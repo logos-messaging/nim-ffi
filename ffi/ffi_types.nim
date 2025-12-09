@@ -1,3 +1,4 @@
+import std/tables
 import chronos
 
 ################################################################################
@@ -30,6 +31,9 @@ template foreignThreadGc*(body: untyped) =
     tearDownForeignThreadGc()
 
 type onDone* = proc()
+
+## Registered requests table populated at compile time
+var registeredRequests* {.threadvar.}: Table[cstring, FFIRequestProc]
 
 ### End of FFI utils
 ################################################################################
