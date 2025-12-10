@@ -7,7 +7,7 @@ proc extractFieldsFromLambda(body: NimNode): seq[NimNode] =
   var procNode = body
   if procNode.kind == nnkStmtList and procNode.len == 1:
     procNode = procNode[0]
-  if procNode.kind != nnkLambda:
+  if procNode.kind != nnkLambda and procNode.kind != nnkProcDef:
     error "registerReqFFI expects a lambda proc, found: " & $procNode.kind
 
   let params = procNode[3] # parameters list
@@ -24,7 +24,7 @@ proc buildRequestType(reqTypeName: NimNode, body: NimNode): NimNode =
   var procNode = body
   if procNode.kind == nnkStmtList and procNode.len == 1:
     procNode = procNode[0]
-  if procNode.kind != nnkLambda:
+  if procNode.kind != nnkLambda and procNode.kind != nnkProcDef:
     error "registerReqFFI expects a lambda proc, found: " & $procNode.kind
 
   let params = procNode[3] # formal params of the lambda
@@ -60,7 +60,7 @@ proc buildFfiNewReqProc(reqTypeName, body: NimNode): NimNode =
   else:
     procNode = body
 
-  if procNode.kind != nnkLambda:
+  if procNode.kind != nnkLambda and procNode.kind != nnkProcDef:
     error "registerReqFFI expects a lambda definition. Found: " & $procNode.kind
 
   # T: typedesc[CreateNodeRequest]
@@ -186,7 +186,7 @@ proc buildProcessFFIRequestProc(reqTypeName, reqHandler, body: NimNode): NimNode
   var procNode = body
   if procNode.kind == nnkStmtList and procNode.len == 1:
     procNode = procNode[0]
-  if procNode.kind != nnkLambda:
+  if procNode.kind != nnkLambda and procNode.kind != nnkProcDef:
     error "registerReqFFI expects a lambda definition. Found: " & $procNode.kind
 
   let typedescParam =
@@ -362,6 +362,16 @@ macro ffi*(prc: untyped): untyped =
   for i in 1 ..< formalParams.len:
     newParams.add(newIdentDefs(formalParams[i][0], formalParams[i][1]))
 
+  # Build Future[Result[string, string]] return type
+  let futReturnType = quote:
+    Future[Result[string, string]]
+
+  var userParams = newSeq[NimNode]()
+  userParams.add(futReturnType)
+  if formalParams.len > 3:
+    for i in 4 ..< formalParams.len:
+      userParams.add(newIdentDefs(formalParams[i][0], formalParams[i][1]))
+
   # Build argument list for processReq
   var argsList = newSeq[NimNode]()
   for i in 1 ..< formalParams.len:
@@ -394,12 +404,17 @@ macro ffi*(prc: untyped): untyped =
     pragmas = newTree(nnkPragma, ident "dynlib", ident "exportc"),
   )
 
+  var anonymousProcNode = newProc(
+    name = newEmptyNode(), # anonymous proc
+    params = userParams,
+    body = newStmtList(bodyNode),
+    pragmas = newTree(nnkPragma, ident"async"),
+  )
+
   # registerReqFFI wrapper
   let registerReq = quote:
     registerReqFFI(`reqName`, `paramIdent`: `paramType`):
-      proc(): Future[Result[string, string]] {.async.} =
-        return `bodyNode`
+      `anonymousProcNode`
 
   # Final macro result
   result = newStmtList(registerReq, ffiProc)
-

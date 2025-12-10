@@ -62,7 +62,7 @@ macro declareLibrary*(libraryName: static[string]): untyped =
   let nimMainName = ident("lib" & libraryName & "NimMain")
 
   let initializeLibraryProc = quote:
-    proc `procName`() {.exported.} =
+    proc `procName`*() {.exported.} =
       if not initialized.exchange(true):
         ## Every Nim library needs to call `<yourprefix>NimMain` once exactly,
         ## to initialize the Nim runtime.
@@ -78,18 +78,4 @@ macro declareLibrary*(libraryName: static[string]): untyped =
 
   res.add(initializeLibraryProc)
 
-  ## Generate the exported C-callable callback setter
-  let setCallbackProc = quote:
-    proc set_event_callback(
-        ctx: ptr FFIContext, callback: FFICallBack, userData: pointer
-    ) {.dynlib, exportc.} =
-      initializeLibrary()
-      ctx[].eventCallback = cast[pointer](callback)
-      ctx[].eventUserData = userData
-
-  res.add(setCallbackProc)
-
-  # echo result.repr
   return res
-
-

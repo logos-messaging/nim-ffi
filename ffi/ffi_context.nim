@@ -4,7 +4,7 @@
 
 import std/[options, atomics, os, net, locks, json]
 import chronicles, chronos, chronos/threadsync, taskpools/channels_spsc_single, results
-import ./ffi_types, ./ffi_thread_request, ./ffi_watchdog_req, ./internal/ffi_macro
+import ./ffi_types, ./ffi_thread_request, ./internal/ffi_macro
 
 type FFIContext*[T] = object
   myLib*: T
