@@ -4,7 +4,7 @@
 
 import std/[options, atomics, os, net, locks, json]
 import chronicles, chronos, chronos/threadsync, taskpools/channels_spsc_single, results
-import ./ffi_types, ./ffi_thread_request, ./internal/ffi_macro
+import ./ffi_types, ./ffi_thread_request, ./internal/ffi_macro, ./logging
 
 type FFIContext*[T] = object
   myLib*: T
@@ -129,6 +129,8 @@ proc watchdogThreadBody(ctx: ptr FFIContext) {.thread.} =
 
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ## FFI thread that attends library user API requests
+
+  logging.setupLog(logging.LogLevel.DEBUG, logging.LogFormat.TEXT)
 
   let ffiRun = proc(ctx: ptr FFIContext[T]) {.async.} =
     while true:
