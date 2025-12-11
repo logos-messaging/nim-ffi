@@ -69,19 +69,19 @@ proc sendRequestToFFIThread*(
   if fireSyncRes.get() == false:
     return err("Couldn't fireSync in time")
 
-  ## wait until the Waku Thread properly received the request
+  ## wait until the FFI working thread properly received the request
   let res = ctx.reqReceivedSignal.waitSync(timeout)
   if res.isErr():
     return err("Couldn't receive reqReceivedSignal signal")
 
-  ## Notice that in case of "ok", the deallocShared(req) is performed by the Waku Thread in the
-  ## process proc. See the 'waku_thread_request.nim' module for more details.
+  ## Notice that in case of "ok", the deallocShared(req) is performed by the FFI Thread in the
+  ## process proc.
   ok()
 
 type Foo = object
 registerReqFFI(WatchdogReq, foo: ptr Foo):
   proc(): Future[Result[string, string]] {.async.} =
-    return ok("waku thread is not blocked")
+    return ok("FFI thread is not blocked")
 
 type JsonNotRespondingEvent = object
   eventType: string
@@ -93,16 +93,15 @@ proc `$`(event: JsonNotRespondingEvent): string =
   $(%*event)
 
 proc onNotResponding*(ctx: ptr FFIContext) =
-  callEventCallback(ctx, "onWakuNotResponsive"):
+  callEventCallback(ctx, "onNotResponding"):
     $JsonNotRespondingEvent.init()
 
 proc watchdogThreadBody(ctx: ptr FFIContext) {.thread.} =
-  ## Watchdog thread that monitors the Waku thread and notifies the library user if it hangs.
+  ## Watchdog thread that monitors the FFI thread and notifies the library user if it hangs.
 
   let watchdogRun = proc(ctx: ptr FFIContext) {.async.} =
     const WatchdogStartDelay = 10.seconds
     const WatchdogTimeinterval = 1.seconds
-    const WakuNotRespondingTimeout = 3.seconds
 
     # Give time for the node to be created and up before sending watchdog requests
     await sleepAsync(WatchdogStartDelay)
@@ -113,7 +112,7 @@ proc watchdogThreadBody(ctx: ptr FFIContext) {.thread.} =
         debug "Watchdog thread exiting because FFIContext is not running"
         break
 
-      let wakuCallback = proc(
+      let callback = proc(
           callerRet: cint, msg: ptr cchar, len: csize_t, userData: pointer
       ) {.cdecl, gcsafe, raises: [].} =
         discard ## Don't do anything. Just respecting the callback signature.
@@ -121,7 +120,7 @@ proc watchdogThreadBody(ctx: ptr FFIContext) {.thread.} =
 
       trace "Sending watchdog request to FFI thread"
 
-      sendRequestToFFIThread(ctx, WatchdogReq.ffiNewReq(wakuCallback, nilUserData)).isOkOr:
+      sendRequestToFFIThread(ctx, WatchdogReq.ffiNewReq(callback, nilUserData)).isOkOr:
         error "Failed to send watchdog request to FFI thread", error = $error
         onNotResponding(ctx)
 
@@ -174,7 +173,7 @@ proc createFFIContext*[T](): Result[ptr FFIContext[T], string] =
     createThread(ctx.ffiThread, ffiThreadBody[T], ctx)
   except ValueError, ResourceExhaustedError:
     freeShared(ctx)
-    return err("failed to create the Waku thread: " & getCurrentExceptionMsg())
+    return err("failed to create the FFI thread: " & getCurrentExceptionMsg())
 
   try:
     createThread(ctx.watchdogThread, watchdogThreadBody, ctx)

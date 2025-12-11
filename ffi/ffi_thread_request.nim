@@ -1,11 +1,10 @@
 ## This file contains the base message request type that will be handled.
 ## The requests are created by the main thread and processed by
-## the Waku Thread.
+## the FFI Thread.
 
 import std/[json, macros], results, tables
 import chronos, chronos/threadsync
 import ./ffi_types, ./internal/ffi_macro, ./alloc, ./ffi_context
-import waku/factory/waku
 
 type FFIThreadRequest* = object
   callback: FFICallBack
@@ -42,7 +41,7 @@ proc handleRes[T: string | void](
 
   if res.isErr():
     foreignThreadGc:
-      let msg = "libwaku error: handleRes fireSyncRes error: " & $res.error
+      let msg = "ffi error: handleRes fireSyncRes error: " & $res.error
       request[].callback(
         RET_ERR, unsafeAddr msg[0], cast[csize_t](len(msg)), request[].userData
       )
