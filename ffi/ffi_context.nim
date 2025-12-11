@@ -184,7 +184,7 @@ proc createFFIContext*[T](): Result[ptr FFIContext[T], string] =
 
   return ok(ctx)
 
-proc destroyFFIContext*[T](ctx: ptr FFIContext): Result[void, string] =
+proc destroyFFIContext*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ctx.running.store(false)
 
   let signaledOnTime = ctx.reqSignal.fireSync().valueOr:

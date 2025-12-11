@@ -315,8 +315,6 @@ macro registerReqFFI*(reqTypeName, reqHandler, body: untyped): untyped =
   let deleteProc = buildFfiDeleteReqProc(reqTypeName, fields)
   result = newStmtList(typeDef, ffiNewReqProc, deleteProc, processProc, addNewReqToReg)
 
-  # echo "Registered FFI request: " & result.repr
-
 macro processReq*(
     reqType, ctx, callback, userData: untyped, args: varargs[untyped]
 ): untyped =
@@ -335,7 +333,7 @@ macro processReq*(
   result = quote:
     block:
       let res = `sendCall`
-      if res.isErr:
+      if res.isErr():
         let msg = "error in sendRequestToFFIThread: " & res.error
         `callback`(RET_ERR, unsafeAddr msg[0], cast[csize_t](msg.len), `userData`)
         return RET_ERR
@@ -401,7 +399,7 @@ macro ffi*(prc: untyped): untyped =
     name = procName,
     params = newParams,
     body = ffiBody,
-    pragmas = newTree(nnkPragma, ident "dynlib", ident "exportc"),
+    pragmas = newTree(nnkPragma, ident "dynlib", ident "exportc", ident "cdecl"),
   )
 
   var anonymousProcNode = newProc(
