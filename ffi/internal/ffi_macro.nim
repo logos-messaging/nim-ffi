@@ -2,14 +2,12 @@ import std/[macros, tables]
 import chronos
 import ../ffi_types
 
-var registeredRequests* {.threadvar.}: Table[cstring, FFIRequestProc]
-
 proc extractFieldsFromLambda(body: NimNode): seq[NimNode] =
   ## Extracts the fields (params) from the given lambda body.
   var procNode = body
   if procNode.kind == nnkStmtList and procNode.len == 1:
     procNode = procNode[0]
-  if procNode.kind != nnkLambda:
+  if procNode.kind != nnkLambda and procNode.kind != nnkProcDef:
     error "registerReqFFI expects a lambda proc, found: " & $procNode.kind
 
   let params = procNode[3] # parameters list
@@ -26,7 +24,7 @@ proc buildRequestType(reqTypeName: NimNode, body: NimNode): NimNode =
   var procNode = body
   if procNode.kind == nnkStmtList and procNode.len == 1:
     procNode = procNode[0]
-  if procNode.kind != nnkLambda:
+  if procNode.kind != nnkLambda and procNode.kind != nnkProcDef:
     error "registerReqFFI expects a lambda proc, found: " & $procNode.kind
 
   let params = procNode[3] # formal params of the lambda
@@ -62,7 +60,7 @@ proc buildFfiNewReqProc(reqTypeName, body: NimNode): NimNode =
   else:
     procNode = body
 
-  if procNode.kind != nnkLambda:
+  if procNode.kind != nnkLambda and procNode.kind != nnkProcDef:
     error "registerReqFFI expects a lambda definition. Found: " & $procNode.kind
 
   # T: typedesc[CreateNodeRequest]
@@ -188,7 +186,7 @@ proc buildProcessFFIRequestProc(reqTypeName, reqHandler, body: NimNode): NimNode
   var procNode = body
   if procNode.kind == nnkStmtList and procNode.len == 1:
     procNode = procNode[0]
-  if procNode.kind != nnkLambda:
+  if procNode.kind != nnkLambda and procNode.kind != nnkProcDef:
     error "registerReqFFI expects a lambda definition. Found: " & $procNode.kind
 
   let typedescParam =
@@ -317,31 +315,102 @@ macro registerReqFFI*(reqTypeName, reqHandler, body: untyped): untyped =
   let deleteProc = buildFfiDeleteReqProc(reqTypeName, fields)
   result = newStmtList(typeDef, ffiNewReqProc, deleteProc, processProc, addNewReqToReg)
 
-  # echo "Registered FFI request: " & result.repr
-
-macro processReq*(reqType: typed, args: varargs[untyped]): untyped =
-  ## Expands T.processReq(a,b,...) into the sendRequest boilerplate.
-
-  # Collect the passed arguments as NimNodes
-  var callArgs = @[reqType, ident("callback"), ident("userData")]
+macro processReq*(
+    reqType, ctx, callback, userData: untyped, args: varargs[untyped]
+): untyped =
+  ## Expands T.processReq(ctx, callback, userData, a, b, ...)
+  var callArgs = @[reqType, callback, userData]
   for a in args:
     callArgs.add a
 
-  # Build: ffiNewReq(reqType, callback, userData, arg1, arg2, ...)
   let newReqCall = newCall(ident("ffiNewReq"), callArgs)
 
-  # Build: ffi_context.sendRequestToFFIThread(ctx, <newReqCall>)
   let sendCall = newCall(
-    newDotExpr(ident("ffi_context"), ident("sendRequestToFFIThread")),
-    ident("ctx"),
-    newReqCall,
+    newDotExpr(ident("ffi_context"), ident("sendRequestToFFIThread")), ctx, newReqCall
   )
 
   result = quote:
     block:
       let res = `sendCall`
-      if res.isErr:
+      if res.isErr():
         let msg = "error in sendRequestToFFIThread: " & res.error
-        callback(RET_ERR, unsafeAddr msg[0], cast[csize_t](msg.len), userData)
+        `callback`(RET_ERR, unsafeAddr msg[0], cast[csize_t](msg.len), `userData`)
         return RET_ERR
       return RET_OK
+
+macro ffi*(prc: untyped): untyped =
+  let procName = prc[0]
+  let formalParams = prc[3]
+  let bodyNode = prc[^1]
+
+  if formalParams.len < 2:
+    error("`.ffi.` procs require at least 1 parameter")
+
+  let firstParam = formalParams[1]
+  let paramIdent = firstParam[0]
+  let paramType = firstParam[1]
+
+  let reqName = ident($procName & "Req")
+  let returnType = ident("cint")
+
+  # Build parameter list (skip return type)
+  var newParams = newSeq[NimNode]()
+  newParams.add(returnType)
+  for i in 1 ..< formalParams.len:
+    newParams.add(newIdentDefs(formalParams[i][0], formalParams[i][1]))
+
+  # Build Future[Result[string, string]] return type
+  let futReturnType = quote:
+    Future[Result[string, string]]
+
+  var userParams = newSeq[NimNode]()
+  userParams.add(futReturnType)
+  if formalParams.len > 3:
+    for i in 4 ..< formalParams.len:
+      userParams.add(newIdentDefs(formalParams[i][0], formalParams[i][1]))
+
+  # Build argument list for processReq
+  var argsList = newSeq[NimNode]()
+  for i in 1 ..< formalParams.len:
+    argsList.add(formalParams[i][0])
+
+  # 1. Build the dot expression. e.g.: waku_is_onlineReq.processReq
+  let dotExpr = newTree(nnkDotExpr, reqName, ident"processReq")
+
+  # 2. Build the call node with dotExpr as callee
+  let callNode = newTree(nnkCall, dotExpr)
+  for arg in argsList:
+    callNode.add(arg)
+
+  # Proc body
+  let ffiBody = newStmtList(
+    quote do:
+      initializeLibrary()
+      if not isNil(ctx):
+        ctx[].userData = userData
+      if isNil(callback):
+        return RET_MISSING_CALLBACK
+  )
+
+  ffiBody.add(callNode)
+
+  let ffiProc = newProc(
+    name = procName,
+    params = newParams,
+    body = ffiBody,
+    pragmas = newTree(nnkPragma, ident "dynlib", ident "exportc", ident "cdecl"),
+  )
+
+  var anonymousProcNode = newProc(
+    name = newEmptyNode(), # anonymous proc
+    params = userParams,
+    body = newStmtList(bodyNode),
+    pragmas = newTree(nnkPragma, ident"async"),
+  )
+
+  # registerReqFFI wrapper
+  let registerReq = quote:
+    registerReqFFI(`reqName`, `paramIdent`: `paramType`):
+      `anonymousProcNode`
+
+  result = newStmtList(registerReq, ffiProc)
