@@ -325,7 +325,6 @@ macro processReq*(
 
   let newReqCall = newCall(ident("ffiNewReq"), callArgs)
 
-  # CORRECT: use actual ctx symbol
   let sendCall = newCall(
     newDotExpr(ident("ffi_context"), ident("sendRequestToFFIThread")), ctx, newReqCall
   )
@@ -414,5 +413,4 @@ macro ffi*(prc: untyped): untyped =
     registerReqFFI(`reqName`, `paramIdent`: `paramType`):
       `anonymousProcNode`
 
-  # Final macro result
   result = newStmtList(registerReq, ffiProc)
