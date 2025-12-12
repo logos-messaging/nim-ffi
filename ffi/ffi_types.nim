@@ -32,8 +32,8 @@ template foreignThreadGc*(body: untyped) =
 
 type onDone* = proc()
 
-## Registered requests table populated at compile time
-var registeredRequests* {.threadvar.}: Table[cstring, FFIRequestProc]
+## Registered requests table populated at compile time and never updated at run time
+var registeredRequests*: Table[cstring, FFIRequestProc]
 
 ### End of FFI utils
 ################################################################################
