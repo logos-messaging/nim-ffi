@@ -7,7 +7,7 @@ import chronicles, chronos, chronos/threadsync, taskpools/channels_spsc_single, 
 import ./ffi_types, ./ffi_thread_request, ./internal/ffi_macro, ./logging
 
 type FFIContext*[T] = object
-  myLib*: T
+  myLib*: ptr T
     # main library object (e.g., Waku, LibP2P, SDS,  the one to be exposed as a library)
   ffiThread: Thread[(ptr FFIContext[T])]
     # represents the main FFI thread in charge of attending API consumer actions
@@ -76,7 +76,7 @@ proc sendRequestToFFIThread*(
 
   ## Notice that in case of "ok", the deallocShared(req) is performed by the FFI Thread in the
   ## process proc.
-  ok()
+  return ok()
 
 type Foo = object
 registerReqFFI(WatchdogReq, foo: ptr Foo):
@@ -98,6 +98,7 @@ proc onNotResponding*(ctx: ptr FFIContext) =
 
 proc watchdogThreadBody(ctx: ptr FFIContext) {.thread.} =
   ## Watchdog thread that monitors the FFI thread and notifies the library user if it hangs.
+  ## This thread never blocks.
 
   let watchdogRun = proc(ctx: ptr FFIContext) {.async.} =
     const WatchdogStartDelay = 10.seconds
@@ -126,12 +127,34 @@ proc watchdogThreadBody(ctx: ptr FFIContext) {.thread.} =
 
   waitFor watchdogRun(ctx)
 
+proc processRequest[T](
+    request: ptr FFIThreadRequest, ctx: ptr FFIContext[T]
+) {.async.} =
+  ## Invoked within the FFI thread to process a request coming from the FFI API consumer thread.
+
+  let reqId = $request[].reqId
+    ## The reqId determines which proc will handle the request.
+    ## The registeredRequests represents a table defined at compile time.
+    ## Then, registeredRequests == Table[reqId, proc-handling-the-request-asynchronously]
+
+  let retFut =
+    if not ctx[].registeredRequests[].contains(reqId):
+      ## That shouldn't happen because only registered requests should be sent to the FFI thread.
+      nilProcess(request[].reqId)
+    else:
+      ctx[].registeredRequests[][reqId](request[].reqContent, ctx)
+  handleRes(await retFut, request)
+
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
-  ## FFI thread that attends library user API requests
+  ## FFI thread body that attends library user API requests
 
   logging.setupLog(logging.LogLevel.DEBUG, logging.LogFormat.TEXT)
 
   let ffiRun = proc(ctx: ptr FFIContext[T]) {.async.} =
+    var ffiReqHandler: T
+      ## Holds the main library object, i.e., in charge of handling the ffi requests.
+      ## e.g., Waku, LibP2P, SDS, etc.
+
     while true:
       await ctx.reqSignal.wait()
 
@@ -145,10 +168,10 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
         chronicles.error "ffi thread could not receive a request"
         continue
 
+      ctx.myLib = addr ffiReqHandler
+
       ## Handle the request
-      asyncSpawn FFIThreadRequest.process(
-        request, addr ctx.myLib, ctx.registeredRequests
-      )
+      asyncSpawn processRequest(request, ctx)
 
       let fireRes = ctx.reqReceivedSignal.fireSync()
       if fireRes.isErr():

@@ -30,9 +30,9 @@ template foreignThreadGc*(body: untyped) =
   when declared(tearDownForeignThreadGc):
     tearDownForeignThreadGc()
 
-type onDone* = proc()
-
-## Registered requests table populated at compile time and never updated at run time
+## Registered requests table populated at compile time and never updated at run time.
+## The key represents the request type name as cstring, e.g., "CreateNodeRequest".
+## The value is a proc that handles the request asynchronously.
 var registeredRequests*: Table[cstring, FFIRequestProc]
 
 ### End of FFI utils

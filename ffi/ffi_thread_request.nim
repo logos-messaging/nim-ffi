@@ -4,12 +4,12 @@
 
 import std/[json, macros], results, tables
 import chronos, chronos/threadsync
-import ./ffi_types, ./internal/ffi_macro, ./alloc, ./ffi_context
+import ./ffi_types, ./internal/ffi_macro, ./alloc
 
 type FFIThreadRequest* = object
   callback: FFICallBack
   userData: pointer
-  reqId: cstring
+  reqId*: cstring
   reqContent*: pointer
 
 proc init*(
@@ -30,7 +30,7 @@ proc deleteRequest(request: ptr FFIThreadRequest) =
   deallocShared(request[].reqId)
   deallocShared(request)
 
-proc handleRes[T: string | void](
+proc handleRes*[T: string | void](
     res: Result[T, string], request: ptr FFIThreadRequest
 ) =
   ## Handles the Result responses, which can either be Result[string, string] or
@@ -56,20 +56,6 @@ proc handleRes[T: string | void](
     )
   return
 
-proc nilProcess(reqId: cstring): Future[Result[string, string]] {.async.} =
+proc nilProcess*(reqId: cstring): Future[Result[string, string]] {.async.} =
   return err("This request type is not implemented: " & $reqId)
 
-proc process*[R](
-    T: type FFIThreadRequest,
-    request: ptr FFIThreadRequest,
-    reqHandler: ptr R,
-    registeredRequests: ptr Table[cstring, FFIRequestProc],
-) {.async.} =
-  let reqId = $request[].reqId
-
-  let retFut =
-    if not registeredRequests[].contains(reqId):
-      nilProcess(request[].reqId)
-    else:
-      registeredRequests[][reqId](request[].reqContent, reqHandler)
-  handleRes(await retFut, request)
