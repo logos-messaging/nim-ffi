@@ -103,6 +103,7 @@ proc watchdogThreadBody(ctx: ptr FFIContext) {.thread.} =
   let watchdogRun = proc(ctx: ptr FFIContext) {.async.} =
     const WatchdogStartDelay = 10.seconds
     const WatchdogTimeinterval = 1.seconds
+    const WatchdogTimeout = 20.seconds
 
     # Give time for the node to be created and up before sending watchdog requests
     await sleepAsync(WatchdogStartDelay)
@@ -121,7 +122,7 @@ proc watchdogThreadBody(ctx: ptr FFIContext) {.thread.} =
 
       trace "Sending watchdog request to FFI thread"
 
-      sendRequestToFFIThread(ctx, WatchdogReq.ffiNewReq(callback, nilUserData)).isOkOr:
+      sendRequestToFFIThread(ctx, WatchdogReq.ffiNewReq(callback, nilUserData), WatchdogTimeout).isOkOr:
         error "Failed to send watchdog request to FFI thread", error = $error
         onNotResponding(ctx)
 
