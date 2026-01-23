@@ -2,7 +2,7 @@
 {.pragma: callback, cdecl, raises: [], gcsafe.}
 {.passc: "-fPIC".}
 
-import std/[options, atomics, os, net, locks, json]
+import std/[options, atomics, os, net, locks, json, tables]
 import chronicles, chronos, chronos/threadsync, taskpools/channels_spsc_single, results
 import ./ffi_types, ./ffi_thread_request, ./internal/ffi_macro, ./logging
 
