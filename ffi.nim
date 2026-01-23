@@ -1,4 +1,5 @@
-import std/[atomics, tables], chronos
+import std/[atomics, tables]
+import chronos, chronicles
 import
   ffi/internal/[ffi_library, ffi_macro],
   ffi/[alloc, ffi_types, ffi_context, ffi_thread_request]
