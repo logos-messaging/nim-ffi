@@ -30,7 +30,14 @@ macro declareLibrary*(libraryName: static[string]): untyped =
         nnkExprColonExpr.newTree(ident"passl", newStrLitNode(soName))
       )
     )
-
+  elif defined(macosx):
+    ## Generates {.passl: "-install_name @rpath/libwaku.dylib".}
+    let installName = fmt"-install_name @rpath/lib{libraryName}.dylib"
+    res.add(
+      newNimNode(nnkPragma).add(
+        nnkExprColonExpr.newTree(ident"passl", newStrLitNode(installName))
+      )
+    )
   ## proc lib{libraryName}NimMain() {.importc.}
   let libNimMainName = ident(fmt"lib{libraryName}NimMain")
   let importcPragma = nnkPragma.newTree(ident"importc")
