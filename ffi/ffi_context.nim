@@ -229,15 +229,15 @@ proc createFFIContext*[T](): Result[ptr FFIContext[T], string] =
 
 proc destroyFFIContext*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ctx.running.store(false)
+  defer:
+    joinThread(ctx.ffiThread)
+    joinThread(ctx.watchdogThread)
+    ctx.cleanUpResources()
 
   let signaledOnTime = ctx.reqSignal.fireSync().valueOr:
     return err("error in destroyFFIContext: " & $error)
   if not signaledOnTime:
     return err("failed to signal reqSignal on time in destroyFFIContext")
-
-  joinThread(ctx.ffiThread)
-  joinThread(ctx.watchdogThread)
-  ctx.cleanUpResources()
 
   return ok()
 
