@@ -151,7 +151,14 @@ proc processRequest[T](
       nilProcess(request[].reqId)
     else:
       ctx[].registeredRequests[][reqId](request[].reqContent, ctx)
-  handleRes(await retFut, request)
+
+  let res =
+    try:
+      await retFut
+    except CatchableError as exc:
+      Result[string, string].err("Exception in processRequest for " & reqId & ": " & exc.msg)
+
+  handleRes(res, request)
 
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ## FFI thread body that attends library user API requests
