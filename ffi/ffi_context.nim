@@ -127,7 +127,9 @@ proc watchdogThreadBody(ctx: ptr FFIContext) {.thread.} =
 
       trace "Sending watchdog request to FFI thread"
 
-      sendRequestToFFIThread(ctx, WatchdogReq.ffiNewReq(callback, nilUserData), WatchdogTimeout).isOkOr:
+      sendRequestToFFIThread(
+        ctx, WatchdogReq.ffiNewReq(callback, nilUserData), WatchdogTimeout
+      ).isOkOr:
         error "Failed to send watchdog request to FFI thread", error = $error
         onNotResponding(ctx)
 
@@ -185,13 +187,21 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
   waitFor ffiRun(ctx)
 
+proc cleanUpResources(ctx: ptr FFIContext[T]) =
+  ctx.lock.deinitLock()
+  ?ctx.reqSignal.close()
+  ?ctx.reqReceivedSignal.close()
+  freeShared(ctx)
+
 proc createFFIContext*[T](): Result[ptr FFIContext[T], string] =
   ## This proc is called from the main thread and it creates
   ## the FFI working thread.
   var ctx = createShared(FFIContext[T], 1)
   ctx.reqSignal = ThreadSignalPtr.new().valueOr:
+    ctx.cleanUpResources()
     return err("couldn't create reqSignal ThreadSignalPtr")
   ctx.reqReceivedSignal = ThreadSignalPtr.new().valueOr:
+    ctx.cleanUpResources()
     return err("couldn't create reqReceivedSignal ThreadSignalPtr")
   ctx.lock.initLock()
   ctx.registeredRequests = addr ffi_types.registeredRequests
@@ -201,13 +211,18 @@ proc createFFIContext*[T](): Result[ptr FFIContext[T], string] =
   try:
     createThread(ctx.ffiThread, ffiThreadBody[T], ctx)
   except ValueError, ResourceExhaustedError:
-    freeShared(ctx)
+    ctx.cleanUpResources()
     return err("failed to create the FFI thread: " & getCurrentExceptionMsg())
 
   try:
     createThread(ctx.watchdogThread, watchdogThreadBody, ctx)
   except ValueError, ResourceExhaustedError:
-    freeShared(ctx)
+    ctx.running.store(false)
+    let fireRes = ctx.reqSignal.fireSync()
+    if fireRes.isErr():
+      error "failed to signal ffiThread during watchdog cleanup", err = fireRes.error
+    joinThread(ctx.ffiThread)
+    ctx.cleanUpResources()
     return err("failed to create the watchdog thread: " & getCurrentExceptionMsg())
 
   return ok(ctx)
@@ -222,10 +237,7 @@ proc destroyFFIContext*[T](ctx: ptr FFIContext[T]): Result[void, string] =
 
   joinThread(ctx.ffiThread)
   joinThread(ctx.watchdogThread)
-  ctx.lock.deinitLock()
-  ?ctx.reqSignal.close()
-  ?ctx.reqReceivedSignal.close()
-  freeShared(ctx)
+  ctx.cleanUpResources()
 
   return ok()
 
