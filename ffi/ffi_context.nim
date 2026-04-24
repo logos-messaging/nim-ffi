@@ -194,11 +194,14 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
   waitFor ffiRun(ctx)
 
-proc cleanUpResources(ctx: ptr FFIContext[T]) =
+proc cleanUpResources(ctx: ptr FFIContext[T]): Result[void, string] =
+  defer:
+    freeShared(ctx)
   ctx.lock.deinitLock()
-  ?ctx.reqSignal.close()
-  ?ctx.reqReceivedSignal.close()
-  freeShared(ctx)
+  if not ctx.reqSignal.isNil():
+    ?ctx.reqSignal.close()
+  if not ctx.reqReceivedSignal.isNil():
+    ?ctx.reqReceivedSignal.close()
 
 proc createFFIContext*[T](): Result[ptr FFIContext[T], string] =
   ## This proc is called from the main thread and it creates
@@ -207,11 +210,14 @@ proc createFFIContext*[T](): Result[ptr FFIContext[T], string] =
   ctx.lock.initLock()
 
   ctx.reqSignal = ThreadSignalPtr.new().valueOr:
-    ctx.cleanUpResources()
-    return err("couldn't create reqSignal ThreadSignalPtr")
+    ctx.cleanUpResources().isOkOr:
+      return err("could not clean resources in a failure new reqSignal: " & $error)
+    return err("couldn't create reqSignal ThreadSignalPtr: " & $error)
 
   ctx.reqReceivedSignal = ThreadSignalPtr.new().valueOr:
-    ctx.cleanUpResources()
+    ctx.cleanUpResources().isOkOr:
+      return
+        err("could not clean resources in a failure new reqReceivedSignal: " & $error)
     return err("couldn't create reqReceivedSignal ThreadSignalPtr")
 
   ctx.registeredRequests = addr ffi_types.registeredRequests
