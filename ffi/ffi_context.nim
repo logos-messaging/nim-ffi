@@ -235,8 +235,10 @@ proc destroyFFIContext*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     ctx.cleanUpResources()
 
   let signaledOnTime = ctx.reqSignal.fireSync().valueOr:
+    ctx.onNotResponding()
     return err("error in destroyFFIContext: " & $error)
   if not signaledOnTime:
+    ctx.onNotResponding()
     return err("failed to signal reqSignal on time in destroyFFIContext")
 
   return ok()
