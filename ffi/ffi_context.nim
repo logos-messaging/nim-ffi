@@ -197,13 +197,16 @@ proc createFFIContext*[T](): Result[ptr FFIContext[T], string] =
   ## This proc is called from the main thread and it creates
   ## the FFI working thread.
   var ctx = createShared(FFIContext[T], 1)
+  ctx.lock.initLock()
+
   ctx.reqSignal = ThreadSignalPtr.new().valueOr:
     ctx.cleanUpResources()
     return err("couldn't create reqSignal ThreadSignalPtr")
+
   ctx.reqReceivedSignal = ThreadSignalPtr.new().valueOr:
     ctx.cleanUpResources()
     return err("couldn't create reqReceivedSignal ThreadSignalPtr")
-  ctx.lock.initLock()
+
   ctx.registeredRequests = addr ffi_types.registeredRequests
 
   ctx.running.store(true)
