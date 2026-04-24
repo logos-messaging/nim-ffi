@@ -6,11 +6,16 @@ import std/[json, macros], results, tables
 import chronos, chronos/threadsync
 import ./ffi_types, ./internal/ffi_macro, ./alloc
 
+type FFIDestroyContentProc* = proc(content: pointer) {.nimcall.}
+
 type FFIThreadRequest* = object
   callback: FFICallBack
   userData: pointer
   reqId*: cstring
   reqContent*: pointer
+  deleteReqContent*: FFIDestroyContentProc
+    ## Called by sendRequestToFFIThread on failure to free reqContent when
+    ## the FFI thread will never process (and thus never free) this request.
 
 proc init*(
     T: typedesc[FFIThreadRequest],
@@ -26,7 +31,9 @@ proc init*(
   ret[].reqContent = reqContent
   return ret
 
-proc deleteRequest(request: ptr FFIThreadRequest) =
+proc deleteRequest*(request: ptr FFIThreadRequest) =
+  if not request[].deleteReqContent.isNil():
+    request[].deleteReqContent(request[].reqContent)
   deallocShared(request[].reqId)
   deallocShared(request)
 

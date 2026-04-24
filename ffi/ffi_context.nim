@@ -60,18 +60,23 @@ proc sendRequestToFFIThread*(
   ## Sending the request
   let sentOk = ctx.reqChannel.trySend(ffiRequest)
   if not sentOk:
+    deleteRequest(ffiRequest)
     return err("Couldn't send a request to the ffi thread")
 
   let fireSyncRes = ctx.reqSignal.fireSync()
   if fireSyncRes.isErr():
+    deleteRequest(ffiRequest)
     return err("failed fireSync: " & $fireSyncRes.error)
 
   if fireSyncRes.get() == false:
+    deleteRequest(ffiRequest)
     return err("Couldn't fireSync in time")
 
   ## wait until the FFI working thread properly received the request
   let res = ctx.reqReceivedSignal.waitSync(timeout)
   if res.isErr():
+    ## Do not free ffiRequest here: the FFI thread was already signaled and
+    ## will process (and free) it.
     return err("Couldn't receive reqReceivedSignal signal")
 
   ## Notice that in case of "ok", the deallocShared(req) is performed by the FFI Thread in the

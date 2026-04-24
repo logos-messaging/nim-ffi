@@ -164,6 +164,9 @@ proc buildFfiNewReqProc(reqTypeName, body: NimNode): NimNode =
       let typeStr = $T
       var ret =
         FFIThreadRequest.init(callback, userData, typeStr.cstring, `reqObjIdent`)
+      proc destroyContent(content: pointer) {.nimcall.} =
+        ffiDeleteReq(cast[ptr `reqTypeName`](content))
+      ret[].deleteReqContent = destroyContent
       return ret
   )
 
