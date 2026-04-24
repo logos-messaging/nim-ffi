@@ -55,9 +55,11 @@ proc handleRes*[T: string | void](
     return
 
   foreignThreadGc:
-    var msg: cstring = ""
+    var resStr: string
+      ## we need to bind the string to extend its lifetime to callback's in ARC/ORC
     when T is string:
-      msg = res.get().cstring()
+      resStr = res.get()
+    let msg: cstring = resStr.cstring()
     request[].callback(
       RET_OK, unsafeAddr msg[0], cast[csize_t](len(msg)), request[].userData
     )
@@ -65,4 +67,3 @@ proc handleRes*[T: string | void](
 
 proc nilProcess*(reqId: cstring): Future[Result[string, string]] {.async.} =
   return err("This request type is not implemented: " & $reqId)
-
