@@ -164,6 +164,9 @@ proc buildFfiNewReqProc(reqTypeName, body: NimNode): NimNode =
       let typeStr = $T
       var ret =
         FFIThreadRequest.init(callback, userData, typeStr.cstring, `reqObjIdent`)
+      proc destroyContent(content: pointer) {.nimcall.} =
+        ffiDeleteReq(cast[ptr `reqTypeName`](content))
+      ret[].deleteReqContent = destroyContent
       return ret
   )
 
@@ -255,8 +258,6 @@ proc buildProcessFFIRequestProc(reqTypeName, reqHandler, body: NimNode): NimNode
 
   newBody.add quote do:
     let `reqIdent`: ptr `reqTypeName` = cast[ptr `reqTypeName`](request)
-    defer:
-      ffiDeleteReq(`reqIdent`)
 
   # automatically unpack fields into locals
   for p in procParams[1 ..^ 1]:
@@ -387,7 +388,7 @@ macro registerReqFFI*(reqTypeName, reqHandler, body: untyped): untyped =
   let processProc = buildProcessFFIRequestProc(reqTypeName, reqHandler, body)
   let addNewReqToReg = addNewRequestToRegistry(reqTypeName, reqHandler)
   let deleteProc = buildFfiDeleteReqProc(reqTypeName, fields)
-  result = newStmtList(typeDef, ffiNewReqProc, deleteProc, processProc, addNewReqToReg)
+  result = newStmtList(typeDef, deleteProc, ffiNewReqProc, processProc, addNewReqToReg)
 
   when defined(ffiDumpMacros):
     echo result.repr

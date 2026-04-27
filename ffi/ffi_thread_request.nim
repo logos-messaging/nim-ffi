@@ -6,11 +6,16 @@ import std/[json, macros], results, tables
 import chronos, chronos/threadsync
 import ./ffi_types, ./internal/ffi_macro, ./alloc
 
+type FFIDestroyContentProc* = proc(content: pointer) {.nimcall, gcsafe.}
+
 type FFIThreadRequest* = object
   callback: FFICallBack
   userData: pointer
   reqId*: cstring
   reqContent*: pointer
+  deleteReqContent*: FFIDestroyContentProc
+    ## Called by sendRequestToFFIThread on failure to free reqContent when
+    ## the FFI thread will never process (and thus never free) this request.
 
 proc init*(
     T: typedesc[FFIThreadRequest],
@@ -26,7 +31,9 @@ proc init*(
   ret[].reqContent = reqContent
   return ret
 
-proc deleteRequest(request: ptr FFIThreadRequest) =
+proc deleteRequest*(request: ptr FFIThreadRequest) =
+  if not request[].deleteReqContent.isNil():
+    request[].deleteReqContent(request[].reqContent)
   deallocShared(request[].reqId)
   deallocShared(request)
 
@@ -48,9 +55,11 @@ proc handleRes*[T: string | void](
     return
 
   foreignThreadGc:
-    var msg: cstring = ""
+    var resStr: string
+      ## we need to bind the string to extend its lifetime to callback's in ARC/ORC
     when T is string:
-      msg = res.get().cstring()
+      resStr = res.get()
+    let msg: cstring = resStr.cstring()
     request[].callback(
       RET_OK, unsafeAddr msg[0], cast[csize_t](len(msg)), request[].userData
     )
@@ -58,4 +67,3 @@ proc handleRes*[T: string | void](
 
 proc nilProcess*(reqId: cstring): Future[Result[string, string]] {.async.} =
   return err("This request type is not implemented: " & $reqId)
-
