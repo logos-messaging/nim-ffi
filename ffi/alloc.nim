@@ -33,7 +33,8 @@ proc allocSharedSeq*[T](s: seq[T]): SharedSeq[T] =
   return (cast[ptr UncheckedArray[T]](data), s.len)
 
 proc deallocSharedSeq*[T](s: var SharedSeq[T]) =
-  deallocShared(s.data)
+  if not s.data.isNil():
+    deallocShared(s.data)
   s.len = 0
 
 proc toSeq*[T](s: SharedSeq[T]): seq[T] =

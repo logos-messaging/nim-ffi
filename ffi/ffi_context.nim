@@ -127,10 +127,14 @@ proc watchdogThreadBody(ctx: ptr FFIContext) {.thread.} =
 
       trace "Sending watchdog request to FFI thread"
 
-      sendRequestToFFIThread(
-        ctx, WatchdogReq.ffiNewReq(callback, nilUserData), WatchdogTimeout
-      ).isOkOr:
-        error "Failed to send watchdog request to FFI thread", error = $error
+      try:
+        sendRequestToFFIThread(
+          ctx, WatchdogReq.ffiNewReq(callback, nilUserData), WatchdogTimeout
+        ).isOkOr:
+          error "Failed to send watchdog request to FFI thread", error = $error
+          onNotResponding(ctx)
+      except Exception as exc:
+        error "Exception sending watchdog request", exc = exc.msg
         onNotResponding(ctx)
 
   waitFor watchdogRun(ctx)
@@ -145,12 +149,16 @@ proc processRequest[T](
     ## The registeredRequests represents a table defined at compile time.
     ## Then, registeredRequests == Table[reqId, proc-handling-the-request-asynchronously]
 
+  ## Explicit conversion keeps `reqId` alive as the backing string,
+  ## avoiding the implicit string→cstring warning that will become an error.
+  let reqIdCs = reqId.cstring
+
   let retFut =
-    if not ctx[].registeredRequests[].contains(reqId):
+    if not ctx[].registeredRequests[].contains(reqIdCs):
       ## That shouldn't happen because only registered requests should be sent to the FFI thread.
       nilProcess(request[].reqId)
     else:
-      ctx[].registeredRequests[][reqId](request[].reqContent, ctx)
+      ctx[].registeredRequests[][reqIdCs](request[].reqContent, ctx)
 
   let res =
     try:
@@ -158,7 +166,13 @@ proc processRequest[T](
     except CatchableError as exc:
       Result[string, string].err("Exception in processRequest for " & reqId & ": " & exc.msg)
 
-  handleRes(res, request)
+  ## handleRes may raise (OOM, GC setup) even though it is rare. Catching here
+  ## keeps the async proc raises:[] compatible. The defer inside handleRes
+  ## guarantees request is freed before the exception propagates.
+  try:
+    handleRes(res, request)
+  except Exception as exc:
+    error "Unexpected exception in handleRes", exc = exc.msg
 
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ## FFI thread body that attends library user API requests
@@ -194,7 +208,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
   waitFor ffiRun(ctx)
 
-proc cleanUpResources(ctx: ptr FFIContext[T]): Result[void, string] =
+proc cleanUpResources[T](ctx: ptr FFIContext[T]): Result[void, string] =
   defer:
     freeShared(ctx)
   ctx.lock.deinitLock()
@@ -202,6 +216,7 @@ proc cleanUpResources(ctx: ptr FFIContext[T]): Result[void, string] =
     ?ctx.reqSignal.close()
   if not ctx.reqReceivedSignal.isNil():
     ?ctx.reqReceivedSignal.close()
+  return ok()
 
 proc createFFIContext*[T](): Result[ptr FFIContext[T], string] =
   ## This proc is called from the main thread and it creates
@@ -227,7 +242,8 @@ proc createFFIContext*[T](): Result[ptr FFIContext[T], string] =
   try:
     createThread(ctx.ffiThread, ffiThreadBody[T], ctx)
   except ValueError, ResourceExhaustedError:
-    ctx.cleanUpResources()
+    ctx.cleanUpResources().isOkOr:
+      error "failed to clean up resources after ffiThread creation failure", err = error
     return err("failed to create the FFI thread: " & getCurrentExceptionMsg())
 
   try:
@@ -238,7 +254,8 @@ proc createFFIContext*[T](): Result[ptr FFIContext[T], string] =
     if fireRes.isErr():
       error "failed to signal ffiThread during watchdog cleanup", err = fireRes.error
     joinThread(ctx.ffiThread)
-    ctx.cleanUpResources()
+    ctx.cleanUpResources().isOkOr:
+      error "failed to clean up resources after watchdogThread creation failure", err = error
     return err("failed to create the watchdog thread: " & getCurrentExceptionMsg())
 
   return ok(ctx)
@@ -248,7 +265,8 @@ proc destroyFFIContext*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   defer:
     joinThread(ctx.ffiThread)
     joinThread(ctx.watchdogThread)
-    ctx.cleanUpResources()
+    ctx.cleanUpResources().isOkOr:
+      error "failed to clean up resources in destroyFFIContext", err = error
 
   let signaledOnTime = ctx.reqSignal.fireSync().valueOr:
     ctx.onNotResponding()

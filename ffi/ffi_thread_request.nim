@@ -6,7 +6,7 @@ import std/[json, macros], results, tables
 import chronos, chronos/threadsync
 import ./ffi_types, ./internal/ffi_macro, ./alloc
 
-type FFIDestroyContentProc* = proc(content: pointer) {.nimcall.}
+type FFIDestroyContentProc* = proc(content: pointer) {.nimcall, gcsafe.}
 
 type FFIThreadRequest* = object
   callback: FFICallBack

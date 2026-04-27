@@ -12,11 +12,17 @@ requires "chronos"
 requires "chronicles"
 requires "taskpools"
 
-# Source files to include
-# srcDir        = "src"
-# installFiles  = @["src/ffi.nim", "mylib.h"]
+const nimFlags = "--mm:orc -d:chronicles_log_level=WARN"
 
-# # 💡 Custom build step before installation
-# before install:
-#   echo "Generating custom C header..."
-#   exec "nim r tools/gen_header.nim"
+task build, "Compile the library":
+  exec "nim c " & nimFlags & " --noMain ffi.nim"
+
+task test, "Run all tests":
+  exec "nim c -r " & nimFlags & " tests/test_alloc.nim"
+  exec "nim c -r " & nimFlags & " tests/test_ffi_context.nim"
+
+task test_alloc, "Run alloc unit tests":
+  exec "nim c -r " & nimFlags & " tests/test_alloc.nim"
+
+task test_ffi, "Run FFI context integration tests":
+  exec "nim c -r " & nimFlags & " tests/test_ffi_context.nim"
