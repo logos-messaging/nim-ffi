@@ -16,7 +16,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-15, windows-latest]
-        nim-version: ['2.2.4', 'stable', 'devel']
+        nim-version: ['2.2.4', 'stable']
 
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.os }} / Nim ${{ matrix.nim-version }}
