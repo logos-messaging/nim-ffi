@@ -11,8 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        nim-version: ['2.2.4', 'stable']
+        os: [ubuntu-22.04, macos-15, windows-latest]
 
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.os }} / Nim ${{ matrix.nim-version }}
@@ -26,23 +25,53 @@ jobs:
           nim-version: ${{ matrix.nim-version }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Cache nimble packages
+      - name: Install Nimble ${{ env.NIMBLE_VERSION }}
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$PATH"
+          fi
+          cd /tmp && nimble install "nimble@${{ env.NIMBLE_VERSION }}" -y
+          echo "$HOME/.nimble/bin" >> $GITHUB_PATH
+
+      - name: Cache nimble deps
+        id: cache-nimbledeps
         uses: actions/cache@v4
         with:
           path: ~/.nimble
           key: ${{ runner.os }}-nimble-${{ matrix.nim-version }}-${{ hashFiles('*.nimble') }}
           restore-keys: |
-            ${{ runner.os }}-nimble-${{ matrix.nim-version }}-
-            ${{ runner.os }}-nimble-
+            ${{ runner.os }}-nimbledeps-
 
-      - name: Install dependencies
-        run: nimble install -y --depsOnly
+      - name: Install nimble deps
+        if: steps.cache-nimbledeps.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+          fi
+          nimble setup --localdeps -y
 
       - name: Build
-        run: nimble build -y
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+          fi
+          nimble build -y
 
       - name: Run allocation tests
-        run: nimble test_alloc -y
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+          fi
+          nimble test_alloc -y
 
       - name: Run FFI context tests
-        run: nimble test_ffi -y
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+          fi
+          nimble test_ffi -y
