@@ -6,12 +6,17 @@ on:
   pull_request:
     branches: [master, main]
 
+env:
+  NIM_VERSION: '2.2.4'
+  NIMBLE_VERSION: '0.22.3'
+
 jobs:
   test:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-15, windows-latest]
+        nim-version: ['2.2.4', 'stable', 'devel']
 
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.os }} / Nim ${{ matrix.nim-version }}
@@ -38,9 +43,12 @@ jobs:
         id: cache-nimbledeps
         uses: actions/cache@v4
         with:
-          path: ~/.nimble
-          key: ${{ runner.os }}-nimble-${{ matrix.nim-version }}-${{ hashFiles('*.nimble') }}
+          path: |
+            nimbledeps/
+            nimble.paths
+          key: ${{ runner.os }}-nimbledeps-${{ matrix.nim-version }}-${{ hashFiles('*.nimble') }}
           restore-keys: |
+            ${{ runner.os }}-nimbledeps-${{ matrix.nim-version }}-
             ${{ runner.os }}-nimbledeps-
 
       - name: Install nimble deps
