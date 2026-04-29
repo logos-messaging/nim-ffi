@@ -14,8 +14,8 @@ requires "taskpools"
 
 const nimFlags = "--mm:orc -d:chronicles_log_level=WARN"
 
-task build, "Compile the library":
-  exec "nim c " & nimFlags & " --noMain ffi.nim"
+task buildffi, "Compile the library":
+  exec "nim c " & nimFlags & " --app:lib --noMain ffi.nim"
 
 task test, "Run all tests":
   exec "nim c -r " & nimFlags & " tests/test_alloc.nim"
