@@ -27,18 +27,6 @@ type FFIContext*[T] = object
   registeredRequests: ptr Table[cstring, FFIRequestProc]
     # Pointer to with the registered requests at compile time
 
-const MaxFFIContexts* = 32
-  ## Maximum number of concurrently live FFI contexts when using FFIContextPool.
-  ## Fds and threads are only consumed for slots that are actually acquired,
-  ## so this value only affects the upfront memory of the pool array.
-
-type FFIContextPool*[T] = object
-  ## Fixed-size pool of FFI contexts. Avoids dynamic heap allocation per context
-  ## and bounds the total number of file descriptors consumed by ThreadSignalPtrs
-  ## to at most MaxFFIContexts * 2.
-  slots: array[MaxFFIContexts, FFIContext[T]]
-  inUse: array[MaxFFIContexts, Atomic[bool]]
-
 const git_version* {.strdefine.} = "n/a"
 
 template callEventCallback*(ctx: ptr FFIContext, eventName: string, body: untyped) =
@@ -128,14 +116,14 @@ proc watchdogThreadBody(ctx: ptr FFIContext) {.thread.} =
     # waitSync returns early if watchdogStopSignal fires (i.e. on destroy).
     let startWait = ctx.watchdogStopSignal.waitSync(WatchdogStartDelay)
     if startWait.isErr():
-      error "watchdog: start-delay waitSync failed", err = startWait.error
+      error "watchdog: start-delay waitSync failed", error = startWait.error
     elif startWait.get():
       return # stop signal fired during start delay
 
     while ctx.running.load:
       let intervalWait = ctx.watchdogStopSignal.waitSync(WatchdogTimeinterval)
       if intervalWait.isErr():
-        error "watchdog: interval waitSync failed", err = intervalWait.error
+        error "watchdog: interval waitSync failed", error = intervalWait.error
       elif intervalWait.get() or not ctx.running.load:
         break
 
@@ -185,7 +173,7 @@ proc processRequest[T](
       await retFut
     except CatchableError as exc:
       Result[string, string].err(
-        "Exception in processRequest for " & reqId & ": " & exc.msg
+        "Exception in processRequest for: " & reqId & ": " & exc.msg
       )
 
   ## handleRes may raise (OOM, GC setup) even though it is rare. Catching here
@@ -194,7 +182,7 @@ proc processRequest[T](
   try:
     handleRes(res, request)
   except Exception as exc:
-    error "Unexpected exception in handleRes", exc = exc.msg
+    error "Unexpected exception in handleRes", error = exc.msg
 
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ## FFI thread body that attends library user API requests
@@ -230,7 +218,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
   waitFor ffiRun(ctx)
 
-proc closeResources[T](ctx: ptr FFIContext[T]): Result[void, string] =
+proc closeResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Closes file descriptors and deinits the lock. Does NOT free ctx memory.
   ## Used by initContextResources error paths and pool destroy, where ctx is
   ## not heap-allocated (pool slots live in a fixed array, not on the heap).
@@ -249,7 +237,7 @@ proc cleanUpResources[T](ctx: ptr FFIContext[T]): Result[void, string] =
     freeShared(ctx)
   return ctx.closeResources()
 
-proc initContextResources[T](ctx: ptr FFIContext[T]): Result[void, string] =
+proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Initialises all resources inside an already-allocated FFIContext slot.
   ## On failure every partially-initialised resource is closed; the caller
   ## is responsible for releasing the slot (freeShared or pool.releaseSlot).
@@ -279,7 +267,7 @@ proc initContextResources[T](ctx: ptr FFIContext[T]): Result[void, string] =
     createThread(ctx.ffiThread, ffiThreadBody[T], ctx)
   except ValueError, ResourceExhaustedError:
     ctx.closeResources().isOkOr:
-      error "failed to close resources after ffiThread creation failure", err = error
+      error "failed to close resources after ffiThread creation failure", error = error
     return err("failed to create the FFI thread: " & getCurrentExceptionMsg())
 
   try:
@@ -288,29 +276,14 @@ proc initContextResources[T](ctx: ptr FFIContext[T]): Result[void, string] =
     ctx.running.store(false)
     let fireRes = ctx.reqSignal.fireSync()
     if fireRes.isErr():
-      error "failed to signal ffiThread during watchdog cleanup", err = fireRes.error
+      error "failed to signal ffiThread during watchdog cleanup", error = fireRes.error
     joinThread(ctx.ffiThread)
     ctx.closeResources().isOkOr:
       error "failed to close resources after watchdogThread creation failure",
-        err = error
+        error = error
     return err("failed to create the watchdog thread: " & getCurrentExceptionMsg())
 
   return ok()
-
-# ── Pool helpers ─────────────────────────────────────────────────────────────
-
-proc acquireSlot[T](pool: var FFIContextPool[T]): Result[ptr FFIContext[T], string] =
-  for i in 0 ..< MaxFFIContexts:
-    var expected = false
-    if pool.inUse[i].compareExchange(expected, true):
-      return ok(pool.slots[i].addr)
-  return err("FFI context pool exhausted (max " & $MaxFFIContexts & " contexts)")
-
-proc releaseSlot[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]) =
-  for i in 0 ..< MaxFFIContexts:
-    if pool.slots[i].addr == ctx:
-      pool.inUse[i].store(false)
-      return
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
@@ -323,19 +296,7 @@ proc createFFIContext*[T](): Result[ptr FFIContext[T], string] =
     return err(error)
   return ok(ctx)
 
-proc createFFIContext*[T](
-    pool: var FFIContextPool[T]
-): Result[ptr FFIContext[T], string] =
-  ## Acquires a slot from the fixed pool and initialises it as an FFI context.
-  ## Bounded fd usage: at most MaxFFIContexts * 2 ThreadSignalPtr fds are ever open.
-  let ctx = pool.acquireSlot().valueOr:
-    return err(error)
-  initContextResources(ctx).isOkOr:
-    pool.releaseSlot(ctx)
-    return err(error)
-  return ok(ctx)
-
-proc signalStop[T](ctx: ptr FFIContext[T]): Result[void, string] =
+proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ctx.running.store(false)
   let ffiSignaled = ctx.reqSignal.fireSync().valueOr:
     ctx.onNotResponding()
@@ -349,24 +310,15 @@ proc signalStop[T](ctx: ptr FFIContext[T]): Result[void, string] =
     return err("failed to signal watchdogStopSignal on time in destroyFFIContext")
   return ok()
 
+proc joinFFIThreads*[T](ctx: ptr FFIContext[T]) =
+  joinThread(ctx.ffiThread)
+  joinThread(ctx.watchdogThread)
+
 proc destroyFFIContext*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   defer:
-    joinThread(ctx.ffiThread)
-    joinThread(ctx.watchdogThread)
+    joinFFIThreads(ctx)
     ctx.cleanUpResources().isOkOr:
-      error "failed to clean up resources in destroyFFIContext", err = error
-  return ctx.signalStop()
-
-proc destroyFFIContext*[T](
-    pool: var FFIContextPool[T], ctx: ptr FFIContext[T]
-): Result[void, string] =
-  ## Stops the FFI context and returns its slot to the pool.
-  defer:
-    joinThread(ctx.ffiThread)
-    joinThread(ctx.watchdogThread)
-    ctx.closeResources().isOkOr:
-      error "failed to close resources in destroyFFIContext", err = error
-    pool.releaseSlot(ctx)
+      error "failed to clean up resources in destroyFFIContext", error = error
   return ctx.signalStop()
 
 template checkParams*(ctx: ptr FFIContext, callback: FFICallBack, userData: pointer) =
