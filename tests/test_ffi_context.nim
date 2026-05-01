@@ -61,6 +61,62 @@ registerReqFFI(EmptyOkRequest, lib: ptr TestLib):
   proc(): Future[Result[string, string]] {.async.} =
     return ok("")
 
+suite "FFIContextPool":
+  test "create and destroy via pool succeeds":
+    var pool: FFIContextPool[TestLib]
+    let ctx = pool.createFFIContext().valueOr:
+      assert false, "createFFIContext(pool) failed: " & $error
+      return
+    check pool.destroyFFIContext(ctx).isOk()
+
+  test "slot is reused after destroy":
+    var pool: FFIContextPool[TestLib]
+    let ctx1 = pool.createFFIContext().valueOr:
+      assert false, "createFFIContext(pool) failed: " & $error
+      return
+    check pool.destroyFFIContext(ctx1).isOk()
+    # After destroying, the same slot must be available again
+    let ctx2 = pool.createFFIContext().valueOr:
+      assert false, "createFFIContext(pool) failed after slot release: " & $error
+      return
+    check pool.destroyFFIContext(ctx2).isOk()
+    check ctx1 == ctx2 # same array slot reused
+
+  test "pool exhaustion returns error":
+    var pool: FFIContextPool[TestLib]
+    var ctxs: array[MaxFFIContexts, ptr FFIContext[TestLib]]
+    for i in 0 ..< MaxFFIContexts:
+      ctxs[i] = pool.createFFIContext().valueOr:
+        for j in 0 ..< i:
+          discard pool.destroyFFIContext(ctxs[j])
+        assert false, "createFFIContext(pool) failed at slot " & $i & ": " & $error
+        return
+    # Pool is now full — next create must fail
+    check pool.createFFIContext().isErr()
+    for i in 0 ..< MaxFFIContexts:
+      discard pool.destroyFFIContext(ctxs[i])
+
+  test "requests are processed via pool context":
+    var pool: FFIContextPool[TestLib]
+    var d: CallbackData
+    initCallbackData(d)
+    defer:
+      deinitCallbackData(d)
+
+    let ctx = pool.createFFIContext().valueOr:
+      assert false, "createFFIContext(pool) failed: " & $error
+      return
+    defer:
+      discard pool.destroyFFIContext(ctx)
+
+    check sendRequestToFFIThread(
+      ctx, PingRequest.ffiNewReq(testCallback, addr d, "pool".cstring)
+    )
+      .isOk()
+    waitCallback(d)
+    check d.retCode == RET_OK
+    check callbackMsg(d) == "pong:pool"
+
 suite "createFFIContext / destroyFFIContext":
   test "create and destroy succeeds":
     let ctx = createFFIContext[TestLib]().valueOr:
@@ -79,14 +135,19 @@ suite "sendRequestToFFIThread":
   test "successful request triggers RET_OK callback":
     var d: CallbackData
     initCallbackData(d)
-    defer: deinitCallbackData(d)
+    defer:
+      deinitCallbackData(d)
 
     let ctx = createFFIContext[TestLib]().valueOr:
       check false
       return
-    defer: discard destroyFFIContext(ctx)
+    defer:
+      discard destroyFFIContext(ctx)
 
-    check sendRequestToFFIThread(ctx, PingRequest.ffiNewReq(testCallback, addr d, "hello".cstring)).isOk()
+    check sendRequestToFFIThread(
+      ctx, PingRequest.ffiNewReq(testCallback, addr d, "hello".cstring)
+    )
+      .isOk()
     waitCallback(d)
     check d.retCode == RET_OK
     check callbackMsg(d) == "pong:hello"
@@ -94,12 +155,14 @@ suite "sendRequestToFFIThread":
   test "failing request triggers RET_ERR callback":
     var d: CallbackData
     initCallbackData(d)
-    defer: deinitCallbackData(d)
+    defer:
+      deinitCallbackData(d)
 
     let ctx = createFFIContext[TestLib]().valueOr:
       check false
       return
-    defer: discard destroyFFIContext(ctx)
+    defer:
+      discard destroyFFIContext(ctx)
 
     check sendRequestToFFIThread(ctx, FailRequest.ffiNewReq(testCallback, addr d)).isOk()
     waitCallback(d)
@@ -108,14 +171,17 @@ suite "sendRequestToFFIThread":
   test "empty ok response delivers empty message":
     var d: CallbackData
     initCallbackData(d)
-    defer: deinitCallbackData(d)
+    defer:
+      deinitCallbackData(d)
 
     let ctx = createFFIContext[TestLib]().valueOr:
       check false
       return
-    defer: discard destroyFFIContext(ctx)
+    defer:
+      discard destroyFFIContext(ctx)
 
-    check sendRequestToFFIThread(ctx, EmptyOkRequest.ffiNewReq(testCallback, addr d)).isOk()
+    check sendRequestToFFIThread(ctx, EmptyOkRequest.ffiNewReq(testCallback, addr d))
+      .isOk()
     waitCallback(d)
     check d.retCode == RET_OK
     check d.msgLen == 0
@@ -124,13 +190,17 @@ suite "sendRequestToFFIThread":
     let ctx = createFFIContext[TestLib]().valueOr:
       check false
       return
-    defer: discard destroyFFIContext(ctx)
+    defer:
+      discard destroyFFIContext(ctx)
 
     for i in 1 .. 5:
       var d: CallbackData
       initCallbackData(d)
       let msg = "msg" & $i
-      check sendRequestToFFIThread(ctx, PingRequest.ffiNewReq(testCallback, addr d, msg.cstring)).isOk()
+      check sendRequestToFFIThread(
+        ctx, PingRequest.ffiNewReq(testCallback, addr d, msg.cstring)
+      )
+        .isOk()
       waitCallback(d)
       deinitCallbackData(d)
       check d.retCode == RET_OK
