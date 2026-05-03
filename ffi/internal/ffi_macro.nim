@@ -10,6 +10,15 @@ when defined(ffiGenBindings):
 # String helpers used by multiple macros
 # ---------------------------------------------------------------------------
 
+proc nimNameToCExport(s: string): string =
+  ## Converts a camelCase Nim proc name to a snake_case C export name.
+  ## Leaves already-snake_case names unchanged.
+  ## e.g. "nimtimerCreate" → "nimtimer_create", "nimtimer_echo" → "nimtimer_echo"
+  for i, c in s:
+    if c.isUpperAscii() and i > 0:
+      result.add('_')
+    result.add(c.toLowerAscii())
+
 proc registerFfiTypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
   ## Registers the type in ffiTypeRegistry for binding generation and returns
   ## the clean typeDef. Serialization is handled by the generic overloads in serial.nim.
@@ -657,6 +666,7 @@ macro ffi*(prc: untyped): untyped =
       raw[0 ..^ 2]
     else:
       raw
+  let cExportName = nimNameToCExport(procNameStr)
   let camelName = toCamelCase(procNameStr)
 
   # Names of generated things
@@ -808,7 +818,7 @@ macro ffi*(prc: untyped): untyped =
       pragmas = newTree(
         nnkPragma,
         ident("dynlib"),
-        ident("exportc"),
+        newTree(nnkExprColonExpr, ident("exportc"), newStrLitNode(cExportName)),
         ident("cdecl"),
         newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
       ),
@@ -839,7 +849,7 @@ macro ffi*(prc: untyped): untyped =
         retTn = $retTypeInner
       ffiProcRegistry.add(
         FFIProcMeta(
-          procName: procNameStr,
+          procName: cExportName,
           libName: currentLibName,
           kind: ffiFfiKind,
           libTypeName: $libTypeName,
@@ -937,7 +947,7 @@ macro ffi*(prc: untyped): untyped =
       pragmas = newTree(
         nnkPragma,
         ident("dynlib"),
-        ident("exportc"),
+        newTree(nnkExprColonExpr, ident("exportc"), newStrLitNode(cExportName)),
         ident("cdecl"),
         newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
       ),
@@ -968,7 +978,7 @@ macro ffi*(prc: untyped): untyped =
         retTnSync = $retTypeInnerSync
       ffiProcRegistry.add(
         FFIProcMeta(
-          procName: procNameStr,
+          procName: cExportName,
           libName: currentLibName,
           kind: ffiFfiKind,
           libTypeName: $libTypeName,
@@ -1304,6 +1314,7 @@ macro ffiCtor*(prc: untyped): untyped =
       procNameStr[0 ..^ 2]
     else:
       procNameStr
+  let cExportName = nimNameToCExport(cleanName)
   let reqTypeNameStr = toCamelCase(cleanName) & "CtorReq"
   let reqTypeName = ident(reqTypeNameStr)
 
@@ -1403,7 +1414,7 @@ macro ffiCtor*(prc: untyped): untyped =
     pragmas = newTree(
       nnkPragma,
       ident("dynlib"),
-      ident("exportc"),
+      newTree(nnkExprColonExpr, ident("exportc"), newStrLitNode(cExportName)),
       ident("cdecl"),
       newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
     ),
@@ -1424,7 +1435,7 @@ macro ffiCtor*(prc: untyped): untyped =
       ctorExtraParams.add(FFIParamMeta(name: paramNames[i], typeName: tn, isPtr: isPtr))
     ffiProcRegistry.add(
       FFIProcMeta(
-        procName: cleanName,
+        procName: cExportName,
         libName: currentLibName,
         kind: ffiCtorKind,
         libTypeName: $libTypeName,
