@@ -4,6 +4,7 @@ import ../ffi_types
 import ../codegen/meta
 when defined(ffiGenBindings):
   import ../codegen/rust
+  import ../codegen/cpp
 
 # ---------------------------------------------------------------------------
 # String helpers used by multiple macros
@@ -1383,21 +1384,28 @@ macro ffiCtor*(prc: untyped): untyped =
 # ---------------------------------------------------------------------------
 
 macro genBindings*(
-    lang: static[string],
     outputDir: static[string],
     nimSrcRelPath: static[string] = "",
 ): untyped =
-  ## Generates binding files for the specified target language.
+  ## Generates binding files for the target language set by -d:ffiTargetLang=<lang>.
+  ## Supported values: "rust" (default), "cpp" (case-insensitive).
   ## Call at the END of your library file, after all {.ffiCtor.} and {.ffi.} procs.
   ##
   ## Example:
-  ##   genBindings("rust", "examples/nim_timer/nim_bindings", "examples/nim_timer/nim_timer.nim")
+  ##   genBindings("examples/nim_timer/nim_bindings", "../nim_timer.nim")
   ##
-  ## Activate with: nim c -d:ffiGenBindings mylib.nim
+  ## Activate with: nim c -d:ffiGenBindings -d:ffiTargetLang=rust mylib.nim
+  ##            or: nim c -d:ffiGenBindings -d:ffiTargetLang=cpp  mylib.nim
 
   when defined(ffiGenBindings):
-    if lang == "rust":
-      let libName = deriveLibName(ffiProcRegistry)
+    let lang = ffiTargetLang.toLowerAscii()
+    let libName = deriveLibName(ffiProcRegistry)
+    case lang
+    of "rust":
       generateRustCrate(ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath)
+    of "cpp", "c++":
+      generateCppBindings(ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath)
+    else:
+      error("genBindings: unknown ffiTargetLang '" & lang & "'. Use 'rust' or 'cpp'.")
 
   result = newEmptyNode()

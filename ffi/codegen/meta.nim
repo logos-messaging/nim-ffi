@@ -33,3 +33,6 @@ type
 var ffiProcRegistry* {.compileTime.}: seq[FFIProcMeta]
 var ffiTypeRegistry* {.compileTime.}: seq[FFITypeMeta]
 var currentLibName* {.compileTime.}: string
+
+# Target language for binding generation; override with -d:ffiTargetLang=cpp
+const ffiTargetLang* {.strdefine.} = "rust"
