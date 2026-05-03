@@ -33,7 +33,7 @@ type ComplexResponse {.ffi.} = object
 # --- Constructor -----------------------------------------------------------
 # Called once from Rust. Creates the FFIContext + NimTimer.
 # Uses chronos (await sleepAsync) so the body is async.
-proc nimtimer_create*(
+proc nimtimerCreate*(
     config: TimerConfig
 ): Future[Result[NimTimer, string]] {.ffiCtor.} =
   await sleepAsync(1.milliseconds) # proves chronos is live on the FFI thread
@@ -42,7 +42,7 @@ proc nimtimer_create*(
 # --- Async method ----------------------------------------------------------
 # Waits `delayMs` milliseconds (non-blocking, on the chronos event loop)
 # then echoes the message back with a request counter.
-proc nimtimer_echo*(
+proc nimtimerEcho*(
     timer: NimTimer, req: EchoRequest
 ): Future[Result[EchoResponse, string]] {.ffi.} =
   await sleepAsync(req.delayMs.milliseconds)
@@ -51,10 +51,10 @@ proc nimtimer_echo*(
 # --- Sync method -----------------------------------------------------------
 # No await — the macro detects this and fires the callback inline,
 # without going through the request channel.
-proc nimtimer_version*(timer: NimTimer): Future[Result[string, string]] {.ffi.} =
+proc nimtimerVersion*(timer: NimTimer): Future[Result[string, string]] {.ffi.} =
   return ok("nim-timer v0.1.0")
 
-proc nimtimer_complex*(
+proc nimtimerComplex*(
     timer: NimTimer, req: ComplexRequest
 ): Future[Result[ComplexResponse, string]] {.ffi.} =
   let note = if req.note.isSome: req.note.get else: "<none>"
