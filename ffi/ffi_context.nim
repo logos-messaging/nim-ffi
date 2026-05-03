@@ -197,7 +197,8 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
         chronicles.error "ffi thread could not receive a request"
         continue
 
-      ctx.myLib = addr ffiReqHandler
+      if ctx.myLib.isNil():
+        ctx.myLib = addr ffiReqHandler
 
       ## Handle the request
       asyncSpawn processRequest(request, ctx)

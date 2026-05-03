@@ -1,6 +1,10 @@
 import std/[macros, atomics], strformat, chronicles, chronos
+import ../codegen/meta
 
 macro declareLibrary*(libraryName: static[string]): untyped =
+  # Record the library name for binding generation
+  currentLibName = libraryName
+
   var res = newStmtList()
 
   ## Generate {.pragma: exported, exportc, cdecl, raises: [].}
