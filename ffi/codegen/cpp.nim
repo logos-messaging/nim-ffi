@@ -4,15 +4,36 @@
 import std/[os, strutils]
 import ./meta
 
+proc genericInnerType(typeName, prefix: string): string =
+  if typeName.startsWith(prefix) and typeName.endsWith("]"):
+    let start = prefix.len
+    let lastIndex = typeName.len - 2
+    return typeName[start .. lastIndex]
+  return ""
+
 proc nimTypeToCpp*(typeName: string): string =
-  case typeName
+  let trimmed = typeName.strip()
+  if trimmed.startsWith("ptr "):
+    return "void*"
+  else:
+    let seqInner = genericInnerType(trimmed, "seq[")
+    if seqInner.len > 0:
+      return "std::vector<" & nimTypeToCpp(seqInner) & ">"
+    let optionInner = genericInnerType(trimmed, "Option[")
+    if optionInner.len > 0:
+      return "std::optional<" & nimTypeToCpp(optionInner) & ">"
+    let maybeInner = genericInnerType(trimmed, "Maybe[")
+    if maybeInner.len > 0:
+      return "std::optional<" & nimTypeToCpp(maybeInner) & ">"
+  case trimmed
   of "string", "cstring": "std::string"
   of "int", "int64": "int64_t"
   of "int32": "int32_t"
   of "bool": "bool"
-  of "float", "float64": "double"
+  of "float": "float"
+  of "float64": "double"
   of "pointer": "void*"
-  else: typeName
+  else: trimmed
 
 proc stripLibPrefixCpp(procName, libName: string): string =
   let prefix = libName & "_"
@@ -21,9 +42,7 @@ proc stripLibPrefixCpp(procName, libName: string): string =
   return procName
 
 proc generateCppHeader*(
-    procs: seq[FFIProcMeta],
-    types: seq[FFITypeMeta],
-    libName: string,
+    procs: seq[FFIProcMeta], types: seq[FFITypeMeta], libName: string
 ): string =
   var lines: seq[string] = @[]
 
@@ -34,7 +53,23 @@ proc generateCppHeader*(
   lines.add("#include <mutex>")
   lines.add("#include <condition_variable>")
   lines.add("#include <functional>")
+  lines.add("#include <vector>")
+  lines.add("#include <optional>")
   lines.add("#include <nlohmann/json.hpp>")
+  lines.add("")
+  lines.add("namespace nlohmann {")
+  lines.add("    template<typename T>")
+  lines.add("    void to_json(json& j, const std::optional<T>& opt) {")
+  lines.add("        if (opt) j = *opt;")
+  lines.add("        else j = nullptr;")
+  lines.add("    }")
+  lines.add("")
+  lines.add("    template<typename T>")
+  lines.add("    void from_json(const json& j, std::optional<T>& opt) {")
+  lines.add("        if (j.is_null()) opt = std::nullopt;")
+  lines.add("        else opt = j.get<T>();")
+  lines.add("    }")
+  lines.add("}")
   lines.add("")
 
   # Types
@@ -52,7 +87,9 @@ proc generateCppHeader*(
       var fieldNames: seq[string] = @[]
       for f in t.fields:
         fieldNames.add(f.name)
-      lines.add("NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE($1, $2)" % [t.name, fieldNames.join(", ")])
+      lines.add(
+        "NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE($1, $2)" % [t.name, fieldNames.join(", ")]
+      )
       lines.add("")
 
   # C extern declarations
@@ -61,7 +98,9 @@ proc generateCppHeader*(
   lines.add("// ============================================================")
   lines.add("")
   lines.add("extern \"C\" {")
-  lines.add("typedef void (*FfiCallback)(int ret, const char* msg, size_t len, void* user_data);")
+  lines.add(
+    "typedef void (*FfiCallback)(int ret, const char* msg, size_t len, void* user_data);"
+  )
   lines.add("")
 
   for p in procs:
@@ -80,6 +119,30 @@ proc generateCppHeader*(
     lines.add("int $1($2);" % [p.procName, params.join(", ")])
 
   lines.add("} // extern \"C\"")
+  lines.add("")
+
+  # Transport serialization helpers
+  lines.add("")
+  lines.add("template<typename T>")
+  lines.add("inline std::string serializeFfiArg(const T& value) {")
+  lines.add("    return nlohmann::json(value).dump();")
+  lines.add("}")
+  lines.add("")
+  lines.add("inline std::string serializeFfiArg(void* value) {")
+  lines.add("    return std::to_string(reinterpret_cast<uintptr_t>(value));")
+  lines.add("}")
+  lines.add("")
+  lines.add("template<typename T>")
+  lines.add("inline T deserializeFfiResult(const std::string& raw) {")
+  lines.add("    return nlohmann::json::parse(raw).get<T>();")
+  lines.add("}")
+  lines.add("")
+  lines.add("template<>")
+  lines.add("inline void* deserializeFfiResult<void*>(const std::string& raw) {")
+  lines.add(
+    "    return reinterpret_cast<void*>(static_cast<uintptr_t>(std::stoull(raw)));"
+  )
+  lines.add("}")
   lines.add("")
 
   # Anonymous namespace with synchronous call helper
@@ -110,7 +173,9 @@ proc generateCppHeader*(
   lines.add("    FfiCallState_ state;")
   lines.add("    const int ret = f(ffi_cb_, &state);")
   lines.add("    if (ret == 2)")
-  lines.add("        throw std::runtime_error(\"RET_MISSING_CALLBACK (internal error)\");")
+  lines.add(
+    "        throw std::runtime_error(\"RET_MISSING_CALLBACK (internal error)\");"
+  )
   lines.add("    std::unique_lock<std::mutex> lock(state.mtx);")
   lines.add("    state.cv.wait(lock, [&state]{ return state.done; });")
   lines.add("    if (!state.ok)")
@@ -125,12 +190,16 @@ proc generateCppHeader*(
   var ctors: seq[FFIProcMeta] = @[]
   var methods: seq[FFIProcMeta] = @[]
   for p in procs:
-    if p.kind == ffiCtorKind: ctors.add(p)
-    else: methods.add(p)
+    if p.kind == ffiCtorKind:
+      ctors.add(p)
+    else:
+      methods.add(p)
 
   let libTypeName =
-    if ctors.len > 0: ctors[0].libTypeName
-    else: libName[0 .. 0].toUpperAscii() & libName[1 .. ^1]
+    if ctors.len > 0:
+      ctors[0].libTypeName
+    else:
+      libName[0 .. 0].toUpperAscii() & libName[1 .. ^1]
 
   let ctxTypeName = libTypeName & "Ctx"
 
@@ -150,7 +219,7 @@ proc generateCppHeader*(
 
     lines.add("    static $1 create($2) {" % [ctxTypeName, ctorParams.join(", ")])
     for ep in ctor.extraParams:
-      lines.add("        const auto $1_json = nlohmann::json($1).dump();" % [ep.name])
+      lines.add("        const auto $1_json = serializeFfiArg($1);" % [ep.name])
 
     var callArgs: seq[string] = @[]
     for ep in ctor.extraParams:
@@ -163,7 +232,10 @@ proc generateCppHeader*(
     lines.add("        });")
     lines.add("        // ctor returns the context address as a plain decimal string")
     lines.add("        const auto addr = std::stoull(raw);")
-    lines.add("        return $1(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)));" % [ctxTypeName])
+    lines.add(
+      "        return $1(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)));" %
+        [ctxTypeName]
+    )
     lines.add("    }")
     lines.add("")
 
@@ -180,7 +252,7 @@ proc generateCppHeader*(
 
     lines.add("    $1 $2($3) const {" % [retCppType, methodName, methParamsStr])
     for ep in m.extraParams:
-      lines.add("        const auto $1_json = nlohmann::json($1).dump();" % [ep.name])
+      lines.add("        const auto $1_json = serializeFfiArg($1);" % [ep.name])
 
     var callArgs = @["ptr_", "cb", "ud"]
     for ep in m.extraParams:
@@ -190,10 +262,10 @@ proc generateCppHeader*(
     lines.add("            return $1($2);" % [m.procName, callArgs.join(", ")])
     lines.add("        });")
 
-    if retCppType == "std::string":
-      lines.add("        return nlohmann::json::parse(raw).get<std::string>();")
+    if retCppType == "void*":
+      lines.add("        return deserializeFfiResult<void*>(raw);")
     else:
-      lines.add("        return nlohmann::json::parse(raw).get<$1>();" % [retCppType])
+      lines.add("        return deserializeFfiResult<$1>(raw);" % [retCppType])
     lines.add("    }")
     lines.add("")
 
@@ -210,12 +282,12 @@ proc generateCppCMakeLists*(libName: string, nimSrcRelPath: string): string =
   ## CMake uses ${...} which would clash with Nim's % format operator,
   ## so we build the file line by line using string concatenation.
   let src = nimSrcRelPath.replace("\\", "/")
-  let cv  = "${CMAKE_CURRENT_SOURCE_DIR}"  # CMake variable shorthand
-  let rv  = "${REPO_ROOT}"
-  let lf  = "${NIM_LIB_FILE}"
-  let nm  = "${NIM_EXECUTABLE}"
-  let ns  = "${NIM_SRC}"
-  let sd  = "${_search_dir}"
+  let cv = "${CMAKE_CURRENT_SOURCE_DIR}" # CMake variable shorthand
+  let rv = "${REPO_ROOT}"
+  let lf = "${NIM_LIB_FILE}"
+  let nm = "${NIM_EXECUTABLE}"
+  let ns = "${NIM_SRC}"
+  let sd = "${_search_dir}"
   var L: seq[string] = @[]
   L.add("cmake_minimum_required(VERSION 3.14)")
   L.add("project(" & libName & "_cpp_bindings CXX)")
@@ -223,7 +295,9 @@ proc generateCppCMakeLists*(libName: string, nimSrcRelPath: string): string =
   L.add("set(CMAKE_CXX_STANDARD 17)")
   L.add("set(CMAKE_CXX_STANDARD_REQUIRED ON)")
   L.add("")
-  L.add("# ── nlohmann/json ─────────────────────────────────────────────────────────────")
+  L.add(
+    "# ── nlohmann/json ─────────────────────────────────────────────────────────────"
+  )
   L.add("include(FetchContent)")
   L.add("FetchContent_Declare(")
   L.add("    nlohmann_json")
@@ -233,7 +307,9 @@ proc generateCppCMakeLists*(libName: string, nimSrcRelPath: string): string =
   L.add(")")
   L.add("FetchContent_MakeAvailable(nlohmann_json)")
   L.add("")
-  L.add("# ── Locate the repository root (contains ffi.nimble) ─────────────────────────")
+  L.add(
+    "# ── Locate the repository root (contains ffi.nimble) ─────────────────────────"
+  )
   L.add("set(_search_dir \"" & cv & "\")")
   L.add("set(REPO_ROOT \"\")")
   L.add("foreach(_i RANGE 10)")
@@ -244,15 +320,21 @@ proc generateCppCMakeLists*(libName: string, nimSrcRelPath: string): string =
   L.add("    get_filename_component(_search_dir \"" & sd & "\" DIRECTORY)")
   L.add("endforeach()")
   L.add("if(\"${REPO_ROOT}\" STREQUAL \"\")")
-  L.add("    message(FATAL_ERROR \"Cannot find repo root (no ffi.nimble in any ancestor)\")")
+  L.add(
+    "    message(FATAL_ERROR \"Cannot find repo root (no ffi.nimble in any ancestor)\")"
+  )
   L.add("endif()")
   L.add("")
-  L.add("# ── Nim source path ───────────────────────────────────────────────────────────")
+  L.add(
+    "# ── Nim source path ───────────────────────────────────────────────────────────"
+  )
   L.add("get_filename_component(NIM_SRC")
   L.add("    \"" & cv & "/" & src & "\"")
   L.add("    ABSOLUTE)")
   L.add("")
-  L.add("# ── Compile the Nim shared library ───────────────────────────────────────────")
+  L.add(
+    "# ── Compile the Nim shared library ───────────────────────────────────────────"
+  )
   L.add("find_program(NIM_EXECUTABLE nim REQUIRED)")
   L.add("")
   L.add("if(CMAKE_SYSTEM_NAME STREQUAL \"Darwin\")")
@@ -281,15 +363,24 @@ proc generateCppCMakeLists*(libName: string, nimSrcRelPath: string): string =
   L.add("add_custom_target(nim_lib ALL DEPENDS \"" & lf & "\")")
   L.add("")
   L.add("add_library(" & libName & " SHARED IMPORTED GLOBAL)")
-  L.add("set_target_properties(" & libName & " PROPERTIES IMPORTED_LOCATION \"" & lf & "\")")
+  L.add(
+    "set_target_properties(" & libName & " PROPERTIES IMPORTED_LOCATION \"" & lf & "\")"
+  )
   L.add("add_dependencies(" & libName & " nim_lib)")
   L.add("")
-  L.add("# ── Interface target exposing the generated header ────────────────────────────")
+  L.add(
+    "# ── Interface target exposing the generated header ────────────────────────────"
+  )
   L.add("add_library(" & libName & "_headers INTERFACE)")
   L.add("target_include_directories(" & libName & "_headers INTERFACE \"" & cv & "\")")
-  L.add("target_link_libraries(" & libName & "_headers INTERFACE " & libName & " nlohmann_json::nlohmann_json)")
+  L.add(
+    "target_link_libraries(" & libName & "_headers INTERFACE " & libName &
+      " nlohmann_json::nlohmann_json)"
+  )
   L.add("")
-  L.add("# ── Optional example executable ───────────────────────────────────────────────")
+  L.add(
+    "# ── Optional example executable ───────────────────────────────────────────────"
+  )
   L.add("if(EXISTS \"" & cv & "/main.cpp\")")
   L.add("    add_executable(example main.cpp)")
   L.add("    target_link_libraries(example PRIVATE " & libName & "_headers)")
