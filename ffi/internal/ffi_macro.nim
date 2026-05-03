@@ -10,6 +10,31 @@ when defined(ffiGenBindings):
 # String helpers used by multiple macros
 # ---------------------------------------------------------------------------
 
+proc registerFfiTypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
+  ## Registers the type in ffiTypeRegistry for binding generation and returns
+  ## the clean typeDef. Serialization is handled by the generic overloads in serial.nim.
+  let typeName =
+    if typeDef[0].kind == nnkPostfix: typeDef[0][1] else: typeDef[0]
+  let typeNameStr = $typeName
+
+  var fieldMetas: seq[FFIFieldMeta] = @[]
+  let objTy = typeDef[2]
+  if objTy.kind == nnkObjectTy and objTy.len >= 3:
+    let recList = objTy[2]
+    if recList.kind == nnkRecList:
+      for identDef in recList:
+        if identDef.kind == nnkIdentDefs:
+          let fieldType = identDef[^2]
+          let fieldTypeName =
+            if fieldType.kind == nnkIdent: $fieldType
+            elif fieldType.kind == nnkPtrTy: "ptr " & $fieldType[0]
+            else: fieldType.repr
+          for i in 0 ..< identDef.len - 2:
+            fieldMetas.add(FFIFieldMeta(name: $identDef[i], typeName: fieldTypeName))
+
+  ffiTypeRegistry.add(FFITypeMeta(name: typeNameStr, fields: fieldMetas))
+  result = typeDef
+
 proc capitalizeFirstLetter(s: string): string =
   ## Returns `s` with the first character uppercased.
   if s.len == 0:
@@ -560,22 +585,29 @@ macro ffiRaw*(prc: untyped): untyped =
     echo result.repr
 
 macro ffi*(prc: untyped): untyped =
-  ## Simplified FFI macro — developer writes a clean Nim-idiomatic signature.
+  ## Simplified FFI macro — applies to procs or types.
   ##
-  ## The annotated proc must:
-  ##   - Have a first parameter of the library type (e.g. w: Waku)
-  ##   - Optionally have additional Nim-typed parameters
-  ##   - Return Future[Result[RetType, string]]
-  ##   - NOT include ctx, callback, or userData in its signature
+  ## On a type: `type Foo {.ffi.} = object` registers Foo for binding generation
+  ## and generates ffiSerialize/ffiDeserialize overloads.
   ##
-  ## Example:
+  ## On a proc: the annotated proc must have a first parameter of the library type,
+  ## optionally additional Nim-typed parameters, and return Future[Result[RetType, string]].
+  ## It must NOT include ctx, callback, or userData in its signature.
+  ##
+  ## Example (type):
+  ##   type EchoRequest {.ffi.} = object
+  ##     message: string
+  ##     delayMs: int
+  ##
+  ## Example (proc):
   ##   proc mylib_send*(w: MyLib, cfg: SendConfig): Future[Result[string, string]] {.ffi.} =
   ##     return ok("done")
-  ##
-  ## The macro generates:
-  ##   1. A named async helper proc (MyLibSendBody) containing the user body
-  ##   2. A registerReqFFI call that deserializes cstring args and calls the helper
-  ##   3. A C-exported proc with ctx/callback/userData + cstring params
+
+  if prc.kind == nnkTypeDef:
+    var cleanTypeDef = prc.copyNimTree()
+    if cleanTypeDef[0].kind == nnkPragmaExpr:
+      cleanTypeDef[0] = cleanTypeDef[0][0]
+    return registerFfiTypeInfo(cleanTypeDef)
 
   let procName = prc[0]
   let formalParams = prc[3]
