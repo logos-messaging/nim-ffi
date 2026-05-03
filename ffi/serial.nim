@@ -1,4 +1,4 @@
-import std/[json, macros, sequtils, options]
+import std/[json, macros, options]
 import results
 import ./codegen/meta
 
@@ -81,6 +81,9 @@ proc ffiSerialize*[T](x: Option[T]): string =
   else:
     "null"
 
+proc ffiSerialize*[T: object](x: T): string =
+  $(%*x)
+
 proc ffiDeserialize*[T](s: cstring, _: typedesc[ptr T]): Result[ptr T, string] =
   try:
     let address = cast[ptr T](uint(parseJson($s).getBiggestInt()))
@@ -120,10 +123,16 @@ proc ffiDeserialize*[T](s: cstring, _: typedesc[Option[T]]): Result[Option[T], s
   except Exception as e:
     err(e.msg)
 
+proc ffiDeserialize*[T: object](s: cstring, _: typedesc[T]): Result[T, string] =
+  try:
+    ok(parseJson($s).to(T))
+  except Exception as e:
+    err(e.msg)
+
 macro ffiType*(body: untyped): untyped =
   ## Statement macro applied to a type declaration block.
-  ## Generates ffiSerialize and ffiDeserialize overloads for each type,
-  ## and registers the type in ffiTypeRegistry for binding generation.
+  ## Registers the type in ffiTypeRegistry for binding generation.
+  ## Serialization is handled by the generic ffiSerialize/ffiDeserialize overloads.
   ## Usage:
   ##   ffiType:
   ##     type Foo = object
@@ -136,56 +145,21 @@ macro ffiType*(body: untyped): untyped =
     else:
       typeDef[0]
 
-  # Collect field metadata for the codegen registry
   let typeNameStr = $typeName
   var fieldMetas: seq[FFIFieldMeta] = @[]
-  # typeDef layout: TypDef[name, genericParams, objectTy]
-  # objectTy layout: ObjectTy[empty, empty, recList]
   let objTy = typeDef[2]
   if objTy.kind == nnkObjectTy and objTy.len >= 3:
     let recList = objTy[2]
     if recList.kind == nnkRecList:
       for identDef in recList:
         if identDef.kind == nnkIdentDefs:
-          # identDef: [name1, ..., type, default]
           let fieldType = identDef[^2]
-          var fieldTypeName: string
-          if fieldType.kind == nnkIdent:
-            fieldTypeName = $fieldType
-          elif fieldType.kind == nnkPtrTy:
-            fieldTypeName = "ptr " & $fieldType[0]
-          else:
-            fieldTypeName = fieldType.repr
+          let fieldTypeName =
+            if fieldType.kind == nnkIdent: $fieldType
+            elif fieldType.kind == nnkPtrTy: "ptr " & $fieldType[0]
+            else: fieldType.repr
           for i in 0 ..< identDef.len - 2:
-            let fname = $identDef[i]
-            fieldMetas.add(FFIFieldMeta(name: fname, typeName: fieldTypeName))
+            fieldMetas.add(FFIFieldMeta(name: $identDef[i], typeName: fieldTypeName))
 
   ffiTypeRegistry.add(FFITypeMeta(name: typeNameStr, fields: fieldMetas))
-
-  let serializeProc = quote:
-    proc ffiSerialize*(x: `typeName`): string =
-      $(%*x)
-
-  var assignmentText = ""
-  for field in fieldMetas:
-    if assignmentText.len > 0:
-      assignmentText &= "\n"
-    assignmentText &=
-      "  result[\"" & field.name & "\"] = parseJson(ffiSerialize(x." & field.name & "))"
-  let jsonProc = parseStmt(
-    "proc `%`*(x: " & typeNameStr & "): JsonNode =\n  var result = newJObject()\n" &
-      assignmentText & "\n  return result\n"
-  )
-
-  let importJson = quote:
-    import json
-  let deserializeProc = quote:
-    proc ffiDeserialize*(
-        s: cstring, _: typedesc[`typeName`]
-    ): Result[`typeName`, string] =
-      try:
-        ok(parseJson($s).to(`typeName`))
-      except Exception as e:
-        err(e.msg)
-
-  result = newStmtList(importJson, body, serializeProc, jsonProc, deserializeProc)
+  result = body

@@ -8,32 +8,27 @@ declareLibrary("nimtimer")
 type NimTimer = object
   name: string # set at creation time, read back in each response
 
-ffiType:
-  type TimerConfig = object
-    name: string
+type TimerConfig {.ffi.} = object
+  name: string
 
-ffiType:
-  type EchoRequest = object
-    message: string
-    delayMs: int # how long chronos sleeps before replying
+type EchoRequest {.ffi.} = object
+  message: string
+  delayMs: int # how long chronos sleeps before replying
 
-ffiType:
-  type EchoResponse = object
-    echoed: string
-    timerName: string # proves that the timer's own state is accessible
+type EchoResponse {.ffi.} = object
+  echoed: string
+  timerName: string # proves that the timer's own state is accessible
 
-ffiType:
-  type ComplexRequest = object
-    messages: seq[EchoRequest]
-    tags: seq[string]
-    note: Option[string]
-    retries: Maybe[int]
+type ComplexRequest {.ffi.} = object
+  messages: seq[EchoRequest]
+  tags: seq[string]
+  note: Option[string]
+  retries: Maybe[int]
 
-ffiType:
-  type ComplexResponse = object
-    summary: string
-    itemCount: int
-    hasNote: bool
+type ComplexResponse {.ffi.} = object
+  summary: string
+  itemCount: int
+  hasNote: bool
 
 # --- Constructor -----------------------------------------------------------
 # Called once from Rust. Creates the FFIContext + NimTimer.
