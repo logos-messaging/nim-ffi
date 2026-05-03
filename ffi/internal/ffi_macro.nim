@@ -200,6 +200,7 @@ proc buildFfiNewReqProc(reqTypeName, body: NimNode): NimNode =
         FFIThreadRequest.init(callback, userData, typeStr.cstring, `reqObjIdent`)
       proc destroyContent(content: pointer) {.nimcall.} =
         ffiDeleteReq(cast[ptr `reqTypeName`](content))
+
       ret[].deleteReqContent = destroyContent
       return ret
   )
@@ -363,12 +364,11 @@ proc addNewRequestToRegistry(reqTypeName, reqHandler: NimNode): NimNode =
   #   CreateNodeRequest.processFFIRequest(request, reqHandler)
   let asyncProc = newProc(
     name = newEmptyNode(), # anonymous proc
-    params =
-      @[
-        returnType,
-        newIdentDefs(ident("request"), ident("pointer")),
-        newIdentDefs(ident("reqHandler"), ident("pointer")),
-      ],
+    params = @[
+      returnType,
+      newIdentDefs(ident("request"), ident("pointer")),
+      newIdentDefs(ident("reqHandler"), ident("pointer")),
+    ],
     body = newBody,
     pragmas = nnkPragma.newTree(ident("async")),
   )
@@ -587,19 +587,27 @@ macro ffi*(prc: untyped): untyped =
 
   # Extract LibType from the first parameter
   let firstParam = formalParams[1]
-  let libParamName = firstParam[0]  # e.g. `w`
-  let libTypeName = firstParam[1]   # e.g. `Waku`
+  let libParamName = firstParam[0] # e.g. `w`
+  let libTypeName = firstParam[1] # e.g. `Waku`
 
   # Extract the return type: Future[Result[RetType, string]]
   # RetType is used in the body helper proc signature
   let retTypeNode = formalParams[0]
   if retTypeNode.kind == nnkEmpty:
-    error("`.ffi.` proc must have an explicit return type Future[Result[RetType, string]]")
+    error(
+      "`.ffi.` proc must have an explicit return type Future[Result[RetType, string]]"
+    )
   if retTypeNode.kind != nnkBracketExpr or $retTypeNode[0] != "Future":
-    error("`.ffi.` return type must be Future[Result[RetType, string]], got: " & retTypeNode.repr)
+    error(
+      "`.ffi.` return type must be Future[Result[RetType, string]], got: " &
+        retTypeNode.repr
+    )
   let resultInner = retTypeNode[1] # Result[RetType, string]
   if resultInner.kind != nnkBracketExpr or $resultInner[0] != "Result":
-    error("`.ffi.` return type must be Future[Result[RetType, string]], got: " & retTypeNode.repr)
+    error(
+      "`.ffi.` return type must be Future[Result[RetType, string]], got: " &
+        retTypeNode.repr
+    )
 
   # Collect additional param names and types (everything after the first param)
   var extraParamNames: seq[string] = @[]
@@ -613,7 +621,10 @@ macro ffi*(prc: untyped): untyped =
   # Generate type/proc names from proc name
   let procNameStr = block:
     let raw = $procName
-    if raw.endsWith("*"): raw[0 ..^ 2] else: raw
+    if raw.endsWith("*"):
+      raw[0 ..^ 2]
+    else:
+      raw
   let camelName = toCamelCase(procNameStr)
 
   # Names of generated things
@@ -631,9 +642,8 @@ macro ffi*(prc: untyped): untyped =
       procName
 
   # Common exported params (needed for both branches)
-  let ctxType = nnkPtrTy.newTree(
-    nnkBracketExpr.newTree(ident("FFIContext"), libTypeName)
-  )
+  let ctxType =
+    nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), libTypeName))
 
   if isAsync:
     # -------------------------------------------------------------------------
@@ -668,9 +678,8 @@ macro ffi*(prc: untyped): untyped =
     )
 
     let ctxHandlerName = ident("ffiCtxHandler")
-    let ptrFfiCtx = nnkPtrTy.newTree(
-      nnkBracketExpr.newTree(ident("FFIContext"), libTypeName)
-    )
+    let ptrFfiCtx =
+      nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), libTypeName))
 
     var lambdaParams = newSeq[NimNode]()
     lambdaParams.add(futStrStr)
@@ -785,8 +794,10 @@ macro ffi*(prc: untyped): untyped =
           tn = $ptype[0]
         else:
           tn = $ptype
-        ffiExtraParams.add(FFIParamMeta(name: extraParamNames[i], typeName: tn, isPtr: isPtr))
-      let retTypeInner = resultInner[1]  # RetType from Result[RetType, string]
+        ffiExtraParams.add(
+          FFIParamMeta(name: extraParamNames[i], typeName: tn, isPtr: isPtr)
+        )
+      let retTypeInner = resultInner[1] # RetType from Result[RetType, string]
       var retIsPtr = false
       var retTn = ""
       if retTypeInner.kind == nnkPtrTy:
@@ -794,19 +805,20 @@ macro ffi*(prc: untyped): untyped =
         retTn = $retTypeInner[0]
       else:
         retTn = $retTypeInner
-      ffiProcRegistry.add(FFIProcMeta(
-        procName: procNameStr,
-        libName: currentLibName,
-        kind: ffiFfiKind,
-        libTypeName: $libTypeName,
-        extraParams: ffiExtraParams,
-        returnTypeName: retTn,
-        returnIsPtr: retIsPtr,
-        isAsync: true,
-      ))
+      ffiProcRegistry.add(
+        FFIProcMeta(
+          procName: procNameStr,
+          libName: currentLibName,
+          kind: ffiFfiKind,
+          libTypeName: $libTypeName,
+          extraParams: ffiExtraParams,
+          returnTypeName: retTn,
+          returnIsPtr: retIsPtr,
+          isAsync: true,
+        )
+      )
 
     result = newStmtList(helperProc, registerReq, ffiProc)
-
   else:
     # -------------------------------------------------------------------------
     # SYNC PATH — no await/waitFor in body; bypass thread-channel machinery
@@ -881,7 +893,9 @@ macro ffi*(prc: untyped): untyped =
         callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
         return RET_ERR
       let serialized = ffiSerialize(`retValOrErrIdent`.value)
-      callback(RET_OK, unsafeAddr serialized[0], cast[csize_t](serialized.len), userData)
+      callback(
+        RET_OK, unsafeAddr serialized[0], cast[csize_t](serialized.len), userData
+      )
       return RET_OK
 
     let syncFfiProc = newProc(
@@ -909,7 +923,9 @@ macro ffi*(prc: untyped): untyped =
           tn = $ptype[0]
         else:
           tn = $ptype
-        ffiExtraParamsSync.add(FFIParamMeta(name: extraParamNames[i], typeName: tn, isPtr: isPtr))
+        ffiExtraParamsSync.add(
+          FFIParamMeta(name: extraParamNames[i], typeName: tn, isPtr: isPtr)
+        )
       let retTypeInnerSync = resultInner[1]
       var retIsPtrSync = false
       var retTnSync = ""
@@ -918,16 +934,18 @@ macro ffi*(prc: untyped): untyped =
         retTnSync = $retTypeInnerSync[0]
       else:
         retTnSync = $retTypeInnerSync
-      ffiProcRegistry.add(FFIProcMeta(
-        procName: procNameStr,
-        libName: currentLibName,
-        kind: ffiFfiKind,
-        libTypeName: $libTypeName,
-        extraParams: ffiExtraParamsSync,
-        returnTypeName: retTnSync,
-        returnIsPtr: retIsPtrSync,
-        isAsync: false,
-      ))
+      ffiProcRegistry.add(
+        FFIProcMeta(
+          procName: procNameStr,
+          libName: currentLibName,
+          kind: ffiFfiKind,
+          libTypeName: $libTypeName,
+          extraParams: ffiExtraParamsSync,
+          returnTypeName: retTnSync,
+          returnIsPtr: retIsPtrSync,
+          isAsync: false,
+        )
+      )
 
     result = newStmtList(syncHelperProc, syncFfiProc)
 
@@ -953,11 +971,15 @@ proc buildCtorRequestType(reqTypeName: NimNode, paramNames: seq[string]): NimNod
     if fields.len > 0:
       newTree(nnkRecList, fields)
     else:
-      newTree(nnkRecList, newTree(nnkIdentDefs, ident("_placeholder"), ident("pointer"), newEmptyNode()))
+      newTree(
+        nnkRecList,
+        newTree(nnkIdentDefs, ident("_placeholder"), ident("pointer"), newEmptyNode()),
+      )
 
   let objTy = newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), recList)
   let typeName = postfix(reqTypeName, "*")
-  result = newNimNode(nnkTypeSection).add(newTree(nnkTypeDef, typeName, newEmptyNode(), objTy))
+  result =
+    newNimNode(nnkTypeSection).add(newTree(nnkTypeDef, typeName, newEmptyNode(), objTy))
 
   when defined(ffiDumpMacros):
     echo result.repr
@@ -990,9 +1012,8 @@ proc buildCtorFfiNewReqProc(reqTypeName: NimNode, paramNames: seq[string]): NimN
 
   var formalParams = newSeq[NimNode]()
 
-  let typedescParam = newIdentDefs(
-    ident("T"), nnkBracketExpr.newTree(ident("typedesc"), reqTypeName)
-  )
+  let typedescParam =
+    newIdentDefs(ident("T"), nnkBracketExpr.newTree(ident("typedesc"), reqTypeName))
   formalParams.add(typedescParam)
   formalParams.add(newIdentDefs(ident("callback"), ident("FFICallBack")))
   formalParams.add(newIdentDefs(ident("userData"), ident("pointer")))
@@ -1018,6 +1039,7 @@ proc buildCtorFfiNewReqProc(reqTypeName: NimNode, paramNames: seq[string]): NimN
     var ret = FFIThreadRequest.init(callback, userData, typeStr.cstring, `reqObjIdent`)
     proc destroyContent(content: pointer) {.nimcall.} =
       ffiDeleteReq(cast[ptr `reqTypeName`](content))
+
     ret[].deleteReqContent = destroyContent
     return ret
 
@@ -1084,9 +1106,8 @@ proc buildCtorProcessFFIRequestProc(
   )
 
   # The ctx param type: ptr FFIContext[LibType]
-  let ctxType = nnkPtrTy.newTree(
-    nnkBracketExpr.newTree(ident("FFIContext"), libTypeName)
-  )
+  let ctxType =
+    nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), libTypeName))
 
   let typedescParam =
     newIdentDefs(ident("T"), nnkBracketExpr.newTree(ident("typedesc"), reqTypeName))
@@ -1152,9 +1173,8 @@ proc addCtorRequestToRegistry(reqTypeName, libTypeName: NimNode): NimNode =
   ## Registers the ctor request in the registeredRequests table.
   ## The handler casts reqHandler to ptr FFIContext[LibType] and calls processFFIRequest.
 
-  let ctxType = nnkPtrTy.newTree(
-    nnkBracketExpr.newTree(ident("FFIContext"), libTypeName)
-  )
+  let ctxType =
+    nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), libTypeName))
 
   let returnType = nnkBracketExpr.newTree(
     ident("Future"),
@@ -1173,20 +1193,18 @@ proc addCtorRequestToRegistry(reqTypeName, libTypeName: NimNode): NimNode =
 
   let asyncProc = newProc(
     name = newEmptyNode(),
-    params =
-      @[
-        returnType,
-        newIdentDefs(ident("request"), ident("pointer")),
-        newIdentDefs(ident("reqHandler"), ident("pointer")),
-      ],
+    params = @[
+      returnType,
+      newIdentDefs(ident("request"), ident("pointer")),
+      newIdentDefs(ident("reqHandler"), ident("pointer")),
+    ],
     body = newBody,
     pragmas = nnkPragma.newTree(ident("async")),
   )
 
   let key = newLit($reqTypeName)
-  result = newAssignment(
-    newTree(nnkBracketExpr, ident("registeredRequests"), key), asyncProc
-  )
+  result =
+    newAssignment(newTree(nnkBracketExpr, ident("registeredRequests"), key), asyncProc)
 
   when defined(ffiDumpMacros):
     echo result.repr
@@ -1219,13 +1237,21 @@ macro ffiCtor*(prc: untyped): untyped =
   let retTypeNode = formalParams[0]
   # retTypeNode should be Future[Result[LibType, string]]
   if retTypeNode.kind == nnkEmpty:
-    error("ffiCtor: proc must have an explicit return type Future[Result[LibType, string]]")
+    error(
+      "ffiCtor: proc must have an explicit return type Future[Result[LibType, string]]"
+    )
   # retTypeNode: BracketExpr(Future, BracketExpr(Result, LibType, string))
   if retTypeNode.kind != nnkBracketExpr or $retTypeNode[0] != "Future":
-    error("ffiCtor: return type must be Future[Result[LibType, string]], got: " & retTypeNode.repr)
+    error(
+      "ffiCtor: return type must be Future[Result[LibType, string]], got: " &
+        retTypeNode.repr
+    )
   let resultInner = retTypeNode[1] # Result[LibType, string]
   if resultInner.kind != nnkBracketExpr or $resultInner[0] != "Result":
-    error("ffiCtor: return type must be Future[Result[LibType, string]], got: " & retTypeNode.repr)
+    error(
+      "ffiCtor: return type must be Future[Result[LibType, string]], got: " &
+        retTypeNode.repr
+    )
   let libTypeName = resultInner[1] # LibType
 
   # Collect param names and types (skip return type at index 0)
@@ -1256,9 +1282,11 @@ macro ffiCtor*(prc: untyped): untyped =
   # Helper proc name: e.g., TestlibCreateCtorReq -> TestlibCreateCtorBody
   let helperProcNameStr = reqTypeNameStr[0 ..^ ("CtorReq".len + 1)] & "CtorBody"
   let helperProcName = ident(helperProcNameStr)
-  let helperProc = buildCtorBodyProc(helperProcName, paramNames, paramTypes, libTypeName, bodyNode)
-  let processProc =
-    buildCtorProcessFFIRequestProc(reqTypeName, helperProcName, paramNames, paramTypes, libTypeName)
+  let helperProc =
+    buildCtorBodyProc(helperProcName, paramNames, paramTypes, libTypeName, bodyNode)
+  let processProc = buildCtorProcessFFIRequestProc(
+    reqTypeName, helperProcName, paramNames, paramTypes, libTypeName
+  )
   let addToReg = addCtorRequestToRegistry(reqTypeName, libTypeName)
 
   # Build the C-exported proc params:
@@ -1311,9 +1339,8 @@ macro ffiCtor*(prc: untyped): untyped =
       return RET_ERR
 
   # sendRequestToFFIThread using the gensym'd ctx
-  let sendCall = newCall(
-    newDotExpr(ctxSym, ident("sendRequestToFFIThread")), newReqCall
-  )
+  let sendCall =
+    newCall(newDotExpr(ctxSym, ident("sendRequestToFFIThread")), newReqCall)
 
   let sendResIdent = genSym(nskLet, "sendRes")
   ffiBody.add quote do:
@@ -1363,18 +1390,22 @@ macro ffiCtor*(prc: untyped): untyped =
       else:
         tn = $ptype
       ctorExtraParams.add(FFIParamMeta(name: paramNames[i], typeName: tn, isPtr: isPtr))
-    ffiProcRegistry.add(FFIProcMeta(
-      procName: cleanName,
-      libName: currentLibName,
-      kind: ffiCtorKind,
-      libTypeName: $libTypeName,
-      extraParams: ctorExtraParams,
-      returnTypeName: $libTypeName,
-      returnIsPtr: false,
-      isAsync: true,
-    ))
+    ffiProcRegistry.add(
+      FFIProcMeta(
+        procName: cleanName,
+        libName: currentLibName,
+        kind: ffiCtorKind,
+        libTypeName: $libTypeName,
+        extraParams: ctorExtraParams,
+        returnTypeName: $libTypeName,
+        returnIsPtr: false,
+        isAsync: true,
+      )
+    )
 
-  result = newStmtList(typeDef, deleteProc, ffiNewReqProc, helperProc, processProc, addToReg, ffiProc)
+  result = newStmtList(
+    typeDef, deleteProc, ffiNewReqProc, helperProc, processProc, addToReg, ffiProc
+  )
 
   when defined(ffiDumpMacros):
     echo result.repr
@@ -1384,28 +1415,39 @@ macro ffiCtor*(prc: untyped): untyped =
 # ---------------------------------------------------------------------------
 
 macro genBindings*(
-    outputDir: static[string],
-    nimSrcRelPath: static[string] = "",
+    outputDir: static[string] = ffiOutputDir,
+    nimSrcRelPath: static[string] = ffiNimSrcRelPath,
 ): untyped =
-  ## Generates binding files for the target language set by -d:ffiTargetLang=<lang>.
+  ## Generates binding files for the language set by -d:targetLang=<lang>.
   ## Supported values: "rust" (default), "cpp" (case-insensitive).
-  ## Call at the END of your library file, after all {.ffiCtor.} and {.ffi.} procs.
+  ## Output path and nim source path default to -d:ffiOutputDir and
+  ## -d:ffiNimSrcRelPath, or can be passed as explicit arguments.
+  ## This macro is a no-op unless -d:ffiGenBindings is set.
   ##
-  ## Example:
-  ##   genBindings("examples/nim_timer/nim_bindings", "../nim_timer.nim")
-  ##
-  ## Activate with: nim c -d:ffiGenBindings -d:ffiTargetLang=rust mylib.nim
-  ##            or: nim c -d:ffiGenBindings -d:ffiTargetLang=cpp  mylib.nim
+  ## Example (all via compile flags):
+  ##   genBindings()
+  ##   # nim c -d:ffiGenBindings -d:targetLang=rust \
+  ##   #        -d:ffiOutputDir=examples/nim_timer/rust_bindings \
+  ##   #        -d:ffiNimSrcRelPath=../nim_timer.nim mylib.nim
 
   when defined(ffiGenBindings):
-    let lang = ffiTargetLang.toLowerAscii()
+    if outputDir.len == 0:
+      error(
+        "genBindings: output directory is empty." &
+        " Pass it as an argument or set -d:ffiOutputDir=path/to/output"
+      )
+    let lang = targetLang.toLowerAscii()
     let libName = deriveLibName(ffiProcRegistry)
     case lang
     of "rust":
-      generateRustCrate(ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath)
+      generateRustCrate(
+        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath
+      )
     of "cpp", "c++":
-      generateCppBindings(ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath)
+      generateCppBindings(
+        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath
+      )
     else:
-      error("genBindings: unknown ffiTargetLang '" & lang & "'. Use 'rust' or 'cpp'.")
+      error("genBindings: unknown targetLang '" & lang & "'. Use 'rust' or 'cpp'.")
 
   result = newEmptyNode()

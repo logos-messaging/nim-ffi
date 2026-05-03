@@ -1,10 +1,12 @@
-import ffi, chronos
+import ffi, chronos, options
+
+type Maybe[T] = Option[T]
 
 declareLibrary("nimtimer")
 
 # The library's main state type. The FFI context owns one instance.
 type NimTimer = object
-  name: string  # set at creation time, read back in each response
+  name: string # set at creation time, read back in each response
 
 ffiType:
   type TimerConfig = object
@@ -13,12 +15,25 @@ ffiType:
 ffiType:
   type EchoRequest = object
     message: string
-    delayMs: int  # how long chronos sleeps before replying
+    delayMs: int # how long chronos sleeps before replying
 
 ffiType:
   type EchoResponse = object
     echoed: string
-    timerName: string  # proves that the timer's own state is accessible
+    timerName: string # proves that the timer's own state is accessible
+
+ffiType:
+  type ComplexRequest = object
+    messages: seq[EchoRequest]
+    tags: seq[string]
+    note: Option[string]
+    retries: Maybe[int]
+
+ffiType:
+  type ComplexResponse = object
+    summary: string
+    itemCount: int
+    hasNote: bool
 
 # --- Constructor -----------------------------------------------------------
 # Called once from Rust. Creates the FFIContext + NimTimer.
@@ -26,7 +41,7 @@ ffiType:
 proc nimtimer_create*(
     config: TimerConfig
 ): Future[Result[NimTimer, string]] {.ffiCtor.} =
-  await sleepAsync(1.milliseconds)  # proves chronos is live on the FFI thread
+  await sleepAsync(1.milliseconds) # proves chronos is live on the FFI thread
   return ok(NimTimer(name: config.name))
 
 # --- Async method ----------------------------------------------------------
@@ -41,10 +56,18 @@ proc nimtimer_echo*(
 # --- Sync method -----------------------------------------------------------
 # No await — the macro detects this and fires the callback inline,
 # without going through the request channel.
-proc nimtimer_version*(
-    timer: NimTimer
-): Future[Result[string, string]] {.ffi.} =
+proc nimtimer_version*(timer: NimTimer): Future[Result[string, string]] {.ffi.} =
   return ok("nim-timer v0.1.0")
 
-when defined(ffiGenBindings):
-  genBindings("examples/nim_timer/nim_bindings", "../nim_timer.nim")
+proc nimtimer_complex*(
+    timer: NimTimer, req: ComplexRequest
+): Future[Result[ComplexResponse, string]] {.ffi.} =
+  let note = if req.note.isSome: req.note.get else: "<none>"
+  let retries = if req.retries.isSome: req.retries.get else: 0
+  let count = req.messages.len
+  let summary =
+    "received " & $count & " messages, note=" & note & ", retries=" & $retries
+  return
+    ok(ComplexResponse(summary: summary, itemCount: count, hasNote: req.note.isSome))
+
+genBindings() # reads -d:ffiOutputDir, -d:ffiNimSrcRelPath, -d:targetLang from compile flags

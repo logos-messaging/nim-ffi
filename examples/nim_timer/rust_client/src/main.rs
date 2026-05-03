@@ -3,7 +3,7 @@
 // This file uses the generated `nimtimer` crate, which wraps all the raw FFI
 // boilerplate (extern "C" declarations, callback machinery, JSON encode/decode).
 //
-// To regenerate the `nim_bindings` crate:
+// To regenerate the `rust_bindings` crate:
 //   nim c --mm:orc -d:chronicles_log_level=WARN --nimMainPrefix:libnimtimer \
 //         -d:ffiGenBindings examples/nim_timer/nim_timer.nim
 use nimtimer::{EchoRequest, NimTimerCtx, TimerConfig};

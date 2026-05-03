@@ -19,20 +19,28 @@ proc toSnakeCase*(s: string): string =
 
 proc toPascalCase*(s: string): string =
   ## Converts the first letter to uppercase.
-  if s.len == 0: return s
+  if s.len == 0:
+    return s
   result = s
   result[0] = s[0].toUpperAscii()
 
 proc nimTypeToRust*(typeName: string): string =
-  ## Maps Nim type names to Rust type names.
-  case typeName
+  ## Maps Nim type names to Rust type names, including generics.
+  let t = typeName.strip()
+  if t.startsWith("seq[") and t.endsWith("]"):
+    return "Vec<" & nimTypeToRust(t[4 .. ^2]) & ">"
+  if t.startsWith("Option[") and t.endsWith("]"):
+    return "Option<" & nimTypeToRust(t[7 .. ^2]) & ">"
+  if t.startsWith("Maybe[") and t.endsWith("]"):
+    return "Option<" & nimTypeToRust(t[6 .. ^2]) & ">"
+  case t
   of "string", "cstring": "String"
   of "int", "int64": "i64"
   of "int32": "i32"
   of "bool": "bool"
   of "float", "float64": "f64"
   of "pointer": "usize"
-  else: toPascalCase(typeName)
+  else: toPascalCase(t)
 
 proc deriveLibName*(procs: seq[FFIProcMeta]): string =
   ## Extracts the common prefix before the first `_` from proc names.
@@ -60,7 +68,8 @@ proc stripLibPrefix*(procName: string, libName: string): string =
 # ---------------------------------------------------------------------------
 
 proc generateCargoToml*(libName: string): string =
-  result = """[package]
+  result =
+    """[package]
 name = "$1"
 version = "0.1.0"
 edition = "2021"
@@ -68,13 +77,15 @@ edition = "2021"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-""" % [libName]
+""" %
+    [libName]
 
 proc generateBuildRs*(libName: string, nimSrcRelPath: string): string =
   ## Generates build.rs that compiles the Nim library.
   ## nimSrcRelPath is relative to the output (crate) directory.
   let escapedSrc = nimSrcRelPath.replace("\\", "\\\\")
-  result = """use std::path::PathBuf;
+  result =
+    """use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
@@ -121,7 +132,8 @@ fn main() {
     println!("cargo:rustc-link-lib=$2");
     println!("cargo:rerun-if-changed={}", nim_src.display());
 }
-""" % [escapedSrc, libName]
+""" %
+    [escapedSrc, libName]
 
 proc generateLibRs*(): string =
   result = """mod ffi;
@@ -239,7 +251,7 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   lines.add("use super::types::*;")
   lines.add("")
 
-  # FfiCallbackResult struct
+  # FfiCallbackResult + Pair
   lines.add("#[derive(Default)]")
   lines.add("struct FfiCallbackResult {")
   lines.add("    payload: Option<Result<String, String>>,")
@@ -248,7 +260,7 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   lines.add("type Pair = Arc<(Mutex<FfiCallbackResult>, Condvar)>;")
   lines.add("")
 
-  # on_result callback
+  # on_result callback (Arc-based, blocking)
   lines.add("unsafe extern \"C\" fn on_result(")
   lines.add("    ret: c_int,")
   lines.add("    msg: *const c_char,")
@@ -270,7 +282,7 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   lines.add("}")
   lines.add("")
 
-  # ffi_call helper
+  # Blocking ffi_call helper using Condvar::wait_timeout_while
   lines.add("fn ffi_call<F>(timeout: Duration, f: F) -> Result<String, String>")
   lines.add("where")
   lines.add("    F: FnOnce(ffi::FfiCallback, *mut c_void) -> c_int,")
@@ -325,10 +337,18 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
       let rustType = nimTypeToRust(ep.typeName)
       if rustType == "String":
         # Primitive string — wrap it in JSON
-        lines.add("        let $1_json_str = serde_json::to_string(&$1).map_err(|e| e.to_string())?;" % [snakeName])
-        lines.add("        let $1_c = CString::new($1_json_str).unwrap();" % [snakeName])
+        lines.add(
+          "        let $1_json_str = serde_json::to_string(&$1).map_err(|e| e.to_string())?;" %
+            [snakeName]
+        )
+        lines.add(
+          "        let $1_c = CString::new($1_json_str).unwrap();" % [snakeName]
+        )
       else:
-        lines.add("        let $1_json = serde_json::to_string(&$1).map_err(|e| e.to_string())?;" % [snakeName])
+        lines.add(
+          "        let $1_json = serde_json::to_string(&$1).map_err(|e| e.to_string())?;" %
+            [snakeName]
+        )
         lines.add("        let $1_c = CString::new($1_json).unwrap();" % [snakeName])
 
     # Build the ffi_call closure
@@ -344,7 +364,9 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
     lines.add("            ffi::$1($2)" % [ctor.procName, ffiCallArgsStr])
     lines.add("        })?;")
     lines.add("        // ctor returns the context address as a plain decimal string")
-    lines.add("        let addr: usize = raw.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;")
+    lines.add(
+      "        let addr: usize = raw.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;"
+    )
     lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout })")
     lines.add("    }")
     lines.add("")
@@ -359,19 +381,34 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
       let rustType = nimTypeToRust(ep.typeName)
       let snakeName = toSnakeCase(ep.name)
       paramsList.add("$1: $2" % [snakeName, rustType])
-    let paramsStr = if paramsList.len > 0: ", " & paramsList.join(", ") else: ""
+    let paramsStr =
+      if paramsList.len > 0:
+        ", " & paramsList.join(", ")
+      else:
+        ""
 
-    lines.add("    pub fn $1(&self$2) -> Result<$3, String> {" % [methodName, paramsStr, retRustType])
+    lines.add(
+      "    pub fn $1(&self$2) -> Result<$3, String> {" %
+        [methodName, paramsStr, retRustType]
+    )
 
     # Serialize extra params
     for ep in m.extraParams:
       let snakeName = toSnakeCase(ep.name)
       let rustType = nimTypeToRust(ep.typeName)
       if rustType == "String":
-        lines.add("        let $1_json_str = serde_json::to_string(&$1).map_err(|e| e.to_string())?;" % [snakeName])
-        lines.add("        let $1_c = CString::new($1_json_str).unwrap();" % [snakeName])
+        lines.add(
+          "        let $1_json_str = serde_json::to_string(&$1).map_err(|e| e.to_string())?;" %
+            [snakeName]
+        )
+        lines.add(
+          "        let $1_c = CString::new($1_json_str).unwrap();" % [snakeName]
+        )
       else:
-        lines.add("        let $1_json = serde_json::to_string(&$1).map_err(|e| e.to_string())?;" % [snakeName])
+        lines.add(
+          "        let $1_json = serde_json::to_string(&$1).map_err(|e| e.to_string())?;" %
+            [snakeName]
+        )
         lines.add("        let $1_c = CString::new($1_json).unwrap();" % [snakeName])
 
     # Build ffi call args: ctx first, then callback/ud, then json args
@@ -387,11 +424,16 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
 
     # Deserialize return value
     if retRustType == "String":
-      lines.add("        serde_json::from_str::<String>(&raw).map_err(|e| e.to_string())")
+      lines.add(
+        "        serde_json::from_str::<String>(&raw).map_err(|e| e.to_string())"
+      )
     elif retRustType == "usize":
       lines.add("        raw.parse::<usize>().map_err(|e| e.to_string())")
     else:
-      lines.add("        serde_json::from_str::<$1>(&raw).map_err(|e| e.to_string())" % [retRustType])
+      lines.add(
+        "        serde_json::from_str::<$1>(&raw).map_err(|e| e.to_string())" %
+          [retRustType]
+      )
     lines.add("    }")
     lines.add("")
 
