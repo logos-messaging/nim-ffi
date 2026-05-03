@@ -5,6 +5,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <functional>
+#include <future>
 #include <vector>
 #include <optional>
 #include <nlohmann/json.hpp>
@@ -145,12 +146,20 @@ public:
         return NimTimerCtx(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)));
     }
 
+    static std::future<NimTimerCtx> createAsync(const TimerConfig& config) {
+        return std::async(std::launch::async, [config]() { return create(config); });
+    }
+
     EchoResponse echo(const EchoRequest& req) const {
         const auto req_json = serializeFfiArg(req);
         const auto raw = ffi_call_([&](FfiCallback cb, void* ud) {
             return nimtimer_echo(ptr_, cb, ud, req_json.c_str());
         });
         return deserializeFfiResult<EchoResponse>(raw);
+    }
+
+    std::future<EchoResponse> echoAsync(const EchoRequest& req) const {
+        return std::async(std::launch::async, [this, req]() { return echo(req); });
     }
 
     std::string version() const {
@@ -160,12 +169,20 @@ public:
         return deserializeFfiResult<std::string>(raw);
     }
 
+    std::future<std::string> versionAsync() const {
+        return std::async(std::launch::async, [this]() { return version(); });
+    }
+
     ComplexResponse complex(const ComplexRequest& req) const {
         const auto req_json = serializeFfiArg(req);
         const auto raw = ffi_call_([&](FfiCallback cb, void* ud) {
             return nimtimer_complex(ptr_, cb, ud, req_json.c_str());
         });
         return deserializeFfiResult<ComplexResponse>(raw);
+    }
+
+    std::future<ComplexResponse> complexAsync(const ComplexRequest& req) const {
+        return std::async(std::launch::async, [this, req]() { return complex(req); });
     }
 
 private:

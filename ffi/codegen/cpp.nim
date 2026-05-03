@@ -53,6 +53,7 @@ proc generateCppHeader*(
   lines.add("#include <mutex>")
   lines.add("#include <condition_variable>")
   lines.add("#include <functional>")
+  lines.add("#include <future>")
   lines.add("#include <vector>")
   lines.add("#include <optional>")
   lines.add("#include <nlohmann/json.hpp>")
@@ -238,6 +239,15 @@ proc generateCppHeader*(
     )
     lines.add("    }")
     lines.add("")
+    lines.add(
+      "    static std::future<$1> createAsync(const TimerConfig& config) {" %
+        [ctxTypeName]
+    )
+    lines.add(
+      "        return std::async(std::launch::async, [config]() { return create(config); });"
+    )
+    lines.add("    }")
+    lines.add("")
 
   # Instance methods
   for m in methods:
@@ -245,10 +255,13 @@ proc generateCppHeader*(
     let retCppType = nimTypeToCpp(m.returnTypeName)
 
     var methParams: seq[string] = @[]
+    var methParamNames: seq[string] = @[]
     for ep in m.extraParams:
       let cppType = nimTypeToCpp(ep.typeName)
       methParams.add("const $1& $2" % [cppType, ep.name])
+      methParamNames.add(ep.name)
     let methParamsStr = methParams.join(", ")
+    let methParamNamesStr = methParamNames.join(", ")
 
     lines.add("    $1 $2($3) const {" % [retCppType, methodName, methParamsStr])
     for ep in m.extraParams:
@@ -267,6 +280,24 @@ proc generateCppHeader*(
     else:
       lines.add("        return deserializeFfiResult<$1>(raw);" % [retCppType])
     lines.add("    }")
+    lines.add("")
+    if methParamsStr.len > 0:
+      lines.add(
+        "    std::future<$1> $2Async($3) const {" %
+          [retCppType, methodName, methParamsStr]
+      )
+      lines.add(
+        "        return std::async(std::launch::async, [this, $1]() { return $2($3); });" %
+          [methParamNamesStr, methodName, methParamNamesStr]
+      )
+      lines.add("    }")
+    else:
+      lines.add("    std::future<$1> $2Async() const {" % [retCppType, methodName])
+      lines.add(
+        "        return std::async(std::launch::async, [this]() { return $2(); });" %
+          [methodName]
+      )
+      lines.add("    }")
     lines.add("")
 
   lines.add("private:")
