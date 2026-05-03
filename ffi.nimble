@@ -31,5 +31,8 @@ task test_ffi, "Run FFI context integration tests":
 task test_serial, "Run serial unit tests":
   exec "nim c -r " & nimFlags & " tests/test_serial.nim"
 
-task genbindings_example, "Generate Rust bindings for the nim_timer example":
-  exec "nim c " & nimFlags & " --app:lib --noMain --nimMainPrefix:libnimtimer -d:ffiGenBindings -o:/dev/null examples/nim_timer/nim_timer.nim"
+task genbindings_rust, "Generate Rust bindings for the nim_timer example":
+  exec "nim c " & nimFlags & " --app:lib --noMain --nimMainPrefix:libnimtimer -d:ffiGenBindings -d:ffiTargetLang=rust -o:/dev/null examples/nim_timer/nim_timer.nim"
+
+task genbindings_cpp, "Generate C++ bindings for the nim_timer example":
+  exec "nim c " & nimFlags & " --app:lib --noMain --nimMainPrefix:libnimtimer -d:ffiGenBindings -d:ffiTargetLang=cpp -o:/dev/null examples/nim_timer/nim_timer.nim"

@@ -47,4 +47,4 @@ proc nimtimer_version*(
   return ok("nim-timer v0.1.0")
 
 when defined(ffiGenBindings):
-  genBindings("rust", "examples/nim_timer/nim_bindings", "../nim_timer.nim")
+  genBindings("examples/nim_timer/nim_bindings", "../nim_timer.nim")
