@@ -1,19 +1,24 @@
 #include "nimtimer.hpp"
 #include <iostream>
+#include <future>
 
 int main() {
     try {
         auto ctx = NimTimerCtx::create(TimerConfig{"cpp-demo"});
         std::cout << "[1] Context created\n";
 
-        auto version = ctx.version();
+        auto versionFuture = ctx.versionAsync();
+        auto echo1Future = ctx.echoAsync(EchoRequest{"hello from C++", 200});
+        auto echo2Future = ctx.echoAsync(EchoRequest{"second C++ request", 50});
+
+        auto version = versionFuture.get();
         std::cout << "[2] Version: " << version << "\n";
 
-        auto echo = ctx.echo(EchoRequest{"hello from C++", 200});
+        auto echo = echo1Future.get();
         std::cout << "[3] Echo 1: echoed=" << echo.echoed
                   << ", timerName=" << echo.timerName << "\n";
 
-        auto echo2 = ctx.echo(EchoRequest{"second C++ request", 50});
+        auto echo2 = echo2Future.get();
         std::cout << "[4] Echo 2: echoed=" << echo2.echoed
                   << ", timerName=" << echo2.timerName << "\n";
 
@@ -23,7 +28,9 @@ int main() {
             std::optional<std::string>("extra note"),
             std::optional<int64_t>(3)
         };
-        auto complex = ctx.complex(complexReq);
+
+        auto complexFuture = ctx.complexAsync(complexReq);
+        auto complex = complexFuture.get();
         std::cout << "[5] Complex: summary=" << complex.summary
                   << ", itemCount=" << complex.itemCount
                   << ", hasNote=" << complex.hasNote << "\n";
