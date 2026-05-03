@@ -5,6 +5,8 @@ use std::time::Duration;
 use super::ffi;
 use super::types::*;
 
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Default)]
 struct FfiCallbackResult {
     payload: Option<Result<String, String>>,
@@ -74,6 +76,15 @@ impl NimTimerCtx {
         Ok(Self { ptr: addr as *mut c_void, timeout })
     }
 
+    pub fn new(config: TimerConfig) -> Result<Self, String> {
+        Self::create(config, DEFAULT_TIMEOUT)
+    }
+
+    #[cfg(feature = "tokio")]
+    pub async fn new_async(config: TimerConfig) -> Result<Self, String> {
+        tokio::task::block_in_place(move || Self::new(config))
+    }
+
     pub fn echo(&self, req: EchoRequest) -> Result<EchoResponse, String> {
         let req_json = serde_json::to_string(&req).map_err(|e| e.to_string())?;
         let req_c = CString::new(req_json).unwrap();
@@ -90,6 +101,16 @@ impl NimTimerCtx {
         serde_json::from_str::<String>(&raw).map_err(|e| e.to_string())
     }
 
+    #[cfg(feature = "tokio")]
+    pub async fn version_async(&self) -> Result<String, String> {
+        let ptr = self.ptr;
+        let timeout = self.timeout;
+        tokio::task::block_in_place(move || {
+            let ctx = Self { ptr, timeout };
+            ctx.version()
+        })
+    }
+
     pub fn complex(&self, req: ComplexRequest) -> Result<ComplexResponse, String> {
         let req_json = serde_json::to_string(&req).map_err(|e| e.to_string())?;
         let req_c = CString::new(req_json).unwrap();
@@ -99,4 +120,23 @@ impl NimTimerCtx {
         serde_json::from_str::<ComplexResponse>(&raw).map_err(|e| e.to_string())
     }
 
+    #[cfg(feature = "tokio")]
+    pub async fn echo_async(&self, req: EchoRequest) -> Result<EchoResponse, String> {
+        let ptr = self.ptr;
+        let timeout = self.timeout;
+        tokio::task::block_in_place(move || {
+            let ctx = Self { ptr, timeout };
+            ctx.echo(req)
+        })
+    }
+
+    #[cfg(feature = "tokio")]
+    pub async fn complex_async(&self, req: ComplexRequest) -> Result<ComplexResponse, String> {
+        let ptr = self.ptr;
+        let timeout = self.timeout;
+        tokio::task::block_in_place(move || {
+            let ctx = Self { ptr, timeout };
+            ctx.complex(req)
+        })
+    }
 }
