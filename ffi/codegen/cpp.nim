@@ -294,7 +294,7 @@ proc generateCppHeader*(
     else:
       lines.add("    std::future<$1> $2Async() const {" % [retCppType, methodName])
       lines.add(
-        "        return std::async(std::launch::async, [this]() { return $2(); });" %
+        "        return std::async(std::launch::async, [this]() { return $1(); });" %
           [methodName]
       )
       lines.add("    }")
