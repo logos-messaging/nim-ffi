@@ -46,18 +46,23 @@ proc generateCppHeader*(
 ): string =
   var lines: seq[string] = @[]
 
+  # ── Includes ───────────────────────────────────────────────────────────────
   lines.add("#pragma once")
   lines.add("#include <string>")
   lines.add("#include <cstdint>")
+  lines.add("#include <chrono>")
   lines.add("#include <stdexcept>")
   lines.add("#include <mutex>")
   lines.add("#include <condition_variable>")
+  lines.add("#include <memory>")
   lines.add("#include <functional>")
   lines.add("#include <future>")
   lines.add("#include <vector>")
   lines.add("#include <optional>")
   lines.add("#include <nlohmann/json.hpp>")
   lines.add("")
+
+  # ── nlohmann optional<T> support ──────────────────────────────────────────
   lines.add("namespace nlohmann {")
   lines.add("    template<typename T>")
   lines.add("    void to_json(json& j, const std::optional<T>& opt) {")
@@ -73,7 +78,7 @@ proc generateCppHeader*(
   lines.add("}")
   lines.add("")
 
-  # Types
+  # ── Types ──────────────────────────────────────────────────────────────────
   if types.len > 0:
     lines.add("// ============================================================")
     lines.add("// Types")
@@ -82,8 +87,7 @@ proc generateCppHeader*(
     for t in types:
       lines.add("struct $1 {" % [t.name])
       for f in t.fields:
-        let cppType = nimTypeToCpp(f.typeName)
-        lines.add("    $1 $2;" % [cppType, f.name])
+        lines.add("    $1 $2;" % [nimTypeToCpp(f.typeName), f.name])
       lines.add("};")
       var fieldNames: seq[string] = @[]
       for f in t.fields:
@@ -93,7 +97,7 @@ proc generateCppHeader*(
       )
       lines.add("")
 
-  # C extern declarations
+  # ── C FFI declarations ─────────────────────────────────────────────────────
   lines.add("// ============================================================")
   lines.add("// C FFI declarations")
   lines.add("// ============================================================")
@@ -103,7 +107,6 @@ proc generateCppHeader*(
     "typedef void (*FfiCallback)(int ret, const char* msg, size_t len, void* user_data);"
   )
   lines.add("")
-
   for p in procs:
     var params: seq[string] = @[]
     if p.kind == ffiFfiKind:
@@ -118,12 +121,12 @@ proc generateCppHeader*(
       params.add("FfiCallback callback")
       params.add("void* user_data")
     lines.add("int $1($2);" % [p.procName, params.join(", ")])
-
+  # Destroy is a plain synchronous call — no callback needed
+  lines.add("void $1_destroy(void* ctx);" % [libName])
   lines.add("} // extern \"C\"")
   lines.add("")
 
-  # Transport serialization helpers
-  lines.add("")
+  # ── Serialization helpers ──────────────────────────────────────────────────
   lines.add("template<typename T>")
   lines.add("inline std::string serializeFfiArg(const T& value) {")
   lines.add("    return nlohmann::json(value).dump();")
@@ -133,20 +136,34 @@ proc generateCppHeader*(
   lines.add("    return std::to_string(reinterpret_cast<uintptr_t>(value));")
   lines.add("}")
   lines.add("")
+  # Wrap parse + get in a single try/catch so callers get a clear FFI error
+  # rather than a raw nlohmann exception with an opaque JSON pointer message.
   lines.add("template<typename T>")
   lines.add("inline T deserializeFfiResult(const std::string& raw) {")
-  lines.add("    return nlohmann::json::parse(raw).get<T>();")
+  lines.add("    try {")
+  lines.add("        return nlohmann::json::parse(raw).get<T>();")
+  lines.add("    } catch (const nlohmann::json::exception& e) {")
+  lines.add(
+    "        throw std::runtime_error(std::string(\"FFI response deserialization failed: \") + e.what());"
+  )
+  lines.add("    }")
   lines.add("}")
   lines.add("")
   lines.add("template<>")
   lines.add("inline void* deserializeFfiResult<void*>(const std::string& raw) {")
+  lines.add("    try {")
   lines.add(
-    "    return reinterpret_cast<void*>(static_cast<uintptr_t>(std::stoull(raw)));"
+    "        return reinterpret_cast<void*>(static_cast<uintptr_t>(std::stoull(raw)));"
   )
+  lines.add("    } catch (const std::exception& e) {")
+  lines.add(
+    "        throw std::runtime_error(std::string(\"FFI returned non-numeric address: \") + raw);"
+  )
+  lines.add("    }")
   lines.add("}")
   lines.add("")
 
-  # Anonymous namespace with synchronous call helper
+  # ── Call helper (anonymous namespace, header-only) ─────────────────────────
   lines.add("// ============================================================")
   lines.add("// Synchronous call helper (anonymous namespace, header-only)")
   lines.add("// ============================================================")
@@ -161,46 +178,63 @@ proc generateCppHeader*(
   lines.add("    std::string             msg;")
   lines.add("};")
   lines.add("")
+  # user_data is a heap-allocated shared_ptr<FfiCallState_>.
+  # Ownership: ffi_call_ holds one copy; this callback holds the other.
+  # When ffi_call_ times out and returns before the callback fires, the
+  # state stays alive (refcount 1) until Nim eventually calls back and
+  # deletes cb_ref — eliminating the UAF that a stack-allocated state has.
   lines.add("inline void ffi_cb_(int ret, const char* msg, size_t /*len*/, void* ud) {")
-  lines.add("    auto* s = static_cast<FfiCallState_*>(ud);")
-  lines.add("    std::lock_guard<std::mutex> lock(s->mtx);")
-  lines.add("    s->ok   = (ret == 0);")
-  lines.add("    s->msg  = msg ? std::string(msg) : std::string{};")
-  lines.add("    s->done = true;")
-  lines.add("    s->cv.notify_one();")
+  lines.add("    auto* sptr = static_cast<std::shared_ptr<FfiCallState_>*>(ud);")
+  lines.add("    {")
+  lines.add("        auto& s = **sptr;")
+  lines.add("        std::lock_guard<std::mutex> lock(s.mtx);")
+  lines.add("        s.ok   = (ret == 0);")
+  lines.add("        s.msg  = msg ? std::string(msg) : std::string{};")
+  lines.add("        s.done = true;")
+  lines.add("        s.cv.notify_one();")
+  lines.add("    }")
+  lines.add("    delete sptr;")
   lines.add("}")
   lines.add("")
-  lines.add("inline std::string ffi_call_(std::function<int(FfiCallback, void*)> f) {")
-  lines.add("    FfiCallState_ state;")
-  lines.add("    const int ret = f(ffi_cb_, &state);")
-  lines.add("    if (ret == 2)")
+  lines.add(
+    "inline std::string ffi_call_(std::function<int(FfiCallback, void*)> f,"
+  )
+  lines.add("                             std::chrono::milliseconds timeout) {")
+  lines.add("    auto state = std::make_shared<FfiCallState_>();")
+  lines.add("    auto* cb_ref = new std::shared_ptr<FfiCallState_>(state);")
+  lines.add("    const int ret = f(ffi_cb_, cb_ref);")
+  lines.add("    if (ret == 2) {")
+  lines.add("        delete cb_ref;")
   lines.add(
     "        throw std::runtime_error(\"RET_MISSING_CALLBACK (internal error)\");"
   )
-  lines.add("    std::unique_lock<std::mutex> lock(state.mtx);")
-  lines.add("    state.cv.wait(lock, [&state]{ return state.done; });")
-  lines.add("    if (!state.ok)")
-  lines.add("        throw std::runtime_error(state.msg);")
-  lines.add("    return state.msg;")
+  lines.add("    }")
+  lines.add("    std::unique_lock<std::mutex> lock(state->mtx);")
+  lines.add(
+    "    const bool fired = state->cv.wait_for(lock, timeout, [&]{ return state->done; });"
+  )
+  lines.add("    if (!fired)")
+  lines.add(
+    "        throw std::runtime_error(\"FFI call timed out after \" + std::to_string(timeout.count()) + \"ms\");"
+  )
+  lines.add("    if (!state->ok)")
+  lines.add("        throw std::runtime_error(state->msg);")
+  lines.add("    return state->msg;")
   lines.add("}")
   lines.add("")
   lines.add("} // anonymous namespace")
   lines.add("")
 
-  # Derive context type name and separate ctors / methods
+  # ── High-level C++ context class ──────────────────────────────────────────
   var ctors: seq[FFIProcMeta] = @[]
   var methods: seq[FFIProcMeta] = @[]
   for p in procs:
-    if p.kind == ffiCtorKind:
-      ctors.add(p)
-    else:
-      methods.add(p)
+    if p.kind == ffiCtorKind: ctors.add(p)
+    else: methods.add(p)
 
   let libTypeName =
-    if ctors.len > 0:
-      ctors[0].libTypeName
-    else:
-      libName[0 .. 0].toUpperAscii() & libName[1 .. ^1]
+    if ctors.len > 0: ctors[0].libTypeName
+    else: libName[0 .. 0].toUpperAscii() & libName[1 .. ^1]
 
   let ctxTypeName = libTypeName & "Ctx"
 
@@ -211,45 +245,92 @@ proc generateCppHeader*(
   lines.add("class $1 {" % [ctxTypeName])
   lines.add("public:")
 
-  # Static create() factory
+  # ── Constructors ────────────────────────────────────────────────────────
   for ctor in ctors:
     var ctorParams: seq[string] = @[]
+    var epNames: seq[string] = @[]
     for ep in ctor.extraParams:
-      let cppType = nimTypeToCpp(ep.typeName)
-      ctorParams.add("const $1& $2" % [cppType, ep.name])
+      ctorParams.add("const $1& $2" % [nimTypeToCpp(ep.typeName), ep.name])
+      epNames.add(ep.name)
+    let timeoutParam = "std::chrono::milliseconds timeout = std::chrono::seconds{30}"
+    let ctorParamsWithTimeout =
+      if ctorParams.len > 0: ctorParams.join(", ") & ", " & timeoutParam
+      else: timeoutParam
 
-    lines.add("    static $1 create($2) {" % [ctxTypeName, ctorParams.join(", ")])
+    # -- create() factory --
+    lines.add("    static $1 create($2) {" % [ctxTypeName, ctorParamsWithTimeout])
     for ep in ctor.extraParams:
       lines.add("        const auto $1_json = serializeFfiArg($1);" % [ep.name])
-
     var callArgs: seq[string] = @[]
     for ep in ctor.extraParams:
       callArgs.add("$1_json.c_str()" % [ep.name])
     callArgs.add("cb")
     callArgs.add("ud")
-
     lines.add("        const auto raw = ffi_call_([&](FfiCallback cb, void* ud) {")
     lines.add("            return $1($2);" % [ctor.procName, callArgs.join(", ")])
-    lines.add("        });")
-    lines.add("        // ctor returns the context address as a plain decimal string")
-    lines.add("        const auto addr = std::stoull(raw);")
+    lines.add("        }, timeout);")
+    lines.add("        try {")
+    lines.add("            const auto addr = std::stoull(raw);")
     lines.add(
-      "        return $1(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)));" %
+      "            return $1(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout);" %
         [ctxTypeName]
     )
+    lines.add("        } catch (const std::exception&) {")
+    lines.add(
+      "            throw std::runtime_error(\"FFI create returned non-numeric address: \" + raw);"
+    )
+    lines.add("        }")
     lines.add("    }")
     lines.add("")
+
+    # -- createAsync() factory: uses actual param types, not hardcoded --
+    let captureList =
+      if epNames.len > 0: epNames.join(", ") & ", timeout"
+      else: "timeout"
+    let callList =
+      if epNames.len > 0: epNames.join(", ") & ", timeout"
+      else: "timeout"
     lines.add(
-      "    static std::future<$1> createAsync(const TimerConfig& config) {" %
-        [ctxTypeName]
+      "    static std::future<$1> createAsync($2) {" %
+        [ctxTypeName, ctorParamsWithTimeout]
     )
     lines.add(
-      "        return std::async(std::launch::async, [config]() { return create(config); });"
+      "        return std::async(std::launch::async, [$1]() { return create($2); });" %
+        [captureList, callList]
     )
     lines.add("    }")
     lines.add("")
 
-  # Instance methods
+  # ── Rule of 5 ──────────────────────────────────────────────────────────
+  # Destructor tears down Nim threads; copies are deleted; moves transfer ownership.
+  lines.add("    ~$1() {" % [ctxTypeName])
+  lines.add("        if (ptr_) {")
+  lines.add("            $1_destroy(ptr_);" % [libName])
+  lines.add("            ptr_ = nullptr;")
+  lines.add("        }")
+  lines.add("    }")
+  lines.add("")
+  lines.add("    $1(const $1&) = delete;" % [ctxTypeName])
+  lines.add("    $1& operator=(const $1&) = delete;" % [ctxTypeName])
+  lines.add("")
+  lines.add(
+    "    $1($1&& other) noexcept : ptr_(other.ptr_), timeout_(other.timeout_) {" %
+      [ctxTypeName]
+  )
+  lines.add("        other.ptr_ = nullptr;")
+  lines.add("    }")
+  lines.add("    $1& operator=($1&& other) noexcept {" % [ctxTypeName])
+  lines.add("        if (this != &other) {")
+  lines.add("            if (ptr_) $1_destroy(ptr_);" % [libName])
+  lines.add("            ptr_ = other.ptr_;")
+  lines.add("            timeout_ = other.timeout_;")
+  lines.add("            other.ptr_ = nullptr;")
+  lines.add("        }")
+  lines.add("        return *this;")
+  lines.add("    }")
+  lines.add("")
+
+  # ── Instance methods ────────────────────────────────────────────────────
   for m in methods:
     let methodName = stripLibPrefixCpp(m.procName, libName)
     let retCppType = nimTypeToCpp(m.returnTypeName)
@@ -257,8 +338,7 @@ proc generateCppHeader*(
     var methParams: seq[string] = @[]
     var methParamNames: seq[string] = @[]
     for ep in m.extraParams:
-      let cppType = nimTypeToCpp(ep.typeName)
-      methParams.add("const $1& $2" % [cppType, ep.name])
+      methParams.add("const $1& $2" % [nimTypeToCpp(ep.typeName), ep.name])
       methParamNames.add(ep.name)
     let methParamsStr = methParams.join(", ")
     let methParamNamesStr = methParamNames.join(", ")
@@ -266,15 +346,12 @@ proc generateCppHeader*(
     lines.add("    $1 $2($3) const {" % [retCppType, methodName, methParamsStr])
     for ep in m.extraParams:
       lines.add("        const auto $1_json = serializeFfiArg($1);" % [ep.name])
-
     var callArgs = @["ptr_", "cb", "ud"]
     for ep in m.extraParams:
       callArgs.add("$1_json.c_str()" % [ep.name])
-
     lines.add("        const auto raw = ffi_call_([&](FfiCallback cb, void* ud) {")
     lines.add("            return $1($2);" % [m.procName, callArgs.join(", ")])
-    lines.add("        });")
-
+    lines.add("        }, timeout_);")
     if retCppType == "void*":
       lines.add("        return deserializeFfiResult<void*>(raw);")
     else:
@@ -302,7 +379,11 @@ proc generateCppHeader*(
 
   lines.add("private:")
   lines.add("    void* ptr_;")
-  lines.add("    explicit $1(void* p) : ptr_(p) {}" % [ctxTypeName])
+  lines.add("    std::chrono::milliseconds timeout_;")
+  lines.add(
+    "    explicit $1(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}" %
+      [ctxTypeName]
+  )
   lines.add("};")
   lines.add("")
 

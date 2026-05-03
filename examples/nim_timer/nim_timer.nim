@@ -66,3 +66,11 @@ proc nimtimerComplex*(
     ok(ComplexResponse(summary: summary, itemCount: count, hasNote: req.note.isSome))
 
 genBindings() # reads -d:ffiOutputDir, -d:ffiNimSrcRelPath, -d:targetLang from compile flags
+
+proc nimtimer_destroy*(ctx: pointer) {.dynlib, exportc, cdecl, raises: [].} =
+  ## Tears down the FFI context created by nimtimer_create.
+  ## Blocks until the FFI thread and watchdog thread have joined.
+  try:
+    discard destroyFFIContext[NimTimer](cast[ptr FFIContext[NimTimer]](ctx))
+  except:
+    discard
