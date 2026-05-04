@@ -1461,8 +1461,18 @@ macro genBindings*(
     outputDir: static[string] = ffiOutputDir,
     nimSrcRelPath: static[string] = ffiNimSrcRelPath,
 ): untyped =
-  ## Generates binding files for the language set by -d:targetLang=<lang>.
-  ## Supported values: "rust" (default), "cpp" (case-insensitive).
+  ## Emits C++ or Rust binding files from the compile-time FFI registries.
+  ##
+  ## PLACEMENT REQUIREMENT: genBindings() must be called AFTER every {.ffi.}
+  ## and {.ffiCtor.} annotation in the compilation unit. Each pragma populates
+  ## ffiProcRegistry and ffiTypeRegistry as the compiler expands the AST;
+  ## calling genBindings() earlier produces incomplete bindings.
+  ##
+  ## In a single-file library, place it at the bottom of the file.
+  ## In a multi-file library, import all sub-modules first and call
+  ## genBindings() once at the bottom of the top-level compilation-root file.
+  ##
+  ## Supported languages (-d:targetLang): "rust" (default), "cpp".
   ## Output path and nim source path default to -d:ffiOutputDir and
   ## -d:ffiNimSrcRelPath, or can be passed as explicit arguments.
   ## This macro is a no-op unless -d:ffiGenBindings is set.

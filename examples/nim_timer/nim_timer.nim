@@ -65,6 +65,13 @@ proc nimtimerComplex*(
   return
     ok(ComplexResponse(summary: summary, itemCount: count, hasNote: req.note.isSome))
 
+# --- genBindings() must come AFTER every {.ffi.} / {.ffiCtor.} annotation ---
+# Each pragma populates ffiProcRegistry / ffiTypeRegistry at compile time as
+# the compiler processes the AST. genBindings() reads those registries to emit
+# the binding files, so placing it any earlier would produce incomplete output.
+# In a multi-file library, import all sub-modules first and call genBindings()
+# once, at the bottom of the top-level compilation-root file.
+# This call is a no-op unless -d:ffiGenBindings is passed to the compiler.
 genBindings() # reads -d:ffiOutputDir, -d:ffiNimSrcRelPath, -d:targetLang from compile flags
 
 proc nimtimer_destroy*(ctx: pointer) {.dynlib, exportc, cdecl, raises: [].} =
