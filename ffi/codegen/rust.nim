@@ -179,8 +179,8 @@ proc generateFfiRs*(procs: seq[FFIProcMeta]): string =
 
   for p in procs:
     var params: seq[string] = @[]
-    if p.kind == ffiFfiKind:
-      # Method: ctx comes first
+    if p.kind in {ffiFfiKind, ffiDtorKind}:
+      # Method/destructor: ctx comes first
       params.add("ctx: *mut c_void")
       params.add("callback: FfiCallback")
       params.add("user_data: *mut c_void")

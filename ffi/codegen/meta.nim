@@ -10,6 +10,7 @@ type
   FFIProcKind* = enum
     ffiCtorKind
     ffiFfiKind
+    ffiDtorKind
 
   FFIProcMeta* = object
     procName*: string # e.g. "nimtimer_echo"

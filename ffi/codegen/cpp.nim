@@ -109,7 +109,7 @@ proc generateCppHeader*(
   lines.add("")
   for p in procs:
     var params: seq[string] = @[]
-    if p.kind == ffiFfiKind:
+    if p.kind in {ffiFfiKind, ffiDtorKind}:
       params.add("void* ctx")
       params.add("FfiCallback callback")
       params.add("void* user_data")
@@ -121,8 +121,6 @@ proc generateCppHeader*(
       params.add("FfiCallback callback")
       params.add("void* user_data")
     lines.add("int $1($2);" % [p.procName, params.join(", ")])
-  # Destroy is a plain synchronous call — no callback needed
-  lines.add("void $1_destroy(void* ctx);" % [libName])
   lines.add("} // extern \"C\"")
   lines.add("")
 

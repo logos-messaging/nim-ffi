@@ -1469,6 +1469,121 @@ macro ffiCtor*(prc: untyped): untyped =
     echo result.repr
 
 # ---------------------------------------------------------------------------
+# ffiDtor — destructor macro
+# ---------------------------------------------------------------------------
+
+macro ffiDtor*(prc: untyped): untyped =
+  ## Defines a C-exported destructor. Works like {.ffi.} but also tears down
+  ## the FFIContext after the body runs.
+  ##
+  ## The annotated proc must have exactly one parameter of the library type.
+  ## The body contains any library-level cleanup to run before context teardown.
+  ##
+  ## Example:
+  ##   proc waku_destroy*(w: Waku) {.ffiDtor.} =
+  ##     w.cleanup()
+  ##
+  ## The generated C-exported proc has the signature:
+  ##   cint waku_destroy(void* ctx, FfiCallback callback, void* userData)
+  ##
+  ## It extracts the library value from ctx, runs the body, then calls
+  ## destroyFFIContext to tear down the FFI thread and free the context.
+
+  let procName = prc[0]
+  let formalParams = prc[3]
+  let bodyNode = prc[^1]
+
+  if formalParams.len < 2:
+    error("ffiDtor: proc must have exactly one parameter (w: LibType)")
+
+  let libParamName = formalParams[1][0] # e.g. w
+  let libTypeName = formalParams[1][1]  # e.g. Waku
+
+  let procNameStr = block:
+    let raw = $procName
+    if raw.endsWith("*"): raw[0 ..^ 2] else: raw
+  let cExportName = nimNameToCExport(procNameStr)
+  let exportedProcName =
+    if procName.kind == nnkPostfix: procName[1] else: procName
+
+  let destroyResIdent = genSym(nskLet, "destroyRes")
+
+  let ffiBody = newStmtList()
+
+  ffiBody.add quote do:
+    when declared(initializeLibrary):
+      initializeLibrary()
+
+  ffiBody.add quote do:
+    if ctx.isNil or cast[ptr FFIContext[`libTypeName`]](ctx)[].myLib.isNil:
+      if not callback.isNil:
+        let errStr = "context not initialized"
+        callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
+      return RET_ERR
+
+  # Extract the library value so the user body can reference it by name
+  ffiBody.add quote do:
+    let `libParamName` = cast[ptr FFIContext[`libTypeName`]](ctx)[].myLib[]
+
+  # Append the user body if it is not a bare discard
+  let isNoop =
+    bodyNode.kind == nnkEmpty or
+    (bodyNode.kind == nnkStmtList and bodyNode.len == 1 and
+      bodyNode[0].kind == nnkDiscardStmt)
+  if not isNoop:
+    ffiBody.add(bodyNode)
+
+  ffiBody.add quote do:
+    let `destroyResIdent` =
+      destroyFFIContext[`libTypeName`](cast[ptr FFIContext[`libTypeName`]](ctx))
+    if `destroyResIdent`.isErr():
+      if not callback.isNil:
+        let errStr = "destroy failed: " & $`destroyResIdent`.error
+        callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
+      return RET_ERR
+
+  ffiBody.add quote do:
+    if not callback.isNil:
+      callback(RET_OK, nil, 0, userData)
+    return RET_OK
+
+  let ffiProc = newProc(
+    name = exportedProcName,
+    params = @[
+      ident("cint"),
+      newIdentDefs(ident("ctx"), ident("pointer")),
+      newIdentDefs(ident("callback"), ident("FFICallBack")),
+      newIdentDefs(ident("userData"), ident("pointer")),
+    ],
+    body = ffiBody,
+    pragmas = newTree(
+      nnkPragma,
+      ident("dynlib"),
+      newTree(nnkExprColonExpr, ident("exportc"), newStrLitNode(cExportName)),
+      ident("cdecl"),
+      newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
+    ),
+  )
+
+  ffiProcRegistry.add(
+    FFIProcMeta(
+      procName: cExportName,
+      libName: currentLibName,
+      kind: ffiDtorKind,
+      libTypeName: $libTypeName,
+      extraParams: @[],
+      returnTypeName: "",
+      returnIsPtr: false,
+      isAsync: false,
+    )
+  )
+
+  result = ffiProc
+
+  when defined(ffiDumpMacros):
+    echo result.repr
+
+# ---------------------------------------------------------------------------
 # genBindings — Rust crate generator
 # ---------------------------------------------------------------------------
 
