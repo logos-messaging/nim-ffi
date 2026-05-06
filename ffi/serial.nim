@@ -2,25 +2,11 @@ import std/[json, macros, options]
 import results
 import ./codegen/meta
 
-## RawString passes the C string through as-is, with no JSON encoding/decoding.
-## Use this when the C caller provides a value that should not be treated as a
-## JSON-encoded string (e.g. a raw config JSON blob, a multiaddress, an ENR).
-type RawString* = distinct string
-
-proc ffiSerialize*(x: RawString): string =
-  string(x)
-
-proc ffiDeserialize*(s: cstring, _: typedesc[RawString]): Result[RawString, string] =
-  ok(RawString($s))
-
 proc ffiSerialize*(x: string): string =
-  $(%*x)
+  x
 
 proc ffiSerialize*(x: cstring): string =
-  if x.isNil:
-    "null"
-  else:
-    ffiSerialize($x)
+  if x.isNil: "" else: $x
 
 proc ffiSerialize*(x: int): string =
   $x
@@ -38,13 +24,7 @@ proc ffiSerialize*(x: pointer): string =
   $cast[uint](x)
 
 proc ffiDeserialize*(s: cstring, _: typedesc[string]): Result[string, string] =
-  try:
-    let node = parseJson($s)
-    if node.kind != JString:
-      return err("expected JSON string")
-    ok(node.getStr())
-  except Exception as e:
-    err(e.msg)
+  ok($s)
 
 proc ffiDeserialize*(s: cstring, _: typedesc[int]): Result[int, string] =
   try:

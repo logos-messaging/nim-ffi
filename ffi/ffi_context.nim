@@ -46,6 +46,26 @@ template callEventCallback*(ctx: ptr FFIContext, eventName: string, body: untype
         RET_ERR, unsafeAddr msg[0], cast[csize_t](len(msg)), ctx[].eventUserData
       )
 
+template dispatchFfiEvent*(w: typed, eventName: string, body: untyped) =
+  ## Fires an FFI event via the library object's event callback fields.
+  ## Works with any type that has ffiEventCallback and ffiEventUserData fields.
+  if w.ffiEventCallback.isNil():
+    chronicles.error eventName & " - ffiEventCallback is nil"
+    return
+  foreignThreadGc:
+    try:
+      let event = body
+      cast[FFICallBack](w.ffiEventCallback)(
+        RET_OK, unsafeAddr event[0], cast[csize_t](len(event)), w.ffiEventUserData
+      )
+    except Exception, CatchableError:
+      let msg =
+        "Exception " & eventName & " when calling 'ffiEventCallback': " &
+        getCurrentExceptionMsg()
+      cast[FFICallBack](w.ffiEventCallback)(
+        RET_ERR, unsafeAddr msg[0], cast[csize_t](len(msg)), w.ffiEventUserData
+      )
+
 proc sendRequestToFFIThread*(
     ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, timeout = InfiniteDuration
 ): Result[void, string] =

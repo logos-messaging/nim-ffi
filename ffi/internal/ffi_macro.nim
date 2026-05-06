@@ -44,6 +44,14 @@ proc registerFfiTypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
   ffiTypeRegistry.add(FFITypeMeta(name: typeNameStr, fields: fieldMetas))
   result = typeDef
 
+proc cParamName(paramName: string, paramType: NimNode): string =
+  ## C export parameter name. string params are passed as-is from C and need
+  ## no Json suffix; other types carry Json to signal they require JSON encoding.
+  if paramType.kind == nnkIdent and $paramType == "string":
+    paramName
+  else:
+    paramName & "Json"
+
 proc capitalizeFirstLetter(s: string): string =
   ## Returns `s` with the first character uppercased.
   if s.len == 0:
@@ -725,17 +733,19 @@ macro ffi*(prc: untyped): untyped =
 
     var lambdaParams = newSeq[NimNode]()
     lambdaParams.add(futStrStr)
-    for name in extraParamNames:
-      lambdaParams.add(newIdentDefs(ident(name & "Json"), ident("cstring")))
+    for i in 0 ..< extraParamNames.len:
+      lambdaParams.add(
+        newIdentDefs(ident(cParamName(extraParamNames[i], extraParamTypes[i])), ident("cstring"))
+      )
 
     let lambdaBody = newStmtList()
 
     for i in 0 ..< extraParamNames.len:
-      let jsonIdent = ident(extraParamNames[i] & "Json")
+      let cIdent = ident(cParamName(extraParamNames[i], extraParamTypes[i]))
       let paramIdent = ident(extraParamNames[i])
       let ptype = extraParamTypes[i]
       lambdaBody.add quote do:
-        let `paramIdent` = ffiDeserialize(`jsonIdent`, `ptype`).valueOr:
+        let `paramIdent` = ffiDeserialize(`cIdent`, `ptype`).valueOr:
           return err($error)
 
     let ctxMyLib = newDotExpr(newTree(nnkDerefExpr, ctxHandlerName), ident("myLib"))
@@ -770,8 +780,10 @@ macro ffi*(prc: untyped): untyped =
     exportedParams.add(newIdentDefs(ident("ctx"), ctxType))
     exportedParams.add(newIdentDefs(ident("callback"), ident("FFICallBack")))
     exportedParams.add(newIdentDefs(ident("userData"), ident("pointer")))
-    for name in extraParamNames:
-      exportedParams.add(newIdentDefs(ident(name & "Json"), ident("cstring")))
+    for i in 0 ..< extraParamNames.len:
+      exportedParams.add(
+        newIdentDefs(ident(cParamName(extraParamNames[i], extraParamTypes[i])), ident("cstring"))
+      )
 
     let ffiBody = newStmtList()
 
@@ -789,8 +801,8 @@ macro ffi*(prc: untyped): untyped =
     newReqCall.add(reqTypeName)
     newReqCall.add(ident("callback"))
     newReqCall.add(ident("userData"))
-    for name in extraParamNames:
-      newReqCall.add(ident(name & "Json"))
+    for i in 0 ..< extraParamNames.len:
+      newReqCall.add(ident(cParamName(extraParamNames[i], extraParamTypes[i])))
 
     let sendCall = newCall(
       newDotExpr(ident("ffi_context"), ident("sendRequestToFFIThread")),
@@ -894,8 +906,10 @@ macro ffi*(prc: untyped): untyped =
     syncExportedParams.add(newIdentDefs(ident("ctx"), ctxType))
     syncExportedParams.add(newIdentDefs(ident("callback"), ident("FFICallBack")))
     syncExportedParams.add(newIdentDefs(ident("userData"), ident("pointer")))
-    for name in extraParamNames:
-      syncExportedParams.add(newIdentDefs(ident(name & "Json"), ident("cstring")))
+    for i in 0 ..< extraParamNames.len:
+      syncExportedParams.add(
+        newIdentDefs(ident(cParamName(extraParamNames[i], extraParamTypes[i])), ident("cstring"))
+      )
 
     let syncFfiBody = newStmtList()
 
@@ -911,11 +925,11 @@ macro ffi*(prc: untyped): untyped =
 
     # Inline deserialization of each extra param
     for i in 0 ..< extraParamNames.len:
-      let jsonIdent = ident(extraParamNames[i] & "Json")
+      let cIdent = ident(cParamName(extraParamNames[i], extraParamTypes[i]))
       let paramIdent = ident(extraParamNames[i])
       let ptype = extraParamTypes[i]
       syncFfiBody.add quote do:
-        let `paramIdent` = ffiDeserialize(`jsonIdent`, `ptype`).valueOr:
+        let `paramIdent` = ffiDeserialize(`cIdent`, `ptype`).valueOr:
           let errStr = "deserialization failed: " & $error
           callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
           return RET_ERR
@@ -1266,10 +1280,12 @@ macro ffiCtor*(prc: untyped): untyped =
   ##
   ## The generated C-exported proc will have the signature:
   ##   proc mylib_create(configJson: cstring, callback: FFICallBack,
-  ##                     userData: pointer): cint {.exportc, cdecl, raises: [].}
+  ##                     userData: pointer): pointer {.exportc, cdecl, raises: [].}
   ##
-  ## On success the callback receives the ctx address as a decimal string.
-  ## The caller should hold this pointer and pass it to subsequent .ffi. calls.
+  ## Returns the context pointer synchronously; NULL on failure.
+  ## The callback also fires when async initialization completes, passing the ctx
+  ## address as a decimal string on success. The caller should hold the returned
+  ## pointer and pass it to subsequent .ffi. calls.
 
   let procName = prc[0]
   let formalParams = prc[3]
@@ -1333,9 +1349,9 @@ macro ffiCtor*(prc: untyped): untyped =
   let addToReg = addCtorRequestToRegistry(reqTypeName, libTypeName)
 
   # Build the C-exported proc params:
-  #   (<paramName>Json: cstring, ..., callback: FFICallBack, userData: pointer): cint
+  #   (<paramName>Json: cstring, ..., callback: FFICallBack, userData: pointer): pointer
   var exportedParams = newSeq[NimNode]()
-  exportedParams.add(ident("cint")) # return type
+  exportedParams.add(ident("pointer")) # return type: ctx pointer or nil on failure
   for name in paramNames:
     exportedParams.add(newIdentDefs(ident(name & "Json"), ident("cstring")))
   exportedParams.add(newIdentDefs(ident("callback"), ident("FFICallBack")))
@@ -1349,10 +1365,16 @@ macro ffiCtor*(prc: untyped): untyped =
     when declared(initializeLibrary):
       initializeLibrary()
 
-  # if callback.isNil: return RET_MISSING_CALLBACK
+  # Use a gensym'd ctx identifier so both the let binding and usage match
+  let ctxSym = genSym(nskLet, "ctx")
+
+  # Create the FFIContext synchronously; return nil on failure
   ffiBody.add quote do:
-    if callback.isNil:
-      return RET_MISSING_CALLBACK
+    let `ctxSym` = createFFIContext[`libTypeName`]().valueOr:
+      if not callback.isNil:
+        let errStr = "ffiCtor: failed to create FFIContext: " & $error
+        callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
+      return nil
 
   # Deserialize each param for early validation
   for i in 0 ..< paramNames.len:
@@ -1362,24 +1384,16 @@ macro ffiCtor*(prc: untyped): untyped =
       block:
         let validateRes = ffiDeserialize(`jsonIdent`, `ptype`)
         if validateRes.isErr():
-          let errStr = "ffiCtor: failed to deserialize param: " & $validateRes.error
-          callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
-          return RET_ERR
+          if not callback.isNil:
+            let errStr = "ffiCtor: failed to deserialize param: " & $validateRes.error
+            callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
+          return nil
 
   # Build the ffiNewReq call with all cstring params
   var newReqArgs: seq[NimNode] = @[reqTypeName, ident("callback"), ident("userData")]
   for name in paramNames:
     newReqArgs.add(ident(name & "Json"))
   let newReqCall = newCall(ident("ffiNewReq"), newReqArgs)
-
-  # Use a gensym'd ctx identifier so both the let binding and usage match
-  let ctxSym = genSym(nskLet, "ctx")
-
-  ffiBody.add quote do:
-    let `ctxSym` = createFFIContext[`libTypeName`]().valueOr:
-      let errStr = "ffiCtor: failed to create FFIContext: " & $error
-      callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
-      return RET_ERR
 
   # sendRequestToFFIThread using the gensym'd ctx
   let sendCall =
@@ -1393,12 +1407,13 @@ macro ffiCtor*(prc: untyped): untyped =
       except Exception as exc:
         Result[void, string].err("sendRequestToFFIThread exception: " & exc.msg)
     if `sendResIdent`.isErr():
-      let errStr = "ffiCtor: failed to send request: " & $`sendResIdent`.error
-      callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
-      return RET_ERR
+      if not callback.isNil:
+        let errStr = "ffiCtor: failed to send request: " & $`sendResIdent`.error
+        callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
+      return nil
 
   ffiBody.add quote do:
-    return RET_OK
+    return cast[pointer](`ctxSym`)
 
   # Strip the * from proc name for the C exported version
   let exportedProcName =
