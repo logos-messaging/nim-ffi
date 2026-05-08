@@ -17,9 +17,10 @@ jobs:
       matrix:
         os: [ubuntu-22.04, macos-15, windows-latest]
         nim-version: ['2.2.4', 'stable']
+        mm: [orc, refc]
 
     runs-on: ${{ matrix.os }}
-    name: ${{ matrix.os }} / Nim ${{ matrix.nim-version }}
+    name: ${{ matrix.os }} / Nim ${{ matrix.nim-version }} / ${{ matrix.mm }}
 
     steps:
       - uses: actions/checkout@v4
@@ -68,18 +69,26 @@ jobs:
           fi
           nimble buildffi -y
 
-      - name: Run allocation tests
+      - name: Run allocation tests (${{ matrix.mm }})
         shell: bash
         run: |
           if [ "$RUNNER_OS" == "Windows" ]; then
             export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
           fi
-          nimble test_alloc -y
+          nim c -r --mm:${{ matrix.mm }} -d:chronicles_log_level=WARN tests/test_alloc.nim
 
-      - name: Run FFI context tests
+      - name: Run FFI context tests (${{ matrix.mm }})
         shell: bash
         run: |
           if [ "$RUNNER_OS" == "Windows" ]; then
             export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
           fi
-          nimble test_ffi -y
+          nim c -r --mm:${{ matrix.mm }} -d:chronicles_log_level=WARN tests/test_ffi_context.nim
+
+      - name: Run GC compatibility tests (${{ matrix.mm }})
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+          fi
+          nim c -r --mm:${{ matrix.mm }} -d:chronicles_log_level=WARN tests/test_gc_compat.nim
