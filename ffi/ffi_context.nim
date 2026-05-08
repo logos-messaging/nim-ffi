@@ -2,7 +2,7 @@
 {.pragma: callback, cdecl, raises: [], gcsafe.}
 {.passc: "-fPIC".}
 
-import std/[options, atomics, os, net, locks, json, tables]
+import std/[options, atomics, os, net, locks, json, tables, sets]
 import chronicles, chronos, chronos/threadsync, taskpools/channels_spsc_single, results
 import ./ffi_types, ./ffi_thread_request, ./internal/ffi_macro, ./logging
 
@@ -27,6 +27,30 @@ type FFIContext*[T] = object
 
 const git_version* {.strdefine.} = "n/a"
 
+var contextRegistry = initHashSet[pointer]()
+var contextRegistryLock: Lock
+contextRegistryLock.initLock()
+
+proc registerCtx(ctx: pointer) =
+  {.cast(gcsafe).}:
+    contextRegistryLock.acquire()
+    defer: contextRegistryLock.release()
+    contextRegistry.incl(ctx)
+
+proc unregisterCtx(ctx: pointer) =
+  {.cast(gcsafe).}:
+    contextRegistryLock.acquire()
+    defer: contextRegistryLock.release()
+    contextRegistry.excl(ctx)
+
+proc isValidCtx*(ctx: pointer): bool =
+  ## Returns true only if ctx was created by createFFIContext and not yet destroyed.
+  ## Rejects nil, offset-invalid, and dangling pointers at the API boundary.
+  {.cast(gcsafe).}:
+    contextRegistryLock.acquire()
+    defer: contextRegistryLock.release()
+    return contextRegistry.contains(ctx)
+
 template callEventCallback*(ctx: ptr FFIContext, eventName: string, body: untyped) =
   if isNil(ctx[].eventCallback):
     chronicles.error eventName & " - eventCallback is nil"
@@ -49,6 +73,9 @@ template callEventCallback*(ctx: ptr FFIContext, eventName: string, body: untype
 proc sendRequestToFFIThread*(
     ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, timeout = InfiniteDuration
 ): Result[void, string] =
+  if not isValidCtx(cast[pointer](ctx)):
+    deleteRequest(ffiRequest)
+    return err("ctx is not a valid FFI context")
   ctx.lock.acquire()
   # This lock is only necessary while we use a SP Channel and while the signalling
   # between threads assumes that there aren't concurrent requests.
@@ -258,9 +285,11 @@ proc createFFIContext*[T](): Result[ptr FFIContext[T], string] =
       error "failed to clean up resources after watchdogThread creation failure", err = error
     return err("failed to create the watchdog thread: " & getCurrentExceptionMsg())
 
+  registerCtx(cast[pointer](ctx))
   return ok(ctx)
 
 proc destroyFFIContext*[T](ctx: ptr FFIContext[T]): Result[void, string] =
+  unregisterCtx(cast[pointer](ctx))
   ctx.running.store(false)
   defer:
     joinThread(ctx.ffiThread)
@@ -278,8 +307,10 @@ proc destroyFFIContext*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   return ok()
 
 template checkParams*(ctx: ptr FFIContext, callback: FFICallBack, userData: pointer) =
-  if not isNil(ctx):
-    ctx[].userData = userData
+  if not isValidCtx(cast[pointer](ctx)):
+    return RET_ERR
+
+  ctx[].userData = userData
 
   if isNil(callback):
     return RET_MISSING_CALLBACK

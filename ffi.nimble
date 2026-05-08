@@ -20,6 +20,7 @@ task buildffi, "Compile the library":
 task test, "Run all tests":
   exec "nim c -r " & nimFlags & " tests/test_alloc.nim"
   exec "nim c -r " & nimFlags & " tests/test_ffi_context.nim"
+  exec "nim c -r " & nimFlags & " tests/test_ctx_validation.nim"
 
 task test_alloc, "Run alloc unit tests":
   exec "nim c -r " & nimFlags & " tests/test_alloc.nim"
