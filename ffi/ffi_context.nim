@@ -163,8 +163,8 @@ proc processRequest[T](
   let res =
     try:
       await retFut
-    except CatchableError as exc:
-      Result[string, string].err("Exception in processRequest for " & reqId & ": " & exc.msg)
+    except AsyncError as exc:
+      Result[string, string].err("Async error in processRequest for " & reqId & ": " & exc.msg)
 
   ## handleRes may raise (OOM, GC setup) even though it is rare. Catching here
   ## keeps the async proc raises:[] compatible. The defer inside handleRes
