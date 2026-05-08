@@ -6,6 +6,12 @@ import std/[options, atomics, os, net, locks, json, tables]
 import chronicles, chronos, chronos/threadsync, taskpools/channels_spsc_single, results
 import ./ffi_types, ./ffi_thread_request, ./internal/ffi_macro, ./logging
 
+type FFICallbackState* = object
+  ## Holds the C event callback and its associated user-data pointer.
+  ## Embedded in FFIContext and referenced from the FFI thread via a thread-local.
+  callback*: pointer
+  userData*: pointer
+
 type FFIContext*[T] = object
   myLib*: ptr T
     # main library object (e.g., Waku, LibP2P, SDS,  the one to be exposed as a library)
@@ -19,51 +25,54 @@ type FFIContext*[T] = object
   reqReceivedSignal: ThreadSignalPtr
     # to signal main thread, interfacing with the FFI thread, that FFI thread received the request
   userData*: pointer
-  eventCallback*: pointer
-  eventUserdata*: pointer
+  callbackState*: FFICallbackState
   running: Atomic[bool] # To control when the threads are running
   registeredRequests: ptr Table[cstring, FFIRequestProc]
     # Pointer to with the registered requests at compile time
 
+var ffiCurrentCallbackState* {.threadvar.}: ptr FFICallbackState
+  ## Set by ffiThreadBody at thread startup; read by dispatchFfiEvent.
+
 const git_version* {.strdefine.} = "n/a"
 
 template callEventCallback*(ctx: ptr FFIContext, eventName: string, body: untyped) =
-  if isNil(ctx[].eventCallback):
+  if isNil(ctx[].callbackState.callback):
     chronicles.error eventName & " - eventCallback is nil"
     return
 
   foreignThreadGc:
     try:
       let event = body
-      cast[FFICallBack](ctx[].eventCallback)(
-        RET_OK, unsafeAddr event[0], cast[csize_t](len(event)), ctx[].eventUserData
+      cast[FFICallBack](ctx[].callbackState.callback)(
+        RET_OK, unsafeAddr event[0], cast[csize_t](len(event)), ctx[].callbackState.userData
       )
     except Exception, CatchableError:
       let msg =
         "Exception " & eventName & " when calling 'eventCallBack': " &
         getCurrentExceptionMsg()
-      cast[FFICallBack](ctx[].eventCallback)(
-        RET_ERR, unsafeAddr msg[0], cast[csize_t](len(msg)), ctx[].eventUserData
+      cast[FFICallBack](ctx[].callbackState.callback)(
+        RET_ERR, unsafeAddr msg[0], cast[csize_t](len(msg)), ctx[].callbackState.userData
       )
 
-template dispatchFfiEvent*(w: typed, eventName: string, body: untyped) =
-  ## Fires an FFI event via the library object's event callback fields.
-  ## Works with any type that has ffiEventCallback and ffiEventUserData fields.
-  if w.ffiEventCallback.isNil():
-    chronicles.error eventName & " - ffiEventCallback is nil"
+template dispatchFfiEvent*(eventName: string, body: untyped) =
+  ## Dispatches an FFI event to the callback registered via `{libName}_set_event_callback`.
+  ## `body` is evaluated lazily — only when a callback is registered.
+  ## Valid only on the FFI thread (i.e., inside {.ffi.} proc bodies and their async closures).
+  let ffiState = ffiCurrentCallbackState
+  if isNil(ffiState) or isNil(ffiState[].callback):
+    chronicles.error eventName & " - event callback not set"
     return
   foreignThreadGc:
     try:
       let event = body
-      cast[FFICallBack](w.ffiEventCallback)(
-        RET_OK, unsafeAddr event[0], cast[csize_t](len(event)), w.ffiEventUserData
+      cast[FFICallBack](ffiState[].callback)(
+        RET_OK, unsafeAddr event[0], cast[csize_t](len(event)), ffiState[].userData
       )
     except Exception, CatchableError:
       let msg =
-        "Exception " & eventName & " when calling 'ffiEventCallback': " &
-        getCurrentExceptionMsg()
-      cast[FFICallBack](w.ffiEventCallback)(
-        RET_ERR, unsafeAddr msg[0], cast[csize_t](len(msg)), w.ffiEventUserData
+        "Exception dispatching " & eventName & ": " & getCurrentExceptionMsg()
+      cast[FFICallBack](ffiState[].callback)(
+        RET_ERR, unsafeAddr msg[0], cast[csize_t](len(msg)), ffiState[].userData
       )
 
 proc sendRequestToFFIThread*(
@@ -196,6 +205,7 @@ proc processRequest[T](
 
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ## FFI thread body that attends library user API requests
+  ffiCurrentCallbackState = addr ctx[].callbackState
 
   logging.setupLog(logging.LogLevel.DEBUG, logging.LogFormat.TEXT)
 

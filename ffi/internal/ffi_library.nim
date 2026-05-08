@@ -93,13 +93,12 @@ macro declareLibraryBase(libraryName: static[string]): untyped =
 
 macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
   ## Declares a library with the given name and automatically generates
-  ## `{libraryName}_set_event_callback`, a C-exported function that lets callers
-  ## register an event callback on both the FFIContext and the library object.
+  ## `{libraryName}_set_event_callback`, a C-exported function that stores the
+  ## caller's event callback on the FFIContext.
   ##
   ## `libType` is the Nim type of the main library object (e.g. `Waku`). It is used
   ## to type the `ctx: ptr FFIContext[libType]` parameter of the generated
-  ## `{libraryName}_set_event_callback` proc, and to conditionally propagate the
-  ## callback to `ctx.myLib[].ffiEventCallback` when that field exists on `libType`.
+  ## `{libraryName}_set_event_callback` proc.
   result = newStmtList()
 
   # Emit the base bootstrap (pragmas, linker flags, NimMain, initializeLibrary)
@@ -117,12 +116,8 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
     if isNil(ctx):
       echo `errorMsg`
       return
-    ctx[].eventCallback = cast[pointer](callback)
-    ctx[].eventUserData = userData
-    when compiles(ctx.myLib[].ffiEventCallback):
-      if not isNil(ctx.myLib) and not isNil(ctx.myLib[]):
-        ctx.myLib[].ffiEventCallback = cast[pointer](callback)
-        ctx.myLib[].ffiEventUserData = userData
+    ctx[].callbackState.callback = cast[pointer](callback)
+    ctx[].callbackState.userData = userData
 
   let procNode = newProc(
     name = funcIdent,
