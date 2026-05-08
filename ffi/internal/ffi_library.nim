@@ -1,7 +1,7 @@
 import std/[macros, atomics], strformat, chronicles, chronos
 import ../codegen/meta
 
-macro declareLibraryBase(libraryName: static[string]): untyped =
+macro declareLibraryBase*(libraryName: static[string]): untyped =
   # Record the library name for binding generation
   currentLibName = libraryName
 

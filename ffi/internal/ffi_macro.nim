@@ -744,15 +744,27 @@ macro ffi*(prc: untyped): untyped =
       let cIdent = ident(cParamName(extraParamNames[i], extraParamTypes[i]))
       let paramIdent = ident(extraParamNames[i])
       let ptype = extraParamTypes[i]
-      lambdaBody.add quote do:
-        let `paramIdent` = ffiDeserialize(`cIdent`, `ptype`).valueOr:
-          return err($error)
+      if $cIdent != $paramIdent:
+        # Non-string param: cIdent has a Json suffix. Deserialize into paramIdent.
+        # buildProcessFFIRequestProc unpacks cIdent from the req struct, so no name clash.
+        lambdaBody.add quote do:
+          let `paramIdent` = ffiDeserialize(`cIdent`, `ptype`).valueOr:
+            return err($error)
+      # String params (cIdent == paramIdent): buildProcessFFIRequestProc already
+      # unpacks the cstring under the same name; we convert inline in the helperCall below.
 
     let ctxMyLib = newDotExpr(newTree(nnkDerefExpr, ctxHandlerName), ident("myLib"))
     let libValDeref = newTree(nnkDerefExpr, ctxMyLib)
     let helperCall = newTree(nnkCall, helperProcName, libValDeref)
-    for name in extraParamNames:
-      helperCall.add(ident(name))
+    for i in 0 ..< extraParamNames.len:
+      let cIdent = ident(cParamName(extraParamNames[i], extraParamTypes[i]))
+      let paramIdent = ident(extraParamNames[i])
+      if $cIdent == $paramIdent:
+        # String param: cIdent/paramIdent is the cstring from the req unpack;
+        # convert to string with $ (ffiDeserialize for string is just ok($s)).
+        helperCall.add(newCall(ident("$"), paramIdent))
+      else:
+        helperCall.add(paramIdent)
 
     let retValIdent = ident("retVal")
     lambdaBody.add quote do:
