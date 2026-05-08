@@ -58,7 +58,7 @@ proc writeAndFlush(f: syncio.File, s: LogOutputStr) =
   try:
     f.write(s)
     f.flushFile()
-  except CatchableError:
+  except IOError:
     logLoggingFailure(cstring(s), getCurrentException())
 
 ## Setup
@@ -99,7 +99,7 @@ proc setupLog*(level: LogLevel, format: LogFormat) =
   let color =
     try:
       not parseBool(os.getEnv("NO_COLOR", "false"))
-    except CatchableError:
+    except ValueError:
       true
 
   setupLogLevel(level)
