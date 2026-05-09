@@ -958,11 +958,13 @@ macro ffi*(prc: untyped): untyped =
       let `retValOrErrIdent` = `syncHelperCall`
       if `retValOrErrIdent`.isErr():
         let errStr = `retValOrErrIdent`.error
-        callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
+        callback(
+          RET_ERR, cast[ptr cchar](errStr.cstring), cast[csize_t](errStr.len), userData
+        )
         return RET_ERR
       let serialized = ffiSerialize(`retValOrErrIdent`.value)
       callback(
-        RET_OK, unsafeAddr serialized[0], cast[csize_t](serialized.len), userData
+        RET_OK, cast[ptr cchar](serialized.cstring), cast[csize_t](serialized.len), userData
       )
       return RET_OK
 
