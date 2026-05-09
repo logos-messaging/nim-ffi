@@ -12,17 +12,23 @@ requires "chronos"
 requires "chronicles"
 requires "taskpools"
 
-const nimFlags = "--mm:orc -d:chronicles_log_level=WARN"
+const nimFlagsOrc = "--mm:orc -d:chronicles_log_level=WARN"
+const nimFlagsRefc = "--mm:refc -d:chronicles_log_level=WARN"
 
 task buildffi, "Compile the library":
-  exec "nim c " & nimFlags & " --app:lib --noMain ffi.nim"
+  exec "nim c " & nimFlagsOrc & " --app:lib --noMain ffi.nim"
 
-task test, "Run all tests":
-  exec "nim c -r " & nimFlags & " tests/test_alloc.nim"
-  exec "nim c -r " & nimFlags & " tests/test_ffi_context.nim"
+task test, "Run all tests under --mm:orc and --mm:refc":
+  for flags in [nimFlagsOrc, nimFlagsRefc]:
+    exec "nim c -r " & flags & " tests/test_alloc.nim"
+    exec "nim c -r " & flags & " tests/test_ffi_context.nim"
+    exec "nim c -r " & flags & " tests/test_gc_compat.nim"
 
-task test_alloc, "Run alloc unit tests":
-  exec "nim c -r " & nimFlags & " tests/test_alloc.nim"
 
-task test_ffi, "Run FFI context integration tests":
-  exec "nim c -r " & nimFlags & " tests/test_ffi_context.nim"
+task test_alloc, "Run alloc unit tests under --mm:orc and --mm:refc":
+  exec "nim c -r " & nimFlagsOrc & " tests/test_alloc.nim"
+  exec "nim c -r " & nimFlagsRefc & " tests/test_alloc.nim"
+
+task test_ffi, "Run FFI context integration tests under --mm:orc and --mm:refc":
+  exec "nim c -r " & nimFlagsOrc & " tests/test_ffi_context.nim"
+  exec "nim c -r " & nimFlagsRefc & " tests/test_ffi_context.nim"
