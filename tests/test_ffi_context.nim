@@ -107,8 +107,17 @@ registerReqFFI(HeavyRefAllocRequest, lib: ptr TestLib):
       head = n
       if i mod 1000 == 0:
         await sleepAsync(0.milliseconds)
-    # Let the chain become collectable and yield so refc has a chance to run.
+    # Break the chain iteratively before releasing head.
+    # ORC's =destroy for RefCell recurses through .next, so a 50k-node chain
+    # would produce ~50k nested =destroy calls and overflow the stack.
+    # Walking the list and unlinking each node first keeps destruction O(n)
+    # iterative instead of O(n) recursive.
+    var node = head
     head = nil
+    while not node.isNil():
+      let nxt = node.next
+      node.next = nil  # unlink before the refcount of `node` can drop to zero
+      node = nxt
     await sleepAsync(10.milliseconds)
     return ok("heavy-done")
 
