@@ -169,26 +169,12 @@ suite "destroyFFIContext does not hang when event loop is blocked":
       check false
       return
 
-    # NOTE on userData lifetime when destroyFFIContext returns err:
-    #
-    # When the event loop is blocked, destroyFFIContext bails out after a
-    # bounded wait, returns err, and intentionally leaks ctx and the FFI
-    # thread (see ffi_context.nim:destroyFFIContext). The thread is still
-    # alive inside the blocking section -- here, os.sleep(5_000) -- and will
-    # eventually return, run handleRes, and invoke the per-request callback
-    # with the original userData pointer.
-    #
-    # That late callback fires *after* this test scope has already exited.
-    # If `d` were a stack variable with `defer: deinitCallbackData(d)`, its
-    # memory would be deinitialized and the stack frame reused before the
-    # callback runs -- the late call into testCallback would dereference
-    # garbage and segfault.
-    #
-    # Implicit contract surfaced by this test: callers of destroyFFIContext
-    # must keep `userData` for any in-flight request alive even after destroy
-    # returns err, because the FFI thread may still invoke the callback
-    # later. We honor that contract here by allocating on the shared heap
-    # and intentionally leaking, mirroring the leak of ctx itself.
+    # CallbackData and ctx are kept alive past destroyFFIContext: the leaked
+    # FFI thread is still inside os.sleep(5_000) and will eventually wake,
+    # run handleRes, fire testCallback, and exit normally. We wait for that
+    # to happen at the end of the test so the leaked thread cannot race with
+    # subsequent tests' createFFIContext on Linux/Windows. Heap allocation
+    # ensures the late callback's userData is still valid when it fires.
     let d = createShared(CallbackData)
     initCallbackData(d[])
 
@@ -206,6 +192,22 @@ suite "destroyFFIContext does not hang when event loop is blocked":
     let t0 = Moment.now()
     check destroyFFIContext(ctx).isErr()
     check (Moment.now() - t0) < 3.seconds
+
+    # Drain the leaked thread before the test scope ends.
+    # 1. waitCallback blocks until os.sleep(5_000) returns and handleRes
+    #    invokes testCallback (~3.5s after destroy returned), which proves
+    #    the leaked thread has reached the end of processRequest.
+    # 2. Yield briefly so the thread can finish iterating its while loop,
+    #    fire threadExitSignal in its defer, and return. Without this, on
+    #    Linux/Windows the still-live thread can race with the next test's
+    #    createFFIContext under --mm:orc and segfault.
+    # ctx.cleanUpResources is intentionally NOT called: destroyFFIContext
+    # skipped it for a reason, and the signal fds are reclaimed by the OS
+    # at process exit.
+    waitCallback(d[])
+    os.sleep(200)
+    deinitCallbackData(d[])
+    freeShared(d)
 
 suite "destroyFFIContext refc workaround":
   ## Documents the refc-specific workaround in cleanUpResources.
