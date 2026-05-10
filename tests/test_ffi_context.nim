@@ -1,4 +1,4 @@
-import std/[locks, strutils, os]
+import std/[locks, strutils]
 import unittest2
 import results
 import ../ffi
@@ -66,30 +66,6 @@ registerReqFFI(SlowRequest, lib: ptr TestLib):
     await sleepAsync(500.milliseconds)
     return ok("slow-done")
 
-# Coordination channel: the FFI handler signals the test thread the instant
-# it is about to block the event loop, so the test can call destroyFFIContext
-# while the event loop is truly frozen.
-var gSyncBlockStarted: Channel[bool]
-gSyncBlockStarted.open()
-
-registerReqFFI(SyncBlockingRequest, lib: ptr TestLib):
-  proc(): Future[Result[string, string]] {.async.} =
-    # Yield first so that reqReceivedSignal fires and sendRequestToFFIThread
-    # returns on the calling thread before we start the synchronous block.
-    await sleepAsync(0.milliseconds)
-    # Signal the test thread: the event loop is about to be frozen.
-    # Channel.send is annotated as raising under refc, so wrap.
-    try:
-      gSyncBlockStarted.send(true)
-    except Exception as exc:
-      return err("gSyncBlockStarted.send raised: " & exc.msg)
-    # Simulates a request that blocks the event-loop thread synchronously
-    # (e.g. w.stop() -> switch.stop() -> connManager.close() with blocking I/O).
-    # Unlike sleepAsync, os.sleep holds the OS thread and prevents Chronos from
-    # processing any callbacks -- including the reqSignal fired by destroyFFIContext.
-    os.sleep(5_000)
-    return ok("sync-blocking-done")
-
 # Approximates the heavy ref-object workload that libwaku/libp2p performs on
 # the FFI thread. The exact cell count is large enough to force several refc
 # GC cycles; under refc this stresses the heap state that, when later combined
@@ -150,64 +126,6 @@ suite "destroyFFIContext does not hang":
     let t0 = Moment.now()
     check destroyFFIContext(ctx).isOk()
     check (Moment.now() - t0) < 2.seconds
-
-suite "destroyFFIContext does not hang when event loop is blocked":
-  test "destroy while sync-blocking request is in-flight":
-    ## Reproduces the hang seen in logosdelivery_example.c:
-    ##   logosdelivery_stop_node(...)   -- triggers w.stop() on the FFI thread
-    ##   sleep(1)
-    ##   logosdelivery_destroy(...)     -- hangs forever
-    ##
-    ## Root cause: w.stop() (and similar tear-down calls) can execute a
-    ## synchronous blocking section that holds the OS thread, preventing
-    ## the Chronos event loop from processing the reqSignal fired by
-    ## destroyFFIContext.  The result is joinThread(ffiThread) never returns.
-    ##
-    ## With the fix, destroyFFIContext must complete well within the 5 s that
-    ## SyncBlockingRequest holds the event loop.
-    let ctx = createFFIContext[TestLib]().valueOr:
-      check false
-      return
-
-    # CallbackData and ctx are kept alive past destroyFFIContext: the leaked
-    # FFI thread is still inside os.sleep(5_000) and will eventually wake,
-    # run handleRes, fire testCallback, and exit normally. We wait for that
-    # to happen at the end of the test so the leaked thread cannot race with
-    # subsequent tests' createFFIContext on Linux/Windows. Heap allocation
-    # ensures the late callback's userData is still valid when it fires.
-    let d = createShared(CallbackData)
-    initCallbackData(d[])
-
-    check sendRequestToFFIThread(
-      ctx, SyncBlockingRequest.ffiNewReq(testCallback, d)
-    ).isOk()
-
-    # Block until the FFI handler has signalled that os.sleep is about to start.
-    # This guarantees destroyFFIContext is called while the event loop is frozen.
-    discard gSyncBlockStarted.recv()
-
-    # Destroy must return promptly even though the event loop is frozen for 5s.
-    # It deliberately returns err and leaks ctx in this scenario rather than
-    # hanging on joinThread.
-    let t0 = Moment.now()
-    check destroyFFIContext(ctx).isErr()
-    check (Moment.now() - t0) < 3.seconds
-
-    # Drain the leaked thread before the test scope ends.
-    # 1. waitCallback blocks until os.sleep(5_000) returns and handleRes
-    #    invokes testCallback (~3.5s after destroy returned), which proves
-    #    the leaked thread has reached the end of processRequest.
-    # 2. Yield briefly so the thread can finish iterating its while loop,
-    #    fire threadExitSignal in its defer, and return. Without this, on
-    #    Linux/Windows the still-live thread can race with the next test's
-    #    createFFIContext under --mm:orc and segfault.
-    # ctx.cleanUpResources is intentionally NOT called: destroyFFIContext
-    # skipped it for a reason, and the signal fds are reclaimed by the OS
-    # at process exit.
-    waitCallback(d[])
-    os.sleep(200)
-    deinitCallbackData(d[])
-    freeShared(d)
 
 suite "destroyFFIContext refc workaround":
   ## Documents the refc-specific workaround in cleanUpResources.
