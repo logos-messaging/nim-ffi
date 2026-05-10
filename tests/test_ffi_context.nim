@@ -169,12 +169,31 @@ suite "destroyFFIContext does not hang when event loop is blocked":
       check false
       return
 
-    var d: CallbackData
-    initCallbackData(d)
-    defer: deinitCallbackData(d)
+    # NOTE on userData lifetime when destroyFFIContext returns err:
+    #
+    # When the event loop is blocked, destroyFFIContext bails out after a
+    # bounded wait, returns err, and intentionally leaks ctx and the FFI
+    # thread (see ffi_context.nim:destroyFFIContext). The thread is still
+    # alive inside the blocking section -- here, os.sleep(5_000) -- and will
+    # eventually return, run handleRes, and invoke the per-request callback
+    # with the original userData pointer.
+    #
+    # That late callback fires *after* this test scope has already exited.
+    # If `d` were a stack variable with `defer: deinitCallbackData(d)`, its
+    # memory would be deinitialized and the stack frame reused before the
+    # callback runs -- the late call into testCallback would dereference
+    # garbage and segfault.
+    #
+    # Implicit contract surfaced by this test: callers of destroyFFIContext
+    # must keep `userData` for any in-flight request alive even after destroy
+    # returns err, because the FFI thread may still invoke the callback
+    # later. We honor that contract here by allocating on the shared heap
+    # and intentionally leaking, mirroring the leak of ctx itself.
+    let d = createShared(CallbackData)
+    initCallbackData(d[])
 
     check sendRequestToFFIThread(
-      ctx, SyncBlockingRequest.ffiNewReq(testCallback, addr d)
+      ctx, SyncBlockingRequest.ffiNewReq(testCallback, d)
     ).isOk()
 
     # Block until the FFI handler has signalled that os.sleep is about to start.
