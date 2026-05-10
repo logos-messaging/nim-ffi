@@ -25,7 +25,6 @@ task test, "Run all tests under --mm:orc and --mm:refc":
     exec "nim c -r " & flags & " tests/test_gc_compat.nim"
     exec "nim c -r " & flags & " tests/test_serial.nim"
 
-
 task test_alloc, "Run alloc unit tests under --mm:orc and --mm:refc":
   exec "nim c -r " & nimFlagsOrc & " tests/test_alloc.nim"
   exec "nim c -r " & nimFlagsRefc & " tests/test_alloc.nim"
@@ -35,13 +34,21 @@ task test_ffi, "Run FFI context integration tests under --mm:orc and --mm:refc":
   exec "nim c -r " & nimFlagsRefc & " tests/test_ffi_context.nim"
 
 task test_serial, "Run serial unit tests":
-  exec "nim c -r " & nimFlags & " tests/test_serial.nim"
+  exec "nim c -r " & nimFlagsOrc & " tests/test_serial.nim"
+  exec "nim c -r " & nimFlagsRefc & " tests/test_serial.nim"
 
 task genbindings_example, "Generate Rust bindings for the nim_timer example":
-  exec "nim c " & nimFlags & " --app:lib --noMain --nimMainPrefix:libnimtimer -d:ffiGenBindings -o:/dev/null examples/nim_timer/nim_timer.nim"
+  exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libnimtimer -d:ffiGenBindings -o:/dev/null examples/nim_timer/nim_timer.nim"
+  exec "nim c " & nimFlagsRefc & " --app:lib --noMain --nimMainPrefix:libnimtimer -d:ffiGenBindings -o:/dev/null examples/nim_timer/nim_timer.nim"
 
 task genbindings_rust, "Generate Rust bindings for the nim_timer example":
-  exec "nim c " & nimFlags &
+  exec "nim c " & nimFlagsOrc &
+    " --app:lib --noMain --nimMainPrefix:libnimtimer" &
+    " -d:ffiGenBindings -d:targetLang=rust" &
+    " -d:ffiOutputDir=examples/nim_timer/rust_bindings" &
+    " -d:ffiNimSrcRelPath=../nim_timer.nim" &
+    " -o:/dev/null examples/nim_timer/nim_timer.nim"
+  exec "nim c " & nimFlagsRefc &
     " --app:lib --noMain --nimMainPrefix:libnimtimer" &
     " -d:ffiGenBindings -d:targetLang=rust" &
     " -d:ffiOutputDir=examples/nim_timer/rust_bindings" &
@@ -49,7 +56,13 @@ task genbindings_rust, "Generate Rust bindings for the nim_timer example":
     " -o:/dev/null examples/nim_timer/nim_timer.nim"
 
 task genbindings_cpp, "Generate C++ bindings for the nim_timer example":
-  exec "nim c " & nimFlags &
+  exec "nim c " & nimFlagsOrc &
+    " --app:lib --noMain --nimMainPrefix:libnimtimer" &
+    " -d:ffiGenBindings -d:targetLang=cpp" &
+    " -d:ffiOutputDir=examples/nim_timer/cpp_bindings" &
+    " -d:ffiNimSrcRelPath=../nim_timer.nim" &
+    " -o:/dev/null examples/nim_timer/nim_timer.nim"
+  exec "nim c " & nimFlagsRefc &
     " --app:lib --noMain --nimMainPrefix:libnimtimer" &
     " -d:ffiGenBindings -d:targetLang=cpp" &
     " -d:ffiOutputDir=examples/nim_timer/cpp_bindings" &
