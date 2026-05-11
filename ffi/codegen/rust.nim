@@ -367,8 +367,7 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
       asyncParamsList.add(
         "$1: $2" % [toSnakeCase(ep.name), nimTypeToRust(ep.typeName)]
       )
-    let asyncParamsStr = asyncParamsList.join(", ")
-    let blockingParamsStr =
+    let paramsStr =
       if asyncParamsList.len > 0: asyncParamsList.join(", ") & ", timeout: Duration"
       else: "timeout: Duration"
 
@@ -396,7 +395,7 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
     let ffiCallArgsStr = ffiCallArgs.join(", ")
 
     # -- blocking create --
-    lines.add("    pub fn create($1) -> Result<Self, String> {" % [blockingParamsStr])
+    lines.add("    pub fn create($1) -> Result<Self, String> {" % [paramsStr])
     for ep in ctor.extraParams:
       emitSerialize(toSnakeCase(ep.name), nimTypeToRust(ep.typeName))
     lines.add("        let raw = ffi_call(timeout, |cb, ud| unsafe {")
@@ -409,14 +408,14 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
 
     # -- async new_async --
     # move closure: each CString is moved in (Send), no raw ptr escapes the block
-    lines.add("    pub async fn new_async($1) -> Result<Self, String> {" % [asyncParamsStr])
+    lines.add("    pub async fn new_async($1) -> Result<Self, String> {" % [paramsStr])
     for ep in ctor.extraParams:
       emitSerialize(toSnakeCase(ep.name), nimTypeToRust(ep.typeName))
     lines.add("        let raw = ffi_call_async(move |cb, ud| unsafe {")
     lines.add("            ffi::$1($2)" % [ctor.procName, ffiCallArgsStr])
     lines.add("        }).await?;")
     lines.add("        let addr: usize = raw.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;")
-    lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout: Duration::from_secs(30) })")
+    lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout })")
     lines.add("    }")
     lines.add("")
 

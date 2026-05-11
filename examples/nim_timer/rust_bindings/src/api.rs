@@ -114,14 +114,14 @@ impl NimTimerCtx {
         Ok(Self { ptr: addr as *mut c_void, timeout })
     }
 
-    pub async fn new_async(config: TimerConfig) -> Result<Self, String> {
+    pub async fn new_async(config: TimerConfig, timeout: Duration) -> Result<Self, String> {
         let config_json = serde_json::to_string(&config).map_err(|e| e.to_string())?;
         let config_c = CString::new(config_json).unwrap();
         let raw = ffi_call_async(move |cb, ud| unsafe {
             ffi::nimtimer_create(config_c.as_ptr(), cb, ud)
         }).await?;
         let addr: usize = raw.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
-        Ok(Self { ptr: addr as *mut c_void, timeout: Duration::from_secs(30) })
+        Ok(Self { ptr: addr as *mut c_void, timeout })
     }
 
     pub fn echo(&self, req: EchoRequest) -> Result<EchoResponse, String> {
