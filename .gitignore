@@ -21,3 +21,7 @@ examples/**/rust_client/target/
 
 # Development plan (local only)
 PLAN.md
+
+# Compiled test binaries (extensionless executables)
+tests/test_*
+!tests/test_*.nim
