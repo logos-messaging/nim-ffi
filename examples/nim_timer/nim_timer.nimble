@@ -11,6 +11,8 @@ requires "taskpools"
 requires "https://github.com/logos-messaging/nim-ffi >= 0.1.3"
 
 const nimFlags = "--mm:orc -d:chronicles_log_level=WARN"
+# Flags baked into the generated build.rs / CMakeLists.txt -- see ffi.nimble.
+const genBakedFlags = "--mm:orc -d:chronicles_log_level=WARN"
 
 task build, "Compile the nimtimer library":
   exec "nim c " & nimFlags &
@@ -19,9 +21,13 @@ task build, "Compile the nimtimer library":
 task genbindings_rust, "Generate Rust bindings for the nimtimer example":
   exec "nim c " & nimFlags & " --app:lib --noMain --nimMainPrefix:libnimtimer" &
     " -d:ffiGenBindings -d:targetLang=rust" & " -d:ffiOutputDir=rust_bindings" &
-    " -d:ffiNimSrcRelPath=nim_timer.nim" & " -o:/dev/null nim_timer.nim"
+    " -d:ffiNimSrcRelPath=nim_timer.nim" &
+    " -d:ffiNimBuildFlags=\"" & genBakedFlags & "\"" &
+    " -o:/dev/null nim_timer.nim"
 
 task genbindings_cpp, "Generate C++ bindings for the nimtimer example":
   exec "nim c " & nimFlags & " --app:lib --noMain --nimMainPrefix:libnimtimer" &
     " -d:ffiGenBindings -d:targetLang=cpp" & " -d:ffiOutputDir=cpp_bindings" &
-    " -d:ffiNimSrcRelPath=nim_timer.nim" & " -o:/dev/null nim_timer.nim"
+    " -d:ffiNimSrcRelPath=nim_timer.nim" &
+    " -d:ffiNimBuildFlags=\"" & genBakedFlags & "\"" &
+    " -o:/dev/null nim_timer.nim"

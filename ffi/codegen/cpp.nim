@@ -483,10 +483,15 @@ proc generateCppHeader*(
 
   result = lines.join("\n")
 
-proc generateCppCMakeLists*(libName: string, nimSrcRelPath: string): string =
+proc generateCppCMakeLists*(
+    libName: string, nimSrcRelPath: string, nimBuildFlags: string = ""
+): string =
   ## Generates CMakeLists.txt for the C++ bindings directory.
   ## CMake uses ${...} which would clash with Nim's % format operator,
   ## so we build the file line by line using string concatenation.
+  ## nimBuildFlags is a whitespace-separated string of extra `nim c` flags
+  ## injected after `nim c` and before the required --app:lib / --noMain /
+  ## --nimMainPrefix / -o: flags.
   let src = nimSrcRelPath.replace("\\", "/")
   let cv = "${CMAKE_CURRENT_SOURCE_DIR}" # CMake variable shorthand
   let rv = "${REPO_ROOT}"
@@ -554,8 +559,8 @@ proc generateCppCMakeLists*(libName: string, nimSrcRelPath: string): string =
   L.add("add_custom_command(")
   L.add("    OUTPUT  \"" & lf & "\"")
   L.add("    COMMAND \"" & nm & "\" c")
-  L.add("                --mm:orc")
-  L.add("                -d:chronicles_log_level=WARN")
+  for tok in nimBuildFlags.splitWhitespace():
+    L.add("                " & tok)
   L.add("                --app:lib")
   L.add("                --noMain")
   L.add("                \"--nimMainPrefix:lib" & libName & "\"")
@@ -601,7 +606,11 @@ proc generateCppBindings*(
     libName: string,
     outputDir: string,
     nimSrcRelPath: string,
+    nimBuildFlags: string = "",
 ) =
   createDir(outputDir)
   writeFile(outputDir / (libName & ".hpp"), generateCppHeader(procs, types, libName))
-  writeFile(outputDir / "CMakeLists.txt", generateCppCMakeLists(libName, nimSrcRelPath))
+  writeFile(
+    outputDir / "CMakeLists.txt",
+    generateCppCMakeLists(libName, nimSrcRelPath, nimBuildFlags),
+  )

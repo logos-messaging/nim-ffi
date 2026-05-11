@@ -44,3 +44,11 @@ const ffiOutputDir* {.strdefine.} = ""
 # Nim source path (relative to outputDir) embedded in generated build files;
 # set with -d:ffiNimSrcRelPath=../relative/path.nim
 const ffiNimSrcRelPath* {.strdefine.} = ""
+
+# Whitespace-separated extra Nim compiler flags to bake into the generated
+# build.rs / CMakeLists.txt for the project's own `nim c` invocation. The
+# generator emits only the strictly-required flags (--app:lib, --noMain,
+# --nimMainPrefix, -o:) by default; everything else (gc choice, log level,
+# project-specific -d defines, etc.) is up to the caller. Example:
+#   -d:ffiNimBuildFlags="--mm:orc -d:chronicles_log_level=WARN"
+const ffiNimBuildFlags* {.strdefine.} = ""

@@ -41,18 +41,26 @@ task genbindings_example, "Generate Rust bindings for the nim_timer example":
   exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libnimtimer -d:ffiGenBindings -o:/dev/null examples/nim_timer/nim_timer.nim"
   exec "nim c " & nimFlagsRefc & " --app:lib --noMain --nimMainPrefix:libnimtimer -d:ffiGenBindings -o:/dev/null examples/nim_timer/nim_timer.nim"
 
+# Flags baked into the generated build.rs / CMakeLists.txt so downstream
+# consumers compile the Nim library with the same conventions this example
+# uses. Anything that should NOT be hardcoded into the published bindings
+# goes here, not in the generator.
+const genBakedFlags = "--mm:orc -d:chronicles_log_level=WARN"
+
 task genbindings_rust, "Generate Rust bindings for the nim_timer example":
   exec "nim c " & nimFlagsOrc &
     " --app:lib --noMain --nimMainPrefix:libnimtimer" &
     " -d:ffiGenBindings -d:targetLang=rust" &
     " -d:ffiOutputDir=examples/nim_timer/rust_bindings" &
     " -d:ffiNimSrcRelPath=../nim_timer.nim" &
+    " -d:ffiNimBuildFlags=\"" & genBakedFlags & "\"" &
     " -o:/dev/null examples/nim_timer/nim_timer.nim"
   exec "nim c " & nimFlagsRefc &
     " --app:lib --noMain --nimMainPrefix:libnimtimer" &
     " -d:ffiGenBindings -d:targetLang=rust" &
     " -d:ffiOutputDir=examples/nim_timer/rust_bindings" &
     " -d:ffiNimSrcRelPath=../nim_timer.nim" &
+    " -d:ffiNimBuildFlags=\"" & genBakedFlags & "\"" &
     " -o:/dev/null examples/nim_timer/nim_timer.nim"
 
 task genbindings_cpp, "Generate C++ bindings for the nim_timer example":
@@ -61,10 +69,12 @@ task genbindings_cpp, "Generate C++ bindings for the nim_timer example":
     " -d:ffiGenBindings -d:targetLang=cpp" &
     " -d:ffiOutputDir=examples/nim_timer/cpp_bindings" &
     " -d:ffiNimSrcRelPath=../nim_timer.nim" &
+    " -d:ffiNimBuildFlags=\"" & genBakedFlags & "\"" &
     " -o:/dev/null examples/nim_timer/nim_timer.nim"
   exec "nim c " & nimFlagsRefc &
     " --app:lib --noMain --nimMainPrefix:libnimtimer" &
     " -d:ffiGenBindings -d:targetLang=cpp" &
     " -d:ffiOutputDir=examples/nim_timer/cpp_bindings" &
     " -d:ffiNimSrcRelPath=../nim_timer.nim" &
+    " -d:ffiNimBuildFlags=\"" & genBakedFlags & "\"" &
     " -o:/dev/null examples/nim_timer/nim_timer.nim"

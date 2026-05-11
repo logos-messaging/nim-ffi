@@ -81,10 +81,27 @@ tokio = { version = "1", features = ["sync"] }
 """ %
     [libName]
 
-proc generateBuildRs*(libName: string, nimSrcRelPath: string): string =
+proc rustEscapeStrLit(s: string): string =
+  ## Escapes a string for safe embedding in a Rust string literal.
+  s.replace("\\", "\\\\").replace("\"", "\\\"")
+
+proc generateBuildRs*(
+    libName: string, nimSrcRelPath: string, nimBuildFlags: string = ""
+): string =
   ## Generates build.rs that compiles the Nim library.
   ## nimSrcRelPath is relative to the output (crate) directory.
+  ## nimBuildFlags is a whitespace-separated string of extra `nim c` flags
+  ## (e.g. "--mm:orc -d:chronicles_log_level=WARN") to inject into the
+  ## generated `nim c` invocation, after `nim c` and before the required
+  ## --app:lib / --noMain / --nimMainPrefix / -o: flags.
   let escapedSrc = nimSrcRelPath.replace("\\", "\\\\")
+  # Build the leading section of the cmd.arg(...) chain: the mandatory
+  # `.arg("c")` plus one `.arg("...")` per caller-supplied flag, each on its
+  # own line. The template then reads as `cmd$3` -- $3 is the whole leading
+  # chain, so no placeholder ever sits inside a method-call expression.
+  var argChain = ".arg(\"c\")"
+  for tok in nimBuildFlags.splitWhitespace():
+    argChain.add("\n        .arg(\"" & rustEscapeStrLit(tok) & "\")")
   result =
     """use std::path::PathBuf;
 use std::process::Command;
@@ -123,9 +140,7 @@ fn main() {
     compile_error!("nim-ffi build.rs: unsupported target OS (expected macos, linux, or windows)");
 
     let mut cmd = Command::new("nim");
-    cmd.arg("c")
-        .arg("--mm:orc")
-        .arg("-d:chronicles_log_level=WARN")
+    cmd$3
         .arg("--app:lib")
         .arg("--noMain")
         .arg(format!("--nimMainPrefix:lib$2"))
@@ -140,7 +155,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", nim_src.display());
 }
 """ %
-    [escapedSrc, libName]
+    [escapedSrc, libName, argChain]
 
 proc generateLibRs*(): string =
   result = """mod ffi;
@@ -502,13 +517,17 @@ proc generateRustCrate*(
     libName: string,
     outputDir: string,
     nimSrcRelPath: string,
+    nimBuildFlags: string = "",
 ) =
   ## Generates a complete Rust crate in outputDir.
   createDir(outputDir)
   createDir(outputDir / "src")
 
   writeFile(outputDir / "Cargo.toml", generateCargoToml(libName))
-  writeFile(outputDir / "build.rs", generateBuildRs(libName, nimSrcRelPath))
+  writeFile(
+    outputDir / "build.rs",
+    generateBuildRs(libName, nimSrcRelPath, nimBuildFlags),
+  )
   writeFile(outputDir / "src" / "lib.rs", generateLibRs())
   writeFile(outputDir / "src" / "ffi.rs", generateFfiRs(procs))
   writeFile(outputDir / "src" / "types.rs", generateTypesRs(types))

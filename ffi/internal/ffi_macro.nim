@@ -1604,6 +1604,7 @@ macro ffiDtor*(prc: untyped): untyped =
 macro genBindings*(
     outputDir: static[string] = ffiOutputDir,
     nimSrcRelPath: static[string] = ffiNimSrcRelPath,
+    nimBuildFlags: static[string] = ffiNimBuildFlags,
 ): untyped =
   ## Emits C++ or Rust binding files from the compile-time FFI registries.
   ##
@@ -1638,11 +1639,13 @@ macro genBindings*(
     case lang
     of "rust":
       generateRustCrate(
-        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath
+        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
+        nimBuildFlags,
       )
     of "cpp", "c++":
       generateCppBindings(
-        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath
+        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
+        nimBuildFlags,
       )
     else:
       error("genBindings: unknown targetLang '" & lang & "'. Use 'rust' or 'cpp'.")
