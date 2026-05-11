@@ -1,0 +1,177 @@
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_int, c_void};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
+use super::ffi;
+use super::types::*;
+
+#[derive(Default)]
+struct FfiCallbackResult {
+    payload: Option<Result<String, String>>,
+}
+
+type Pair = Arc<(Mutex<FfiCallbackResult>, Condvar)>;
+
+unsafe extern "C" fn on_result(
+    ret: c_int,
+    msg: *const c_char,
+    _len: usize,
+    user_data: *mut c_void,
+) {
+    let pair = Arc::from_raw(user_data as *const (Mutex<FfiCallbackResult>, Condvar));
+    {
+        let (lock, cvar) = &*pair;
+        let mut state = lock.lock().unwrap();
+        state.payload = Some(if ret == 0 {
+            Ok(CStr::from_ptr(msg).to_string_lossy().into_owned())
+        } else {
+            Err(CStr::from_ptr(msg).to_string_lossy().into_owned())
+        });
+        cvar.notify_one();
+    }
+    std::mem::forget(pair);
+}
+
+fn ffi_call<F>(timeout: Duration, f: F) -> Result<String, String>
+where
+    F: FnOnce(ffi::FfiCallback, *mut c_void) -> c_int,
+{
+    let pair: Pair = Arc::new((Mutex::new(FfiCallbackResult::default()), Condvar::new()));
+    let raw = Arc::into_raw(pair.clone()) as *mut c_void;
+    let ret = f(on_result, raw);
+    if ret == 2 {
+        return Err("RET_MISSING_CALLBACK (internal error)".into());
+    }
+    let (lock, cvar) = &*pair;
+    let guard = lock.lock().unwrap();
+    let (guard, timed_out) = cvar
+        .wait_timeout_while(guard, timeout, |s| s.payload.is_none())
+        .unwrap();
+    if timed_out.timed_out() {
+        return Err(format!("timed out after {:?}", timeout));
+    }
+    guard.payload.clone().unwrap()
+}
+
+unsafe extern "C" fn on_result_async(
+    ret: c_int,
+    msg: *const c_char,
+    _len: usize,
+    user_data: *mut c_void,
+) {
+    let tx = Box::from_raw(
+        user_data as *mut tokio::sync::oneshot::Sender<Result<String, String>>,
+    );
+    let value = if ret == 0 {
+        Ok(CStr::from_ptr(msg).to_string_lossy().into_owned())
+    } else {
+        Err(CStr::from_ptr(msg).to_string_lossy().into_owned())
+    };
+    let _ = tx.send(value);
+}
+
+async fn ffi_call_async<F>(f: F) -> Result<String, String>
+where
+    F: FnOnce(ffi::FfiCallback, *mut c_void) -> c_int,
+{
+    let rx = {
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        let raw = Box::into_raw(Box::new(tx)) as *mut c_void;
+        let ret = f(on_result_async, raw);
+        if ret == 2 {
+            drop(unsafe {
+                Box::from_raw(
+                    raw as *mut tokio::sync::oneshot::Sender<Result<String, String>>,
+                )
+            });
+            return Err("RET_MISSING_CALLBACK (internal error)".into());
+        }
+        rx
+    };
+    rx.await.map_err(|_| "channel closed before callback fired".to_string())?
+}
+
+/// High-level context for `NimTimer`.
+pub struct NimTimerCtx {
+    ptr: *mut c_void,
+    timeout: Duration,
+}
+
+unsafe impl Send for NimTimerCtx {}
+unsafe impl Sync for NimTimerCtx {}
+
+impl NimTimerCtx {
+    pub fn create(config: TimerConfig, timeout: Duration) -> Result<Self, String> {
+        let config_json = serde_json::to_string(&config).map_err(|e| e.to_string())?;
+        let config_c = CString::new(config_json).unwrap();
+        let raw = ffi_call(timeout, |cb, ud| unsafe {
+            ffi::nimtimer_create(config_c.as_ptr(), cb, ud)
+        })?;
+        let addr: usize = raw.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
+        Ok(Self { ptr: addr as *mut c_void, timeout })
+    }
+
+    pub async fn new_async(config: TimerConfig) -> Result<Self, String> {
+        let config_json = serde_json::to_string(&config).map_err(|e| e.to_string())?;
+        let config_c = CString::new(config_json).unwrap();
+        let raw = ffi_call_async(move |cb, ud| unsafe {
+            ffi::nimtimer_create(config_c.as_ptr(), cb, ud)
+        }).await?;
+        let addr: usize = raw.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
+        Ok(Self { ptr: addr as *mut c_void, timeout: Duration::from_secs(30) })
+    }
+
+    pub fn echo(&self, req: EchoRequest) -> Result<EchoResponse, String> {
+        let req_json = serde_json::to_string(&req).map_err(|e| e.to_string())?;
+        let req_c = CString::new(req_json).unwrap();
+        let raw = ffi_call(self.timeout, |cb, ud| unsafe {
+            ffi::nimtimer_echo(self.ptr, cb, ud, req_c.as_ptr())
+        })?;
+        serde_json::from_str::<EchoResponse>(&raw).map_err(|e| e.to_string())
+    }
+
+    pub async fn echo_async(&self, req: EchoRequest) -> Result<EchoResponse, String> {
+        let req_json = serde_json::to_string(&req).map_err(|e| e.to_string())?;
+        let req_c = CString::new(req_json).unwrap();
+        let ptr = self.ptr as usize;
+        let raw = ffi_call_async(move |cb, ud| unsafe {
+            ffi::nimtimer_echo(ptr as *mut c_void, cb, ud, req_c.as_ptr())
+        }).await?;
+        serde_json::from_str::<EchoResponse>(&raw).map_err(|e| e.to_string())
+    }
+
+    pub fn version(&self) -> Result<String, String> {
+        let raw = ffi_call(self.timeout, |cb, ud| unsafe {
+            ffi::nimtimer_version(self.ptr, cb, ud)
+        })?;
+        serde_json::from_str::<String>(&raw).map_err(|e| e.to_string())
+    }
+
+    pub async fn version_async(&self) -> Result<String, String> {
+        let ptr = self.ptr as usize;
+        let raw = ffi_call_async(move |cb, ud| unsafe {
+            ffi::nimtimer_version(ptr as *mut c_void, cb, ud)
+        }).await?;
+        serde_json::from_str::<String>(&raw).map_err(|e| e.to_string())
+    }
+
+    pub fn complex(&self, req: ComplexRequest) -> Result<ComplexResponse, String> {
+        let req_json = serde_json::to_string(&req).map_err(|e| e.to_string())?;
+        let req_c = CString::new(req_json).unwrap();
+        let raw = ffi_call(self.timeout, |cb, ud| unsafe {
+            ffi::nimtimer_complex(self.ptr, cb, ud, req_c.as_ptr())
+        })?;
+        serde_json::from_str::<ComplexResponse>(&raw).map_err(|e| e.to_string())
+    }
+
+    pub async fn complex_async(&self, req: ComplexRequest) -> Result<ComplexResponse, String> {
+        let req_json = serde_json::to_string(&req).map_err(|e| e.to_string())?;
+        let req_c = CString::new(req_json).unwrap();
+        let ptr = self.ptr as usize;
+        let raw = ffi_call_async(move |cb, ud| unsafe {
+            ffi::nimtimer_complex(ptr as *mut c_void, cb, ud, req_c.as_ptr())
+        }).await?;
+        serde_json::from_str::<ComplexResponse>(&raw).map_err(|e| e.to_string())
+    }
+
+}
