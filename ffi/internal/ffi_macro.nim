@@ -1634,6 +1634,13 @@ macro genBindings*(
         "genBindings: output directory is empty." &
         " Pass it as an argument or set -d:ffiOutputDir=path/to/output"
       )
+    if currentLibName.len == 0:
+      error(
+        "genBindings: library name is empty. Call declareLibrary(\"<name>\", <T>)" &
+        " BEFORE any {.ffi.} / {.ffiCtor.} annotations so the library name is" &
+        " registered. The library name cannot be safely derived from proc names" &
+        " (e.g. \"nim_timer_create\" is ambiguous between \"nim\" and \"nim_timer\")."
+      )
     let lang = targetLang.toLowerAscii()
     let libName = deriveLibName(ffiProcRegistry)
     case lang

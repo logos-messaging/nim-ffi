@@ -43,17 +43,13 @@ proc nimTypeToRust*(typeName: string): string =
   else: toPascalCase(t)
 
 proc deriveLibName*(procs: seq[FFIProcMeta]): string =
-  ## Extracts the common prefix before the first `_` from proc names.
-  ## e.g. ["nimtimer_create", "nimtimer_echo"] → "nimtimer"
-  if currentLibName.len > 0:
-    return currentLibName
-  if procs.len == 0:
-    return "unknown"
-  let first = procs[0].procName
-  let parts = first.split('_')
-  if parts.len > 0:
-    return parts[0]
-  return "unknown"
+  ## Returns the library name registered by declareLibrary("<name>", T).
+  ## Caller must guarantee currentLibName is set (genBindings errors otherwise);
+  ## there is no sound heuristic to recover it from proc names alone --
+  ## "nim_timer_create" is ambiguous between "nim" and "nim_timer".
+  doAssert currentLibName.len > 0,
+    "deriveLibName called before declareLibrary; this is an internal bug"
+  currentLibName
 
 proc stripLibPrefix*(procName: string, libName: string): string =
   ## Strips the library prefix from a proc name.
@@ -178,22 +174,14 @@ proc generateFfiRs*(procs: seq[FFIProcMeta]): string =
   lines.add(");")
   lines.add("")
 
-  # Collect unique lib names for #[link(...)]
-  var libNames: seq[string] = @[]
-  for p in procs:
-    if p.libName notin libNames:
-      libNames.add(p.libName)
-
-  # Derive lib name from proc names if not set
-  var linkLibName = ""
-  if libNames.len > 0 and libNames[0].len > 0:
-    linkLibName = libNames[0]
-  else:
-    # derive from first proc name
-    if procs.len > 0:
-      let parts = procs[0].procName.split('_')
-      if parts.len > 0:
-        linkLibName = parts[0]
+  # Lib name for #[link(...)]. The macro bakes `libName: currentLibName` into
+  # every proc meta at registration time; if the registry has procs at all,
+  # they all share the same libName. No heuristic fallback -- genBindings()
+  # enforces that declareLibrary() was called.
+  doAssert procs.len > 0, "generateFfiRs called with empty proc registry"
+  let linkLibName = procs[0].libName
+  doAssert linkLibName.len > 0,
+    "proc meta missing libName; this is an internal bug (declareLibrary unset?)"
 
   lines.add("#[link(name = \"$1\")]" % [linkLibName])
   lines.add("extern \"C\" {")
