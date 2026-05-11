@@ -64,19 +64,35 @@ proc generateCppHeader*(
   lines.add("")
 
   # ── nlohmann optional<T> support ──────────────────────────────────────────
+  # Use nlohmann's documented extension point (adl_serializer specialization)
+  # rather than free-function to_json/from_json in namespace nlohmann -- the
+  # latter is ODR-fragile across libraries that all do the same. Three
+  # guards layer the protection:
+  #   * NIM_FFI_NO_OPTIONAL_SERIALIZER : consumer opt-out for conflicts.
+  #   * NIM_FFI_OPTIONAL_SERIALIZER_DEFINED_ : TU-level guard so multiple
+  #     nim-ffi-generated headers don't redefine within one translation unit.
+  #   * nlohmann version check : nlohmann >= 3.12 ships this specialization
+  #     natively, so we skip to avoid an ODR violation against it.
+  lines.add("#if !defined(NIM_FFI_NO_OPTIONAL_SERIALIZER) \\")
+  lines.add("    && !defined(NIM_FFI_OPTIONAL_SERIALIZER_DEFINED_) \\")
+  lines.add("    && (!defined(NLOHMANN_JSON_VERSION_MAJOR) \\")
+  lines.add("        || (NLOHMANN_JSON_VERSION_MAJOR < 3) \\")
+  lines.add("        || (NLOHMANN_JSON_VERSION_MAJOR == 3 && NLOHMANN_JSON_VERSION_MINOR < 12))")
+  lines.add("#define NIM_FFI_OPTIONAL_SERIALIZER_DEFINED_")
   lines.add("namespace nlohmann {")
   lines.add("    template<typename T>")
-  lines.add("    void to_json(json& j, const std::optional<T>& opt) {")
-  lines.add("        if (opt) j = *opt;")
-  lines.add("        else j = nullptr;")
-  lines.add("    }")
-  lines.add("")
-  lines.add("    template<typename T>")
-  lines.add("    void from_json(const json& j, std::optional<T>& opt) {")
-  lines.add("        if (j.is_null()) opt = std::nullopt;")
-  lines.add("        else opt = j.get<T>();")
-  lines.add("    }")
+  lines.add("    struct adl_serializer<std::optional<T>> {")
+  lines.add("        static void to_json(json& j, const std::optional<T>& opt) {")
+  lines.add("            if (opt) j = *opt;")
+  lines.add("            else j = nullptr;")
+  lines.add("        }")
+  lines.add("        static void from_json(const json& j, std::optional<T>& opt) {")
+  lines.add("            if (j.is_null()) opt = std::nullopt;")
+  lines.add("            else opt = j.get<T>();")
+  lines.add("        }")
+  lines.add("    };")
   lines.add("}")
+  lines.add("#endif")
   lines.add("")
 
   # ── Types ──────────────────────────────────────────────────────────────────

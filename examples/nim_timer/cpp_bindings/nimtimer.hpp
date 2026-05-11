@@ -13,19 +13,26 @@
 #include <optional>
 #include <nlohmann/json.hpp>
 
+#if !defined(NIM_FFI_NO_OPTIONAL_SERIALIZER) \
+    && !defined(NIM_FFI_OPTIONAL_SERIALIZER_DEFINED_) \
+    && (!defined(NLOHMANN_JSON_VERSION_MAJOR) \
+        || (NLOHMANN_JSON_VERSION_MAJOR < 3) \
+        || (NLOHMANN_JSON_VERSION_MAJOR == 3 && NLOHMANN_JSON_VERSION_MINOR < 12))
+#define NIM_FFI_OPTIONAL_SERIALIZER_DEFINED_
 namespace nlohmann {
     template<typename T>
-    void to_json(json& j, const std::optional<T>& opt) {
-        if (opt) j = *opt;
-        else j = nullptr;
-    }
-
-    template<typename T>
-    void from_json(const json& j, std::optional<T>& opt) {
-        if (j.is_null()) opt = std::nullopt;
-        else opt = j.get<T>();
-    }
+    struct adl_serializer<std::optional<T>> {
+        static void to_json(json& j, const std::optional<T>& opt) {
+            if (opt) j = *opt;
+            else j = nullptr;
+        }
+        static void from_json(const json& j, std::optional<T>& opt) {
+            if (j.is_null()) opt = std::nullopt;
+            else opt = j.get<T>();
+        }
+    };
 }
+#endif
 
 // ============================================================
 // Types
