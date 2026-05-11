@@ -70,7 +70,10 @@ proc nimtimerComplex*(
 # the compiler processes the AST. genBindings() reads those registries to emit
 # the binding files, so placing it any earlier would produce incomplete output.
 # In a multi-file library, import all sub-modules first and call genBindings()
-# once, at the bottom of the top-level compilation-root file.
+# once, at the bottom of the top-level compilation-root file. For multi-file
+# libraries it's strongly recommended to pin `expectedExports = N`: a sub-
+# module that isn't imported here would silently disappear from the bindings,
+# and the pin turns that into a loud compile error.
 # This call is a no-op unless -d:ffiGenBindings is passed to the compiler.
 genBindings() # reads -d:ffiOutputDir, -d:ffiNimSrcRelPath, -d:targetLang from compile flags
 

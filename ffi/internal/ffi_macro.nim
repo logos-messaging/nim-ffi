@@ -1605,6 +1605,7 @@ macro genBindings*(
     outputDir: static[string] = ffiOutputDir,
     nimSrcRelPath: static[string] = ffiNimSrcRelPath,
     nimBuildFlags: static[string] = ffiNimBuildFlags,
+    expectedExports: static[int] = -1,
 ): untyped =
   ## Emits C++ or Rust binding files from the compile-time FFI registries.
   ##
@@ -1621,6 +1622,14 @@ macro genBindings*(
   ## Output path and nim source path default to -d:ffiOutputDir and
   ## -d:ffiNimSrcRelPath, or can be passed as explicit arguments.
   ## This macro is a no-op unless -d:ffiGenBindings is set.
+  ##
+  ## expectedExports: optional pin on the number of registered procs. The
+  ## generator can only see {.ffi.} / {.ffiCtor.} annotations from modules
+  ## the compilation root has *imported* by the time genBindings is called;
+  ## a sub-module that isn't pulled in produces silently-incomplete bindings.
+  ## Set this to your known export count and the macro fails loudly when the
+  ## tally drifts (typical cause: a new export landed in an unimported file).
+  ## Default -1 disables the pin (only the zero-procs sanity check applies).
   ##
   ## Example (all via compile flags):
   ##   genBindings()
@@ -1640,6 +1649,23 @@ macro genBindings*(
         " BEFORE any {.ffi.} / {.ffiCtor.} annotations so the library name is" &
         " registered. The library name cannot be safely derived from proc names" &
         " (e.g. \"nim_timer_create\" is ambiguous between \"nim\" and \"nim_timer\")."
+      )
+    if ffiProcRegistry.len == 0:
+      error(
+        "genBindings: zero {.ffi.} / {.ffiCtor.} procs registered. The most" &
+        " common cause is calling genBindings() from a file that hasn't" &
+        " imported the modules that declare the exports -- the registry only" &
+        " sees annotations from code the compilation root has transitively" &
+        " imported. Move the call to the root file, or import the relevant" &
+        " sub-modules above it."
+      )
+    if expectedExports >= 0 and ffiProcRegistry.len != expectedExports:
+      error(
+        "genBindings: expected " & $expectedExports & " FFI export(s), found " &
+        $ffiProcRegistry.len & ". A {.ffi.} / {.ffiCtor.} annotation may have" &
+        " landed in a module the compilation root doesn't import (silently" &
+        " omitted), or the expectedExports pin is stale. Update the pin or" &
+        " add the missing import."
       )
     let lang = targetLang.toLowerAscii()
     let libName = deriveLibName(ffiProcRegistry)
