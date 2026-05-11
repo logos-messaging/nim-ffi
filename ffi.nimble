@@ -24,6 +24,7 @@ task test, "Run all tests under --mm:orc and --mm:refc":
     exec "nim c -r " & flags & " tests/test_ffi_context.nim"
     exec "nim c -r " & flags & " tests/test_gc_compat.nim"
     exec "nim c -r " & flags & " tests/test_serial.nim"
+    exec "nim c -r " & flags & " tests/test_ctx_validation.nim"
 
 task test_alloc, "Run alloc unit tests under --mm:orc and --mm:refc":
   exec "nim c -r " & nimFlagsOrc & " tests/test_alloc.nim"

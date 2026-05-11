@@ -569,8 +569,9 @@ macro ffiRaw*(prc: untyped): untyped =
   let ffiBody = newStmtList(
     quote do:
       initializeLibrary()
-      if not isNil(ctx):
-        ctx[].userData = userData
+      if not isValidCtx(cast[pointer](ctx)):
+        return RET_ERR
+      ctx[].userData = userData
       if isNil(callback):
         return RET_MISSING_CALLBACK
   )
