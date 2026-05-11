@@ -1,6 +1,10 @@
 import std/[macros, atomics], strformat, chronicles, chronos
+import ../codegen/meta
 
-macro declareLibrary*(libraryName: static[string]): untyped =
+macro declareLibraryBase*(libraryName: static[string]): untyped =
+  # Record the library name for binding generation
+  currentLibName = libraryName
+
   var res = newStmtList()
 
   ## Generate {.pragma: exported, exportc, cdecl, raises: [].}
@@ -86,3 +90,51 @@ macro declareLibrary*(libraryName: static[string]): untyped =
   res.add(initializeLibraryProc)
 
   return res
+
+macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
+  ## Declares a library with the given name and automatically generates
+  ## `{libraryName}_set_event_callback`, a C-exported function that stores the
+  ## caller's event callback on the FFIContext.
+  ##
+  ## `libType` is the Nim type of the main library object (e.g. `Waku`). It is used
+  ## to type the `ctx: ptr FFIContext[libType]` parameter of the generated
+  ## `{libraryName}_set_event_callback` proc.
+  result = newStmtList()
+
+  # Emit the base bootstrap (pragmas, linker flags, NimMain, initializeLibrary)
+  result.add(newCall(ident("declareLibraryBase"), newStrLitNode(libraryName)))
+
+  let funcName = libraryName & "_set_event_callback"
+  let funcIdent = ident(funcName)
+  let errorMsg = "error: invalid context in " & funcName
+
+  let ctxType = nnkPtrTy.newTree(
+    nnkBracketExpr.newTree(ident("FFIContext"), libType)
+  )
+
+  let procBody = quote do:
+    if isNil(ctx):
+      echo `errorMsg`
+      return
+    ctx[].callbackState.callback = cast[pointer](callback)
+    ctx[].callbackState.userData = userData
+
+  let procNode = newProc(
+    name = funcIdent,
+    params = @[
+      newEmptyNode(),
+      newIdentDefs(ident("ctx"), ctxType),
+      newIdentDefs(ident("callback"), ident("FFICallBack")),
+      newIdentDefs(ident("userData"), ident("pointer")),
+    ],
+    body = procBody,
+    pragmas = newTree(
+      nnkPragma,
+      ident("dynlib"),
+      ident("exportc"),
+      ident("cdecl"),
+      newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
+    ),
+  )
+
+  result.add(procNode)
