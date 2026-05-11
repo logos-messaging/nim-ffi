@@ -8,6 +8,7 @@
 #include <memory>
 #include <functional>
 #include <future>
+#include <type_traits>
 #include <vector>
 #include <optional>
 #include <nlohmann/json.hpp>
@@ -148,10 +149,63 @@ inline std::string ffi_call_(std::function<int(FfiCallback, void*)> f,
     return state->msg;
 }
 
+// True-async helpers: std::promise<T> + std::future<T> mirror the Rust
+// tokio::sync::oneshot design -- the FFI callback completes the promise
+// directly, so the returned future becomes ready without ever blocking a
+// thread. The C ABI trampoline cannot be a template, so the per-T completion
+// logic is type-erased into a std::function held inside FfiAsyncState_.
+struct FfiAsyncState_ {
+    std::function<void(int, const char*)> complete;
+};
+
+inline void ffi_cb_async_(int ret, const char* msg, size_t /*len*/, void* ud) {
+    auto* state = static_cast<FfiAsyncState_*>(ud);
+    state->complete(ret, msg);
+    delete state;
+}
+
+template<typename T>
+inline std::future<T> ffi_call_async_(std::function<int(FfiCallback, void*)> f) {
+    auto promise = std::make_shared<std::promise<T>>();
+    auto future  = promise->get_future();
+    auto* state  = new FfiAsyncState_{
+        [promise](int ret, const char* msg) {
+            const std::string s = msg ? std::string(msg) : std::string{};
+            try {
+                if (ret == 0) {
+                    if constexpr (std::is_same_v<T, std::string>) {
+                        promise->set_value(s);
+                    } else if constexpr (std::is_same_v<T, void*>) {
+                        promise->set_value(deserializeFfiResult<void*>(s));
+                    } else {
+                        promise->set_value(deserializeFfiResult<T>(s));
+                    }
+                } else {
+                    promise->set_exception(std::make_exception_ptr(std::runtime_error(s)));
+                }
+            } catch (...) {
+                promise->set_exception(std::current_exception());
+            }
+        }
+    };
+    const int ret = f(ffi_cb_async_, state);
+    if (ret == 2) {
+        delete state;
+        throw std::runtime_error("RET_MISSING_CALLBACK (internal error)");
+    }
+    return future;
+}
+
 } // anonymous namespace
 
 // ============================================================
 // High-level C++ context class
+//
+// Async methods (createAsync / <name>Async) return a std::future<T>
+// that becomes ready when the Nim callback fires. No thread is
+// spawned for the wait: the FFI callback completes the underlying
+// std::promise directly, mirroring the Rust tokio::oneshot path.
+// Apply timeouts via future.wait_for(...) on the caller's side.
 // ============================================================
 
 class NimTimerCtx {
@@ -170,7 +224,30 @@ public:
     }
 
     static std::future<NimTimerCtx> createAsync(const TimerConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
-        return std::async(std::launch::async, [config, timeout]() { return create(config, timeout); });
+        const auto config_json = serializeFfiArg(config);
+        auto promise = std::make_shared<std::promise<NimTimerCtx>>();
+        auto future  = promise->get_future();
+        auto* state  = new FfiAsyncState_{
+            [promise, timeout](int ret, const char* msg) {
+                const std::string s = msg ? std::string(msg) : std::string{};
+                try {
+                    if (ret == 0) {
+                        const auto addr = std::stoull(s);
+                        promise->set_value(NimTimerCtx(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout));
+                    } else {
+                        promise->set_exception(std::make_exception_ptr(std::runtime_error(s)));
+                    }
+                } catch (...) {
+                    promise->set_exception(std::current_exception());
+                }
+            }
+        };
+        const int ret = nimtimer_create(config_json.c_str(), ffi_cb_async_, state);
+        if (ret == 2) {
+            delete state;
+            throw std::runtime_error("RET_MISSING_CALLBACK (internal error)");
+        }
+        return future;
     }
 
     ~NimTimerCtx() {
@@ -205,7 +282,10 @@ public:
     }
 
     std::future<EchoResponse> echoAsync(const EchoRequest& req) const {
-        return std::async(std::launch::async, [this, req]() { return echo(req); });
+        const auto req_json = serializeFfiArg(req);
+        return ffi_call_async_<EchoResponse>([&](FfiCallback cb, void* ud) {
+            return nimtimer_echo(ptr_, cb, ud, req_json.c_str());
+        });
     }
 
     std::string version() const {
@@ -216,7 +296,9 @@ public:
     }
 
     std::future<std::string> versionAsync() const {
-        return std::async(std::launch::async, [this]() { return version(); });
+        return ffi_call_async_<std::string>([&](FfiCallback cb, void* ud) {
+            return nimtimer_version(ptr_, cb, ud);
+        });
     }
 
     ComplexResponse complex(const ComplexRequest& req) const {
@@ -228,7 +310,10 @@ public:
     }
 
     std::future<ComplexResponse> complexAsync(const ComplexRequest& req) const {
-        return std::async(std::launch::async, [this, req]() { return complex(req); });
+        const auto req_json = serializeFfiArg(req);
+        return ffi_call_async_<ComplexResponse>([&](FfiCallback cb, void* ud) {
+            return nimtimer_complex(ptr_, cb, ud, req_json.c_str());
+        });
     }
 
 private:
