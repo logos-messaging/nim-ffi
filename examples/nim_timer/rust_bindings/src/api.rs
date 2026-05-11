@@ -19,17 +19,14 @@ unsafe extern "C" fn on_result(
     user_data: *mut c_void,
 ) {
     let pair = Arc::from_raw(user_data as *const (Mutex<FfiCallbackResult>, Condvar));
-    {
-        let (lock, cvar) = &*pair;
-        let mut state = lock.lock().unwrap();
-        state.payload = Some(if ret == 0 {
-            Ok(CStr::from_ptr(msg).to_string_lossy().into_owned())
-        } else {
-            Err(CStr::from_ptr(msg).to_string_lossy().into_owned())
-        });
-        cvar.notify_one();
-    }
-    std::mem::forget(pair);
+    let (lock, cvar) = &*pair;
+    let mut state = lock.lock().unwrap();
+    state.payload = Some(if ret == 0 {
+        Ok(CStr::from_ptr(msg).to_string_lossy().into_owned())
+    } else {
+        Err(CStr::from_ptr(msg).to_string_lossy().into_owned())
+    });
+    cvar.notify_one();
 }
 
 fn ffi_call<F>(timeout: Duration, f: F) -> Result<String, String>
@@ -40,6 +37,7 @@ where
     let raw = Arc::into_raw(pair.clone()) as *mut c_void;
     let ret = f(on_result, raw);
     if ret == 2 {
+        drop(unsafe { Arc::from_raw(raw as *const (Mutex<FfiCallbackResult>, Condvar)) });
         return Err("RET_MISSING_CALLBACK (internal error)".into());
     }
     let (lock, cvar) = &*pair;
