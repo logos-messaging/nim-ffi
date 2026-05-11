@@ -12,6 +12,17 @@ struct FfiCallbackResult {
 
 type Pair = Arc<(Mutex<FfiCallbackResult>, Condvar)>;
 
+/// Null-safe conversion from a C string returned by the Nim side.
+/// The C ABI permits a null `msg` even though the current producer
+/// always passes a non-null pointer; treat null as an empty string.
+unsafe fn cstr_to_string(msg: *const c_char) -> String {
+    if msg.is_null() {
+        String::new()
+    } else {
+        CStr::from_ptr(msg).to_string_lossy().into_owned()
+    }
+}
+
 unsafe extern "C" fn on_result(
     ret: c_int,
     msg: *const c_char,
@@ -21,11 +32,8 @@ unsafe extern "C" fn on_result(
     let pair = Arc::from_raw(user_data as *const (Mutex<FfiCallbackResult>, Condvar));
     let (lock, cvar) = &*pair;
     let mut state = lock.lock().unwrap();
-    state.payload = Some(if ret == 0 {
-        Ok(CStr::from_ptr(msg).to_string_lossy().into_owned())
-    } else {
-        Err(CStr::from_ptr(msg).to_string_lossy().into_owned())
-    });
+    let s = cstr_to_string(msg);
+    state.payload = Some(if ret == 0 { Ok(s) } else { Err(s) });
     cvar.notify_one();
 }
 
@@ -60,11 +68,8 @@ unsafe extern "C" fn on_result_async(
     let tx = Box::from_raw(
         user_data as *mut tokio::sync::oneshot::Sender<Result<String, String>>,
     );
-    let value = if ret == 0 {
-        Ok(CStr::from_ptr(msg).to_string_lossy().into_owned())
-    } else {
-        Err(CStr::from_ptr(msg).to_string_lossy().into_owned())
-    };
+    let s = cstr_to_string(msg);
+    let value = if ret == 0 { Ok(s) } else { Err(s) };
     let _ = tx.send(value);
 }
 
