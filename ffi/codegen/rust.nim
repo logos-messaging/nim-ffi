@@ -109,12 +109,18 @@ fn main() {
         }
     }
 
+    // Match the per-OS shared-library naming used by the CMakeLists:
+    //   macOS:   lib<name>.dylib
+    //   Linux:   lib<name>.so
+    //   Windows: <name>.dll (Cargo links the auto-generated <name>.lib import lib)
     #[cfg(target_os = "macos")]
-    let lib_ext = "dylib";
+    let out_lib = repo_root.join("lib$2.dylib");
     #[cfg(target_os = "linux")]
-    let lib_ext = "so";
-
-    let out_lib = repo_root.join(format!("lib$2.{lib_ext}"));
+    let out_lib = repo_root.join("lib$2.so");
+    #[cfg(target_os = "windows")]
+    let out_lib = repo_root.join("$2.dll");
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    compile_error!("nim-ffi build.rs: unsupported target OS (expected macos, linux, or windows)");
 
     let mut cmd = Command::new("nim");
     cmd.arg("c")
