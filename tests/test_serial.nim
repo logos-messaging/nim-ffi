@@ -1,16 +1,14 @@
 import unittest
 import results
-import ../ffi/serial
+import ../ffi
 
-ffiType:
-  type Point = object
-    x: int
-    y: int
+type Point {.ffi.} = object
+  x: int
+  y: int
 
-ffiType:
-  type Nested = object
-    label: string
-    point: Point
+type Nested {.ffi.} = object
+  label: string
+  point: Point
 
 suite "ffiSerialize / ffiDeserialize primitives":
   test "string round-trip":
@@ -81,7 +79,7 @@ suite "pointer serialization":
     let serialized = ffiSerialize(p)
     check serialized == "0"
 
-suite "ffiType macro — object round-trip":
+suite "{.ffi.} on type — object round-trip":
   test "Point round-trip":
     let pt = Point(x: 10, y: 20)
     let serialized = ffiSerialize(pt)

@@ -5,9 +5,8 @@ import ../ffi
 
 type TestLib = object
 
-ffiType:
-  type CtxValidationConfig = object
-    initialValue: int
+type CtxValidationConfig {.ffi.} = object
+  initialValue: int
 
 proc ctxval_create*(
     config: CtxValidationConfig
