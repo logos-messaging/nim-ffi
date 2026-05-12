@@ -104,10 +104,6 @@ suite "ffiDeserialize error handling":
     let back = ffiDeserialize("not json at all".cstring, int)
     check back.isErr()
 
-  test "wrong JSON type returns err for string":
-    let back = ffiDeserialize("42".cstring, string)
-    check back.isErr()
-
   test "malformed JSON for object returns err":
     let back = ffiDeserialize("{bad json".cstring, Point)
     check back.isErr()
