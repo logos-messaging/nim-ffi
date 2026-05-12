@@ -533,6 +533,12 @@ macro ffiRaw*(prc: untyped): untyped =
   let paramIdent = firstParam[0]
   let paramType = firstParam[1]
 
+  # The first param of an `.ffiRaw.` proc is `ctx: ptr FFIContext[LibType]`.
+  # Extract LibType so we can call the module-level pool var (named
+  # "<LibType>FFIPool", declared by `.ffiCtor.`) to validate ctx.
+  let libTypeName = paramType[0][1]
+  let poolIdent = ident($libTypeName & "FFIPool")
+
   let reqName = ident($procName & "Req")
   let returnType = ident("cint")
 
@@ -569,7 +575,7 @@ macro ffiRaw*(prc: untyped): untyped =
   let ffiBody = newStmtList(
     quote do:
       initializeLibrary()
-      if not isValidCtx(cast[pointer](ctx)):
+      if not `poolIdent`.isValidCtx(cast[pointer](ctx)):
         return RET_ERR
       ctx[].userData = userData
       if isNil(callback):
@@ -804,9 +810,10 @@ macro ffi*(prc: untyped): untyped =
       if callback.isNil:
         return RET_MISSING_CALLBACK
 
+    let asyncPoolIdent = ident($libTypeName & "FFIPool")
     ffiBody.add quote do:
-      if ctx.isNil or ctx[].myLib.isNil:
-        let errStr = "context not initialized"
+      if not `asyncPoolIdent`.isValidCtx(cast[pointer](ctx)):
+        let errStr = "ctx is not a valid FFI context"
         callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
         return RET_ERR
 
@@ -930,9 +937,10 @@ macro ffi*(prc: untyped): untyped =
       if callback.isNil:
         return RET_MISSING_CALLBACK
 
+    let syncPoolIdent = ident($libTypeName & "FFIPool")
     syncFfiBody.add quote do:
-      if ctx.isNil or ctx[].myLib.isNil:
-        let errStr = "context not initialized"
+      if not `syncPoolIdent`.isValidCtx(cast[pointer](ctx)):
+        let errStr = "ctx is not a valid FFI context"
         callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
         return RET_ERR
 
