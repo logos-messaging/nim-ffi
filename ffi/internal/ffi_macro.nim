@@ -533,6 +533,12 @@ macro ffiRaw*(prc: untyped): untyped =
   let paramIdent = firstParam[0]
   let paramType = firstParam[1]
 
+  # The first param of an `.ffiRaw.` proc is `ctx: ptr FFIContext[LibType]`.
+  # Extract LibType so we can call the module-level pool var (named
+  # "<LibType>FFIPool", declared by `.ffiCtor.`) to validate ctx.
+  let libTypeName = paramType[0][1]
+  let poolIdent = ident($libTypeName & "FFIPool")
+
   let reqName = ident($procName & "Req")
   let returnType = ident("cint")
 
@@ -569,7 +575,7 @@ macro ffiRaw*(prc: untyped): untyped =
   let ffiBody = newStmtList(
     quote do:
       initializeLibrary()
-      if not isValidCtx(cast[pointer](ctx)):
+      if not `poolIdent`.isValidCtx(cast[pointer](ctx)):
         return RET_ERR
       ctx[].userData = userData
       if isNil(callback):
@@ -804,9 +810,10 @@ macro ffi*(prc: untyped): untyped =
       if callback.isNil:
         return RET_MISSING_CALLBACK
 
+    let asyncPoolIdent = ident($libTypeName & "FFIPool")
     ffiBody.add quote do:
-      if ctx.isNil or ctx[].myLib.isNil:
-        let errStr = "context not initialized"
+      if not `asyncPoolIdent`.isValidCtx(cast[pointer](ctx)):
+        let errStr = "ctx is not a valid FFI context"
         callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
         return RET_ERR
 
@@ -930,9 +937,10 @@ macro ffi*(prc: untyped): untyped =
       if callback.isNil:
         return RET_MISSING_CALLBACK
 
+    let syncPoolIdent = ident($libTypeName & "FFIPool")
     syncFfiBody.add quote do:
-      if ctx.isNil or ctx[].myLib.isNil:
-        let errStr = "context not initialized"
+      if not `syncPoolIdent`.isValidCtx(cast[pointer](ctx)):
+        let errStr = "ctx is not a valid FFI context"
         callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
         return RET_ERR
 
@@ -1383,9 +1391,12 @@ macro ffiCtor*(prc: untyped): untyped =
   # Use a gensym'd ctx identifier so both the let binding and usage match
   let ctxSym = genSym(nskLet, "ctx")
 
+  # Module-level pool shared by ctor and dtor for this libType
+  let poolIdent = ident($libTypeName & "FFIPool")
+
   # Create the FFIContext synchronously; return nil on failure
   ffiBody.add quote do:
-    let `ctxSym` = createFFIContext[`libTypeName`]().valueOr:
+    let `ctxSym` = `poolIdent`.createFFIContext().valueOr:
       if not callback.isNil:
         let errStr = "ffiCtor: failed to create FFIContext: " & $error
         callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
@@ -1476,8 +1487,13 @@ macro ffiCtor*(prc: untyped): untyped =
       )
     )
 
+  let poolDecl = quote do:
+    when not declared(`poolIdent`):
+      var `poolIdent`: FFIContextPool[`libTypeName`]
+
   result = newStmtList(
-    typeDef, deleteProc, ffiNewReqProc, helperProc, processProc, addToReg, ffiProc
+    typeDef, deleteProc, ffiNewReqProc, helperProc, processProc, addToReg, poolDecl,
+    ffiProc,
   )
 
   when defined(ffiDumpMacros):
@@ -1548,9 +1564,10 @@ macro ffiDtor*(prc: untyped): untyped =
   if not isNoop:
     ffiBody.add(bodyNode)
 
+  let poolIdent = ident($libTypeName & "FFIPool")
   ffiBody.add quote do:
     let `destroyResIdent` =
-      destroyFFIContext[`libTypeName`](cast[ptr FFIContext[`libTypeName`]](ctx))
+      `poolIdent`.destroyFFIContext(cast[ptr FFIContext[`libTypeName`]](ctx))
     if `destroyResIdent`.isErr():
       if not callback.isNil:
         let errStr = "destroy failed: " & $`destroyResIdent`.error
@@ -1593,7 +1610,11 @@ macro ffiDtor*(prc: untyped): untyped =
     )
   )
 
-  result = ffiProc
+  let poolDecl = quote do:
+    when not declared(`poolIdent`):
+      var `poolIdent`: FFIContextPool[`libTypeName`]
+
+  result = newStmtList(poolDecl, ffiProc)
 
   when defined(ffiDumpMacros):
     echo result.repr
@@ -1622,6 +1643,8 @@ macro genBindings*(
   ## -d:ffiNimSrcRelPath, or can be passed as explicit arguments.
   ## This macro is a no-op unless -d:ffiGenBindings is set.
   ##
+  ## This reads -d:ffiOutputDir, -d:ffiNimSrcRelPath, -d:targetLang from compile flags.
+  ## 
   ## Example (all via compile flags):
   ##   genBindings()
   ##   # nim c -d:ffiGenBindings -d:targetLang=rust \

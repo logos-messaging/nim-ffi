@@ -95,11 +95,12 @@ suite "GC safety - string lifetime across thread boundary":
     initCallbackData(d)
     defer: deinitCallbackData(d)
 
-    let ctx = createFFIContext[GcTestLib]().valueOr:
+    var pool: FFIContextPool[GcTestLib]
+    let ctx = pool.createFFIContext().valueOr:
       checkpoint "createFFIContext failed: " & $error
       check false
       return
-    defer: discard destroyFFIContext(ctx)
+    defer: discard pool.destroyFFIContext(ctx)
 
     check sendRequestToFFIThread(
       ctx, StringLifetimeRequest.ffiNewReq(testCallback, addr d, "hello".cstring)
@@ -113,10 +114,11 @@ suite "GC safety - string lifetime across thread boundary":
     initCallbackData(d)
     defer: deinitCallbackData(d)
 
-    let ctx = createFFIContext[GcTestLib]().valueOr:
+    var pool: FFIContextPool[GcTestLib]
+    let ctx = pool.createFFIContext().valueOr:
       check false
       return
-    defer: discard destroyFFIContext(ctx)
+    defer: discard pool.destroyFFIContext(ctx)
 
     check sendRequestToFFIThread(
       ctx, GcErrRequest.ffiNewReq(testCallback, addr d, "test".cstring)
@@ -130,10 +132,11 @@ suite "GC safety - string lifetime across thread boundary":
     initCallbackData(d)
     defer: deinitCallbackData(d)
 
-    let ctx = createFFIContext[GcTestLib]().valueOr:
+    var pool: FFIContextPool[GcTestLib]
+    let ctx = pool.createFFIContext().valueOr:
       check false
       return
-    defer: discard destroyFFIContext(ctx)
+    defer: discard pool.destroyFFIContext(ctx)
 
     check sendRequestToFFIThread(
       ctx, LargeStringRequest.ffiNewReq(testCallback, addr d)
@@ -147,10 +150,11 @@ suite "GC safety - string lifetime across thread boundary":
 
 suite "GC stability - repeated requests":
   test "20 sequential requests without GC corruption":
-    let ctx = createFFIContext[GcTestLib]().valueOr:
+    var pool: FFIContextPool[GcTestLib]
+    let ctx = pool.createFFIContext().valueOr:
       check false
       return
-    defer: discard destroyFFIContext(ctx)
+    defer: discard pool.destroyFFIContext(ctx)
 
     for i in 1 .. 20:
       var d: CallbackData

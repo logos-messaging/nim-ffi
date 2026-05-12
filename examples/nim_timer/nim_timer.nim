@@ -72,7 +72,7 @@ proc nimtimerComplex*(
 # In a multi-file library, import all sub-modules first and call genBindings()
 # once, at the bottom of the top-level compilation-root file.
 # This call is a no-op unless -d:ffiGenBindings is passed to the compiler.
-genBindings() # reads -d:ffiOutputDir, -d:ffiNimSrcRelPath, -d:targetLang from compile flags
+genBindings()
 
 proc nimtimer_destroy*(ctx: pointer) {.dynlib, exportc, cdecl, raises: [].} =
   ## Tears down the FFI context created by nimtimer_create.

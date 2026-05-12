@@ -2,7 +2,7 @@
 {.pragma: callback, cdecl, raises: [], gcsafe.}
 {.passc: "-fPIC".}
 
-import std/[options, atomics, os, net, locks, json, tables, sets]
+import std/[atomics, locks, json, tables]
 import chronicles, chronos, chronos/threadsync, taskpools/channels_spsc_single, results
 import ./ffi_types, ./ffi_thread_request, ./internal/ffi_macro, ./logging
 
@@ -41,30 +41,6 @@ var ffiCurrentCallbackState* {.threadvar.}: ptr FFICallbackState
 
 const git_version* {.strdefine.} = "n/a"
 
-var contextRegistry = initHashSet[pointer]()
-var contextRegistryLock: Lock
-contextRegistryLock.initLock()
-
-proc registerCtx(ctx: pointer) =
-  {.cast(gcsafe).}:
-    contextRegistryLock.acquire()
-    defer: contextRegistryLock.release()
-    contextRegistry.incl(ctx)
-
-proc unregisterCtx(ctx: pointer) =
-  {.cast(gcsafe).}:
-    contextRegistryLock.acquire()
-    defer: contextRegistryLock.release()
-    contextRegistry.excl(ctx)
-
-proc isValidCtx*(ctx: pointer): bool =
-  ## Returns true only if ctx was created by createFFIContext and not yet destroyed.
-  ## Rejects nil, offset-invalid, and dangling pointers at the API boundary.
-  {.cast(gcsafe).}:
-    contextRegistryLock.acquire()
-    defer: contextRegistryLock.release()
-    return contextRegistry.contains(ctx)
-
 template callEventCallback*(ctx: ptr FFIContext, eventName: string, body: untyped) =
   if isNil(ctx[].callbackState.callback):
     chronicles.error eventName & " - eventCallback is nil"
@@ -74,14 +50,20 @@ template callEventCallback*(ctx: ptr FFIContext, eventName: string, body: untype
     try:
       let event = body
       cast[FFICallBack](ctx[].callbackState.callback)(
-        RET_OK, unsafeAddr event[0], cast[csize_t](len(event)), ctx[].callbackState.userData
+        RET_OK,
+        unsafeAddr event[0],
+        cast[csize_t](len(event)),
+        ctx[].callbackState.userData,
       )
     except Exception, CatchableError:
       let msg =
         "Exception " & eventName & " when calling 'eventCallBack': " &
         getCurrentExceptionMsg()
       cast[FFICallBack](ctx[].callbackState.callback)(
-        RET_ERR, unsafeAddr msg[0], cast[csize_t](len(msg)), ctx[].callbackState.userData
+        RET_ERR,
+        unsafeAddr msg[0],
+        cast[csize_t](len(msg)),
+        ctx[].callbackState.userData,
       )
 
 template dispatchFfiEvent*(eventName: string, body: untyped) =
@@ -99,8 +81,7 @@ template dispatchFfiEvent*(eventName: string, body: untyped) =
         RET_OK, unsafeAddr event[0], cast[csize_t](len(event)), ffiState[].userData
       )
     except Exception, CatchableError:
-      let msg =
-        "Exception dispatching " & eventName & ": " & getCurrentExceptionMsg()
+      let msg = "Exception dispatching " & eventName & ": " & getCurrentExceptionMsg()
       cast[FFICallBack](ffiState[].callback)(
         RET_ERR, unsafeAddr msg[0], cast[csize_t](len(msg)), ffiState[].userData
       )
@@ -108,9 +89,6 @@ template dispatchFfiEvent*(eventName: string, body: untyped) =
 proc sendRequestToFFIThread*(
     ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, timeout = InfiniteDuration
 ): Result[void, string] =
-  if not isValidCtx(cast[pointer](ctx)):
-    deleteRequest(ffiRequest)
-    return err("ctx is not a valid FFI context")
   ctx.lock.acquire()
   # This lock is only necessary while we use a SP Channel and while the signalling
   # between threads assumes that there aren't concurrent requests.
@@ -229,7 +207,9 @@ proc processRequest[T](
     try:
       await retFut
     except AsyncError as exc:
-      Result[string, string].err("Async error in processRequest for " & reqId & ": " & exc.msg)
+      Result[string, string].err(
+        "Async error in processRequest for " & reqId & ": " & exc.msg
+      )
 
   ## handleRes may raise (OOM, GC setup) even though it is rare. Catching here
   ## keeps the async proc raises:[] compatible. The defer inside handleRes
@@ -237,7 +217,7 @@ proc processRequest[T](
   try:
     handleRes(res, request)
   except Exception as exc:
-    error "Unexpected exception in handleRes", exc = exc.msg
+    error "Unexpected exception in handleRes", error = exc.msg
 
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ## FFI thread body that attends library user API requests
@@ -250,8 +230,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
     # wait can unblock and proceed with cleanup.
     let fireRes = ctx.threadExitSignal.fireSync()
     if fireRes.isErr():
-      error "failed to fire threadExitSignal on FFI thread exit",
-        err = fireRes.error
+      error "failed to fire threadExitSignal on FFI thread exit", err = fireRes.error
 
   let ffiRun = proc(ctx: ptr FFIContext[T]) {.async.} =
     var ffiReqHandler: T
@@ -281,6 +260,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   waitFor ffiRun(ctx)
 
 proc cleanUpResources[T](ctx: ptr FFIContext[T]): Result[void, string] =
+  ## Full cleanup for heap-allocated contexts: closes all resources and frees memory.
   defer:
     freeShared(ctx)
   ctx.lock.deinitLock()
@@ -316,10 +296,10 @@ proc cleanUpResources[T](ctx: ptr FFIContext[T]): Result[void, string] =
       ?ctx.threadExitSignal.close()
   return ok()
 
-proc createFFIContext*[T](): Result[ptr FFIContext[T], string] =
-  ## This proc is called from the main thread and it creates
-  ## the FFI working thread.
-  var ctx = createShared(FFIContext[T], 1)
+proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
+  ## Initialises all resources inside an already-allocated FFIContext slot.
+  ## On failure every partially-initialised resource is closed; the caller
+  ## is responsible for releasing the slot (freeShared or pool.releaseSlot).
   ctx.lock.initLock()
 
   var success = false
@@ -327,7 +307,7 @@ proc createFFIContext*[T](): Result[ptr FFIContext[T], string] =
     if not success:
       ctx.cleanUpResources().isOkOr:
         error "failed to clean up resources after createFFIContext failure",
-          err = error
+          error = error
 
   ctx.reqSignal = ThreadSignalPtr.new().valueOr:
     return err("couldn't create reqSignal ThreadSignalPtr: " & $error)
@@ -358,61 +338,58 @@ proc createFFIContext*[T](): Result[ptr FFIContext[T], string] =
     ctx.running.store(false)
     let fireRes = ctx.reqSignal.fireSync()
     if fireRes.isErr():
-      error "failed to signal ffiThread during watchdog cleanup",
-        err = fireRes.error
+      error "failed to signal ffiThread during watchdog cleanup", error = fireRes.error
     joinThread(ctx.ffiThread)
     return err("failed to create the watchdog thread: " & getCurrentExceptionMsg())
 
-  registerCtx(cast[pointer](ctx))
   success = true
-  return ok(ctx)
+  return ok()
 
-proc destroyFFIContext*[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## If the FFI thread's event loop is blocked by a synchronous handler
-  ## (e.g. blocking I/O), it cannot process reqSignal in time to exit.
-  ## In that case we leak ctx and the thread rather than hanging forever:
-  ## the thread will eventually exit on its own, but cleanup is skipped
-  ## because the thread may still be touching ctx fields.
-  const ThreadExitTimeout = 1500.milliseconds
-  unregisterCtx(cast[pointer](ctx))
-
+proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ctx.running.store(false)
-
-  let signaledOnTime = ctx.reqSignal.fireSync().valueOr:
+  let reqSignaled = ctx.reqSignal.fireSync().valueOr:
     ctx.onNotResponding()
-    return err("error in destroyFFIContext: " & $error)
-  if not signaledOnTime:
+    return err("error signaling reqSignal in signalStop: " & $error)
+  if not reqSignaled:
     ctx.onNotResponding()
-    return err("failed to signal reqSignal on time in destroyFFIContext")
+    return err("failed to signal reqSignal on time in signalStop")
+  let stopSignaled = ctx.stopSignal.fireSync().valueOr:
+    return err("error signaling stopSignal in signalStop: " & $error)
+  if not stopSignaled:
+    return err("failed to signal stopSignal on time in signalStop")
+  return ok()
 
-  ctx.stopSignal.fireSync().isOkOr:
-    error "failed to fire stopSignal in destroyFFIContext", err = $error
+## If the FFI thread's event loop is blocked by a synchronous handler
+## (e.g. blocking I/O), it cannot process reqSignal in time to exit.
+## clearContext waits on threadExitSignal up to this bound; on timeout it
+## returns err and skips joinThread/cleanup (leaking the thread + ctx slot)
+## rather than hanging the caller forever.
+const ThreadExitTimeout* = 1500.milliseconds
 
-  ## Bounded wait for ffiThread to exit. waitSync blocks the calling thread
-  ## up to the timeout; ffiThread fires threadExitSignal in its defer block.
+proc stopAndJoinThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
+  ## Signals the FFI and watchdog threads to stop, waits up to ThreadExitTimeout
+  ## for the FFI thread to exit, and joins both. On timeout returns err and
+  ## skips joinThread (leaving the threads live) rather than hanging the caller.
+  ## Resource cleanup (signal fds, lock) is the caller's responsibility.
+  ctx.signalStop().isOkOr:
+    return err("signalStop failed: " & $error)
+
   let exitedOnTime = ctx.threadExitSignal.waitSync(ThreadExitTimeout).valueOr:
     ctx.onNotResponding()
     return err("error waiting for FFI thread exit: " & $error)
 
   if not exitedOnTime:
-    ## Event loop is blocked by a synchronous handler. Leak the thread and
-    ## ctx to avoid hanging the caller forever.
     ctx.onNotResponding()
     return err("FFI thread did not exit in time; leaking ctx to avoid hang")
 
   joinThread(ctx.ffiThread)
   joinThread(ctx.watchdogThread)
-  ctx.cleanUpResources().isOkOr:
-    error "failed to clean up resources in destroyFFIContext", err = error
-    return err("cleanUpResources failed: " & $error)
-
   return ok()
 
-template checkParams*(ctx: ptr FFIContext, callback: FFICallBack, userData: pointer) =
-  if not isValidCtx(cast[pointer](ctx)):
-    return RET_ERR
-
-  ctx[].userData = userData
-
-  if isNil(callback):
-    return RET_MISSING_CALLBACK
+proc clearContext[T](ctx: ptr FFIContext[T]): Result[void, string] =
+  ## Stops the FFI context that was created via createFFIContext[T]() (heap).
+  ctx.stopAndJoinThreads().isOkOr:
+    return err("clearContext: " & $error)
+  ctx.cleanUpResources().isOkOr:
+    return err("cleanUpResources failed: " & $error)
+  return ok()
