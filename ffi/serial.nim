@@ -1,4 +1,4 @@
-import std/[json, macros, options]
+import std/[json, options]
 import results
 import ./codegen/meta
 
@@ -119,38 +119,3 @@ proc ffiDeserialize*[T: object](s: cstring, _: typedesc[T]): Result[T, string] =
     ok(parseJson($s).to(T))
   except Exception as e:
     err(e.msg)
-
-macro ffiType*(body: untyped): untyped =
-  ## Statement macro applied to a type declaration block.
-  ## Registers the type in ffiTypeRegistry for binding generation.
-  ## Serialization is handled by the generic ffiSerialize/ffiDeserialize overloads.
-  ## Usage:
-  ##   ffiType:
-  ##     type Foo = object
-  ##       field: int
-  let typeSection = body[0]
-  let typeDef = typeSection[0]
-  let typeName =
-    if typeDef[0].kind == nnkPostfix:
-      typeDef[0][1]
-    else:
-      typeDef[0]
-
-  let typeNameStr = $typeName
-  var fieldMetas: seq[FFIFieldMeta] = @[]
-  let objTy = typeDef[2]
-  if objTy.kind == nnkObjectTy and objTy.len >= 3:
-    let recList = objTy[2]
-    if recList.kind == nnkRecList:
-      for identDef in recList:
-        if identDef.kind == nnkIdentDefs:
-          let fieldType = identDef[^2]
-          let fieldTypeName =
-            if fieldType.kind == nnkIdent: $fieldType
-            elif fieldType.kind == nnkPtrTy: "ptr " & $fieldType[0]
-            else: fieldType.repr
-          for i in 0 ..< identDef.len - 2:
-            fieldMetas.add(FFIFieldMeta(name: $identDef[i], typeName: fieldTypeName))
-
-  ffiTypeRegistry.add(FFITypeMeta(name: typeNameStr, fields: fieldMetas))
-  result = body
