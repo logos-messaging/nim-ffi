@@ -317,7 +317,7 @@ proc cleanUpResources[T](ctx: ptr FFIContext[T]): Result[void, string] =
       ?ctx.threadExitSignal.close()
   return ok()
 
-proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
+proc initContextResources[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Initialises all resources inside an already-allocated FFIContext slot.
   ## On failure every partially-initialised resource is closed; the caller
   ## is responsible for releasing the slot (freeShared or pool.releaseSlot).
