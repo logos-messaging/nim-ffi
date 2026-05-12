@@ -398,23 +398,23 @@ proc createFFIContext*[T](
   ## Acquires a slot from the fixed pool and initialises it as an FFI context.
   ## Bounded fd usage: at most MaxFFIContexts * 2 ThreadSignalPtr fds are ever open.
   let ctx = pool.acquireSlot().valueOr:
-    return err(error)
+    return err("createFFIContext: acquireSlot failed: " & $error)
   initContextResources(ctx).isOkOr:
     pool.releaseSlot(ctx)
-    return err(error)
+    return err("createFFIContext: initContextResources failed: " & $error)
   return ok(ctx)
 
 proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ctx.running.store(false)
-  let ffiSignaled = ctx.reqSignal.fireSync().valueOr:
+  let reqSignaled = ctx.reqSignal.fireSync().valueOr:
     ctx.onNotResponding()
     return err("error signaling reqSignal in destroyFFIContext: " & $error)
-  if not ffiSignaled:
+  if not reqSignaled:
     ctx.onNotResponding()
     return err("failed to signal reqSignal on time in destroyFFIContext")
-  let wdSignaled = ctx.stopSignal.fireSync().valueOr:
+  let stopSignaled = ctx.stopSignal.fireSync().valueOr:
     return err("error signaling stopSignal in destroyFFIContext: " & $error)
-  if not wdSignaled:
+  if not stopSignaled:
     return err("failed to signal stopSignal on time in destroyFFIContext")
   return ok()
 
@@ -425,12 +425,12 @@ proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
 ## rather than hanging the caller forever.
 const ThreadExitTimeout = 1500.milliseconds
 
-proc destroyFFIContext*[T](ctx: ptr FFIContext[T]): Result[void, string] =
+proc destroyFFIContext[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Stops the FFI context that was created via createFFIContext[T]() (heap).
   unregisterCtx(cast[pointer](ctx))
 
   ctx.signalStop().isOkOr:
-    return err(error)
+    return err("destroyFFIContext: signalStop failed: " & $error)
 
   let exitedOnTime = ctx.threadExitSignal.waitSync(ThreadExitTimeout).valueOr:
     ctx.onNotResponding()
@@ -456,7 +456,7 @@ proc destroyFFIContext*[T](
   unregisterCtx(cast[pointer](ctx))
 
   ctx.signalStop().isOkOr:
-    return err(error)
+    return err("destroyFFIContext(pool): signalStop failed: " & $error)
 
   let exitedOnTime = ctx.threadExitSignal.waitSync(ThreadExitTimeout).valueOr:
     ctx.onNotResponding()
