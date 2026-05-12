@@ -7,5 +7,5 @@ import
 export atomics, tables
 export chronos, chronicles
 export
-  atomics, alloc, ffi_library, ffi_macro, ffi_types, ffi_context,
-  ffi_thread_request, serial
+  atomics, alloc, ffi_library, ffi_macro, ffi_types, ffi_context, ffi_thread_request,
+  serial
