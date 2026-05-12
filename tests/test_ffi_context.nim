@@ -179,17 +179,19 @@ suite "FFIContextPool":
 
 suite "createFFIContext / destroyFFIContext":
   test "create and destroy succeeds":
-    let ctx = createFFIContext[TestLib]().valueOr:
+    var pool: FFIContextPool[TestLib]
+    let ctx = pool.createFFIContext().valueOr:
       checkpoint "createFFIContext failed: " & $error
       check false
       return
-    check destroyFFIContext(ctx).isOk()
+    check pool.destroyFFIContext(ctx).isOk()
 
   test "double destroy is safe via running flag":
-    let ctx = createFFIContext[TestLib]().valueOr:
+    var pool: FFIContextPool[TestLib]
+    let ctx = pool.createFFIContext().valueOr:
       check false
       return
-    check destroyFFIContext(ctx).isOk()
+    check pool.destroyFFIContext(ctx).isOk()
 
 suite "destroyFFIContext does not hang":
   test "destroy while a slow async request is still in-flight":
@@ -197,7 +199,8 @@ suite "destroyFFIContext does not hang":
     ## running async request (e.g. stop_node / w.stop()) was still executing.
     ## The destroy must return well within 2 seconds; before the fix it would
     ## block forever on joinThread(ffiThread).
-    let ctx = createFFIContext[TestLib]().valueOr:
+    var pool: FFIContextPool[TestLib]
+    let ctx = pool.createFFIContext().valueOr:
       check false
       return
 
@@ -213,7 +216,7 @@ suite "destroyFFIContext does not hang":
 
     # Destroy immediately while SlowRequest is still running.
     let t0 = Moment.now()
-    check destroyFFIContext(ctx).isOk()
+    check pool.destroyFFIContext(ctx).isOk()
     check (Moment.now() - t0) < 2.seconds
 
 suite "destroyFFIContext does not hang when event loop is blocked":
@@ -230,7 +233,8 @@ suite "destroyFFIContext does not hang when event loop is blocked":
     ##
     ## With the fix, destroyFFIContext must complete well within the 5 s that
     ## SyncBlockingRequest holds the event loop.
-    let ctx = createFFIContext[TestLib]().valueOr:
+    var pool: FFIContextPool[TestLib]
+    let ctx = pool.createFFIContext().valueOr:
       check false
       return
 
@@ -255,7 +259,7 @@ suite "destroyFFIContext does not hang when event loop is blocked":
     # It deliberately returns err and leaks ctx in this scenario rather than
     # hanging on joinThread.
     let t0 = Moment.now()
-    check destroyFFIContext(ctx).isErr()
+    check pool.destroyFFIContext(ctx).isErr()
     check (Moment.now() - t0) < 3.seconds
 
     # Drain the leaked thread before the test scope ends.
@@ -303,7 +307,8 @@ suite "destroyFFIContext refc workaround":
   ## returns immediately. Under `--mm:orc` it returns immediately either
   ## way.
   test "destroy after heavy ref-allocation workload returns promptly":
-    let ctx = createFFIContext[TestLib]().valueOr:
+    var pool: FFIContextPool[TestLib]
+    let ctx = pool.createFFIContext().valueOr:
       check false
       return
 
@@ -318,7 +323,7 @@ suite "destroyFFIContext refc workaround":
     check d.retCode == RET_OK
 
     let t0 = Moment.now()
-    check destroyFFIContext(ctx).isOk()
+    check pool.destroyFFIContext(ctx).isOk()
     check (Moment.now() - t0) < 3.seconds
 
 suite "sendRequestToFFIThread":
@@ -328,11 +333,12 @@ suite "sendRequestToFFIThread":
     defer:
       deinitCallbackData(d)
 
-    let ctx = createFFIContext[TestLib]().valueOr:
+    var pool: FFIContextPool[TestLib]
+    let ctx = pool.createFFIContext().valueOr:
       check false
       return
     defer:
-      discard destroyFFIContext(ctx)
+      discard pool.destroyFFIContext(ctx)
 
     check sendRequestToFFIThread(
       ctx, PingRequest.ffiNewReq(testCallback, addr d, "hello".cstring)
@@ -348,11 +354,12 @@ suite "sendRequestToFFIThread":
     defer:
       deinitCallbackData(d)
 
-    let ctx = createFFIContext[TestLib]().valueOr:
+    var pool: FFIContextPool[TestLib]
+    let ctx = pool.createFFIContext().valueOr:
       check false
       return
     defer:
-      discard destroyFFIContext(ctx)
+      discard pool.destroyFFIContext(ctx)
 
     check sendRequestToFFIThread(ctx, FailRequest.ffiNewReq(testCallback, addr d)).isOk()
     waitCallback(d)
@@ -364,11 +371,12 @@ suite "sendRequestToFFIThread":
     defer:
       deinitCallbackData(d)
 
-    let ctx = createFFIContext[TestLib]().valueOr:
+    var pool: FFIContextPool[TestLib]
+    let ctx = pool.createFFIContext().valueOr:
       check false
       return
     defer:
-      discard destroyFFIContext(ctx)
+      discard pool.destroyFFIContext(ctx)
 
     check sendRequestToFFIThread(ctx, EmptyOkRequest.ffiNewReq(testCallback, addr d))
       .isOk()
@@ -377,11 +385,12 @@ suite "sendRequestToFFIThread":
     check d.msgLen == 0
 
   test "sequential requests are all processed":
-    let ctx = createFFIContext[TestLib]().valueOr:
+    var pool: FFIContextPool[TestLib]
+    let ctx = pool.createFFIContext().valueOr:
       check false
       return
     defer:
-      discard destroyFFIContext(ctx)
+      discard pool.destroyFFIContext(ctx)
 
     for i in 1 .. 5:
       var d: CallbackData
@@ -439,7 +448,7 @@ suite "ffiCtor macro":
     check not ctx[].myLib.isNil
     check ctx[].myLib[].value == 42
 
-    check destroyFFIContext(ctx).isOk()
+    check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
 
 # ---------------------------------------------------------------------------
 # Simplified .ffi. macro integration test
@@ -474,7 +483,7 @@ suite "simplified .ffi. macro":
     let ctxAddr = cast[uint](parseBiggestUInt(addrStr))
     check ctxAddr != 0
     let ctx = cast[ptr FFIContext[SimpleLib]](ctxAddr)
-    defer: check destroyFFIContext(ctx).isOk()
+    defer: check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
 
     # Now call the .ffi. proc
     var d: CallbackData
@@ -524,7 +533,7 @@ suite "async/sync detection in .ffi.":
     let ctxAddr = cast[uint](parseBiggestUInt(addrStr))
     check ctxAddr != 0
     let ctx = cast[ptr FFIContext[SimpleLib]](ctxAddr)
-    defer: check destroyFFIContext(ctx).isOk()
+    defer: check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
 
     var d2: CallbackData
     initCallbackData(d2)
@@ -592,7 +601,7 @@ suite "ptr return type in .ffi.":
     let ctxAddr = cast[uint](parseBiggestUInt(ctxAddrStr))
     check ctxAddr != 0
     let ctx = cast[ptr FFIContext[SimpleLib]](ctxAddr)
-    defer: check destroyFFIContext(ctx).isOk()
+    defer: check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
 
     # Alloc a handle
     var allocD: CallbackData

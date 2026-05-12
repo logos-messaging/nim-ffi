@@ -1383,9 +1383,12 @@ macro ffiCtor*(prc: untyped): untyped =
   # Use a gensym'd ctx identifier so both the let binding and usage match
   let ctxSym = genSym(nskLet, "ctx")
 
+  # Module-level pool shared by ctor and dtor for this libType
+  let poolIdent = ident($libTypeName & "FFIPool")
+
   # Create the FFIContext synchronously; return nil on failure
   ffiBody.add quote do:
-    let `ctxSym` = createFFIContext[`libTypeName`]().valueOr:
+    let `ctxSym` = `poolIdent`.createFFIContext().valueOr:
       if not callback.isNil:
         let errStr = "ffiCtor: failed to create FFIContext: " & $error
         callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
@@ -1476,8 +1479,13 @@ macro ffiCtor*(prc: untyped): untyped =
       )
     )
 
+  let poolDecl = quote do:
+    when not declared(`poolIdent`):
+      var `poolIdent`: FFIContextPool[`libTypeName`]
+
   result = newStmtList(
-    typeDef, deleteProc, ffiNewReqProc, helperProc, processProc, addToReg, ffiProc
+    typeDef, deleteProc, ffiNewReqProc, helperProc, processProc, addToReg, poolDecl,
+    ffiProc,
   )
 
   when defined(ffiDumpMacros):
@@ -1548,9 +1556,10 @@ macro ffiDtor*(prc: untyped): untyped =
   if not isNoop:
     ffiBody.add(bodyNode)
 
+  let poolIdent = ident($libTypeName & "FFIPool")
   ffiBody.add quote do:
     let `destroyResIdent` =
-      destroyFFIContext[`libTypeName`](cast[ptr FFIContext[`libTypeName`]](ctx))
+      `poolIdent`.destroyFFIContext(cast[ptr FFIContext[`libTypeName`]](ctx))
     if `destroyResIdent`.isErr():
       if not callback.isNil:
         let errStr = "destroy failed: " & $`destroyResIdent`.error
@@ -1593,7 +1602,11 @@ macro ffiDtor*(prc: untyped): untyped =
     )
   )
 
-  result = ffiProc
+  let poolDecl = quote do:
+    when not declared(`poolIdent`):
+      var `poolIdent`: FFIContextPool[`libTypeName`]
+
+  result = newStmtList(poolDecl, ffiProc)
 
   when defined(ffiDumpMacros):
     echo result.repr
