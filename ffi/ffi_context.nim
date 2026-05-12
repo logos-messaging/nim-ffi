@@ -408,29 +408,29 @@ proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ctx.running.store(false)
   let reqSignaled = ctx.reqSignal.fireSync().valueOr:
     ctx.onNotResponding()
-    return err("error signaling reqSignal in destroyFFIContext: " & $error)
+    return err("error signaling reqSignal in signalStop: " & $error)
   if not reqSignaled:
     ctx.onNotResponding()
-    return err("failed to signal reqSignal on time in destroyFFIContext")
+    return err("failed to signal reqSignal on time in signalStop")
   let stopSignaled = ctx.stopSignal.fireSync().valueOr:
-    return err("error signaling stopSignal in destroyFFIContext: " & $error)
+    return err("error signaling stopSignal in signalStop: " & $error)
   if not stopSignaled:
-    return err("failed to signal stopSignal on time in destroyFFIContext")
+    return err("failed to signal stopSignal on time in signalStop")
   return ok()
 
 ## If the FFI thread's event loop is blocked by a synchronous handler
 ## (e.g. blocking I/O), it cannot process reqSignal in time to exit.
-## destroyFFIContext waits on threadExitSignal up to this bound; on timeout it
+## clearContext waits on threadExitSignal up to this bound; on timeout it
 ## returns err and skips joinThread/cleanup (leaking the thread + ctx slot)
 ## rather than hanging the caller forever.
 const ThreadExitTimeout = 1500.milliseconds
 
-proc destroyFFIContext[T](ctx: ptr FFIContext[T]): Result[void, string] =
+proc clearContext[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Stops the FFI context that was created via createFFIContext[T]() (heap).
   unregisterCtx(cast[pointer](ctx))
 
   ctx.signalStop().isOkOr:
-    return err("destroyFFIContext: signalStop failed: " & $error)
+    return err("clearContext: signalStop failed: " & $error)
 
   let exitedOnTime = ctx.threadExitSignal.waitSync(ThreadExitTimeout).valueOr:
     ctx.onNotResponding()
