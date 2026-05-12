@@ -1635,6 +1635,8 @@ macro genBindings*(
   ## -d:ffiNimSrcRelPath, or can be passed as explicit arguments.
   ## This macro is a no-op unless -d:ffiGenBindings is set.
   ##
+  ## This reads -d:ffiOutputDir, -d:ffiNimSrcRelPath, -d:targetLang from compile flags.
+  ## 
   ## Example (all via compile flags):
   ##   genBindings()
   ##   # nim c -d:ffiGenBindings -d:targetLang=rust \
