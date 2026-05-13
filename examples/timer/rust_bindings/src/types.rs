@@ -37,19 +37,19 @@ pub struct ComplexResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NimtimerCreateCtorReq {
+pub struct TimerCreateCtorReq {
     pub config: TimerConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NimtimerEchoReq {
+pub struct TimerEchoReq {
     pub req: EchoRequest,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NimtimerVersionReq {}
+pub struct TimerVersionReq {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NimtimerComplexReq {
+pub struct TimerComplexReq {
     pub req: ComplexRequest,
 }

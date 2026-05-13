@@ -3,8 +3,8 @@ use std::process::Command;
 
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let nim_src = manifest.join("../nim_timer.nim");
-    let nim_src = nim_src.canonicalize().unwrap_or(manifest.join("../nim_timer.nim"));
+    let nim_src = manifest.join("../timer.nim");
+    let nim_src = nim_src.canonicalize().unwrap_or(manifest.join("../timer.nim"));
 
     let mut repo_root = nim_src.clone();
     loop {
@@ -22,7 +22,7 @@ fn main() {
     #[cfg(target_os = "linux")]
     let lib_ext = "so";
 
-    let out_lib = repo_root.join(format!("libnimtimer.{lib_ext}"));
+    let out_lib = repo_root.join(format!("libtimer.{lib_ext}"));
 
     let mut cmd = Command::new("nim");
     cmd.arg("c")
@@ -30,7 +30,7 @@ fn main() {
         .arg("-d:chronicles_log_level=WARN")
         .arg("--app:lib")
         .arg("--noMain")
-        .arg(format!("--nimMainPrefix:libnimtimer"))
+        .arg(format!("--nimMainPrefix:libtimer"))
         .arg(format!("-o:{}", out_lib.display()));
     cmd.arg(&nim_src).current_dir(&repo_root);
 
@@ -38,6 +38,6 @@ fn main() {
     assert!(status.success(), "Nim compilation failed");
 
     println!("cargo:rustc-link-search={}", repo_root.display());
-    println!("cargo:rustc-link-lib=nimtimer");
+    println!("cargo:rustc-link-lib=timer");
     println!("cargo:rerun-if-changed={}", nim_src.display());
 }

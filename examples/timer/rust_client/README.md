@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This folder contains **example Rust applications** that demonstrate how to use the auto-generated `nimtimer` crate (from `../rust_bindings`).
+This folder contains **example Rust applications** that demonstrate how to use the auto-generated `timer` crate (from `../rust_bindings`).
 
 ## What's Included
 
@@ -21,7 +21,7 @@ Two executable examples:
 ## Building
 
 ```sh
-cd examples/nim_timer/rust_client
+cd examples/timer/rust_client
 cargo build
 ```
 
@@ -37,7 +37,7 @@ cargo run --bin tokio_client
 
 ## Important Notes
 
-- The `nimtimer` crate is a **local dependency** (`path = "../rust_bindings"`)
+- The `timer` crate is a **local dependency** (`path = "../rust_bindings"`)
 - It is **auto-generated** — do not manually edit it
 - These examples are **not** part of the generated output; they are hand-written to show usage patterns
-- To regenerate the `nimtimer` crate, run `nimble genbindings_rust` from the parent directory
+- To regenerate the `timer` crate, run `nimble genbindings_rust` from the parent directory

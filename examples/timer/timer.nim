@@ -3,10 +3,10 @@ import ffi, chronos, options
 type Maybe[T] = Option[T]
 
 # The library's main state type. The FFI context owns one instance.
-type NimTimer = object
+type Timer = object
   name: string # set at creation time, read back in each response
 
-declareLibrary("nimtimer", NimTimer)
+declareLibrary("timer", Timer)
 
 type TimerConfig {.ffi.} = object
   name: string
@@ -31,19 +31,19 @@ type ComplexResponse {.ffi.} = object
   hasNote: bool
 
 # --- Constructor -----------------------------------------------------------
-# Called once from Rust. Creates the FFIContext + NimTimer.
+# Called once from Rust. Creates the FFIContext + Timer.
 # Uses chronos (await sleepAsync) so the body is async.
-proc nimtimerCreate*(
+proc timerCreate*(
     config: TimerConfig
-): Future[Result[NimTimer, string]] {.ffiCtor.} =
+): Future[Result[Timer, string]] {.ffiCtor.} =
   await sleepAsync(1.milliseconds) # proves chronos is live on the FFI thread
-  return ok(NimTimer(name: config.name))
+  return ok(Timer(name: config.name))
 
 # --- Async method ----------------------------------------------------------
 # Waits `delayMs` milliseconds (non-blocking, on the chronos event loop)
 # then echoes the message back with a request counter.
-proc nimtimerEcho*(
-    timer: NimTimer, req: EchoRequest
+proc timerEcho*(
+    timer: Timer, req: EchoRequest
 ): Future[Result[EchoResponse, string]] {.ffi.} =
   await sleepAsync(req.delayMs.milliseconds)
   return ok(EchoResponse(echoed: req.message, timerName: timer.name))
@@ -51,11 +51,11 @@ proc nimtimerEcho*(
 # --- Sync method -----------------------------------------------------------
 # No await — the macro detects this and fires the callback inline,
 # without going through the request channel.
-proc nimtimerVersion*(timer: NimTimer): Future[Result[string, string]] {.ffi.} =
+proc timerVersion*(timer: Timer): Future[Result[string, string]] {.ffi.} =
   return ok("nim-timer v0.1.0")
 
-proc nimtimerComplex*(
-    timer: NimTimer, req: ComplexRequest
+proc timerComplex*(
+    timer: Timer, req: ComplexRequest
 ): Future[Result[ComplexResponse, string]] {.ffi.} =
   let note = if req.note.isSome: req.note.get else: "<none>"
   let retries = if req.retries.isSome: req.retries.get else: 0
@@ -65,8 +65,8 @@ proc nimtimerComplex*(
   return
     ok(ComplexResponse(summary: summary, itemCount: count, hasNote: req.note.isSome))
 
-proc nimtimer_destroy*(timer: NimTimer) {.ffiDtor.} =
-  ## Tears down the FFI context created by nimtimer_create.
+proc timer_destroy*(timer: Timer) {.ffiDtor.} =
+  ## Tears down the FFI context created by timer_create.
   ## Blocks until the FFI thread and watchdog thread have joined.
   discard
 

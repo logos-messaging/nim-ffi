@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(nimtimer_cpp_bindings CXX)
+project(timer_cpp_bindings CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -29,17 +29,17 @@ if("${REPO_ROOT}" STREQUAL "")
 endif()
 
 get_filename_component(NIM_SRC
-    "${CMAKE_CURRENT_SOURCE_DIR}/../nim_timer.nim"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../timer.nim"
     ABSOLUTE)
 
 find_program(NIM_EXECUTABLE nim REQUIRED)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    set(NIM_LIB_FILE "${REPO_ROOT}/libnimtimer.dylib")
+    set(NIM_LIB_FILE "${REPO_ROOT}/libtimer.dylib")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    set(NIM_LIB_FILE "${REPO_ROOT}/nimtimer.dll")
+    set(NIM_LIB_FILE "${REPO_ROOT}/timer.dll")
 else()
-    set(NIM_LIB_FILE "${REPO_ROOT}/libnimtimer.so")
+    set(NIM_LIB_FILE "${REPO_ROOT}/libtimer.so")
 endif()
 
 add_custom_command(
@@ -49,26 +49,26 @@ add_custom_command(
                 -d:chronicles_log_level=WARN
                 --app:lib
                 --noMain
-                "--nimMainPrefix:libnimtimer"
+                "--nimMainPrefix:libtimer"
                 "-o:${NIM_LIB_FILE}"
                 "${NIM_SRC}"
     WORKING_DIRECTORY "${REPO_ROOT}"
     DEPENDS "${NIM_SRC}"
-    COMMENT "Compiling Nim library libnimtimer"
+    COMMENT "Compiling Nim library libtimer"
     VERBATIM
 )
 add_custom_target(nim_lib ALL DEPENDS "${NIM_LIB_FILE}")
 
-add_library(nimtimer SHARED IMPORTED GLOBAL)
-set_target_properties(nimtimer PROPERTIES IMPORTED_LOCATION "${NIM_LIB_FILE}")
-add_dependencies(nimtimer nim_lib)
+add_library(timer SHARED IMPORTED GLOBAL)
+set_target_properties(timer PROPERTIES IMPORTED_LOCATION "${NIM_LIB_FILE}")
+add_dependencies(timer nim_lib)
 
-add_library(nimtimer_headers INTERFACE)
-target_include_directories(nimtimer_headers INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(nimtimer_headers INTERFACE nimtimer nlohmann_json::nlohmann_json)
+add_library(timer_headers INTERFACE)
+target_include_directories(timer_headers INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(timer_headers INTERFACE timer nlohmann_json::nlohmann_json)
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp")
     add_executable(example main.cpp)
-    target_link_libraries(example PRIVATE nimtimer_headers)
+    target_link_libraries(example PRIVATE timer_headers)
     add_dependencies(example nim_lib)
 endif()

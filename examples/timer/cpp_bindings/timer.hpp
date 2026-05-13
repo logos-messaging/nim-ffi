@@ -66,25 +66,25 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(ComplexResponse, summary, itemCount, hasNote)
 // Per-proc request envelopes (CBOR encoded on the wire)
 // ============================================================
 
-struct NimtimerCreateCtorReq {
+struct TimerCreateCtorReq {
     TimerConfig config;
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(NimtimerCreateCtorReq, config)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(TimerCreateCtorReq, config)
 
-struct NimtimerEchoReq {
+struct TimerEchoReq {
     EchoRequest req;
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(NimtimerEchoReq, req)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(TimerEchoReq, req)
 
-struct NimtimerVersionReq {
+struct TimerVersionReq {
 };
-inline void to_json(nlohmann::json& j, const NimtimerVersionReq&) { j = nlohmann::json::object(); }
-inline void from_json(const nlohmann::json&, NimtimerVersionReq&) {}
+inline void to_json(nlohmann::json& j, const TimerVersionReq&) { j = nlohmann::json::object(); }
+inline void from_json(const nlohmann::json&, TimerVersionReq&) {}
 
-struct NimtimerComplexReq {
+struct TimerComplexReq {
     ComplexRequest req;
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(NimtimerComplexReq, req)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(TimerComplexReq, req)
 
 // ============================================================
 // C FFI declarations
@@ -93,11 +93,11 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(NimtimerComplexReq, req)
 extern "C" {
 typedef void (*FfiCallback)(int ret, const char* msg, size_t len, void* user_data);
 
-void* nimtimer_create(const uint8_t* req_cbor, size_t req_cbor_len, FfiCallback callback, void* user_data);
-int nimtimer_echo(void* ctx, FfiCallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
-int nimtimer_version(void* ctx, FfiCallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
-int nimtimer_complex(void* ctx, FfiCallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
-int nimtimer_destroy(void* ctx, FfiCallback callback, void* user_data);
+void* timer_create(const uint8_t* req_cbor, size_t req_cbor_len, FfiCallback callback, void* user_data);
+int timer_echo(void* ctx, FfiCallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int timer_version(void* ctx, FfiCallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int timer_complex(void* ctx, FfiCallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int timer_destroy(void* ctx, FfiCallback callback, void* user_data);
 } // extern "C"
 
 template<typename T>
@@ -171,43 +171,43 @@ inline std::vector<std::uint8_t> ffi_call_(std::function<int(FfiCallback, void*)
 // High-level C++ context class
 // ============================================================
 
-class NimTimerCtx {
+class TimerCtx {
 public:
-    static NimTimerCtx create(const TimerConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
-        const auto req = NimtimerCreateCtorReq{config};
+    static TimerCtx create(const TimerConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
+        const auto req = TimerCreateCtorReq{config};
         const auto req_bytes = encodeCborFfi(req);
         const auto raw = ffi_call_([&](FfiCallback cb, void* ud) {
-            return nimtimer_create(req_bytes.data(), req_bytes.size(), cb, ud);
+            return timer_create(req_bytes.data(), req_bytes.size(), cb, ud);
         }, timeout);
         const auto addr_str = decodeCborFfi<std::string>(raw);
         try {
             const auto addr = std::stoull(addr_str);
-            return NimTimerCtx(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout);
+            return TimerCtx(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout);
         } catch (const std::exception&) {
             throw std::runtime_error("FFI create returned non-numeric address: " + addr_str);
         }
     }
 
-    static std::future<NimTimerCtx> createAsync(const TimerConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
+    static std::future<TimerCtx> createAsync(const TimerConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
         return std::async(std::launch::async, [config, timeout]() { return create(config, timeout); });
     }
 
-    ~NimTimerCtx() {
+    ~TimerCtx() {
         if (ptr_) {
-            nimtimer_destroy(ptr_, nullptr, nullptr);
+            timer_destroy(ptr_, nullptr, nullptr);
             ptr_ = nullptr;
         }
     }
 
-    NimTimerCtx(const NimTimerCtx&) = delete;
-    NimTimerCtx& operator=(const NimTimerCtx&) = delete;
+    TimerCtx(const TimerCtx&) = delete;
+    TimerCtx& operator=(const TimerCtx&) = delete;
 
-    NimTimerCtx(NimTimerCtx&& other) noexcept : ptr_(other.ptr_), timeout_(other.timeout_) {
+    TimerCtx(TimerCtx&& other) noexcept : ptr_(other.ptr_), timeout_(other.timeout_) {
         other.ptr_ = nullptr;
     }
-    NimTimerCtx& operator=(NimTimerCtx&& other) noexcept {
+    TimerCtx& operator=(TimerCtx&& other) noexcept {
         if (this != &other) {
-            if (ptr_) nimtimer_destroy(ptr_, nullptr, nullptr);
+            if (ptr_) timer_destroy(ptr_, nullptr, nullptr);
             ptr_ = other.ptr_;
             timeout_ = other.timeout_;
             other.ptr_ = nullptr;
@@ -216,10 +216,10 @@ public:
     }
 
     EchoResponse echo(const EchoRequest& req) const {
-        const auto req = NimtimerEchoReq{req};
+        const auto req = TimerEchoReq{req};
         const auto req_bytes = encodeCborFfi(req);
         const auto raw = ffi_call_([&](FfiCallback cb, void* ud) {
-            return nimtimer_echo(ptr_, cb, ud, req_bytes.data(), req_bytes.size());
+            return timer_echo(ptr_, cb, ud, req_bytes.data(), req_bytes.size());
         }, timeout_);
         return decodeCborFfi<EchoResponse>(raw);
     }
@@ -229,10 +229,10 @@ public:
     }
 
     std::string version() const {
-        const auto req = NimtimerVersionReq{};
+        const auto req = TimerVersionReq{};
         const auto req_bytes = encodeCborFfi(req);
         const auto raw = ffi_call_([&](FfiCallback cb, void* ud) {
-            return nimtimer_version(ptr_, cb, ud, req_bytes.data(), req_bytes.size());
+            return timer_version(ptr_, cb, ud, req_bytes.data(), req_bytes.size());
         }, timeout_);
         return decodeCborFfi<std::string>(raw);
     }
@@ -242,10 +242,10 @@ public:
     }
 
     ComplexResponse complex(const ComplexRequest& req) const {
-        const auto req = NimtimerComplexReq{req};
+        const auto req = TimerComplexReq{req};
         const auto req_bytes = encodeCborFfi(req);
         const auto raw = ffi_call_([&](FfiCallback cb, void* ud) {
-            return nimtimer_complex(ptr_, cb, ud, req_bytes.data(), req_bytes.size());
+            return timer_complex(ptr_, cb, ud, req_bytes.data(), req_bytes.size());
         }, timeout_);
         return decodeCborFfi<ComplexResponse>(raw);
     }
@@ -257,5 +257,5 @@ public:
 private:
     void* ptr_;
     std::chrono::milliseconds timeout_;
-    explicit NimTimerCtx(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}
+    explicit TimerCtx(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}
 };

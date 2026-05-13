@@ -1,4 +1,4 @@
-# nim_timer example
+# timer example
 
 This example is a self-contained Nimble project demonstrating how to import `nim-ffi` and use the `.ffiCtor.` / `.ffi.` abstraction.
 
@@ -6,7 +6,7 @@ This example is a self-contained Nimble project demonstrating how to import `nim
 
 1. Change into the example directory:
    ```sh
-   cd examples/nim_timer
+   cd examples/timer
    ```
 
 2. Install the local `ffi` dependency:
@@ -27,27 +27,27 @@ This example is a self-contained Nimble project demonstrating how to import `nim
 
 ## Rust example clients
 
-The Rust client lives in `examples/nim_timer/rust_client`.
+The Rust client lives in `examples/timer/rust_client`.
 
 - Run the sync example:
   ```sh
-  cd examples/nim_timer/rust_client
+  cd examples/timer/rust_client
   cargo run --bin rust_client
   ```
 
 - Run the Tokio example:
   ```sh
-  cd examples/nim_timer/rust_client
+  cd examples/timer/rust_client
   cargo run --bin tokio_client
   ```
 
 ## C++ example
 
-The generated C++ example lives in `examples/nim_timer/cpp_bindings`.
+The generated C++ example lives in `examples/timer/cpp_bindings`.
 
 Build and run it with:
 ```sh
-cd examples/nim_timer/cpp_bindings
+cd examples/timer/cpp_bindings
 cmake -S . -B build
 cmake --build build
 ./build/example

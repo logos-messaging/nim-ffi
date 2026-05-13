@@ -2,13 +2,13 @@
 
 ## Purpose
 
-This folder contains **auto-generated Rust bindings** (the `nimtimer` crate) for the `nim_timer` Nim library. It is generated from `../nim_timer.nim` and provides:
+This folder contains **auto-generated Rust bindings** (the `timer` crate) for the `timer` Nim library. It is generated from `../timer.nim` and provides:
 
-- `src/lib.rs`: Main library exposing high-level Rust types and the `NimTimerCtx` API
+- `src/lib.rs`: Main library exposing high-level Rust types and the `TimerCtx` API
 - `src/api.rs`: High-level async/sync wrapper around the FFI
 - `src/ffi.rs`: Raw `extern "C"` declarations for the Nim library
 - `src/types.rs`: Serializable Rust types matching the Nim FFI types
-- `build.rs`: Build script that compiles the Nim library to `libnimtimer.dylib` (or `.so`/`.dll`)
+- `build.rs`: Build script that compiles the Nim library to `libtimer.dylib` (or `.so`/`.dll`)
 - `Cargo.toml`: Package manifest with serde and serde_json dependencies
 
 ## How It's Generated
@@ -16,13 +16,13 @@ This folder contains **auto-generated Rust bindings** (the `nimtimer` crate) for
 Generate or regenerate these bindings by running from the parent directory:
 
 ```sh
-cd examples/nim_timer
+cd examples/timer
 nimble genbindings_rust
 ```
 
 This command:
 1. Invokes the Nim compiler with `-d:targetLang:rust` flag
-2. Triggers `genBindings("examples/nim_timer/rust_bindings", "../nim_timer.nim")` in `nim_timer.nim`
+2. Triggers `genBindings("examples/timer/rust_bindings", "../timer.nim")` in `timer.nim`
 3. Creates/updates the generated binding files
 
 ## Using as a Dependency
@@ -31,7 +31,7 @@ The `rust_client` example consumes this crate:
 
 ```toml
 [dependencies]
-nimtimer = { path = "../rust_bindings" }
+timer = { path = "../rust_bindings" }
 ```
 
 ## Do Not Edit

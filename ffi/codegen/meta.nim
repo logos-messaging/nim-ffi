@@ -15,10 +15,10 @@ type
     ffiDtorKind
 
   FFIProcMeta* = object
-    procName*: string # e.g. "nimtimer_echo"
-    libName*: string # library name, e.g. "nimtimer"
+    procName*: string # e.g. "timer_echo"
+    libName*: string # library name, e.g. "timer"
     kind*: FFIProcKind
-    libTypeName*: string # e.g. "NimTimer"
+    libTypeName*: string # e.g. "Timer"
     extraParams*: seq[FFIParamMeta] # all params except the lib param
     returnTypeName*: string # e.g. "EchoResponse", "string", "pointer"
     returnIsPtr*: bool # true if return type is ptr T

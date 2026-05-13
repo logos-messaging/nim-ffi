@@ -13,7 +13,7 @@ when defined(ffiGenBindings):
 proc nimNameToCExport(s: string): string =
   ## Converts a camelCase Nim proc name to a snake_case C export name.
   ## Leaves already-snake_case names unchanged.
-  ## e.g. "nimtimerCreate" → "nimtimer_create", "nimtimer_echo" → "nimtimer_echo"
+  ## e.g. "timerCreate" → "timer_create", "timer_echo" → "timer_echo"
   for i, c in s:
     if c.isUpperAscii() and i > 0:
       result.add('_')

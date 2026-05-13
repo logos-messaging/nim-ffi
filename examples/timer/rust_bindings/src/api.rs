@@ -113,21 +113,21 @@ where
     rx.await.map_err(|_| "channel closed before callback fired".to_string())?
 }
 
-/// High-level context for `NimTimer`.
-pub struct NimTimerCtx {
+/// High-level context for `Timer`.
+pub struct TimerCtx {
     ptr: *mut c_void,
     timeout: Duration,
 }
 
-unsafe impl Send for NimTimerCtx {}
-unsafe impl Sync for NimTimerCtx {}
+unsafe impl Send for TimerCtx {}
+unsafe impl Sync for TimerCtx {}
 
-impl NimTimerCtx {
+impl TimerCtx {
     pub fn create(config: TimerConfig, timeout: Duration) -> Result<Self, String> {
-        let req = NimtimerCreateCtorReq { config };
+        let req = TimerCreateCtorReq { config };
         let req_bytes = encode_cbor(&req)?;
         let raw_bytes = ffi_call(timeout, |cb, ud| unsafe {
-            ffi::nimtimer_create(req_bytes.as_ptr(), req_bytes.len(), cb, ud)
+            ffi::timer_create(req_bytes.as_ptr(), req_bytes.len(), cb, ud)
         })?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
         let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
@@ -135,10 +135,10 @@ impl NimTimerCtx {
     }
 
     pub async fn new_async(config: TimerConfig) -> Result<Self, String> {
-        let req = NimtimerCreateCtorReq { config };
+        let req = TimerCreateCtorReq { config };
         let req_bytes = encode_cbor(&req)?;
         let raw_bytes = ffi_call_async(move |cb, ud| unsafe {
-            ffi::nimtimer_create(req_bytes.as_ptr(), req_bytes.len(), cb, ud)
+            ffi::timer_create(req_bytes.as_ptr(), req_bytes.len(), cb, ud)
         }).await?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
         let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
@@ -146,58 +146,58 @@ impl NimTimerCtx {
     }
 
     pub fn echo(&self, req: EchoRequest) -> Result<EchoResponse, String> {
-        let req = NimtimerEchoReq { req };
+        let req = TimerEchoReq { req };
         let req_bytes = encode_cbor(&req)?;
         let raw_bytes = ffi_call(self.timeout, |cb, ud| unsafe {
-            ffi::nimtimer_echo(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+            ffi::timer_echo(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         })?;
         decode_cbor::<EchoResponse>(&raw_bytes)
     }
 
     pub async fn echo_async(&self, req: EchoRequest) -> Result<EchoResponse, String> {
-        let req = NimtimerEchoReq { req };
+        let req = TimerEchoReq { req };
         let req_bytes = encode_cbor(&req)?;
         let ptr = self.ptr as usize;
         let raw_bytes = ffi_call_async(move |cb, ud| unsafe {
-            ffi::nimtimer_echo(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+            ffi::timer_echo(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         }).await?;
         decode_cbor::<EchoResponse>(&raw_bytes)
     }
 
     pub fn version(&self) -> Result<String, String> {
-        let req = NimtimerVersionReq {};
+        let req = TimerVersionReq {};
         let req_bytes = encode_cbor(&req)?;
         let raw_bytes = ffi_call(self.timeout, |cb, ud| unsafe {
-            ffi::nimtimer_version(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+            ffi::timer_version(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         })?;
         decode_cbor::<String>(&raw_bytes)
     }
 
     pub async fn version_async(&self) -> Result<String, String> {
-        let req = NimtimerVersionReq {};
+        let req = TimerVersionReq {};
         let req_bytes = encode_cbor(&req)?;
         let ptr = self.ptr as usize;
         let raw_bytes = ffi_call_async(move |cb, ud| unsafe {
-            ffi::nimtimer_version(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+            ffi::timer_version(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         }).await?;
         decode_cbor::<String>(&raw_bytes)
     }
 
     pub fn complex(&self, req: ComplexRequest) -> Result<ComplexResponse, String> {
-        let req = NimtimerComplexReq { req };
+        let req = TimerComplexReq { req };
         let req_bytes = encode_cbor(&req)?;
         let raw_bytes = ffi_call(self.timeout, |cb, ud| unsafe {
-            ffi::nimtimer_complex(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+            ffi::timer_complex(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         })?;
         decode_cbor::<ComplexResponse>(&raw_bytes)
     }
 
     pub async fn complex_async(&self, req: ComplexRequest) -> Result<ComplexResponse, String> {
-        let req = NimtimerComplexReq { req };
+        let req = TimerComplexReq { req };
         let req_bytes = encode_cbor(&req)?;
         let ptr = self.ptr as usize;
         let raw_bytes = ffi_call_async(move |cb, ud| unsafe {
-            ffi::nimtimer_complex(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+            ffi::timer_complex(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         }).await?;
         decode_cbor::<ComplexResponse>(&raw_bytes)
     }
