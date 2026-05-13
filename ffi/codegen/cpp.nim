@@ -155,9 +155,7 @@ proc generateCppHeader*(
           [p.procName]
       )
     of ffiDtorKind:
-      lines.add(
-        "int $1(void* ctx, FfiCallback callback, void* user_data);" % [p.procName]
-      )
+      lines.add("int $1(void* ctx);" % [p.procName])
   lines.add("} // extern \"C\"")
   lines.add("")
 
@@ -329,7 +327,7 @@ proc generateCppHeader*(
   # ── Rule of 5 ──────────────────────────────────────────────────────────
   lines.add("    ~$1() {" % [ctxTypeName])
   lines.add("        if (ptr_) {")
-  lines.add("            $1_destroy(ptr_, nullptr, nullptr);" % [libName])
+  lines.add("            $1_destroy(ptr_);" % [libName])
   lines.add("            ptr_ = nullptr;")
   lines.add("        }")
   lines.add("    }")
@@ -345,7 +343,7 @@ proc generateCppHeader*(
   lines.add("    }")
   lines.add("    $1& operator=($1&& other) noexcept {" % [ctxTypeName])
   lines.add("        if (this != &other) {")
-  lines.add("            if (ptr_) $1_destroy(ptr_, nullptr, nullptr);" % [libName])
+  lines.add("            if (ptr_) $1_destroy(ptr_);" % [libName])
   lines.add("            ptr_ = other.ptr_;")
   lines.add("            timeout_ = other.timeout_;")
   lines.add("            other.ptr_ = nullptr;")

@@ -1318,9 +1318,6 @@ macro ffiDtor*(prc: untyped): untyped =
 
   ffiBody.add quote do:
     if ctx.isNil or cast[ptr FFIContext[`libTypeName`]](ctx)[].myLib.isNil:
-      if not callback.isNil:
-        let errStr = "context not initialized"
-        callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
       return RET_ERR
 
   ffiBody.add quote do:
@@ -1338,15 +1335,9 @@ macro ffiDtor*(prc: untyped): untyped =
     let `destroyResIdent` =
       `poolIdent`.destroyFFIContext(cast[ptr FFIContext[`libTypeName`]](ctx))
     if `destroyResIdent`.isErr():
-      if not callback.isNil:
-        let errStr = "destroy failed: " & $`destroyResIdent`.error
-        callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
       return RET_ERR
 
   ffiBody.add quote do:
-    if not callback.isNil:
-      var sentinel = CborNullByte
-      callback(RET_OK, cast[ptr cchar](addr sentinel), 1.csize_t, userData)
     return RET_OK
 
   let ffiProc = newProc(
@@ -1354,8 +1345,6 @@ macro ffiDtor*(prc: untyped): untyped =
     params = @[
       ident("cint"),
       newIdentDefs(ident("ctx"), ident("pointer")),
-      newIdentDefs(ident("callback"), ident("FFICallBack")),
-      newIdentDefs(ident("userData"), ident("pointer")),
     ],
     body = ffiBody,
     pragmas = newTree(

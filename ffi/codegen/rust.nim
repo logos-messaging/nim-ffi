@@ -169,8 +169,6 @@ proc generateFfiRs*(procs: seq[FFIProcMeta]): string =
       )
     of ffiDtorKind:
       params.add("ctx: *mut c_void")
-      params.add("callback: FfiCallback")
-      params.add("user_data: *mut c_void")
       lines.add("    pub fn $1($2) -> c_int;" % [p.procName, params.join(", ")])
 
   lines.add("}")

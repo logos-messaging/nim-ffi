@@ -97,7 +97,7 @@ void* timer_create(const uint8_t* req_cbor, size_t req_cbor_len, FfiCallback cal
 int timer_echo(void* ctx, FfiCallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int timer_version(void* ctx, FfiCallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int timer_complex(void* ctx, FfiCallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
-int timer_destroy(void* ctx, FfiCallback callback, void* user_data);
+int timer_destroy(void* ctx);
 } // extern "C"
 
 template<typename T>
@@ -194,7 +194,7 @@ public:
 
     ~TimerCtx() {
         if (ptr_) {
-            timer_destroy(ptr_, nullptr, nullptr);
+            timer_destroy(ptr_);
             ptr_ = nullptr;
         }
     }
@@ -207,7 +207,7 @@ public:
     }
     TimerCtx& operator=(TimerCtx&& other) noexcept {
         if (this != &other) {
-            if (ptr_) timer_destroy(ptr_, nullptr, nullptr);
+            if (ptr_) timer_destroy(ptr_);
             ptr_ = other.ptr_;
             timeout_ = other.timeout_;
             other.ptr_ = nullptr;
