@@ -24,29 +24,31 @@ struct FfiCallbackResult {
 
 type Pair = Arc<(Mutex<FfiCallbackResult>, Condvar)>;
 
+// Reconstruct the (ret, msg, len) tuple delivered by the C callback
+// into a Result<Vec<u8>, String>: payload on success, UTF-8 message on error.
+unsafe fn ffi_payload(ret: c_int, msg: *const c_char, len: usize) -> Result<Vec<u8>, String> {
+    let bytes = if msg.is_null() || len == 0 {
+        Vec::new()
+    } else {
+        slice::from_raw_parts(msg as *const u8, len).to_vec()
+    };
+    if ret == 0 { Ok(bytes) }
+    else        { Err(String::from_utf8_lossy(&bytes).into_owned()) }
+}
+
 unsafe extern "C" fn on_result(
     ret: c_int,
     msg: *const c_char,
     len: usize,
     user_data: *mut c_void,
 ) {
+    // from_raw reclaims the strong ref that ffi_call's into_raw left behind;
+    // letting `pair` drop at end of scope releases it.
     let pair = Arc::from_raw(user_data as *const (Mutex<FfiCallbackResult>, Condvar));
-    {
-        let (lock, cvar) = &*pair;
-        let mut state = lock.lock().unwrap();
-        let bytes = if msg.is_null() || len == 0 {
-            Vec::new()
-        } else {
-            slice::from_raw_parts(msg as *const u8, len).to_vec()
-        };
-        state.payload = Some(if ret == 0 {
-            Ok(bytes)
-        } else {
-            Err(String::from_utf8_lossy(&bytes).into_owned())
-        });
-        cvar.notify_one();
-    }
-    std::mem::forget(pair);
+    let (lock, cvar) = &*pair;
+    let mut state = lock.lock().unwrap();
+    state.payload = Some(ffi_payload(ret, msg, len));
+    cvar.notify_one();
 }
 
 fn ffi_call<F>(timeout: Duration, f: F) -> Result<Vec<u8>, String>
@@ -79,17 +81,7 @@ unsafe extern "C" fn on_result_async(
     let tx = Box::from_raw(
         user_data as *mut tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>,
     );
-    let bytes = if msg.is_null() || len == 0 {
-        Vec::new()
-    } else {
-        slice::from_raw_parts(msg as *const u8, len).to_vec()
-    };
-    let value = if ret == 0 {
-        Ok(bytes)
-    } else {
-        Err(String::from_utf8_lossy(&bytes).into_owned())
-    };
-    let _ = tx.send(value);
+    let _ = tx.send(ffi_payload(ret, msg, len));
 }
 
 async fn ffi_call_async<F>(f: F) -> Result<Vec<u8>, String>
