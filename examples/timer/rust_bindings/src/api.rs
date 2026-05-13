@@ -78,9 +78,26 @@ unsafe extern "C" fn on_result_async(
     len: usize,
     user_data: *mut c_void,
 ) {
+    // This fn represents the callback called internally in the Nim library function.
+    // We use a oneshot channel to deliver the result from the Nim-managed thread
+    // to the awaiting tokio task in ffi_call_async; the tx side is passed through
+    // the user_data pointer. The heap allocation behind Box::from_raw is released
+    // when `tx` drops (either consumed by `send` or at end of scope).
     let tx = Box::from_raw(
         user_data as *mut tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>,
     );
+
+    // `tx.send` returns Err only if the awaiting future was dropped (and with it
+    // the Receiver): e.g. tokio::time::timeout elapsed, a tokio::select! branch
+    // lost the race, or the future was dropped before being awaited. This cannot
+    // happen with the current rust_client demo but may occur in arbitrary
+    // downstream consumers, so we discard the Err safely.
+    // Given that this is invoked from a Nim thread, we can't propagate the error by panicking or
+    // returning a Result. Furthermore, an API dev may intentionally set a timeout in the await,
+    // in which case is also fine to discard the send error in this case because the API user will
+    // handle the timeout expiry in their own code.
+    // The important part is to ensure that the callback doesn't panic or block indefinitely if the
+    // receiver is gone.
     let _ = tx.send(ffi_payload(ret, msg, len));
 }
 
