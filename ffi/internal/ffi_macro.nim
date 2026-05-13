@@ -5,6 +5,7 @@ import ../codegen/[meta, string_helpers]
 when defined(ffiGenBindings):
   import ../codegen/rust
   import ../codegen/cpp
+  import ../codegen/cddl
 
 # ---------------------------------------------------------------------------
 # String helpers used by multiple macros
@@ -1421,7 +1422,14 @@ macro genBindings*(
       generateCppBindings(
         ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath
       )
+    of "cddl":
+      generateCddlBindings(
+        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath
+      )
     else:
-      error("genBindings: unknown targetLang '" & lang & "'. Use 'rust' or 'cpp'.")
+      error(
+        "genBindings: unknown targetLang '" & lang &
+        "'. Use 'rust', 'cpp', or 'cddl'."
+      )
 
   return newEmptyNode()
