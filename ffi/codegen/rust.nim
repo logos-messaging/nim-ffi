@@ -4,31 +4,6 @@
 import std/[os, strutils]
 import ./meta
 
-# ---------------------------------------------------------------------------
-# Name conversion helpers
-# ---------------------------------------------------------------------------
-
-proc toSnakeCase*(s: string): string =
-  result = ""
-  for i, c in s:
-    if c.isUpperAscii() and i > 0:
-      result.add('_')
-    result.add(c.toLowerAscii())
-
-proc toPascalCase*(s: string): string =
-  if s.len == 0:
-    return s
-  result = s
-  result[0] = s[0].toUpperAscii()
-
-proc toCamelCase*(s: string): string =
-  ## Converts snake_case to PascalCase for Rust type names.
-  ## e.g. "testlib_create" -> "TestlibCreate"
-  var parts = s.split('_')
-  result = ""
-  for p in parts:
-    result.add toPascalCase(p)
-
 proc nimTypeToRust*(typeName: string): string =
   let t = typeName.strip()
   if t.startsWith("seq[") and t.endsWith("]"):

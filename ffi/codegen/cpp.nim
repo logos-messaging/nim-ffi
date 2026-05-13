@@ -37,18 +37,6 @@ proc nimTypeToCpp*(typeName: string): string =
   of "pointer": "uint64_t"
   else: trimmed
 
-proc capitalizeFirstLetter(s: string): string =
-  if s.len == 0:
-    return s
-  result = s
-  result[0] = s[0].toUpperAscii()
-
-proc toCamelCase(s: string): string =
-  var parts = s.split('_')
-  result = ""
-  for p in parts:
-    result.add capitalizeFirstLetter(p)
-
 proc stripLibPrefixCpp(procName, libName: string): string =
   let prefix = libName & "_"
   if procName.startsWith(prefix):

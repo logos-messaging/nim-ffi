@@ -45,21 +45,6 @@ proc registerFfiTypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
   ffiTypeRegistry.add(FFITypeMeta(name: typeNameStr, fields: fieldMetas))
   result = typeDef
 
-proc capitalizeFirstLetter(s: string): string =
-  ## Returns `s` with the first character uppercased.
-  if s.len == 0:
-    return s
-  result = s
-  result[0] = s[0].toUpperAscii()
-
-proc toCamelCase(s: string): string =
-  ## Converts snake_case or mixed identifiers to CamelCase for type names.
-  ## e.g. "testlib_create" -> "TestlibCreate"
-  var parts = s.split('_')
-  result = ""
-  for p in parts:
-    result.add capitalizeFirstLetter(p)
-
 proc bodyHasAwait(n: NimNode): bool =
   ## Returns true if the AST node `n` contains any `await` or `waitFor` call.
   if n.kind in {nnkCall, nnkCommand}:
