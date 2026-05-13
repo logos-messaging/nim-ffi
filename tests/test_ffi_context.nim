@@ -412,9 +412,8 @@ suite "sendRequestToFFIThread":
 type SimpleLib = object
   value: int
 
-ffiType:
-  type SimpleConfig = object
-    initialValue: int
+type SimpleConfig {.ffi.} = object
+  initialValue: int
 
 proc testlib_create*(
     config: SimpleConfig
@@ -454,9 +453,8 @@ suite "ffiCtor macro":
 # Simplified .ffi. macro integration test
 # ---------------------------------------------------------------------------
 
-ffiType:
-  type SendConfig = object
-    message: string
+type SendConfig {.ffi.} = object
+  message: string
 
 proc testlib_send*(
     lib: SimpleLib, cfg: SendConfig
@@ -558,9 +556,8 @@ suite "async/sync detection in .ffi.":
 type Handle = object
   data: string
 
-ffiType:
-  type NameParam = object
-    name: string
+type NameParam {.ffi.} = object
+  name: string
 
 proc testlib_alloc_handle*(
     lib: SimpleLib, np: NameParam
