@@ -27,7 +27,7 @@ namespace nlohmann {
 }
 
 // ============================================================
-// Types
+// User-declared FFI types
 // ============================================================
 
 struct TimerConfig {
@@ -63,48 +63,59 @@ struct ComplexResponse {
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(ComplexResponse, summary, itemCount, hasNote)
 
 // ============================================================
+// Per-proc request envelopes (CBOR encoded on the wire)
+// ============================================================
+
+struct NimtimerCreateCtorReq {
+    TimerConfig config;
+};
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(NimtimerCreateCtorReq, config)
+
+struct NimtimerEchoReq {
+    EchoRequest req;
+};
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(NimtimerEchoReq, req)
+
+struct NimtimerVersionReq {
+};
+inline void to_json(nlohmann::json& j, const NimtimerVersionReq&) { j = nlohmann::json::object(); }
+inline void from_json(const nlohmann::json&, NimtimerVersionReq&) {}
+
+struct NimtimerComplexReq {
+    ComplexRequest req;
+};
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(NimtimerComplexReq, req)
+
+// ============================================================
 // C FFI declarations
 // ============================================================
 
 extern "C" {
 typedef void (*FfiCallback)(int ret, const char* msg, size_t len, void* user_data);
 
-int nimtimer_create(const char* config_json, FfiCallback callback, void* user_data);
-int nimtimer_echo(void* ctx, FfiCallback callback, void* user_data, const char* req_json);
-int nimtimer_version(void* ctx, FfiCallback callback, void* user_data);
-int nimtimer_complex(void* ctx, FfiCallback callback, void* user_data, const char* req_json);
-void nimtimer_destroy(void* ctx);
+void* nimtimer_create(const uint8_t* req_cbor, size_t req_cbor_len, FfiCallback callback, void* user_data);
+int nimtimer_echo(void* ctx, FfiCallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int nimtimer_version(void* ctx, FfiCallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int nimtimer_complex(void* ctx, FfiCallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int nimtimer_destroy(void* ctx, FfiCallback callback, void* user_data);
 } // extern "C"
 
 template<typename T>
-inline std::string serializeFfiArg(const T& value) {
-    return nlohmann::json(value).dump();
-}
-
-inline std::string serializeFfiArg(void* value) {
-    return std::to_string(reinterpret_cast<uintptr_t>(value));
+inline std::vector<std::uint8_t> encodeCborFfi(const T& value) {
+    return nlohmann::json::to_cbor(nlohmann::json(value));
 }
 
 template<typename T>
-inline T deserializeFfiResult(const std::string& raw) {
+inline T decodeCborFfi(const std::vector<std::uint8_t>& bytes) {
     try {
-        return nlohmann::json::parse(raw).get<T>();
+        return nlohmann::json::from_cbor(bytes).get<T>();
     } catch (const nlohmann::json::exception& e) {
-        throw std::runtime_error(std::string("FFI response deserialization failed: ") + e.what());
-    }
-}
-
-template<>
-inline void* deserializeFfiResult<void*>(const std::string& raw) {
-    try {
-        return reinterpret_cast<void*>(static_cast<uintptr_t>(std::stoull(raw)));
-    } catch (const std::exception& e) {
-        throw std::runtime_error(std::string("FFI returned non-numeric address: ") + raw);
+        throw std::runtime_error(std::string("FFI CBOR decode failed: ") + e.what());
     }
 }
 
 // ============================================================
-// Synchronous call helper (anonymous namespace, header-only)
+// Synchronous call helper
 // ============================================================
 
 namespace {
@@ -114,24 +125,33 @@ struct FfiCallState_ {
     std::condition_variable cv;
     bool                    done{false};
     bool                    ok{false};
-    std::string             msg;
+    std::vector<std::uint8_t> bytes;
+    std::string             err;
 };
 
-inline void ffi_cb_(int ret, const char* msg, size_t /*len*/, void* ud) {
+inline void ffi_cb_(int ret, const char* msg, size_t len, void* ud) {
     auto* sptr = static_cast<std::shared_ptr<FfiCallState_>*>(ud);
     {
         auto& s = **sptr;
         std::lock_guard<std::mutex> lock(s.mtx);
         s.ok   = (ret == 0);
-        s.msg  = msg ? std::string(msg) : std::string{};
+        if (msg && len > 0) {
+            if (s.ok) {
+                s.bytes.assign(
+                    reinterpret_cast<const std::uint8_t*>(msg),
+                    reinterpret_cast<const std::uint8_t*>(msg) + len);
+            } else {
+                s.err.assign(msg, len);
+            }
+        }
         s.done = true;
         s.cv.notify_one();
     }
     delete sptr;
 }
 
-inline std::string ffi_call_(std::function<int(FfiCallback, void*)> f,
-                             std::chrono::milliseconds timeout) {
+inline std::vector<std::uint8_t> ffi_call_(std::function<int(FfiCallback, void*)> f,
+                                          std::chrono::milliseconds timeout) {
     auto state = std::make_shared<FfiCallState_>();
     auto* cb_ref = new std::shared_ptr<FfiCallState_>(state);
     const int ret = f(ffi_cb_, cb_ref);
@@ -144,8 +164,8 @@ inline std::string ffi_call_(std::function<int(FfiCallback, void*)> f,
     if (!fired)
         throw std::runtime_error("FFI call timed out after " + std::to_string(timeout.count()) + "ms");
     if (!state->ok)
-        throw std::runtime_error(state->msg);
-    return state->msg;
+        throw std::runtime_error(state->err);
+    return state->bytes;
 }
 
 } // anonymous namespace
@@ -157,15 +177,17 @@ inline std::string ffi_call_(std::function<int(FfiCallback, void*)> f,
 class NimTimerCtx {
 public:
     static NimTimerCtx create(const TimerConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
-        const auto config_json = serializeFfiArg(config);
+        const auto req = NimtimerCreateCtorReq{config};
+        const auto req_bytes = encodeCborFfi(req);
         const auto raw = ffi_call_([&](FfiCallback cb, void* ud) {
-            return nimtimer_create(config_json.c_str(), cb, ud);
+            return nimtimer_create(req_bytes.data(), req_bytes.size(), cb, ud);
         }, timeout);
+        const auto addr_str = decodeCborFfi<std::string>(raw);
         try {
-            const auto addr = std::stoull(raw);
+            const auto addr = std::stoull(addr_str);
             return NimTimerCtx(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout);
         } catch (const std::exception&) {
-            throw std::runtime_error("FFI create returned non-numeric address: " + raw);
+            throw std::runtime_error("FFI create returned non-numeric address: " + addr_str);
         }
     }
 
@@ -175,7 +197,7 @@ public:
 
     ~NimTimerCtx() {
         if (ptr_) {
-            nimtimer_destroy(ptr_);
+            nimtimer_destroy(ptr_, nullptr, nullptr);
             ptr_ = nullptr;
         }
     }
@@ -188,7 +210,7 @@ public:
     }
     NimTimerCtx& operator=(NimTimerCtx&& other) noexcept {
         if (this != &other) {
-            if (ptr_) nimtimer_destroy(ptr_);
+            if (ptr_) nimtimer_destroy(ptr_, nullptr, nullptr);
             ptr_ = other.ptr_;
             timeout_ = other.timeout_;
             other.ptr_ = nullptr;
@@ -197,11 +219,12 @@ public:
     }
 
     EchoResponse echo(const EchoRequest& req) const {
-        const auto req_json = serializeFfiArg(req);
+        const auto req = NimtimerEchoReq{req};
+        const auto req_bytes = encodeCborFfi(req);
         const auto raw = ffi_call_([&](FfiCallback cb, void* ud) {
-            return nimtimer_echo(ptr_, cb, ud, req_json.c_str());
+            return nimtimer_echo(ptr_, cb, ud, req_bytes.data(), req_bytes.size());
         }, timeout_);
-        return deserializeFfiResult<EchoResponse>(raw);
+        return decodeCborFfi<EchoResponse>(raw);
     }
 
     std::future<EchoResponse> echoAsync(const EchoRequest& req) const {
@@ -209,10 +232,12 @@ public:
     }
 
     std::string version() const {
+        const auto req = NimtimerVersionReq{};
+        const auto req_bytes = encodeCborFfi(req);
         const auto raw = ffi_call_([&](FfiCallback cb, void* ud) {
-            return nimtimer_version(ptr_, cb, ud);
+            return nimtimer_version(ptr_, cb, ud, req_bytes.data(), req_bytes.size());
         }, timeout_);
-        return deserializeFfiResult<std::string>(raw);
+        return decodeCborFfi<std::string>(raw);
     }
 
     std::future<std::string> versionAsync() const {
@@ -220,11 +245,12 @@ public:
     }
 
     ComplexResponse complex(const ComplexRequest& req) const {
-        const auto req_json = serializeFfiArg(req);
+        const auto req = NimtimerComplexReq{req};
+        const auto req_bytes = encodeCborFfi(req);
         const auto raw = ffi_call_([&](FfiCallback cb, void* ud) {
-            return nimtimer_complex(ptr_, cb, ud, req_json.c_str());
+            return nimtimer_complex(ptr_, cb, ud, req_bytes.data(), req_bytes.size());
         }, timeout_);
-        return deserializeFfiResult<ComplexResponse>(raw);
+        return decodeCborFfi<ComplexResponse>(raw);
     }
 
     std::future<ComplexResponse> complexAsync(const ComplexRequest& req) const {

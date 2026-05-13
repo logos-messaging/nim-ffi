@@ -9,8 +9,9 @@ pub type FfiCallback = unsafe extern "C" fn(
 
 #[link(name = "nimtimer")]
 extern "C" {
-    pub fn nimtimer_create(config_json: *const c_char, callback: FfiCallback, user_data: *mut c_void) -> c_int;
-    pub fn nimtimer_echo(ctx: *mut c_void, callback: FfiCallback, user_data: *mut c_void, req_json: *const c_char) -> c_int;
-    pub fn nimtimer_version(ctx: *mut c_void, callback: FfiCallback, user_data: *mut c_void) -> c_int;
-    pub fn nimtimer_complex(ctx: *mut c_void, callback: FfiCallback, user_data: *mut c_void, req_json: *const c_char) -> c_int;
+    pub fn nimtimer_create(req_cbor: *const u8, req_cbor_len: usize, callback: FfiCallback, user_data: *mut c_void) -> *mut c_void;
+    pub fn nimtimer_echo(ctx: *mut c_void, callback: FfiCallback, user_data: *mut c_void, req_cbor: *const u8, req_cbor_len: usize) -> c_int;
+    pub fn nimtimer_version(ctx: *mut c_void, callback: FfiCallback, user_data: *mut c_void, req_cbor: *const u8, req_cbor_len: usize) -> c_int;
+    pub fn nimtimer_complex(ctx: *mut c_void, callback: FfiCallback, user_data: *mut c_void, req_cbor: *const u8, req_cbor_len: usize) -> c_int;
+    pub fn nimtimer_destroy(ctx: *mut c_void, callback: FfiCallback, user_data: *mut c_void) -> c_int;
 }

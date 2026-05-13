@@ -1,5 +1,5 @@
 ## Rust binding generator for the nim-ffi framework.
-## Generates a complete Rust crate from compile-time FFI metadata.
+## Generates a complete Rust crate that uses CBOR (ciborium) on the wire.
 
 import std/[os, strutils]
 import ./meta
@@ -9,8 +9,6 @@ import ./meta
 # ---------------------------------------------------------------------------
 
 proc toSnakeCase*(s: string): string =
-  ## Converts camelCase to snake_case.
-  ## e.g. "delayMs" → "delay_ms", "timerName" → "timer_name"
   result = ""
   for i, c in s:
     if c.isUpperAscii() and i > 0:
@@ -18,14 +16,20 @@ proc toSnakeCase*(s: string): string =
     result.add(c.toLowerAscii())
 
 proc toPascalCase*(s: string): string =
-  ## Converts the first letter to uppercase.
   if s.len == 0:
     return s
   result = s
   result[0] = s[0].toUpperAscii()
 
+proc toCamelCase*(s: string): string =
+  ## Converts snake_case to PascalCase for Rust type names.
+  ## e.g. "testlib_create" -> "TestlibCreate"
+  var parts = s.split('_')
+  result = ""
+  for p in parts:
+    result.add toPascalCase(p)
+
 proc nimTypeToRust*(typeName: string): string =
-  ## Maps Nim type names to Rust type names, including generics.
   let t = typeName.strip()
   if t.startsWith("seq[") and t.endsWith("]"):
     return "Vec<" & nimTypeToRust(t[4 .. ^2]) & ">"
@@ -39,12 +43,10 @@ proc nimTypeToRust*(typeName: string): string =
   of "int32": "i32"
   of "bool": "bool"
   of "float", "float64": "f64"
-  of "pointer": "usize"
+  of "pointer": "u64"
   else: toPascalCase(t)
 
 proc deriveLibName*(procs: seq[FFIProcMeta]): string =
-  ## Extracts the common prefix before the first `_` from proc names.
-  ## e.g. ["nimtimer_create", "nimtimer_echo"] → "nimtimer"
   if currentLibName.len > 0:
     return currentLibName
   if procs.len == 0:
@@ -56,12 +58,15 @@ proc deriveLibName*(procs: seq[FFIProcMeta]): string =
   return "unknown"
 
 proc stripLibPrefix*(procName: string, libName: string): string =
-  ## Strips the library prefix from a proc name.
-  ## e.g. "nimtimer_echo", "nimtimer" → "echo"
   let prefix = libName & "_"
   if procName.startsWith(prefix):
     return procName[prefix.len .. ^1]
   return procName
+
+proc reqStructName(p: FFIProcMeta): string =
+  ## Mirrors the Nim macro: <CamelCase(procName)>Req or CtorReq for ctors.
+  let camel = toCamelCase(p.procName)
+  if p.kind == ffiCtorKind: camel & "CtorReq" else: camel & "Req"
 
 # ---------------------------------------------------------------------------
 # File generators
@@ -76,14 +81,12 @@ edition = "2021"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+ciborium = "0.2"
 tokio = { version = "1", features = ["sync"] }
 """ %
     [libName]
 
 proc generateBuildRs*(libName: string, nimSrcRelPath: string): string =
-  ## Generates build.rs that compiles the Nim library.
-  ## nimSrcRelPath is relative to the output (crate) directory.
   let escapedSrc = nimSrcRelPath.replace("\\", "\\\\")
   result =
     """use std::path::PathBuf;
@@ -94,10 +97,6 @@ fn main() {
     let nim_src = manifest.join("$1");
     let nim_src = nim_src.canonicalize().unwrap_or(manifest.join("$1"));
 
-    // Walk up to find the nim-ffi repo root (directory containing nim_src's library)
-    // The repo root is where nim c should be run from (contains config.nims).
-    // We assume nim_src lives somewhere under repo_root.
-    // Derive repo_root as the ancestor that contains the .nimble file or config.nims.
     let mut repo_root = nim_src.clone();
     loop {
         repo_root = match repo_root.parent() {
@@ -145,7 +144,8 @@ pub use api::*;
 """
 
 proc generateFfiRs*(procs: seq[FFIProcMeta]): string =
-  ## Generates ffi.rs with extern "C" declarations for all procs.
+  ## Generates ffi.rs with extern "C" declarations. Each Nim FFI proc takes a
+  ## single CBOR buffer (ptr+len) for its request payload.
   var lines: seq[string] = @[]
   lines.add("use std::os::raw::{c_char, c_int, c_void};")
   lines.add("")
@@ -157,18 +157,15 @@ proc generateFfiRs*(procs: seq[FFIProcMeta]): string =
   lines.add(");")
   lines.add("")
 
-  # Collect unique lib names for #[link(...)]
   var libNames: seq[string] = @[]
   for p in procs:
     if p.libName notin libNames:
       libNames.add(p.libName)
 
-  # Derive lib name from proc names if not set
   var linkLibName = ""
   if libNames.len > 0 and libNames[0].len > 0:
     linkLibName = libNames[0]
   else:
-    # derive from first proc name
     if procs.len > 0:
       let parts = procs[0].procName.split('_')
       if parts.len > 0:
@@ -179,28 +176,36 @@ proc generateFfiRs*(procs: seq[FFIProcMeta]): string =
 
   for p in procs:
     var params: seq[string] = @[]
-    if p.kind in {ffiFfiKind, ffiDtorKind}:
-      # Method/destructor: ctx comes first
+    case p.kind
+    of ffiFfiKind:
       params.add("ctx: *mut c_void")
       params.add("callback: FfiCallback")
       params.add("user_data: *mut c_void")
-      for ep in p.extraParams:
-        params.add("$1_json: *const c_char" % [toSnakeCase(ep.name)])
-    else:
-      # Constructor: no ctx
-      for ep in p.extraParams:
-        params.add("$1_json: *const c_char" % [toSnakeCase(ep.name)])
+      params.add("req_cbor: *const u8")
+      params.add("req_cbor_len: usize")
+      lines.add("    pub fn $1($2) -> c_int;" % [p.procName, params.join(", ")])
+    of ffiCtorKind:
+      params.add("req_cbor: *const u8")
+      params.add("req_cbor_len: usize")
       params.add("callback: FfiCallback")
       params.add("user_data: *mut c_void")
-
-    let paramStr = params.join(", ")
-    lines.add("    pub fn $1($2) -> c_int;" % [p.procName, paramStr])
+      lines.add(
+        "    pub fn $1($2) -> *mut c_void;" % [p.procName, params.join(", ")]
+      )
+    of ffiDtorKind:
+      params.add("ctx: *mut c_void")
+      params.add("callback: FfiCallback")
+      params.add("user_data: *mut c_void")
+      lines.add("    pub fn $1($2) -> c_int;" % [p.procName, params.join(", ")])
 
   lines.add("}")
   result = lines.join("\n") & "\n"
 
-proc generateTypesRs*(types: seq[FFITypeMeta]): string =
-  ## Generates types.rs with Rust structs for all FFI types.
+proc generateTypesRs*(
+    types: seq[FFITypeMeta], procs: seq[FFIProcMeta]
+): string =
+  ## Generates types.rs with Rust structs for all user-declared FFI types and
+  ## for each per-proc Req struct (matching the Nim macro's generated types).
   var lines: seq[string] = @[]
   lines.add("use serde::{Deserialize, Serialize};")
   lines.add("")
@@ -211,29 +216,46 @@ proc generateTypesRs*(types: seq[FFITypeMeta]): string =
     for f in t.fields:
       let snakeName = toSnakeCase(f.name)
       let rustType = nimTypeToRust(f.typeName)
-      # Add serde rename if camelCase name differs from snake_case
       if snakeName != f.name:
         lines.add("    #[serde(rename = \"$1\")]" % [f.name])
       lines.add("    pub $1: $2," % [snakeName, rustType])
     lines.add("}")
     lines.add("")
 
+  # Per-proc Req structs — these wrap the typed parameters and are the unit of
+  # CBOR encoding sent across the FFI boundary.
+  for p in procs:
+    if p.kind == ffiDtorKind:
+      continue
+    let reqName = reqStructName(p)
+    lines.add("#[derive(Debug, Clone, Serialize, Deserialize)]")
+    if p.extraParams.len == 0:
+      lines.add("pub struct $1 {}" % [reqName])
+    else:
+      lines.add("pub struct $1 {" % [reqName])
+      for ep in p.extraParams:
+        let snake = toSnakeCase(ep.name)
+        let rustType =
+          if ep.isPtr: "u64"
+          else: nimTypeToRust(ep.typeName)
+        if snake != ep.name:
+          lines.add("    #[serde(rename = \"$1\")]" % [ep.name])
+        lines.add("    pub $1: $2," % [snake, rustType])
+      lines.add("}")
+    lines.add("")
+
   result = lines.join("\n")
 
 proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
-  ## Generates api.rs with both a blocking and a tokio-async high-level API.
-  ##
-  ## Blocking: ctx.echo(req)           — thread-blocks via Condvar
-  ## Async:    ctx.echo_async(req).await — non-blocking via oneshot channel;
-  ##           the FFI callback fires from the Nim/chronos thread and wakes
-  ##           the awaiting task without ever blocking a thread.
+  ## Generates api.rs with a blocking and a tokio-async high-level API.
+  ## Requests/responses are CBOR (ciborium); errors are raw UTF-8 strings.
   var lines: seq[string] = @[]
 
   var ctors: seq[FFIProcMeta] = @[]
   var methods: seq[FFIProcMeta] = @[]
   for p in procs:
     if p.kind == ffiCtorKind: ctors.add(p)
-    else: methods.add(p)
+    elif p.kind == ffiFfiKind: methods.add(p)
 
   var libTypeName = ""
   if ctors.len > 0: libTypeName = ctors[0].libTypeName
@@ -242,18 +264,36 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   let ctxTypeName = libTypeName & "Ctx"
 
   # ── Imports ────────────────────────────────────────────────────────────────
-  lines.add("use std::ffi::{CStr, CString};")
   lines.add("use std::os::raw::{c_char, c_int, c_void};")
+  lines.add("use std::slice;")
   lines.add("use std::sync::{Arc, Condvar, Mutex};")
   lines.add("use std::time::Duration;")
+  lines.add("use serde::de::DeserializeOwned;")
+  lines.add("use serde::Serialize;")
   lines.add("use super::ffi;")
   lines.add("use super::types::*;")
   lines.add("")
 
+  # ── CBOR helpers ───────────────────────────────────────────────────────────
+  lines.add("fn encode_cbor<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {")
+  lines.add("    let mut buf = Vec::new();")
+  lines.add("    ciborium::ser::into_writer(value, &mut buf).map_err(|e| e.to_string())?;")
+  lines.add("    Ok(buf)")
+  lines.add("}")
+  lines.add("")
+  lines.add(
+    "fn decode_cbor<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {"
+  )
+  lines.add("    ciborium::de::from_reader(bytes).map_err(|e| e.to_string())")
+  lines.add("}")
+  lines.add("")
+
   # ── Blocking trampoline ────────────────────────────────────────────────────
+  # The callback payload is raw bytes — CBOR on RET_OK, UTF-8 on RET_ERR. We
+  # buffer it as Vec<u8> and decode on the caller side.
   lines.add("#[derive(Default)]")
   lines.add("struct FfiCallbackResult {")
-  lines.add("    payload: Option<Result<String, String>>,")
+  lines.add("    payload: Option<Result<Vec<u8>, String>>,")
   lines.add("}")
   lines.add("")
   lines.add("type Pair = Arc<(Mutex<FfiCallbackResult>, Condvar)>;")
@@ -261,24 +301,29 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   lines.add("unsafe extern \"C\" fn on_result(")
   lines.add("    ret: c_int,")
   lines.add("    msg: *const c_char,")
-  lines.add("    _len: usize,")
+  lines.add("    len: usize,")
   lines.add("    user_data: *mut c_void,")
   lines.add(") {")
   lines.add("    let pair = Arc::from_raw(user_data as *const (Mutex<FfiCallbackResult>, Condvar));")
   lines.add("    {")
   lines.add("        let (lock, cvar) = &*pair;")
   lines.add("        let mut state = lock.lock().unwrap();")
-  lines.add("        state.payload = Some(if ret == 0 {")
-  lines.add("            Ok(CStr::from_ptr(msg).to_string_lossy().into_owned())")
+  lines.add("        let bytes = if msg.is_null() || len == 0 {")
+  lines.add("            Vec::new()")
   lines.add("        } else {")
-  lines.add("            Err(CStr::from_ptr(msg).to_string_lossy().into_owned())")
+  lines.add("            slice::from_raw_parts(msg as *const u8, len).to_vec()")
+  lines.add("        };")
+  lines.add("        state.payload = Some(if ret == 0 {")
+  lines.add("            Ok(bytes)")
+  lines.add("        } else {")
+  lines.add("            Err(String::from_utf8_lossy(&bytes).into_owned())")
   lines.add("        });")
   lines.add("        cvar.notify_one();")
   lines.add("    }")
   lines.add("    std::mem::forget(pair);")
   lines.add("}")
   lines.add("")
-  lines.add("fn ffi_call<F>(timeout: Duration, f: F) -> Result<String, String>")
+  lines.add("fn ffi_call<F>(timeout: Duration, f: F) -> Result<Vec<u8>, String>")
   lines.add("where")
   lines.add("    F: FnOnce(ffi::FfiCallback, *mut c_void) -> c_int,")
   lines.add("{")
@@ -301,40 +346,40 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   lines.add("")
 
   # ── Async (tokio oneshot) trampoline ───────────────────────────────────────
-  # The callback is invoked from the Nim/chronos thread and sends the result
-  # through the oneshot channel, waking the awaiting tokio task without
-  # blocking any thread.
   lines.add("unsafe extern \"C\" fn on_result_async(")
   lines.add("    ret: c_int,")
   lines.add("    msg: *const c_char,")
-  lines.add("    _len: usize,")
+  lines.add("    len: usize,")
   lines.add("    user_data: *mut c_void,")
   lines.add(") {")
   lines.add("    let tx = Box::from_raw(")
-  lines.add("        user_data as *mut tokio::sync::oneshot::Sender<Result<String, String>>,")
+  lines.add("        user_data as *mut tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>,")
   lines.add("    );")
-  lines.add("    let value = if ret == 0 {")
-  lines.add("        Ok(CStr::from_ptr(msg).to_string_lossy().into_owned())")
+  lines.add("    let bytes = if msg.is_null() || len == 0 {")
+  lines.add("        Vec::new()")
   lines.add("    } else {")
-  lines.add("        Err(CStr::from_ptr(msg).to_string_lossy().into_owned())")
+  lines.add("        slice::from_raw_parts(msg as *const u8, len).to_vec()")
+  lines.add("    };")
+  lines.add("    let value = if ret == 0 {")
+  lines.add("        Ok(bytes)")
+  lines.add("    } else {")
+  lines.add("        Err(String::from_utf8_lossy(&bytes).into_owned())")
   lines.add("    };")
   lines.add("    let _ = tx.send(value);")
   lines.add("}")
   lines.add("")
-  # Scoped block keeps raw/tx/F dead at the single await point so the
-  # returned future is Send regardless of whether F itself is Send.
-  lines.add("async fn ffi_call_async<F>(f: F) -> Result<String, String>")
+  lines.add("async fn ffi_call_async<F>(f: F) -> Result<Vec<u8>, String>")
   lines.add("where")
   lines.add("    F: FnOnce(ffi::FfiCallback, *mut c_void) -> c_int,")
   lines.add("{")
   lines.add("    let rx = {")
-  lines.add("        let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();")
+  lines.add("        let (tx, rx) = tokio::sync::oneshot::channel::<Result<Vec<u8>, String>>();")
   lines.add("        let raw = Box::into_raw(Box::new(tx)) as *mut c_void;")
   lines.add("        let ret = f(on_result_async, raw);")
   lines.add("        if ret == 2 {")
   lines.add("            drop(unsafe {")
   lines.add("                Box::from_raw(")
-  lines.add("                    raw as *mut tokio::sync::oneshot::Sender<Result<String, String>>,")
+  lines.add("                    raw as *mut tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>,")
   lines.add("                )")
   lines.add("            });")
   lines.add("            return Err(\"RET_MISSING_CALLBACK (internal error)\".into());")
@@ -359,60 +404,50 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
 
   # ── Constructors ───────────────────────────────────────────────────────────
   for ctor in ctors:
-    var asyncParamsList: seq[string] = @[]
+    let reqName = reqStructName(ctor)
+    var paramsList: seq[string] = @[]
+    var fieldInits: seq[string] = @[]
     for ep in ctor.extraParams:
-      asyncParamsList.add(
-        "$1: $2" % [toSnakeCase(ep.name), nimTypeToRust(ep.typeName)]
-      )
-    let asyncParamsStr = asyncParamsList.join(", ")
+      let snake = toSnakeCase(ep.name)
+      let rustType =
+        if ep.isPtr: "u64"
+        else: nimTypeToRust(ep.typeName)
+      paramsList.add("$1: $2" % [snake, rustType])
+      fieldInits.add(snake)
+    let asyncParamsStr = paramsList.join(", ")
     let blockingParamsStr =
-      if asyncParamsList.len > 0: asyncParamsList.join(", ") & ", timeout: Duration"
+      if paramsList.len > 0: paramsList.join(", ") & ", timeout: Duration"
       else: "timeout: Duration"
 
-    # Helper: emit JSON serialization lines for extra params
-    template emitSerialize(snakeName, rustType: string) =
-      if rustType == "String":
-        lines.add(
-          "        let $1_json_str = serde_json::to_string(&$1).map_err(|e| e.to_string())?;" %
-            [snakeName]
-        )
-        lines.add("        let $1_c = CString::new($1_json_str).unwrap();" % [snakeName])
+    let reqLit =
+      if fieldInits.len > 0:
+        reqName & " { " & fieldInits.join(", ") & " }"
       else:
-        lines.add(
-          "        let $1_json = serde_json::to_string(&$1).map_err(|e| e.to_string())?;" %
-            [snakeName]
-        )
-        lines.add("        let $1_c = CString::new($1_json).unwrap();" % [snakeName])
-
-    # Build the ordered arg list for the raw FFI call (ctor: params, cb, ud)
-    var ffiCallArgs: seq[string] = @[]
-    for ep in ctor.extraParams:
-      ffiCallArgs.add("$1_c.as_ptr()" % [toSnakeCase(ep.name)])
-    ffiCallArgs.add("cb")
-    ffiCallArgs.add("ud")
-    let ffiCallArgsStr = ffiCallArgs.join(", ")
+        reqName & " {}"
 
     # -- blocking create --
     lines.add("    pub fn create($1) -> Result<Self, String> {" % [blockingParamsStr])
-    for ep in ctor.extraParams:
-      emitSerialize(toSnakeCase(ep.name), nimTypeToRust(ep.typeName))
-    lines.add("        let raw = ffi_call(timeout, |cb, ud| unsafe {")
-    lines.add("            ffi::$1($2)" % [ctor.procName, ffiCallArgsStr])
+    lines.add("        let req = $1;" % [reqLit])
+    lines.add("        let req_bytes = encode_cbor(&req)?;")
+    lines.add("        let raw_bytes = ffi_call(timeout, |cb, ud| unsafe {")
+    lines.add("            ffi::$1(req_bytes.as_ptr(), req_bytes.len(), cb, ud)" % [ctor.procName])
     lines.add("        })?;")
-    lines.add("        let addr: usize = raw.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;")
+    # The ctor success payload is a CBOR text string holding the ctx address.
+    lines.add("        let addr_str: String = decode_cbor(&raw_bytes)?;")
+    lines.add("        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;")
     lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout })")
     lines.add("    }")
     lines.add("")
 
     # -- async new_async --
-    # move closure: each CString is moved in (Send), no raw ptr escapes the block
     lines.add("    pub async fn new_async($1) -> Result<Self, String> {" % [asyncParamsStr])
-    for ep in ctor.extraParams:
-      emitSerialize(toSnakeCase(ep.name), nimTypeToRust(ep.typeName))
-    lines.add("        let raw = ffi_call_async(move |cb, ud| unsafe {")
-    lines.add("            ffi::$1($2)" % [ctor.procName, ffiCallArgsStr])
+    lines.add("        let req = $1;" % [reqLit])
+    lines.add("        let req_bytes = encode_cbor(&req)?;")
+    lines.add("        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {")
+    lines.add("            ffi::$1(req_bytes.as_ptr(), req_bytes.len(), cb, ud)" % [ctor.procName])
     lines.add("        }).await?;")
-    lines.add("        let addr: usize = raw.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;")
+    lines.add("        let addr_str: String = decode_cbor(&raw_bytes)?;")
+    lines.add("        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;")
     lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout: Duration::from_secs(30) })")
     lines.add("    }")
     lines.add("")
@@ -421,67 +456,61 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   for m in methods:
     let methodName = stripLibPrefix(m.procName, libName)
     let retRustType = nimTypeToRust(m.returnTypeName)
+    let reqName = reqStructName(m)
 
     var paramsList: seq[string] = @[]
+    var fieldInits: seq[string] = @[]
     for ep in m.extraParams:
-      paramsList.add("$1: $2" % [toSnakeCase(ep.name), nimTypeToRust(ep.typeName)])
+      let snake = toSnakeCase(ep.name)
+      let rustType =
+        if ep.isPtr: "u64"
+        else: nimTypeToRust(ep.typeName)
+      paramsList.add("$1: $2" % [snake, rustType])
+      fieldInits.add(snake)
     let paramsStr = if paramsList.len > 0: ", " & paramsList.join(", ") else: ""
 
-    template emitSerialize(snakeName, rustType: string) =
-      if rustType == "String":
-        lines.add(
-          "        let $1_json_str = serde_json::to_string(&$1).map_err(|e| e.to_string())?;" %
-            [snakeName]
-        )
-        lines.add("        let $1_c = CString::new($1_json_str).unwrap();" % [snakeName])
+    let reqLit =
+      if fieldInits.len > 0:
+        reqName & " { " & fieldInits.join(", ") & " }"
       else:
-        lines.add(
-          "        let $1_json = serde_json::to_string(&$1).map_err(|e| e.to_string())?;" %
-            [snakeName]
-        )
-        lines.add("        let $1_c = CString::new($1_json).unwrap();" % [snakeName])
+        reqName & " {}"
 
-    template emitDeserialize(retRustType: string) =
-      if retRustType == "String":
-        lines.add("        serde_json::from_str::<String>(&raw).map_err(|e| e.to_string())")
-      elif retRustType == "usize":
-        lines.add("        raw.parse::<usize>().map_err(|e| e.to_string())")
-      else:
-        lines.add(
-          "        serde_json::from_str::<$1>(&raw).map_err(|e| e.to_string())" % [retRustType]
-        )
+    let retTypeForApi =
+      if m.returnIsPtr: "u64"
+      else: retRustType
 
     # -- blocking method --
-    lines.add("    pub fn $1(&self$2) -> Result<$3, String> {" % [methodName, paramsStr, retRustType])
-    for ep in m.extraParams:
-      emitSerialize(toSnakeCase(ep.name), nimTypeToRust(ep.typeName))
-    var ffiArgs: seq[string] = @["self.ptr", "cb", "ud"]
-    for ep in m.extraParams:
-      ffiArgs.add("$1_c.as_ptr()" % [toSnakeCase(ep.name)])
-    let ffiArgsStr = ffiArgs.join(", ")
-    lines.add("        let raw = ffi_call(self.timeout, |cb, ud| unsafe {")
-    lines.add("            ffi::$1($2)" % [m.procName, ffiArgsStr])
+    lines.add(
+      "    pub fn $1(&self$2) -> Result<$3, String> {" %
+        [methodName, paramsStr, retTypeForApi]
+    )
+    lines.add("        let req = $1;" % [reqLit])
+    lines.add("        let req_bytes = encode_cbor(&req)?;")
+    lines.add("        let raw_bytes = ffi_call(self.timeout, |cb, ud| unsafe {")
+    lines.add(
+      "            ffi::$1(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())" %
+        [m.procName]
+    )
     lines.add("        })?;")
-    emitDeserialize(retRustType)
+    lines.add("        decode_cbor::<$1>(&raw_bytes)" % [retTypeForApi])
     lines.add("    }")
     lines.add("")
 
     # -- async method --
-    # ptr is cast to usize (Copy + Send) so the move closure is Send,
-    # keeping the returned future Send for multi-threaded tokio runtimes.
-    lines.add("    pub async fn $1_async(&self$2) -> Result<$3, String> {" %
-      [methodName, paramsStr, retRustType])
-    for ep in m.extraParams:
-      emitSerialize(toSnakeCase(ep.name), nimTypeToRust(ep.typeName))
+    lines.add(
+      "    pub async fn $1_async(&self$2) -> Result<$3, String> {" %
+        [methodName, paramsStr, retTypeForApi]
+    )
+    lines.add("        let req = $1;" % [reqLit])
+    lines.add("        let req_bytes = encode_cbor(&req)?;")
     lines.add("        let ptr = self.ptr as usize;")
-    var asyncFfiArgs: seq[string] = @["ptr as *mut c_void", "cb", "ud"]
-    for ep in m.extraParams:
-      asyncFfiArgs.add("$1_c.as_ptr()" % [toSnakeCase(ep.name)])
-    let asyncFfiArgsStr = asyncFfiArgs.join(", ")
-    lines.add("        let raw = ffi_call_async(move |cb, ud| unsafe {")
-    lines.add("            ffi::$1($2)" % [m.procName, asyncFfiArgsStr])
+    lines.add("        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {")
+    lines.add(
+      "            ffi::$1(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())" %
+        [m.procName]
+    )
     lines.add("        }).await?;")
-    emitDeserialize(retRustType)
+    lines.add("        decode_cbor::<$1>(&raw_bytes)" % [retTypeForApi])
     lines.add("    }")
     lines.add("")
 
@@ -495,7 +524,6 @@ proc generateRustCrate*(
     outputDir: string,
     nimSrcRelPath: string,
 ) =
-  ## Generates a complete Rust crate in outputDir.
   createDir(outputDir)
   createDir(outputDir / "src")
 
@@ -503,5 +531,5 @@ proc generateRustCrate*(
   writeFile(outputDir / "build.rs", generateBuildRs(libName, nimSrcRelPath))
   writeFile(outputDir / "src" / "lib.rs", generateLibRs())
   writeFile(outputDir / "src" / "ffi.rs", generateFfiRs(procs))
-  writeFile(outputDir / "src" / "types.rs", generateTypesRs(types))
+  writeFile(outputDir / "src" / "types.rs", generateTypesRs(types, procs))
   writeFile(outputDir / "src" / "api.rs", generateApiRs(procs, libName))

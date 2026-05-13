@@ -54,6 +54,16 @@ proc callbackMsg(d: var CallbackData): string =
   if d.msgLen > 0:
     copyMem(addr result[0], addr d.msg[0], d.msgLen)
 
+proc callbackBytes(d: var CallbackData): seq[byte] =
+  result = newSeq[byte](d.msgLen)
+  if d.msgLen > 0:
+    copyMem(addr result[0], addr d.msg[0], d.msgLen)
+
+proc callbackOkString(d: var CallbackData): string =
+  ## Decodes the CBOR success payload as a string.
+  cborDecode(callbackBytes(d), string).valueOr:
+    return ""
+
 # Concatenates GC-allocated strings so the result is not a string literal;
 # exercises the resStr lifetime binding inside handleRes.
 registerReqFFI(StringLifetimeRequest, lib: ptr GcTestLib):
@@ -107,7 +117,7 @@ suite "GC safety - string lifetime across thread boundary":
     ).isOk()
     waitCallback(d)
     check d.retCode == RET_OK
-    check callbackMsg(d) == "lifetime:hello"
+    check callbackOkString(d) == "lifetime:hello"
 
   test "error string lifetime across thread boundary":
     var d: CallbackData
@@ -125,6 +135,7 @@ suite "GC safety - string lifetime across thread boundary":
     ).isOk()
     waitCallback(d)
     check d.retCode == RET_ERR
+    # Error payloads are raw UTF-8, not CBOR.
     check callbackMsg(d) == "gc-err:test"
 
   test "large string result is delivered without corruption":
@@ -143,10 +154,12 @@ suite "GC safety - string lifetime across thread boundary":
     ).isOk()
     waitCallback(d)
     check d.retCode == RET_OK
-    check d.msgLen == 512
-    check d.msg[0] == 'a'
-    check d.msg[25] == 'z'
-    check d.msg[26] == 'a'
+    # CBOR-encoded 512-char text string: 3 header bytes (0x79 + u16 len) + 512 chars.
+    let decoded = callbackOkString(d)
+    check decoded.len == 512
+    check decoded[0] == 'a'
+    check decoded[25] == 'z'
+    check decoded[26] == 'a'
 
 suite "GC stability - repeated requests":
   test "20 sequential requests without GC corruption":
@@ -164,6 +177,6 @@ suite "GC stability - repeated requests":
         ctx, StringLifetimeRequest.ffiNewReq(testCallback, addr d, input.cstring)
       ).isOk()
       waitCallback(d)
-      deinitCallbackData(d)
       check d.retCode == RET_OK
-      check callbackMsg(d) == "lifetime:" & input
+      check callbackOkString(d) == "lifetime:" & input
+      deinitCallbackData(d)

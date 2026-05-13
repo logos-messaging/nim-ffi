@@ -6,10 +6,6 @@ fn main() {
     let nim_src = manifest.join("../nim_timer.nim");
     let nim_src = nim_src.canonicalize().unwrap_or(manifest.join("../nim_timer.nim"));
 
-    // Walk up to find the nim-ffi repo root (directory containing nim_src's library)
-    // The repo root is where nim c should be run from (contains config.nims).
-    // We assume nim_src lives somewhere under repo_root.
-    // Derive repo_root as the ancestor that contains the .nimble file or config.nims.
     let mut repo_root = nim_src.clone();
     loop {
         repo_root = match repo_root.parent() {

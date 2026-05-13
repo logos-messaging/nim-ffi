@@ -2,11 +2,11 @@ import ffi, chronos, options
 
 type Maybe[T] = Option[T]
 
-declareLibrary("nimtimer")
-
 # The library's main state type. The FFI context owns one instance.
 type NimTimer = object
   name: string # set at creation time, read back in each response
+
+declareLibrary("nimtimer", NimTimer)
 
 type TimerConfig {.ffi.} = object
   name: string
@@ -65,7 +65,12 @@ proc nimtimerComplex*(
   return
     ok(ComplexResponse(summary: summary, itemCount: count, hasNote: req.note.isSome))
 
-# --- genBindings() must come AFTER every {.ffi.} / {.ffiCtor.} annotation ---
+proc nimtimer_destroy*(timer: NimTimer) {.ffiDtor.} =
+  ## Tears down the FFI context created by nimtimer_create.
+  ## Blocks until the FFI thread and watchdog thread have joined.
+  discard
+
+# --- genBindings() must come AFTER every {.ffi.} / {.ffiCtor.} / {.ffiDtor.} ---
 # Each pragma populates ffiProcRegistry / ffiTypeRegistry at compile time as
 # the compiler processes the AST. genBindings() reads those registries to emit
 # the binding files, so placing it any earlier would produce incomplete output.
@@ -73,11 +78,3 @@ proc nimtimerComplex*(
 # once, at the bottom of the top-level compilation-root file.
 # This call is a no-op unless -d:ffiGenBindings is passed to the compiler.
 genBindings()
-
-proc nimtimer_destroy*(ctx: pointer) {.dynlib, exportc, cdecl, raises: [].} =
-  ## Tears down the FFI context created by nimtimer_create.
-  ## Blocks until the FFI thread and watchdog thread have joined.
-  try:
-    discard destroyFFIContext[NimTimer](cast[ptr FFIContext[NimTimer]](ctx))
-  except:
-    discard

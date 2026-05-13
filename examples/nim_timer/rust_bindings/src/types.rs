@@ -35,3 +35,21 @@ pub struct ComplexResponse {
     #[serde(rename = "hasNote")]
     pub has_note: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NimtimerCreateCtorReq {
+    pub config: TimerConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NimtimerEchoReq {
+    pub req: EchoRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NimtimerVersionReq {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NimtimerComplexReq {
+    pub req: ComplexRequest,
+}

@@ -28,12 +28,10 @@ if("${REPO_ROOT}" STREQUAL "")
     message(FATAL_ERROR "Cannot find repo root (no ffi.nimble in any ancestor)")
 endif()
 
-# ── Nim source path ───────────────────────────────────────────────────────────
 get_filename_component(NIM_SRC
     "${CMAKE_CURRENT_SOURCE_DIR}/../nim_timer.nim"
     ABSOLUTE)
 
-# ── Compile the Nim shared library ───────────────────────────────────────────
 find_program(NIM_EXECUTABLE nim REQUIRED)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
@@ -65,12 +63,10 @@ add_library(nimtimer SHARED IMPORTED GLOBAL)
 set_target_properties(nimtimer PROPERTIES IMPORTED_LOCATION "${NIM_LIB_FILE}")
 add_dependencies(nimtimer nim_lib)
 
-# ── Interface target exposing the generated header ────────────────────────────
 add_library(nimtimer_headers INTERFACE)
 target_include_directories(nimtimer_headers INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(nimtimer_headers INTERFACE nimtimer nlohmann_json::nlohmann_json)
 
-# ── Optional example executable ───────────────────────────────────────────────
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp")
     add_executable(example main.cpp)
     target_link_libraries(example PRIVATE nimtimer_headers)

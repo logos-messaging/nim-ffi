@@ -1,13 +1,25 @@
-use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
+use std::slice;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use super::ffi;
 use super::types::*;
 
+fn encode_cbor<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(value, &mut buf).map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
+fn decode_cbor<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
+    ciborium::de::from_reader(bytes).map_err(|e| e.to_string())
+}
+
 #[derive(Default)]
 struct FfiCallbackResult {
-    payload: Option<Result<String, String>>,
+    payload: Option<Result<Vec<u8>, String>>,
 }
 
 type Pair = Arc<(Mutex<FfiCallbackResult>, Condvar)>;
@@ -15,24 +27,29 @@ type Pair = Arc<(Mutex<FfiCallbackResult>, Condvar)>;
 unsafe extern "C" fn on_result(
     ret: c_int,
     msg: *const c_char,
-    _len: usize,
+    len: usize,
     user_data: *mut c_void,
 ) {
     let pair = Arc::from_raw(user_data as *const (Mutex<FfiCallbackResult>, Condvar));
     {
         let (lock, cvar) = &*pair;
         let mut state = lock.lock().unwrap();
-        state.payload = Some(if ret == 0 {
-            Ok(CStr::from_ptr(msg).to_string_lossy().into_owned())
+        let bytes = if msg.is_null() || len == 0 {
+            Vec::new()
         } else {
-            Err(CStr::from_ptr(msg).to_string_lossy().into_owned())
+            slice::from_raw_parts(msg as *const u8, len).to_vec()
+        };
+        state.payload = Some(if ret == 0 {
+            Ok(bytes)
+        } else {
+            Err(String::from_utf8_lossy(&bytes).into_owned())
         });
         cvar.notify_one();
     }
     std::mem::forget(pair);
 }
 
-fn ffi_call<F>(timeout: Duration, f: F) -> Result<String, String>
+fn ffi_call<F>(timeout: Duration, f: F) -> Result<Vec<u8>, String>
 where
     F: FnOnce(ffi::FfiCallback, *mut c_void) -> c_int,
 {
@@ -56,32 +73,37 @@ where
 unsafe extern "C" fn on_result_async(
     ret: c_int,
     msg: *const c_char,
-    _len: usize,
+    len: usize,
     user_data: *mut c_void,
 ) {
     let tx = Box::from_raw(
-        user_data as *mut tokio::sync::oneshot::Sender<Result<String, String>>,
+        user_data as *mut tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>,
     );
-    let value = if ret == 0 {
-        Ok(CStr::from_ptr(msg).to_string_lossy().into_owned())
+    let bytes = if msg.is_null() || len == 0 {
+        Vec::new()
     } else {
-        Err(CStr::from_ptr(msg).to_string_lossy().into_owned())
+        slice::from_raw_parts(msg as *const u8, len).to_vec()
+    };
+    let value = if ret == 0 {
+        Ok(bytes)
+    } else {
+        Err(String::from_utf8_lossy(&bytes).into_owned())
     };
     let _ = tx.send(value);
 }
 
-async fn ffi_call_async<F>(f: F) -> Result<String, String>
+async fn ffi_call_async<F>(f: F) -> Result<Vec<u8>, String>
 where
     F: FnOnce(ffi::FfiCallback, *mut c_void) -> c_int,
 {
     let rx = {
-        let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<Vec<u8>, String>>();
         let raw = Box::into_raw(Box::new(tx)) as *mut c_void;
         let ret = f(on_result_async, raw);
         if ret == 2 {
             drop(unsafe {
                 Box::from_raw(
-                    raw as *mut tokio::sync::oneshot::Sender<Result<String, String>>,
+                    raw as *mut tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>,
                 )
             });
             return Err("RET_MISSING_CALLBACK (internal error)".into());
@@ -102,76 +124,82 @@ unsafe impl Sync for NimTimerCtx {}
 
 impl NimTimerCtx {
     pub fn create(config: TimerConfig, timeout: Duration) -> Result<Self, String> {
-        let config_json = serde_json::to_string(&config).map_err(|e| e.to_string())?;
-        let config_c = CString::new(config_json).unwrap();
-        let raw = ffi_call(timeout, |cb, ud| unsafe {
-            ffi::nimtimer_create(config_c.as_ptr(), cb, ud)
+        let req = NimtimerCreateCtorReq { config };
+        let req_bytes = encode_cbor(&req)?;
+        let raw_bytes = ffi_call(timeout, |cb, ud| unsafe {
+            ffi::nimtimer_create(req_bytes.as_ptr(), req_bytes.len(), cb, ud)
         })?;
-        let addr: usize = raw.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
+        let addr_str: String = decode_cbor(&raw_bytes)?;
+        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
         Ok(Self { ptr: addr as *mut c_void, timeout })
     }
 
     pub async fn new_async(config: TimerConfig) -> Result<Self, String> {
-        let config_json = serde_json::to_string(&config).map_err(|e| e.to_string())?;
-        let config_c = CString::new(config_json).unwrap();
-        let raw = ffi_call_async(move |cb, ud| unsafe {
-            ffi::nimtimer_create(config_c.as_ptr(), cb, ud)
+        let req = NimtimerCreateCtorReq { config };
+        let req_bytes = encode_cbor(&req)?;
+        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {
+            ffi::nimtimer_create(req_bytes.as_ptr(), req_bytes.len(), cb, ud)
         }).await?;
-        let addr: usize = raw.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
+        let addr_str: String = decode_cbor(&raw_bytes)?;
+        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
         Ok(Self { ptr: addr as *mut c_void, timeout: Duration::from_secs(30) })
     }
 
     pub fn echo(&self, req: EchoRequest) -> Result<EchoResponse, String> {
-        let req_json = serde_json::to_string(&req).map_err(|e| e.to_string())?;
-        let req_c = CString::new(req_json).unwrap();
-        let raw = ffi_call(self.timeout, |cb, ud| unsafe {
-            ffi::nimtimer_echo(self.ptr, cb, ud, req_c.as_ptr())
+        let req = NimtimerEchoReq { req };
+        let req_bytes = encode_cbor(&req)?;
+        let raw_bytes = ffi_call(self.timeout, |cb, ud| unsafe {
+            ffi::nimtimer_echo(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         })?;
-        serde_json::from_str::<EchoResponse>(&raw).map_err(|e| e.to_string())
+        decode_cbor::<EchoResponse>(&raw_bytes)
     }
 
     pub async fn echo_async(&self, req: EchoRequest) -> Result<EchoResponse, String> {
-        let req_json = serde_json::to_string(&req).map_err(|e| e.to_string())?;
-        let req_c = CString::new(req_json).unwrap();
+        let req = NimtimerEchoReq { req };
+        let req_bytes = encode_cbor(&req)?;
         let ptr = self.ptr as usize;
-        let raw = ffi_call_async(move |cb, ud| unsafe {
-            ffi::nimtimer_echo(ptr as *mut c_void, cb, ud, req_c.as_ptr())
+        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {
+            ffi::nimtimer_echo(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         }).await?;
-        serde_json::from_str::<EchoResponse>(&raw).map_err(|e| e.to_string())
+        decode_cbor::<EchoResponse>(&raw_bytes)
     }
 
     pub fn version(&self) -> Result<String, String> {
-        let raw = ffi_call(self.timeout, |cb, ud| unsafe {
-            ffi::nimtimer_version(self.ptr, cb, ud)
+        let req = NimtimerVersionReq {};
+        let req_bytes = encode_cbor(&req)?;
+        let raw_bytes = ffi_call(self.timeout, |cb, ud| unsafe {
+            ffi::nimtimer_version(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         })?;
-        serde_json::from_str::<String>(&raw).map_err(|e| e.to_string())
+        decode_cbor::<String>(&raw_bytes)
     }
 
     pub async fn version_async(&self) -> Result<String, String> {
+        let req = NimtimerVersionReq {};
+        let req_bytes = encode_cbor(&req)?;
         let ptr = self.ptr as usize;
-        let raw = ffi_call_async(move |cb, ud| unsafe {
-            ffi::nimtimer_version(ptr as *mut c_void, cb, ud)
+        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {
+            ffi::nimtimer_version(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         }).await?;
-        serde_json::from_str::<String>(&raw).map_err(|e| e.to_string())
+        decode_cbor::<String>(&raw_bytes)
     }
 
     pub fn complex(&self, req: ComplexRequest) -> Result<ComplexResponse, String> {
-        let req_json = serde_json::to_string(&req).map_err(|e| e.to_string())?;
-        let req_c = CString::new(req_json).unwrap();
-        let raw = ffi_call(self.timeout, |cb, ud| unsafe {
-            ffi::nimtimer_complex(self.ptr, cb, ud, req_c.as_ptr())
+        let req = NimtimerComplexReq { req };
+        let req_bytes = encode_cbor(&req)?;
+        let raw_bytes = ffi_call(self.timeout, |cb, ud| unsafe {
+            ffi::nimtimer_complex(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         })?;
-        serde_json::from_str::<ComplexResponse>(&raw).map_err(|e| e.to_string())
+        decode_cbor::<ComplexResponse>(&raw_bytes)
     }
 
     pub async fn complex_async(&self, req: ComplexRequest) -> Result<ComplexResponse, String> {
-        let req_json = serde_json::to_string(&req).map_err(|e| e.to_string())?;
-        let req_c = CString::new(req_json).unwrap();
+        let req = NimtimerComplexReq { req };
+        let req_bytes = encode_cbor(&req)?;
         let ptr = self.ptr as usize;
-        let raw = ffi_call_async(move |cb, ud| unsafe {
-            ffi::nimtimer_complex(ptr as *mut c_void, cb, ud, req_c.as_ptr())
+        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {
+            ffi::nimtimer_complex(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         }).await?;
-        serde_json::from_str::<ComplexResponse>(&raw).map_err(|e| e.to_string())
+        decode_cbor::<ComplexResponse>(&raw_bytes)
     }
 
 }

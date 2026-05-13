@@ -4,7 +4,7 @@
 
 import std/[atomics, locks, json, tables]
 import chronicles, chronos, chronos/threadsync, taskpools/channels_spsc_single, results
-import ./ffi_types, ./ffi_thread_request, ./internal/ffi_macro, ./logging
+import ./ffi_types, ./ffi_thread_request, ./internal/ffi_macro, ./logging, ./cbor_serial
 
 type FFICallbackState* = object
   ## Holds the C event callback and its associated user-data pointer.
@@ -201,13 +201,13 @@ proc processRequest[T](
       ## That shouldn't happen because only registered requests should be sent to the FFI thread.
       nilProcess(request[].reqId)
     else:
-      ctx[].registeredRequests[][reqIdCs](request[].reqContent, ctx)
+      ctx[].registeredRequests[][reqIdCs](cast[pointer](request), ctx)
 
   let res =
     try:
       await retFut
     except AsyncError as exc:
-      Result[string, string].err(
+      Result[seq[byte], string].err(
         "Async error in processRequest for " & reqId & ": " & exc.msg
       )
 
