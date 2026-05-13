@@ -64,10 +64,10 @@ type CborReader* = object
   pos*: int
 
 proc newReader*(data: openArray[byte]): CborReader =
-  result.len = data.len
+  var rdr = CborReader(len: data.len, pos: 0)
   if data.len > 0:
-    result.data = cast[ptr UncheckedArray[byte]](unsafeAddr data[0])
-  result.pos = 0
+    rdr.data = cast[ptr UncheckedArray[byte]](unsafeAddr data[0])
+  return rdr
 
 proc remaining(r: CborReader): int =
   r.len - r.pos
@@ -461,4 +461,4 @@ macro ffiType*(body: untyped): untyped =
             fieldMetas.add(FFIFieldMeta(name: $identDef[i], typeName: fieldTypeName))
 
   ffiTypeRegistry.add(FFITypeMeta(name: typeNameStr, fields: fieldMetas))
-  result = body
+  return body

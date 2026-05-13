@@ -14,10 +14,12 @@ proc nimNameToCExport(s: string): string =
   ## Converts a camelCase Nim proc name to a snake_case C export name.
   ## Leaves already-snake_case names unchanged.
   ## e.g. "timerCreate" → "timer_create", "timer_echo" → "timer_echo"
+  var snake = ""
   for i, c in s:
     if c.isUpperAscii() and i > 0:
-      result.add('_')
-    result.add(c.toLowerAscii())
+      snake.add('_')
+    snake.add(c.toLowerAscii())
+  return snake
 
 proc registerFfiTypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
   ## Registers the type in ffiTypeRegistry for binding generation and returns
@@ -43,7 +45,7 @@ proc registerFfiTypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
             fieldMetas.add(FFIFieldMeta(name: $identDef[i], typeName: fieldTypeName))
 
   ffiTypeRegistry.add(FFITypeMeta(name: typeNameStr, fields: fieldMetas))
-  result = typeDef
+  return typeDef
 
 proc bodyHasAwait(n: NimNode): bool =
   ## Returns true if the AST node `n` contains any `await` or `waitFor` call.
@@ -106,11 +108,12 @@ proc buildRequestType(reqTypeName: NimNode, body: NimNode): NimNode =
     else:
       postfix(reqTypeName, "*")
 
-  result =
+  let typeSection =
     newNimNode(nnkTypeSection).add(newTree(nnkTypeDef, typeName, newEmptyNode(), objTy))
 
   when defined(ffiDumpMacros):
-    echo result.repr
+    echo typeSection.repr
+  return typeSection
 
 proc buildFfiNewReqProc(reqTypeName, body: NimNode): NimNode =
   ## Builds ffiNewReq: takes the user's typed params, packs them into a Req
@@ -177,7 +180,7 @@ proc buildFfiNewReqProc(reqTypeName, body: NimNode): NimNode =
       return FFIThreadRequest.init(callback, userData, typeStr.cstring, bytes)
   )
 
-  result = newProc(
+  let newReqProc = newProc(
     name = postfix(ident("ffiNewReq"), "*"),
     params = formalParams,
     body = newBody,
@@ -185,7 +188,8 @@ proc buildFfiNewReqProc(reqTypeName, body: NimNode): NimNode =
   )
 
   when defined(ffiDumpMacros):
-    echo result.repr
+    echo newReqProc.repr
+  return newReqProc
 
 proc buildProcessFFIRequestProc(reqTypeName, reqHandler, body: NimNode): NimNode =
   ## Generates the FFI-thread-side processor for the Req type.
@@ -254,7 +258,7 @@ proc buildProcessFFIRequestProc(reqTypeName, reqHandler, body: NimNode): NimNode
 
   newBody.add(bodyNode)
 
-  result = newProc(
+  let processProc = newProc(
     name = postfix(ident("processFFIRequest"), "*"),
     params = formalParams,
     body = newBody,
@@ -267,7 +271,8 @@ proc buildProcessFFIRequestProc(reqTypeName, reqHandler, body: NimNode): NimNode
   )
 
   when defined(ffiDumpMacros):
-    echo result.repr
+    echo processProc.repr
+  return processProc
 
 proc addNewRequestToRegistry(reqTypeName, reqHandler: NimNode): NimNode =
   ## Generates the dispatcher that the FFI thread calls: it invokes
@@ -325,11 +330,12 @@ proc addNewRequestToRegistry(reqTypeName, reqHandler: NimNode): NimNode =
   )
 
   let key = newLit($reqTypeName)
-  result =
+  let regAssign =
     newAssignment(newTree(nnkBracketExpr, ident("registeredRequests"), key), asyncProc)
 
   when defined(ffiDumpMacros):
-    echo result.repr
+    echo regAssign.repr
+  return regAssign
 
 macro registerReqFFI*(reqTypeName, reqHandler, body: untyped): untyped =
   ## Registers a request type and its FFI-thread handler.
@@ -343,10 +349,11 @@ macro registerReqFFI*(reqTypeName, reqHandler, body: untyped): untyped =
   let ffiNewReqProc = buildFfiNewReqProc(reqTypeName, body)
   let processProc = buildProcessFFIRequestProc(reqTypeName, reqHandler, body)
   let addNewReqToReg = addNewRequestToRegistry(reqTypeName, reqHandler)
-  result = newStmtList(typeDef, ffiNewReqProc, processProc, addNewReqToReg)
+  let stmts = newStmtList(typeDef, ffiNewReqProc, processProc, addNewReqToReg)
 
   when defined(ffiDumpMacros):
-    echo result.repr
+    echo stmts.repr
+  return stmts
 
 macro processReq*(
     reqType, ctx, callback, userData: untyped, args: varargs[untyped]
@@ -363,7 +370,7 @@ macro processReq*(
     newDotExpr(ident("ffi_context"), ident("sendRequestToFFIThread")), ctx, newReqCall
   )
 
-  result = quote:
+  let blockExpr = quote:
     block:
       let res = `sendCall`
       if res.isErr():
@@ -373,7 +380,8 @@ macro processReq*(
       return RET_OK
 
   when defined(ffiDumpMacros):
-    echo result.repr
+    echo blockExpr.repr
+  return blockExpr
 
 macro ffiRaw*(prc: untyped): untyped =
   ## Defines an FFI-exported proc that registers a request handler to be executed
@@ -451,10 +459,11 @@ macro ffiRaw*(prc: untyped): untyped =
     registerReqFFI(`reqName`, `paramIdent`: `paramType`):
       `anonymousProcNode`
 
-  result = newStmtList(registerReq, ffiProc)
+  let stmts = newStmtList(registerReq, ffiProc)
 
   when defined(ffiDumpMacros):
-    echo result.repr
+    echo stmts.repr
+  return stmts
 
 # ---------------------------------------------------------------------------
 # ffi macro — primary FFI proc / FFI type registration
@@ -589,6 +598,7 @@ macro ffi*(prc: untyped): untyped =
       pragmas = newTree(nnkPragma, ident("async")),
     )
 
+  var stmts: NimNode
   if isAsync:
     # -------------------------------------------------------------------------
     # ASYNC PATH
@@ -720,7 +730,7 @@ macro ffi*(prc: untyped): untyped =
         )
       )
 
-    result = newStmtList(helperProc, registerReq, ffiProc)
+    stmts = newStmtList(helperProc, registerReq, ffiProc)
   else:
     # -------------------------------------------------------------------------
     # SYNC PATH — bypass thread channel; fire callback inline
@@ -870,12 +880,13 @@ macro ffi*(prc: untyped): untyped =
         )
       )
 
-    result = newStmtList(
+    stmts = newStmtList(
       syncReqTypeDef, syncBodyProc, userAsyncWrapper, syncFfiProc
     )
 
   when defined(ffiDumpMacros):
-    echo result.repr
+    echo stmts.repr
+  return stmts
 
 # ---------------------------------------------------------------------------
 # ffiCtor — constructor macro
@@ -901,11 +912,12 @@ proc buildCtorRequestType(reqTypeName: NimNode, paramNames: seq[string],
 
   let objTy = newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), recList)
   let typeName = postfix(reqTypeName, "*")
-  result =
+  let typeSection =
     newNimNode(nnkTypeSection).add(newTree(nnkTypeDef, typeName, newEmptyNode(), objTy))
 
   when defined(ffiDumpMacros):
-    echo result.repr
+    echo typeSection.repr
+  return typeSection
 
 proc buildCtorFfiNewReqProc(
     reqTypeName: NimNode, paramNames: seq[string]
@@ -934,7 +946,7 @@ proc buildCtorFfiNewReqProc(
       callback, userData, typeStr.cstring, reqCbor, int(reqCborLen)
     )
 
-  result = newProc(
+  let newReqProc = newProc(
     name = postfix(ident("ffiNewReq"), "*"),
     params = formalParams,
     body = newBody,
@@ -942,7 +954,8 @@ proc buildCtorFfiNewReqProc(
   )
 
   when defined(ffiDumpMacros):
-    echo result.repr
+    echo newReqProc.repr
+  return newReqProc
 
 proc buildCtorBodyProc(
     helperName: NimNode,
@@ -960,7 +973,7 @@ proc buildCtorBodyProc(
   for i in 0 ..< paramNames.len:
     innerParams.add(newIdentDefs(ident(paramNames[i]), paramTypes[i]))
 
-  result = newProc(
+  let bodyProc = newProc(
     name = postfix(helperName, "*"),
     params = innerParams,
     body = newStmtList(userBody),
@@ -968,7 +981,8 @@ proc buildCtorBodyProc(
   )
 
   when defined(ffiDumpMacros):
-    echo result.repr
+    echo bodyProc.repr
+  return bodyProc
 
 proc buildCtorProcessFFIRequestProc(
     reqTypeName: NimNode,
@@ -1041,7 +1055,7 @@ proc buildCtorProcessFFIRequestProc(
   newBody.add quote do:
     return ok($cast[uint](`ctxIdent`))
 
-  result = newProc(
+  let processProc = newProc(
     name = postfix(ident("processFFIRequest"), "*"),
     params = formalParams,
     body = newBody,
@@ -1050,7 +1064,8 @@ proc buildCtorProcessFFIRequestProc(
   )
 
   when defined(ffiDumpMacros):
-    echo result.repr
+    echo processProc.repr
+  return processProc
 
 proc addCtorRequestToRegistry(reqTypeName, libTypeName: NimNode): NimNode =
   ## Wraps the ctor processFFIRequest result in a seq[byte] dispatcher.
@@ -1097,11 +1112,12 @@ proc addCtorRequestToRegistry(reqTypeName, libTypeName: NimNode): NimNode =
   )
 
   let key = newLit($reqTypeName)
-  result =
+  let regAssign =
     newAssignment(newTree(nnkBracketExpr, ident("registeredRequests"), key), asyncProc)
 
   when defined(ffiDumpMacros):
-    echo result.repr
+    echo regAssign.repr
+  return regAssign
 
 macro ffiCtor*(prc: untyped): untyped =
   ## Defines a C-exported constructor. The generated wrapper takes a single
@@ -1272,13 +1288,14 @@ macro ffiCtor*(prc: untyped): untyped =
     when not declared(`poolIdent`):
       var `poolIdent`: FFIContextPool[`libTypeName`]
 
-  result = newStmtList(
+  let stmts = newStmtList(
     typeDef, ffiNewReqProc, helperProc, processProc, addToReg, poolDecl,
     ffiProc,
   )
 
   when defined(ffiDumpMacros):
-    echo result.repr
+    echo stmts.repr
+  return stmts
 
 # ---------------------------------------------------------------------------
 # ffiDtor — destructor macro (unchanged signature)
@@ -1373,10 +1390,11 @@ macro ffiDtor*(prc: untyped): untyped =
     when not declared(`poolIdent`):
       var `poolIdent`: FFIContextPool[`libTypeName`]
 
-  result = newStmtList(poolDecl, ffiProc)
+  let stmts = newStmtList(poolDecl, ffiProc)
 
   when defined(ffiDumpMacros):
-    echo result.repr
+    echo stmts.repr
+  return stmts
 
 # ---------------------------------------------------------------------------
 # genBindings — codegen entry point
@@ -1409,4 +1427,4 @@ macro genBindings*(
     else:
       error("genBindings: unknown targetLang '" & lang & "'. Use 'rust' or 'cpp'.")
 
-  result = newEmptyNode()
+  return newEmptyNode()

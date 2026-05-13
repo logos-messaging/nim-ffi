@@ -44,15 +44,17 @@ proc waitCallback(d: var CallbackData) =
   release(d.lock)
 
 proc callbackBytes(d: var CallbackData): seq[byte] =
-  result = newSeq[byte](d.msgLen)
+  var bytes = newSeq[byte](d.msgLen)
   if d.msgLen > 0:
-    copyMem(addr result[0], addr d.msg[0], d.msgLen)
+    copyMem(addr bytes[0], addr d.msg[0], d.msgLen)
+  return bytes
 
 proc callbackErr(d: var CallbackData): string =
   ## Reads the error payload (sent as raw UTF-8 bytes on RET_ERR).
-  result = newString(d.msgLen)
+  var msg = newString(d.msgLen)
   if d.msgLen > 0:
-    copyMem(addr result[0], addr d.msg[0], d.msgLen)
+    copyMem(addr msg[0], addr d.msg[0], d.msgLen)
+  return msg
 
 registerReqFFI(PingRequest, lib: ptr TestLib):
   proc(message: cstring): Future[Result[string, string]] {.async.} =

@@ -48,8 +48,7 @@ proc reqStructName(p: FFIProcMeta): string =
 # ---------------------------------------------------------------------------
 
 proc generateCargoToml*(libName: string): string =
-  result =
-    """[package]
+  return """[package]
 name = "$1"
 version = "0.1.0"
 edition = "2021"
@@ -63,8 +62,7 @@ tokio = { version = "1", features = ["sync"] }
 
 proc generateBuildRs*(libName: string, nimSrcRelPath: string): string =
   let escapedSrc = nimSrcRelPath.replace("\\", "\\\\")
-  result =
-    """use std::path::PathBuf;
+  return """use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
@@ -111,7 +109,7 @@ fn main() {
     [escapedSrc, libName]
 
 proc generateLibRs*(): string =
-  result = """mod ffi;
+  return """mod ffi;
 mod types;
 mod api;
 pub use types::*;
@@ -172,7 +170,7 @@ proc generateFfiRs*(procs: seq[FFIProcMeta]): string =
       lines.add("    pub fn $1($2) -> c_int;" % [p.procName, params.join(", ")])
 
   lines.add("}")
-  result = lines.join("\n") & "\n"
+  return lines.join("\n") & "\n"
 
 proc generateTypesRs*(
     types: seq[FFITypeMeta], procs: seq[FFIProcMeta]
@@ -217,7 +215,7 @@ proc generateTypesRs*(
       lines.add("}")
     lines.add("")
 
-  result = lines.join("\n")
+  return lines.join("\n")
 
 proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   ## Generates api.rs with a blocking and a tokio-async high-level API.
@@ -497,7 +495,7 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
     lines.add("")
 
   lines.add("}")
-  result = lines.join("\n") & "\n"
+  return lines.join("\n") & "\n"
 
 proc generateRustCrate*(
     procs: seq[FFIProcMeta],

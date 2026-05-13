@@ -52,23 +52,26 @@ const ffiNimSrcRelPath* {.strdefine.} = ""
 # ---------------------------------------------------------------------------
 
 proc toSnakeCase*(s: string): string =
-  result = ""
+  var snake = ""
   for i, c in s:
     if c.isUpperAscii() and i > 0:
-      result.add('_')
-    result.add(c.toLowerAscii())
+      snake.add('_')
+    snake.add(c.toLowerAscii())
+  return snake
 
 proc toPascalCase*(s: string): string =
   ## Returns `s` with the first character uppercased.
   if s.len == 0:
     return s
-  result = s
-  result[0] = s[0].toUpperAscii()
+  var pascal = s
+  pascal[0] = s[0].toUpperAscii()
+  return pascal
 
 proc toCamelCase*(s: string): string =
   ## Converts snake_case or mixed identifiers to PascalCase for type names.
   ## e.g. "testlib_create" -> "TestlibCreate"
-  var parts = s.split('_')
-  result = ""
+  let parts = s.split('_')
+  var camel = ""
   for p in parts:
-    result.add toPascalCase(p)
+    camel.add toPascalCase(p)
+  return camel

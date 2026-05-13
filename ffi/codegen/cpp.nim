@@ -421,7 +421,7 @@ proc generateCppHeader*(
   lines.add("};")
   lines.add("")
 
-  result = lines.join("\n")
+  return lines.join("\n")
 
 proc generateCppCMakeLists*(libName: string, nimSrcRelPath: string): string =
   let src = nimSrcRelPath.replace("\\", "/")
@@ -518,7 +518,7 @@ proc generateCppCMakeLists*(libName: string, nimSrcRelPath: string): string =
   L.add("    add_dependencies(example nim_lib)")
   L.add("endif()")
   L.add("")
-  result = L.join("\n")
+  return L.join("\n")
 
 proc generateCppBindings*(
     procs: seq[FFIProcMeta],
