@@ -70,11 +70,18 @@ proc timer_destroy*(timer: Timer) {.ffiDtor.} =
   ## Blocks until the FFI thread and watchdog thread have joined.
   discard
 
-# --- genBindings() must come AFTER every {.ffi.} / {.ffiCtor.} / {.ffiDtor.} ---
-# Each pragma populates ffiProcRegistry / ffiTypeRegistry at compile time as
-# the compiler processes the AST. genBindings() reads those registries to emit
-# the binding files, so placing it any earlier would produce incomplete output.
-# In a multi-file library, import all sub-modules first and call genBindings()
-# once, at the bottom of the top-level compilation-root file.
-# This call is a no-op unless -d:ffiGenBindings is passed to the compiler.
+# genBindings() must be the LAST top-level call in the FFI root file —
+# after every {.ffi.}, {.ffiCtor.} and {.ffiDtor.} pragma. Each pragma
+# fires at compile time and registers its proc into the compile-time
+# ffiProcRegistry / ffiTypeRegistry; genBindings() then reads those
+# registries to emit the language bindings. If genBindings() runs before
+# a pragma, that proc is silently absent from the generated bindings.
+#
+# Multi-file libraries: keep all .ffi./.ffiCtor./.ffiDtor. pragmas in
+# imported sub-modules and call genBindings() once at the bottom of the
+# top-level file that imports them — Nim resolves imports before the
+# importing file's body runs, so the registries are fully populated by
+# the time genBindings() executes.
+#
+# genBindings() is a compile-time no-op unless -d:ffiGenBindings is set.
 genBindings()
