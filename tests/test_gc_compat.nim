@@ -141,6 +141,14 @@ suite "GC safety - string lifetime across thread boundary":
     check callbackMsg(d) == "gc-err:test"
 
   test "large string result is delivered without corruption":
+    # Round-trip check: build the same 512-char string the FFI handler is
+    # specified to produce, run the request through the FFI thread (which
+    # CBOR-encodes the result), decode the callback payload, and assert
+    # the decoded string is byte-for-byte identical to the original.
+    var expected = newString(512)
+    for i in 0 ..< 512:
+      expected[i] = char(ord('a') + (i mod 26))
+
     var d: CallbackData
     initCallbackData(d)
     defer: deinitCallbackData(d)
@@ -156,12 +164,7 @@ suite "GC safety - string lifetime across thread boundary":
     ).isOk()
     waitCallback(d)
     check d.retCode == RET_OK
-    # CBOR-encoded 512-char text string: 3 header bytes (0x79 + u16 len) + 512 chars.
-    let decoded = callbackOkString(d)
-    check decoded.len == 512
-    check decoded[0] == 'a'
-    check decoded[25] == 'z'
-    check decoded[26] == 'a'
+    check callbackOkString(d) == expected
 
 suite "GC stability - repeated requests":
   test "20 sequential requests without GC corruption":
