@@ -82,6 +82,32 @@ proc fieldStorageType(typ: NimNode): NimNode =
     else: typ
   else: typ
 
+proc unpackReqField*(
+    fieldIdent, userType, decodedIdent: NimNode
+): NimNode =
+  ## Emits AST for unpacking one field from a CBOR-decoded Req struct into a
+  ## local typed as the user's original param type.
+  ##
+  ## `cstring` params are stored as `string` in the Req (per fieldStorageType)
+  ## and cast back via `.cstring` on unpack — safe because `decodedIdent`
+  ## outlives the cstring use within the generated proc body.
+  ##
+  ## Produces one of:
+  ##   let <field>: cstring = (<decoded>.<field>).cstring   # for cstring
+  ##   let <field> = <decoded>.<field>                       # for everything else
+  ##
+  ## Built with the runtime AST API rather than `quote do:` so the proc is
+  ## callable from both macro context and ordinary code (e.g. unit tests).
+  let storedAsString = userType.kind == nnkIdent and $userType == "cstring"
+  if storedAsString:
+    let fieldAccess = newDotExpr(decodedIdent, fieldIdent)
+    let castExpr = newDotExpr(fieldAccess, ident("cstring"))
+    return nnkLetSection.newTree(
+      nnkIdentDefs.newTree(fieldIdent, ident("cstring"), castExpr)
+    )
+  else:
+    return newLetStmt(fieldIdent, newDotExpr(decodedIdent, fieldIdent))
+
 proc cExportedParams(ctxType: NimNode): seq[NimNode] =
   ## Standard parameter list for the C-exported wrapper of a .ffi. proc:
   ##   (returns cint; ctx, callback, userData, reqCbor, reqCborLen)
@@ -314,16 +340,7 @@ proc buildProcessFFIRequestProc(reqTypeName, reqHandler, body: NimNode): NimNode
 
   # Unpack each field as a local typed as the user's original param type.
   for p in procParams[1 ..^ 1]:
-    let fieldName = p[0]
-    let userType = p[1]
-    let storedAsString =
-      userType.kind == nnkIdent and $userType == "cstring"
-    if storedAsString:
-      newBody.add quote do:
-        let `fieldName`: cstring = (`decodedIdent`.`fieldName`).cstring
-    else:
-      newBody.add quote do:
-        let `fieldName` = `decodedIdent`.`fieldName`
+    newBody.add unpackReqField(p[0], p[1], decodedIdent)
 
   newBody.add(bodyNode)
 
@@ -888,16 +905,9 @@ macro ffi*(prc: untyped): untyped =
 
     # Unpack fields with the user's original parameter types.
     for i in 0 ..< extraParamNames.len:
-      let fieldIdent = ident(extraParamNames[i])
-      let userType = extraParamTypes[i]
-      let storedAsString =
-        userType.kind == nnkIdent and $userType == "cstring"
-      if storedAsString:
-        syncFfiBody.add quote do:
-          let `fieldIdent`: cstring = (`decodedIdent`.`fieldIdent`).cstring
-      else:
-        syncFfiBody.add quote do:
-          let `fieldIdent` = `decodedIdent`.`fieldIdent`
+      syncFfiBody.add unpackReqField(
+        ident(extraParamNames[i]), extraParamTypes[i], decodedIdent
+      )
 
     let syncCtxMyLib = newDotExpr(newTree(nnkDerefExpr, ident("ctx")), ident("myLib"))
     let syncLibValDeref = newTree(nnkDerefExpr, syncCtxMyLib)
@@ -1120,16 +1130,9 @@ proc buildCtorProcessFFIRequestProc(
         return err("CBOR decode failed for " & $T & ": " & $error)
 
   for i in 0 ..< paramNames.len:
-    let paramIdent = ident(paramNames[i])
-    let userType = paramTypes[i]
-    let storedAsString =
-      userType.kind == nnkIdent and $userType == "cstring"
-    if storedAsString:
-      newBody.add quote do:
-        let `paramIdent`: cstring = (`decodedIdent`.`paramIdent`).cstring
-    else:
-      newBody.add quote do:
-        let `paramIdent` = `decodedIdent`.`paramIdent`
+    newBody.add unpackReqField(
+      ident(paramNames[i]), paramTypes[i], decodedIdent
+    )
 
   let helperCallNode = newTree(nnkCall, helperName)
   for name in paramNames:
