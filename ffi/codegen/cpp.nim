@@ -61,6 +61,25 @@ proc reqStructName(p: FFIProcMeta): string =
   let camel = toCamelCase(p.procName)
   if p.kind == FFIKind.CTOR: camel & "CtorReq" else: camel & "Req"
 
+proc cppBracedInit(structName: string, fieldNames: seq[string]): string =
+  ## Produces a C++ braced-init expression for a per-proc Req struct.
+  ## Used to construct the request value before CBOR-encoding it for the wire,
+  ## as in `const auto req = TimerEchoReq{message, count};` in the generated
+  ## header. The field order must match the struct's declaration order, which
+  ## in turn mirrors the user's Nim FFI signature.
+  ##
+  ## Examples:
+  ##   cppBracedInit("TimerEchoReq", @["message", "count"])
+  ##     → "TimerEchoReq{message, count}"
+  ##   cppBracedInit("TimerVersionReq", @[])
+  ##     → "TimerVersionReq{}"
+  ##   cppBracedInit("TimerCreateCtorReq", @["config"])
+  ##     → "TimerCreateCtorReq{config}"
+  ##
+  ## Empty `fieldNames` collapses cleanly because `join` on an empty seq
+  ## returns "", so the result is the well-formed empty-init `Name{}`.
+  return structName & "{" & fieldNames.join(", ") & "}"
+
 proc generateCppHeader*(
     procs: seq[FFIProcMeta], types: seq[FFITypeMeta], libName: string
 ): string =
@@ -187,14 +206,7 @@ proc generateCppHeader*(
       if ctorParams.len > 0: ctorParams.join(", ") & ", " & timeoutParam
       else: timeoutParam
 
-    var initList: seq[string] = @[]
-    for n in epNames:
-      initList.add(n)
-    let reqInit =
-      if initList.len > 0:
-        reqName & "{" & initList.join(", ") & "}"
-      else:
-        reqName & "{}"
+    let reqInit = cppBracedInit(reqName, epNames)
 
     lines.add("    static $1 create($2) {" % [ctxTypeName, ctorParamsWithTimeout])
     lines.add("        const auto req = $1;" % [reqInit])
@@ -261,14 +273,7 @@ proc generateCppHeader*(
     let methParamsStr = methParams.join(", ")
     let methParamNamesStr = methParamNames.join(", ")
 
-    var initList: seq[string] = @[]
-    for n in methParamNames:
-      initList.add(n)
-    let reqInit =
-      if initList.len > 0:
-        reqName & "{" & initList.join(", ") & "}"
-      else:
-        reqName & "{}"
+    let reqInit = cppBracedInit(reqName, methParamNames)
 
     lines.add("    $1 $2($3) const {" % [retCppType, methodName, methParamsStr])
     lines.add("        const auto req = $1;" % [reqInit])
