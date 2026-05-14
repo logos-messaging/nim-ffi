@@ -6,6 +6,10 @@
 import std/[os, strutils]
 import ./meta
 
+## Wire-format C++ type used for any Nim `ptr T` / `pointer`. Fixed 64-bit so
+## the CBOR payload size is stable regardless of host architecture.
+const CppPtrType* = "uint64_t"
+
 proc genericInnerType(typeName, prefix: string): string =
   if typeName.startsWith(prefix) and typeName.endsWith("]"):
     let start = prefix.len
@@ -16,7 +20,7 @@ proc genericInnerType(typeName, prefix: string): string =
 proc nimTypeToCpp*(typeName: string): string =
   let trimmed = typeName.strip()
   if trimmed.startsWith("ptr "):
-    return "uint64_t"
+    return CppPtrType
   else:
     let seqInner = genericInnerType(trimmed, "seq[")
     if seqInner.len > 0:
@@ -34,7 +38,7 @@ proc nimTypeToCpp*(typeName: string): string =
   of "bool": "bool"
   of "float": "float"
   of "float64": "double"
-  of "pointer": "uint64_t"
+  of "pointer": CppPtrType
   else: trimmed
 
 proc stripLibPrefixCpp(procName, libName: string): string =
@@ -115,7 +119,7 @@ proc generateCppHeader*(
     lines.add("struct $1 {" % [reqName])
     for ep in p.extraParams:
       let cppType =
-        if ep.isPtr: "uint64_t"
+        if ep.isPtr: CppPtrType
         else: nimTypeToCpp(ep.typeName)
       lines.add("    $1 $2;" % [cppType, ep.name])
     lines.add("};")
@@ -265,7 +269,7 @@ proc generateCppHeader*(
     var epNames: seq[string] = @[]
     for ep in ctor.extraParams:
       let cppType =
-        if ep.isPtr: "uint64_t"
+        if ep.isPtr: CppPtrType
         else: nimTypeToCpp(ep.typeName)
       ctorParams.add("const $1& $2" % [cppType, ep.name])
       epNames.add(ep.name)
@@ -356,7 +360,7 @@ proc generateCppHeader*(
   for m in methods:
     let methodName = stripLibPrefixCpp(m.procName, libName)
     let retCppType =
-      if m.returnIsPtr: "uint64_t"
+      if m.returnIsPtr: CppPtrType
       else: nimTypeToCpp(m.returnTypeName)
     let reqName = reqStructName(m)
 
@@ -364,7 +368,7 @@ proc generateCppHeader*(
     var methParamNames: seq[string] = @[]
     for ep in m.extraParams:
       let cppType =
-        if ep.isPtr: "uint64_t"
+        if ep.isPtr: CppPtrType
         else: nimTypeToCpp(ep.typeName)
       methParams.add("const $1& $2" % [cppType, ep.name])
       methParamNames.add(ep.name)
