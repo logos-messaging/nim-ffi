@@ -1,0 +1,85 @@
+name: test
+
+on:
+  workflow_call:
+    inputs:
+      test:
+        required: true
+        type: string
+
+env:
+  NIMBLE_VERSION: '0.22.3'
+
+jobs:
+  run:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15, windows-latest]
+        nim-version: ['2.2.4', 'stable']
+        mm: [orc, refc]
+        include:
+          - os: ubuntu-22.04
+            label: Linux
+          - os: macos-15
+            label: macOS
+          - os: windows-latest
+            label: Windows
+
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.label }} · Nim ${{ matrix.nim-version }} · ${{ matrix.mm }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: ${{ matrix.nim-version }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Nimble ${{ env.NIMBLE_VERSION }}
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$PATH"
+          fi
+          cd /tmp && nimble install "nimble@${{ env.NIMBLE_VERSION }}" -y
+          echo "$HOME/.nimble/bin" >> $GITHUB_PATH
+
+      - name: Cache nimble deps
+        id: cache-nimbledeps
+        uses: actions/cache@v4
+        with:
+          path: |
+            nimbledeps/
+            nimble.paths
+          key: ${{ runner.os }}-nimbledeps-${{ matrix.nim-version }}-${{ hashFiles('*.nimble') }}
+          restore-keys: |
+            ${{ runner.os }}-nimbledeps-${{ matrix.nim-version }}-
+            ${{ runner.os }}-nimbledeps-
+
+      - name: Install nimble deps
+        if: steps.cache-nimbledeps.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+          fi
+          nimble setup --localdeps -y
+
+      - name: Build
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+          fi
+          nimble buildffi -y
+
+      - name: Run ${{ inputs.test }} (${{ matrix.mm }})
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+          fi
+          nim c -r --mm:${{ matrix.mm }} -d:chronicles_log_level=WARN tests/${{ inputs.test }}.nim
