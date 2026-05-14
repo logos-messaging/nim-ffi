@@ -5,6 +5,7 @@ import std/[os, strutils]
 import ./meta
 
 proc nimTypeToRust*(typeName: string): string =
+  ## Maps Nim type names to Rust type names, including generics.
   let t = typeName.strip()
   if t.startsWith("seq[") and t.endsWith("]"):
     return "Vec<" & nimTypeToRust(t[4 .. ^2]) & ">"
@@ -22,6 +23,8 @@ proc nimTypeToRust*(typeName: string): string =
   else: toPascalCase(t)
 
 proc deriveLibName*(procs: seq[FFIProcMeta]): string =
+  ## Extracts the common prefix before the first `_` from proc names.
+  ## e.g. ["timer_create", "timer_echo"] → "timer"
   if currentLibName.len > 0:
     return currentLibName
   if procs.len == 0:
@@ -33,6 +36,8 @@ proc deriveLibName*(procs: seq[FFIProcMeta]): string =
   return "unknown"
 
 proc stripLibPrefix*(procName: string, libName: string): string =
+  ## Strips the library prefix from a proc name.
+  ## e.g. "timer_echo", "timer" → "echo"
   let prefix = libName & "_"
   if procName.startsWith(prefix):
     return procName[prefix.len .. ^1]
@@ -61,6 +66,8 @@ tokio = { version = "1", features = ["sync"] }
     [libName]
 
 proc generateBuildRs*(libName: string, nimSrcRelPath: string): string =
+  ## Generates build.rs that compiles the Nim library.
+  ## nimSrcRelPath is relative to the output (crate) directory.
   let escapedSrc = nimSrcRelPath.replace("\\", "\\\\")
   return """use std::path::PathBuf;
 use std::process::Command;
@@ -70,6 +77,10 @@ fn main() {
     let nim_src = manifest.join("$1");
     let nim_src = nim_src.canonicalize().unwrap_or(manifest.join("$1"));
 
+    // Walk up to find the nim-ffi repo root (directory containing nim_src's library)
+    // The repo root is where nim c should be run from (contains config.nims).
+    // We assume nim_src lives somewhere under repo_root.
+    // Derive repo_root as the ancestor that contains the .nimble file or config.nims.
     let mut repo_root = nim_src.clone();
     loop {
         repo_root = match repo_root.parent() {
@@ -130,15 +141,18 @@ proc generateFfiRs*(procs: seq[FFIProcMeta]): string =
   lines.add(");")
   lines.add("")
 
+  # Collect unique lib names for #[link(...)]
   var libNames: seq[string] = @[]
   for p in procs:
     if p.libName notin libNames:
       libNames.add(p.libName)
 
+  # Derive lib name from proc names if not set
   var linkLibName = ""
   if libNames.len > 0 and libNames[0].len > 0:
     linkLibName = libNames[0]
   else:
+    # derive from first proc name
     if procs.len > 0:
       let parts = procs[0].procName.split('_')
       if parts.len > 0:
@@ -151,6 +165,7 @@ proc generateFfiRs*(procs: seq[FFIProcMeta]): string =
     var params: seq[string] = @[]
     case p.kind
     of FFIKind.FFI:
+      # Method/destructor-style: ctx comes first
       params.add("ctx: *mut c_void")
       params.add("callback: FfiCallback")
       params.add("user_data: *mut c_void")
@@ -158,6 +173,7 @@ proc generateFfiRs*(procs: seq[FFIProcMeta]): string =
       params.add("req_cbor_len: usize")
       lines.add("    pub fn $1($2) -> c_int;" % [p.procName, params.join(", ")])
     of FFIKind.CTOR:
+      # Constructor: no ctx; returns the freshly-allocated handle
       params.add("req_cbor: *const u8")
       params.add("req_cbor_len: usize")
       params.add("callback: FfiCallback")
@@ -187,6 +203,7 @@ proc generateTypesRs*(
     for f in t.fields:
       let snakeName = toSnakeCase(f.name)
       let rustType = nimTypeToRust(f.typeName)
+      # Add serde rename if camelCase name differs from snake_case
       if snakeName != f.name:
         lines.add("    #[serde(rename = \"$1\")]" % [f.name])
       lines.add("    pub $1: $2," % [snakeName, rustType])
@@ -218,7 +235,13 @@ proc generateTypesRs*(
   return lines.join("\n")
 
 proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
-  ## Generates api.rs with a blocking and a tokio-async high-level API.
+  ## Generates api.rs with both a blocking and a tokio-async high-level API.
+  ##
+  ## Blocking: ctx.echo(req)             — thread-blocks via Condvar
+  ## Async:    ctx.echo_async(req).await — non-blocking via oneshot channel;
+  ##           the FFI callback fires from the Nim/chronos thread and wakes
+  ##           the awaiting task without ever blocking a thread.
+  ##
   ## Requests/responses are CBOR (ciborium); errors are raw UTF-8 strings.
   var lines: seq[string] = @[]
 
@@ -350,6 +373,8 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   lines.add("    let _ = tx.send(ffi_payload(ret, msg, len));")
   lines.add("}")
   lines.add("")
+  # Scoped block keeps raw/tx/F dead at the single await point so the
+  # returned future is Send regardless of whether F itself is Send.
   lines.add("async fn ffi_call_async<F>(f: F) -> Result<Vec<u8>, String>")
   lines.add("where")
   lines.add("    F: FnOnce(ffi::FfiCallback, *mut c_void) -> c_int,")
@@ -479,6 +504,8 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
     lines.add("")
 
     # -- async method --
+    # ptr is cast to usize (Copy + Send) so the move closure is Send,
+    # keeping the returned future Send for multi-threaded tokio runtimes.
     lines.add(
       "    pub async fn $1_async(&self$2) -> Result<$3, String> {" %
         [methodName, paramsStr, retTypeForApi]
@@ -506,6 +533,7 @@ proc generateRustCrate*(
     outputDir: string,
     nimSrcRelPath: string,
 ) =
+  ## Generates a complete Rust crate in outputDir.
   createDir(outputDir)
   createDir(outputDir / "src")
 
