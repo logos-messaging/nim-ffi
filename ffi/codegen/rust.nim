@@ -4,6 +4,11 @@
 import std/[os, strutils]
 import ./meta
 
+## Wire-format Rust type used for any Nim `ptr T` / `pointer`. Fixed 64-bit so
+## the CBOR payload size is stable regardless of host architecture (mirrors
+## CppPtrType in cpp.nim).
+const RustPtrType* = "u64"
+
 proc nimTypeToRust*(typeName: string): string =
   ## Maps Nim type names to Rust type names, including generics.
   let t = typeName.strip()
@@ -19,7 +24,7 @@ proc nimTypeToRust*(typeName: string): string =
   of "int32": "i32"
   of "bool": "bool"
   of "float", "float64": "f64"
-  of "pointer": "u64"
+  of "pointer": RustPtrType
   else: capitalizeFirstLetter(t)
 
 proc deriveLibName*(procs: seq[FFIProcMeta]): string =
@@ -224,7 +229,7 @@ proc generateTypesRs*(
       for ep in p.extraParams:
         let snake = camelToSnakeCase(ep.name)
         let rustType =
-          if ep.isPtr: "u64"
+          if ep.isPtr: RustPtrType
           else: nimTypeToRust(ep.typeName)
         if snake != ep.name:
           lines.add("    #[serde(rename = \"$1\")]" % [ep.name])
@@ -417,7 +422,7 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
     for ep in ctor.extraParams:
       let snake = camelToSnakeCase(ep.name)
       let rustType =
-        if ep.isPtr: "u64"
+        if ep.isPtr: RustPtrType
         else: nimTypeToRust(ep.typeName)
       paramsList.add("$1: $2" % [snake, rustType])
       fieldInits.add(snake)
@@ -470,7 +475,7 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
     for ep in m.extraParams:
       let snake = camelToSnakeCase(ep.name)
       let rustType =
-        if ep.isPtr: "u64"
+        if ep.isPtr: RustPtrType
         else: nimTypeToRust(ep.typeName)
       paramsList.add("$1: $2" % [snake, rustType])
       fieldInits.add(snake)
@@ -483,7 +488,7 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
         reqName & " {}"
 
     let retTypeForApi =
-      if m.returnIsPtr: "u64"
+      if m.returnIsPtr: RustPtrType
       else: retRustType
 
     # -- blocking method --
