@@ -82,10 +82,78 @@ proc fieldStorageType(typ: NimNode): NimNode =
     else: typ
   else: typ
 
+proc cExportedParams(ctxType: NimNode): seq[NimNode] =
+  ## Standard parameter list for the C-exported wrapper of a .ffi. proc:
+  ##   (returns cint; ctx, callback, userData, reqCbor, reqCborLen)
+  ## Shared by the async and sync paths so both wrappers carry the same ABI.
+  var params: seq[NimNode] = @[]
+  params.add(ident("cint"))
+  params.add(newIdentDefs(ident("ctx"), ctxType))
+  params.add(newIdentDefs(ident("callback"), ident("FFICallBack")))
+  params.add(newIdentDefs(ident("userData"), ident("pointer")))
+  params.add(newIdentDefs(ident("reqCbor"), nnkPtrTy.newTree(ident("byte"))))
+  params.add(newIdentDefs(ident("reqCborLen"), ident("csize_t")))
+  return params
+
+proc buildReqTypeFromFields(
+    reqTypeName: NimNode, paramNames: seq[string], paramTypes: seq[NimNode]
+): NimNode =
+  ## Builds the per-proc Req `nnkTypeSection` (exported) from explicit
+  ## parallel lists of parameter names and types. The result is the AST for
+  ## a `type Foo* = object` declaration that the codegen later emits.
+  ##
+  ## `cstring` parameter types are rewritten to `string` (via fieldStorageType)
+  ## so the request can ride a plain CBOR text string on the wire. Empty
+  ## parameter lists get a single `_placeholder: uint8` field so the object
+  ## type is well-formed (Nim won't accept an empty `object` body here).
+  ##
+  ## Examples (in pseudo-Nim, showing the AST this proc produces):
+  ##
+  ##   buildReqTypeFromFields(
+  ##     reqTypeName = ident("EchoReq"),
+  ##     paramNames  = @["message", "delayMs"],
+  ##     paramTypes  = @[ident("cstring"), ident("int")])
+  ##   # → type EchoReq* = object
+  ##   #     message: string   # cstring rewritten to string
+  ##   #     delayMs: int
+  ##
+  ##   buildReqTypeFromFields(
+  ##     reqTypeName = ident("VersionReq"),
+  ##     paramNames  = @[],
+  ##     paramTypes  = @[])
+  ##   # → type VersionReq* = object
+  ##   #     _placeholder: uint8   # placeholder for the empty-params case
+  ##
+  ## If `reqTypeName` is already a postfix node (e.g. `EchoReq*`) it is used
+  ## as-is; otherwise the `*` export marker is added.
+  var fields: seq[NimNode] = @[]
+  for i in 0 ..< paramNames.len:
+    let storedType = fieldStorageType(paramTypes[i])
+    fields.add newTree(nnkIdentDefs, ident(paramNames[i]), storedType, newEmptyNode())
+
+  let recList =
+    if fields.len > 0:
+      newTree(nnkRecList, fields)
+    else:
+      newTree(
+        nnkRecList,
+        newTree(nnkIdentDefs, ident("_placeholder"), ident("uint8"), newEmptyNode()),
+      )
+
+  let objTy = newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), recList)
+
+  let typeName =
+    if reqTypeName.kind == nnkPostfix: reqTypeName
+    else: postfix(reqTypeName, "*")
+
+  return newNimNode(nnkTypeSection).add(
+    newTree(nnkTypeDef, typeName, newEmptyNode(), objTy)
+  )
+
 proc buildRequestType(reqTypeName: NimNode, body: NimNode): NimNode =
-  ## Builds the per-proc Req object type. Field names match the lambda params;
-  ## field types match the user-typed param types (with `cstring` rewritten to
-  ## `string` for trivial CBOR transport).
+  ## Builds the per-proc Req object type from a registerReqFFI lambda body.
+  ## Field names match the lambda params; field types match the user-typed
+  ## param types (with `cstring` rewritten to `string` for transport).
   ##
   ## Builds:
   ##   type <reqTypeName>* = object
@@ -104,35 +172,13 @@ proc buildRequestType(reqTypeName: NimNode, body: NimNode): NimNode =
     error "registerReqFFI expects a lambda proc, found: " & $procNode.kind
 
   let params = procNode[3]
-  var fields: seq[NimNode] = @[]
+  var paramNames: seq[string] = @[]
+  var paramTypes: seq[NimNode] = @[]
   for p in params[1 .. ^1]:
-    # Field must be nnkIdentDefs(name, type, defaultExpr)
-    let name = p[0]
-    let typ = fieldStorageType(p[1])
-    fields.add newTree(nnkIdentDefs, name, typ, newEmptyNode())
+    paramNames.add($p[0])
+    paramTypes.add(p[1])
 
-  # Wrap fields in a rec list
-  let recList =
-    if fields.len > 0:
-      newTree(nnkRecList, fields)
-    else:
-      newTree(
-        nnkRecList,
-        newTree(nnkIdentDefs, ident("_placeholder"), ident("uint8"), newEmptyNode()),
-      )
-
-  # object type node: object [of?] [pragma?] recList
-  let objTy = newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), recList)
-
-  # Export the type (e.g. EchoRequest*)
-  let typeName =
-    if reqTypeName.kind == nnkPostfix:
-      reqTypeName
-    else:
-      postfix(reqTypeName, "*")
-
-  let typeSection =
-    newNimNode(nnkTypeSection).add(newTree(nnkTypeDef, typeName, newEmptyNode(), objTy))
+  let typeSection = buildReqTypeFromFields(reqTypeName, paramNames, paramTypes)
 
   when defined(ffiDumpMacros):
     echo typeSection.repr
@@ -721,15 +767,7 @@ macro ffi*(prc: untyped): untyped =
     # -------------------------------------------------------------------------
     # C-exported wrapper: takes (ctx, callback, userData, reqCbor, reqCborLen)
     # -------------------------------------------------------------------------
-    var exportedParams = newSeq[NimNode]()
-    exportedParams.add(ident("cint"))
-    exportedParams.add(newIdentDefs(ident("ctx"), ctxType))
-    exportedParams.add(newIdentDefs(ident("callback"), ident("FFICallBack")))
-    exportedParams.add(newIdentDefs(ident("userData"), ident("pointer")))
-    exportedParams.add(
-      newIdentDefs(ident("reqCbor"), nnkPtrTy.newTree(ident("byte")))
-    )
-    exportedParams.add(newIdentDefs(ident("reqCborLen"), ident("csize_t")))
+    let exportedParams = cExportedParams(ctxType)
 
     let ffiBody = newStmtList()
 
@@ -816,34 +854,10 @@ macro ffi*(prc: untyped): untyped =
     let userAsyncWrapper = buildSyncAsyncWrapperProc()
 
     # Declare the Req type so we can CBOR-decode the incoming payload uniformly.
-    var syncReqFields: seq[NimNode] = @[]
-    for i in 0 ..< extraParamNames.len:
-      let fieldName = ident(extraParamNames[i])
-      let storedType = fieldStorageType(extraParamTypes[i])
-      syncReqFields.add newTree(nnkIdentDefs, fieldName, storedType, newEmptyNode())
-    let syncReqRecList =
-      if syncReqFields.len > 0:
-        newTree(nnkRecList, syncReqFields)
-      else:
-        newTree(
-          nnkRecList,
-          newTree(nnkIdentDefs, ident("_placeholder"), ident("uint8"), newEmptyNode()),
-        )
-    let syncReqObjTy =
-      newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), syncReqRecList)
-    let syncReqTypeDef = newNimNode(nnkTypeSection).add(
-      newTree(nnkTypeDef, postfix(reqTypeName, "*"), newEmptyNode(), syncReqObjTy)
-    )
+    let syncReqTypeDef =
+      buildReqTypeFromFields(reqTypeName, extraParamNames, extraParamTypes)
 
-    var syncExportedParams = newSeq[NimNode]()
-    syncExportedParams.add(ident("cint"))
-    syncExportedParams.add(newIdentDefs(ident("ctx"), ctxType))
-    syncExportedParams.add(newIdentDefs(ident("callback"), ident("FFICallBack")))
-    syncExportedParams.add(newIdentDefs(ident("userData"), ident("pointer")))
-    syncExportedParams.add(
-      newIdentDefs(ident("reqCbor"), nnkPtrTy.newTree(ident("byte")))
-    )
-    syncExportedParams.add(newIdentDefs(ident("reqCborLen"), ident("csize_t")))
+    let syncExportedParams = cExportedParams(ctxType)
 
     let syncFfiBody = newStmtList()
 
