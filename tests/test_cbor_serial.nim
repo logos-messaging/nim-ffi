@@ -164,3 +164,59 @@ suite "CBOR error handling":
     let truncated = bytes[0 ..< 2]
     let res = cborDecode(truncated, string)
     check res.isErr
+
+# ---------------------------------------------------------------------------
+# Regression for PR #23 review item 9: cborEncodeShared writes directly into
+# a shared-memory buffer (allocShared), letting the FFI thread request take
+# ownership without an intermediate seq[byte] copy. The shared-encoder must
+# produce byte-for-byte the same output as the seq-encoder.
+# ---------------------------------------------------------------------------
+
+suite "cborEncodeShared":
+  test "object payload round-trips":
+    let n = Nested(label: "", point: Point(x: 0, y: 0))
+    let (sd, sl) = cborEncodeShared(n)
+    defer:
+      if not sd.isNil:
+        deallocShared(sd)
+    check sl > 0
+    let back = cborDecodePtr(sd, sl, Nested).value
+    check back.label == ""
+    check back.point.x == 0
+    check back.point.y == 0
+
+  test "shared encoder is byte-for-byte equal to seq encoder":
+    let n = Nested(label: "hello", point: Point(x: 3, y: 4))
+    let seqBytes = cborEncode(n)
+    let (sd, sl) = cborEncodeShared(n)
+    defer:
+      if not sd.isNil:
+        deallocShared(sd)
+    check sl == seqBytes.len
+    for i in 0 ..< sl:
+      check sd[i] == seqBytes[i]
+    let back = cborDecodePtr(sd, sl, Nested).value
+    check back.label == "hello"
+    check back.point.x == 3
+    check back.point.y == 4
+
+  test "large string growth (exercises reallocShared)":
+    # Larger than the initial 16-byte cap so reallocShared must run several
+    # times; verifies the shared-mode grower handles repeated reallocations.
+    var big = newString(4096)
+    for i in 0 ..< big.len:
+      big[i] = char(ord('a') + (i mod 26))
+    let (sd, sl) = cborEncodeShared(big)
+    defer:
+      if not sd.isNil:
+        deallocShared(sd)
+    let back = cborDecodePtr(sd, sl, string).value
+    check back == big
+
+  test "empty-string payload is the single byte 0x60 in shared mode":
+    let (sd, sl) = cborEncodeShared("")
+    defer:
+      if not sd.isNil:
+        deallocShared(sd)
+    check sl == 1
+    check sd[0] == 0x60'u8
