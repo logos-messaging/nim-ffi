@@ -10,6 +10,16 @@ import ./meta
 ## the CBOR payload size is stable regardless of host architecture.
 const CppPtrType* = "uint64_t"
 
+## Static template blocks live as real C++ / CMake files under templates/cpp/
+## and are slurped into the binary at compile time. Edits to those files are
+## reflected in the generated bindings without touching this codegen.
+const
+  HeaderPreludeTpl     = staticRead("templates/cpp/header_prelude.hpp.tpl")
+  CborHelpersTpl       = staticRead("templates/cpp/cbor_helpers.hpp.tpl")
+  SyncCallHelperTpl    = staticRead("templates/cpp/sync_call_helper.hpp.tpl")
+  ContextRuleOf5Tpl    = staticRead("templates/cpp/context_rule_of_5.hpp.tpl")
+  CMakeListsTpl        = staticRead("templates/cpp/CMakeLists.txt.tpl")
+
 proc genericInnerType(typeName, prefix: string): string =
   if typeName.startsWith(prefix) and typeName.endsWith("]"):
     let start = prefix.len
@@ -56,36 +66,7 @@ proc generateCppHeader*(
 ): string =
   var lines: seq[string] = @[]
 
-  lines.add("#pragma once")
-  lines.add("#include <string>")
-  lines.add("#include <cstdint>")
-  lines.add("#include <chrono>")
-  lines.add("#include <stdexcept>")
-  lines.add("#include <mutex>")
-  lines.add("#include <condition_variable>")
-  lines.add("#include <memory>")
-  lines.add("#include <functional>")
-  lines.add("#include <future>")
-  lines.add("#include <vector>")
-  lines.add("#include <optional>")
-  lines.add("#include <nlohmann/json.hpp>")
-  lines.add("")
-
-  # ── nlohmann optional<T> support ──────────────────────────────────────────
-  lines.add("namespace nlohmann {")
-  lines.add("    template<typename T>")
-  lines.add("    void to_json(json& j, const std::optional<T>& opt) {")
-  lines.add("        if (opt) j = *opt;")
-  lines.add("        else j = nullptr;")
-  lines.add("    }")
-  lines.add("")
-  lines.add("    template<typename T>")
-  lines.add("    void from_json(const json& j, std::optional<T>& opt) {")
-  lines.add("        if (j.is_null()) opt = std::nullopt;")
-  lines.add("        else opt = j.get<T>();")
-  lines.add("    }")
-  lines.add("}")
-  lines.add("")
+  lines.add(HeaderPreludeTpl)
 
   # ── Types ──────────────────────────────────────────────────────────────────
   if types.len > 0:
@@ -164,83 +145,9 @@ proc generateCppHeader*(
   lines.add("")
 
   # ── CBOR helpers ───────────────────────────────────────────────────────────
-  lines.add("template<typename T>")
-  lines.add("inline std::vector<std::uint8_t> encodeCborFfi(const T& value) {")
-  lines.add("    return nlohmann::json::to_cbor(nlohmann::json(value));")
-  lines.add("}")
-  lines.add("")
-  lines.add("template<typename T>")
-  lines.add("inline T decodeCborFfi(const std::vector<std::uint8_t>& bytes) {")
-  lines.add("    try {")
-  lines.add("        return nlohmann::json::from_cbor(bytes).get<T>();")
-  lines.add("    } catch (const nlohmann::json::exception& e) {")
-  lines.add("        throw std::runtime_error(std::string(\"FFI CBOR decode failed: \") + e.what());")
-  lines.add("    }")
-  lines.add("}")
-  lines.add("")
+  lines.add(CborHelpersTpl)
 
-  # ── Call helper (anonymous namespace, header-only) ─────────────────────────
-  lines.add("// ============================================================")
-  lines.add("// Synchronous call helper")
-  lines.add("// ============================================================")
-  lines.add("")
-  lines.add("namespace {")
-  lines.add("")
-  lines.add("struct FfiCallState_ {")
-  lines.add("    std::mutex              mtx;")
-  lines.add("    std::condition_variable cv;")
-  lines.add("    bool                    done{false};")
-  lines.add("    bool                    ok{false};")
-  lines.add("    std::vector<std::uint8_t> bytes;")
-  lines.add("    std::string             err;")
-  lines.add("};")
-  lines.add("")
-  lines.add("inline void ffi_cb_(int ret, const char* msg, size_t len, void* ud) {")
-  lines.add("    // ffi_call_ heap-allocated a shared_ptr and passed its address as ud;")
-  lines.add("    // take ownership here so it's freed on every exit path.")
-  lines.add("    std::unique_ptr<std::shared_ptr<FfiCallState_>> handle(")
-  lines.add("        static_cast<std::shared_ptr<FfiCallState_>*>(ud));")
-  lines.add("    FfiCallState_& s = **handle;")
-  lines.add("")
-  lines.add("    std::lock_guard<std::mutex> lock(s.mtx);")
-  lines.add("    s.ok = (ret == 0);")
-  lines.add("    if (msg && len > 0) {")
-  lines.add("        const auto* p = reinterpret_cast<const std::uint8_t*>(msg);")
-  lines.add("        if (s.ok) s.bytes.assign(p, p + len);")
-  lines.add("        else      s.err.assign(msg, len);")
-  lines.add("    }")
-  lines.add("    s.done = true;")
-  lines.add("    s.cv.notify_one();")
-  lines.add("}")
-  lines.add("")
-  lines.add(
-    "inline std::vector<std::uint8_t> ffi_call_(std::function<int(FfiCallback, void*)> f,"
-  )
-  lines.add("                                          std::chrono::milliseconds timeout) {")
-  lines.add("    auto state = std::make_shared<FfiCallState_>();")
-  lines.add("    auto* cb_ref = new std::shared_ptr<FfiCallState_>(state);")
-  lines.add("    const int ret = f(ffi_cb_, cb_ref);")
-  lines.add("    if (ret == 2) {")
-  lines.add("        delete cb_ref;")
-  lines.add(
-    "        throw std::runtime_error(\"RET_MISSING_CALLBACK (internal error)\");"
-  )
-  lines.add("    }")
-  lines.add("    std::unique_lock<std::mutex> lock(state->mtx);")
-  lines.add(
-    "    const bool fired = state->cv.wait_for(lock, timeout, [&]{ return state->done; });"
-  )
-  lines.add("    if (!fired)")
-  lines.add(
-    "        throw std::runtime_error(\"FFI call timed out after \" + std::to_string(timeout.count()) + \"ms\");"
-  )
-  lines.add("    if (!state->ok)")
-  lines.add("        throw std::runtime_error(state->err);")
-  lines.add("    return state->bytes;")
-  lines.add("}")
-  lines.add("")
-  lines.add("} // anonymous namespace")
-  lines.add("")
+  lines.add(SyncCallHelperTpl)
 
   # ── High-level C++ context class ──────────────────────────────────────────
   var ctors: seq[FFIProcMeta] = @[]
@@ -329,32 +236,9 @@ proc generateCppHeader*(
     lines.add("")
 
   # ── Rule of 5 ──────────────────────────────────────────────────────────
-  lines.add("    ~$1() {" % [ctxTypeName])
-  lines.add("        if (ptr_) {")
-  lines.add("            $1_destroy(ptr_);" % [libName])
-  lines.add("            ptr_ = nullptr;")
-  lines.add("        }")
-  lines.add("    }")
-  lines.add("")
-  lines.add("    $1(const $1&) = delete;" % [ctxTypeName])
-  lines.add("    $1& operator=(const $1&) = delete;" % [ctxTypeName])
-  lines.add("")
-  lines.add(
-    "    $1($1&& other) noexcept : ptr_(other.ptr_), timeout_(other.timeout_) {" %
-      [ctxTypeName]
-  )
-  lines.add("        other.ptr_ = nullptr;")
-  lines.add("    }")
-  lines.add("    $1& operator=($1&& other) noexcept {" % [ctxTypeName])
-  lines.add("        if (this != &other) {")
-  lines.add("            if (ptr_) $1_destroy(ptr_);" % [libName])
-  lines.add("            ptr_ = other.ptr_;")
-  lines.add("            timeout_ = other.timeout_;")
-  lines.add("            other.ptr_ = nullptr;")
-  lines.add("        }")
-  lines.add("        return *this;")
-  lines.add("    }")
-  lines.add("")
+  lines.add(ContextRuleOf5Tpl.multiReplace(
+    ("{{CTX}}", ctxTypeName), ("{{LIB}}", libName)
+  ))
 
   # ── Instance methods ────────────────────────────────────────────────────
   for m in methods:
@@ -429,100 +313,7 @@ proc generateCppHeader*(
 
 proc generateCppCMakeLists*(libName: string, nimSrcRelPath: string): string =
   let src = nimSrcRelPath.replace("\\", "/")
-  let cv = "${CMAKE_CURRENT_SOURCE_DIR}"
-  let rv = "${REPO_ROOT}"
-  let lf = "${NIM_LIB_FILE}"
-  let nm = "${NIM_EXECUTABLE}"
-  let ns = "${NIM_SRC}"
-  let sd = "${_search_dir}"
-  var L: seq[string] = @[]
-  L.add("cmake_minimum_required(VERSION 3.14)")
-  L.add("project(" & libName & "_cpp_bindings CXX)")
-  L.add("")
-  L.add("set(CMAKE_CXX_STANDARD 17)")
-  L.add("set(CMAKE_CXX_STANDARD_REQUIRED ON)")
-  L.add("")
-  L.add(
-    "# ── nlohmann/json ─────────────────────────────────────────────────────────────"
-  )
-  L.add("include(FetchContent)")
-  L.add("FetchContent_Declare(")
-  L.add("    nlohmann_json")
-  L.add("    GIT_REPOSITORY https://github.com/nlohmann/json.git")
-  L.add("    GIT_TAG        v3.11.3")
-  L.add("    GIT_SHALLOW    TRUE")
-  L.add(")")
-  L.add("FetchContent_MakeAvailable(nlohmann_json)")
-  L.add("")
-  L.add(
-    "# ── Locate the repository root (contains ffi.nimble) ─────────────────────────"
-  )
-  L.add("set(_search_dir \"" & cv & "\")")
-  L.add("set(REPO_ROOT \"\")")
-  L.add("foreach(_i RANGE 10)")
-  L.add("    if(EXISTS \"" & sd & "/ffi.nimble\")")
-  L.add("        set(REPO_ROOT \"" & sd & "\")")
-  L.add("        break()")
-  L.add("    endif()")
-  L.add("    get_filename_component(_search_dir \"" & sd & "\" DIRECTORY)")
-  L.add("endforeach()")
-  L.add("if(\"${REPO_ROOT}\" STREQUAL \"\")")
-  L.add(
-    "    message(FATAL_ERROR \"Cannot find repo root (no ffi.nimble in any ancestor)\")"
-  )
-  L.add("endif()")
-  L.add("")
-  L.add("get_filename_component(NIM_SRC")
-  L.add("    \"" & cv & "/" & src & "\"")
-  L.add("    ABSOLUTE)")
-  L.add("")
-  L.add("find_program(NIM_EXECUTABLE nim REQUIRED)")
-  L.add("")
-  L.add("if(CMAKE_SYSTEM_NAME STREQUAL \"Darwin\")")
-  L.add("    set(NIM_LIB_FILE \"" & rv & "/lib" & libName & ".dylib\")")
-  L.add("elseif(CMAKE_SYSTEM_NAME STREQUAL \"Windows\")")
-  L.add("    set(NIM_LIB_FILE \"" & rv & "/" & libName & ".dll\")")
-  L.add("else()")
-  L.add("    set(NIM_LIB_FILE \"" & rv & "/lib" & libName & ".so\")")
-  L.add("endif()")
-  L.add("")
-  L.add("add_custom_command(")
-  L.add("    OUTPUT  \"" & lf & "\"")
-  L.add("    COMMAND \"" & nm & "\" c")
-  L.add("                --mm:orc")
-  L.add("                -d:chronicles_log_level=WARN")
-  L.add("                --app:lib")
-  L.add("                --noMain")
-  L.add("                \"--nimMainPrefix:lib" & libName & "\"")
-  L.add("                \"-o:" & lf & "\"")
-  L.add("                \"" & ns & "\"")
-  L.add("    WORKING_DIRECTORY \"" & rv & "\"")
-  L.add("    DEPENDS \"" & ns & "\"")
-  L.add("    COMMENT \"Compiling Nim library lib" & libName & "\"")
-  L.add("    VERBATIM")
-  L.add(")")
-  L.add("add_custom_target(nim_lib ALL DEPENDS \"" & lf & "\")")
-  L.add("")
-  L.add("add_library(" & libName & " SHARED IMPORTED GLOBAL)")
-  L.add(
-    "set_target_properties(" & libName & " PROPERTIES IMPORTED_LOCATION \"" & lf & "\")"
-  )
-  L.add("add_dependencies(" & libName & " nim_lib)")
-  L.add("")
-  L.add("add_library(" & libName & "_headers INTERFACE)")
-  L.add("target_include_directories(" & libName & "_headers INTERFACE \"" & cv & "\")")
-  L.add(
-    "target_link_libraries(" & libName & "_headers INTERFACE " & libName &
-      " nlohmann_json::nlohmann_json)"
-  )
-  L.add("")
-  L.add("if(EXISTS \"" & cv & "/main.cpp\")")
-  L.add("    add_executable(example main.cpp)")
-  L.add("    target_link_libraries(example PRIVATE " & libName & "_headers)")
-  L.add("    add_dependencies(example nim_lib)")
-  L.add("endif()")
-  L.add("")
-  return L.join("\n")
+  return CMakeListsTpl.multiReplace(("{{LIB}}", libName), ("{{SRC}}", src))
 
 proc generateCppBindings*(
     procs: seq[FFIProcMeta],
