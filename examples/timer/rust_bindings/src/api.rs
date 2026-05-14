@@ -1,6 +1,5 @@
 use std::os::raw::{c_char, c_int, c_void};
 use std::slice;
-use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -17,16 +16,16 @@ fn decode_cbor<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
     ciborium::de::from_reader(bytes).map_err(|e| e.to_string())
 }
 
-#[derive(Default)]
-struct FfiCallbackResult {
-    payload: Option<Result<Vec<u8>, String>>,
-}
-
-type Pair = Arc<(Mutex<FfiCallbackResult>, Condvar)>;
+type FfiResult = Result<Vec<u8>, String>;
+type FfiSender = flume::Sender<FfiResult>;
 
 // Reconstruct the (ret, msg, len) tuple delivered by the C callback
 // into a Result<Vec<u8>, String>: payload on success, UTF-8 message on error.
-unsafe fn ffi_payload(ret: c_int, msg: *const c_char, len: usize) -> Result<Vec<u8>, String> {
+// `from_utf8_lossy` accepts non-UTF-8 error bytes by inserting U+FFFD; the
+// alternative would be to dispatch a separate Err for invalid UTF-8, but the
+// codegen contract is that Nim handlers emit `string` error payloads, so
+// invalid UTF-8 here would be a Nim-side bug.
+unsafe fn ffi_payload(ret: c_int, msg: *const c_char, len: usize) -> FfiResult {
     let bytes = if msg.is_null() || len == 0 {
         Vec::new()
     } else {
@@ -42,50 +41,9 @@ unsafe extern "C" fn on_result(
     len: usize,
     user_data: *mut c_void,
 ) {
-    // from_raw reclaims the strong ref that ffi_call's into_raw left behind;
-    // letting `pair` drop at end of scope releases it.
-    let pair = Arc::from_raw(user_data as *const (Mutex<FfiCallbackResult>, Condvar));
-    let (lock, cvar) = &*pair;
-    let mut state = lock.lock().unwrap();
-    state.payload = Some(ffi_payload(ret, msg, len));
-    cvar.notify_one();
-}
-
-fn ffi_call<F>(timeout: Duration, f: F) -> Result<Vec<u8>, String>
-where
-    F: FnOnce(ffi::FfiCallback, *mut c_void) -> c_int,
-{
-    let pair: Pair = Arc::new((Mutex::new(FfiCallbackResult::default()), Condvar::new()));
-    let raw = Arc::into_raw(pair.clone()) as *mut c_void;
-    let ret = f(on_result, raw);
-    if ret == 2 {
-        return Err("RET_MISSING_CALLBACK (internal error)".into());
-    }
-    let (lock, cvar) = &*pair;
-    let guard = lock.lock().unwrap();
-    let (guard, timed_out) = cvar
-        .wait_timeout_while(guard, timeout, |s| s.payload.is_none())
-        .unwrap();
-    if timed_out.timed_out() {
-        return Err(format!("timed out after {:?}", timeout));
-    }
-    guard.payload.clone().unwrap()
-}
-
-unsafe extern "C" fn on_result_async(
-    ret: c_int,
-    msg: *const c_char,
-    len: usize,
-    user_data: *mut c_void,
-) {
-    // This fn represents the callback called internally in the Nim library function.
-    // We use a oneshot channel to deliver the result from the Nim-managed thread
-    // to the awaiting tokio task in ffi_call_async; the tx side is passed through
-    // the user_data pointer. The heap allocation behind Box::from_raw is released
-    // when `tx` drops (either consumed by `send` or at end of scope).
-    let tx = Box::from_raw(
-        user_data as *mut tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>,
-    );
+    // Take ownership of the boxed Sender — dropping it at end of scope
+    // releases the only outstanding handle.
+    let tx = Box::from_raw(user_data as *mut FfiSender);
 
     // `tx.send` returns Err only if the awaiting future was dropped (and with it
     // the Receiver): e.g. tokio::time::timeout elapsed, a tokio::select! branch
@@ -101,25 +59,43 @@ unsafe extern "C" fn on_result_async(
     let _ = tx.send(ffi_payload(ret, msg, len));
 }
 
-async fn ffi_call_async<F>(f: F) -> Result<Vec<u8>, String>
+fn ffi_call_sync<F>(timeout: Duration, f: F) -> FfiResult
 where
     F: FnOnce(ffi::FfiCallback, *mut c_void) -> c_int,
 {
-    let rx = {
-        let (tx, rx) = tokio::sync::oneshot::channel::<Result<Vec<u8>, String>>();
-        let raw = Box::into_raw(Box::new(tx)) as *mut c_void;
-        let ret = f(on_result_async, raw);
-        if ret == 2 {
-            drop(unsafe {
-                Box::from_raw(
-                    raw as *mut tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>,
-                )
-            });
-            return Err("RET_MISSING_CALLBACK (internal error)".into());
-        }
-        rx
-    };
-    rx.await.map_err(|_| "channel closed before callback fired".to_string())?
+    let (tx, rx) = flume::bounded::<FfiResult>(1);
+    let raw = Box::into_raw(Box::new(tx)) as *mut c_void;
+    let ret = f(on_result, raw);
+    if ret == 2 {
+        // Callback will never fire; reclaim the box to avoid a leak.
+        drop(unsafe { Box::from_raw(raw as *mut FfiSender) });
+        return Err("RET_MISSING_CALLBACK (internal error)".into());
+    }
+    match rx.recv_timeout(timeout) {
+        Ok(payload) => payload,
+        Err(flume::RecvTimeoutError::Timeout) =>
+            Err(format!("timed out after {:?}", timeout)),
+        Err(flume::RecvTimeoutError::Disconnected) =>
+            Err("callback channel disconnected before delivery".into()),
+    }
+}
+
+async fn ffi_call_async<F>(timeout: Duration, f: F) -> FfiResult
+where
+    F: FnOnce(ffi::FfiCallback, *mut c_void) -> c_int,
+{
+    let (tx, rx) = flume::bounded::<FfiResult>(1);
+    let raw = Box::into_raw(Box::new(tx)) as *mut c_void;
+    let ret = f(on_result, raw);
+    if ret == 2 {
+        drop(unsafe { Box::from_raw(raw as *mut FfiSender) });
+        return Err("RET_MISSING_CALLBACK (internal error)".into());
+    }
+    match tokio::time::timeout(timeout, rx.recv_async()).await {
+        Ok(Ok(payload)) => payload,
+        Ok(Err(_)) => Err("callback channel disconnected before delivery".into()),
+        Err(_) => Err(format!("timed out after {:?}", timeout)),
+    }
 }
 
 /// High-level context for `Timer`.
@@ -152,8 +128,9 @@ impl TimerCtx {
     pub fn create(config: TimerConfig, timeout: Duration) -> Result<Self, String> {
         let req = TimerCreateCtorReq { config };
         let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call(timeout, |cb, ud| unsafe {
-            ffi::timer_create(req_bytes.as_ptr(), req_bytes.len(), cb, ud)
+        let raw_bytes = ffi_call_sync(timeout, |cb, ud| unsafe {
+            let _ = ffi::timer_create(req_bytes.as_ptr(), req_bytes.len(), cb, ud);
+            0
         })?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
         let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
@@ -163,8 +140,9 @@ impl TimerCtx {
     pub async fn new_async(config: TimerConfig, timeout: Duration) -> Result<Self, String> {
         let req = TimerCreateCtorReq { config };
         let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {
-            ffi::timer_create(req_bytes.as_ptr(), req_bytes.len(), cb, ud)
+        let raw_bytes = ffi_call_async(timeout, move |cb, ud| unsafe {
+            let _ = ffi::timer_create(req_bytes.as_ptr(), req_bytes.len(), cb, ud);
+            0
         }).await?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
         let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
@@ -174,7 +152,7 @@ impl TimerCtx {
     pub fn echo(&self, req: EchoRequest) -> Result<EchoResponse, String> {
         let req = TimerEchoReq { req };
         let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call(self.timeout, |cb, ud| unsafe {
+        let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
             ffi::timer_echo(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         })?;
         decode_cbor::<EchoResponse>(&raw_bytes)
@@ -184,7 +162,7 @@ impl TimerCtx {
         let req = TimerEchoReq { req };
         let req_bytes = encode_cbor(&req)?;
         let ptr = self.ptr as usize;
-        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {
+        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
             ffi::timer_echo(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         }).await?;
         decode_cbor::<EchoResponse>(&raw_bytes)
@@ -193,7 +171,7 @@ impl TimerCtx {
     pub fn version(&self) -> Result<String, String> {
         let req = TimerVersionReq {};
         let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call(self.timeout, |cb, ud| unsafe {
+        let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
             ffi::timer_version(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         })?;
         decode_cbor::<String>(&raw_bytes)
@@ -203,7 +181,7 @@ impl TimerCtx {
         let req = TimerVersionReq {};
         let req_bytes = encode_cbor(&req)?;
         let ptr = self.ptr as usize;
-        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {
+        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
             ffi::timer_version(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         }).await?;
         decode_cbor::<String>(&raw_bytes)
@@ -212,7 +190,7 @@ impl TimerCtx {
     pub fn complex(&self, req: ComplexRequest) -> Result<ComplexResponse, String> {
         let req = TimerComplexReq { req };
         let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call(self.timeout, |cb, ud| unsafe {
+        let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
             ffi::timer_complex(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         })?;
         decode_cbor::<ComplexResponse>(&raw_bytes)
@@ -222,7 +200,7 @@ impl TimerCtx {
         let req = TimerComplexReq { req };
         let req_bytes = encode_cbor(&req)?;
         let ptr = self.ptr as usize;
-        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {
+        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
             ffi::timer_complex(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         }).await?;
         decode_cbor::<ComplexResponse>(&raw_bytes)

@@ -58,6 +58,12 @@ proc reqStructName(p: FFIProcMeta): string =
 # ---------------------------------------------------------------------------
 
 proc generateCargoToml*(libName: string): string =
+  # `flume` is the unified callback channel (PR #23 Rust review, item 8): one
+  # primitive that supports both `recv_timeout` (blocking trampoline) and
+  # `recv_async` (async trampoline). Default-features disabled to avoid
+  # pulling its async-std/futures shims.
+  # `tokio` is needed only for `tokio::time::timeout` around the async
+  # `recv_async`. Feature-gating tokio (item 11) is a follow-up commit.
   return """[package]
 name = "$1"
 version = "0.1.0"
@@ -66,7 +72,8 @@ edition = "2021"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 ciborium = "0.2"
-tokio = { version = "1", features = ["sync"] }
+flume = { version = "0.11", default-features = false, features = ["async"] }
+tokio = { version = "1", features = ["sync", "time"] }
 """ %
     [libName]
 
@@ -270,7 +277,6 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   # ── Imports ────────────────────────────────────────────────────────────────
   lines.add("use std::os::raw::{c_char, c_int, c_void};")
   lines.add("use std::slice;")
-  lines.add("use std::sync::{Arc, Condvar, Mutex};")
   lines.add("use std::time::Duration;")
   lines.add("use serde::de::DeserializeOwned;")
   lines.add("use serde::Serialize;")
@@ -292,19 +298,26 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   lines.add("}")
   lines.add("")
 
-  # ── Blocking trampoline ────────────────────────────────────────────────────
-  # The callback payload is raw bytes — CBOR on RET_OK, UTF-8 on RET_ERR. We
-  # buffer it as Vec<u8> and decode on the caller side.
-  lines.add("#[derive(Default)]")
-  lines.add("struct FfiCallbackResult {")
-  lines.add("    payload: Option<Result<Vec<u8>, String>>,")
-  lines.add("}")
-  lines.add("")
-  lines.add("type Pair = Arc<(Mutex<FfiCallbackResult>, Condvar)>;")
+  # ── Unified FFI trampoline (PR #23 Rust review, items 1, 2, 4, 8, 9) ───────
+  # One callback shape used by both the blocking and async wrappers. The
+  # `user_data` pointer owns a single `Box<flume::Sender<Result<Vec<u8>,
+  # String>>>`; the callback reconstructs it, sends the payload, and drops
+  # the box (releasing the sender). The receiver side then either
+  # `recv_timeout` (sync) or `recv_async` under `tokio::time::timeout`
+  # (async). A late callback that fires after the caller has already timed
+  # out sends into a closed receiver, which is harmless: the Err is
+  # discarded and the box drops cleanly. No Arc/Condvar; no Box leak; no
+  # late-fire UAF; no double trampoline.
+  lines.add("type FfiResult = Result<Vec<u8>, String>;")
+  lines.add("type FfiSender = flume::Sender<FfiResult>;")
   lines.add("")
   lines.add("// Reconstruct the (ret, msg, len) tuple delivered by the C callback")
   lines.add("// into a Result<Vec<u8>, String>: payload on success, UTF-8 message on error.")
-  lines.add("unsafe fn ffi_payload(ret: c_int, msg: *const c_char, len: usize) -> Result<Vec<u8>, String> {")
+  lines.add("// `from_utf8_lossy` accepts non-UTF-8 error bytes by inserting U+FFFD; the")
+  lines.add("// alternative would be to dispatch a separate Err for invalid UTF-8, but the")
+  lines.add("// codegen contract is that Nim handlers emit `string` error payloads, so")
+  lines.add("// invalid UTF-8 here would be a Nim-side bug.")
+  lines.add("unsafe fn ffi_payload(ret: c_int, msg: *const c_char, len: usize) -> FfiResult {")
   lines.add("    let bytes = if msg.is_null() || len == 0 {")
   lines.add("        Vec::new()")
   lines.add("    } else {")
@@ -320,52 +333,9 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   lines.add("    len: usize,")
   lines.add("    user_data: *mut c_void,")
   lines.add(") {")
-  lines.add("    // from_raw reclaims the strong ref that ffi_call's into_raw left behind;")
-  lines.add("    // letting `pair` drop at end of scope releases it.")
-  lines.add("    let pair = Arc::from_raw(user_data as *const (Mutex<FfiCallbackResult>, Condvar));")
-  lines.add("    let (lock, cvar) = &*pair;")
-  lines.add("    let mut state = lock.lock().unwrap();")
-  lines.add("    state.payload = Some(ffi_payload(ret, msg, len));")
-  lines.add("    cvar.notify_one();")
-  lines.add("}")
-  lines.add("")
-  lines.add("fn ffi_call<F>(timeout: Duration, f: F) -> Result<Vec<u8>, String>")
-  lines.add("where")
-  lines.add("    F: FnOnce(ffi::FfiCallback, *mut c_void) -> c_int,")
-  lines.add("{")
-  lines.add("    let pair: Pair = Arc::new((Mutex::new(FfiCallbackResult::default()), Condvar::new()));")
-  lines.add("    let raw = Arc::into_raw(pair.clone()) as *mut c_void;")
-  lines.add("    let ret = f(on_result, raw);")
-  lines.add("    if ret == 2 {")
-  lines.add("        return Err(\"RET_MISSING_CALLBACK (internal error)\".into());")
-  lines.add("    }")
-  lines.add("    let (lock, cvar) = &*pair;")
-  lines.add("    let guard = lock.lock().unwrap();")
-  lines.add("    let (guard, timed_out) = cvar")
-  lines.add("        .wait_timeout_while(guard, timeout, |s| s.payload.is_none())")
-  lines.add("        .unwrap();")
-  lines.add("    if timed_out.timed_out() {")
-  lines.add("        return Err(format!(\"timed out after {:?}\", timeout));")
-  lines.add("    }")
-  lines.add("    guard.payload.clone().unwrap()")
-  lines.add("}")
-  lines.add("")
-
-  # ── Async (tokio oneshot) trampoline ───────────────────────────────────────
-  lines.add("unsafe extern \"C\" fn on_result_async(")
-  lines.add("    ret: c_int,")
-  lines.add("    msg: *const c_char,")
-  lines.add("    len: usize,")
-  lines.add("    user_data: *mut c_void,")
-  lines.add(") {")
-  lines.add("    // This fn represents the callback called internally in the Nim library function.")
-  lines.add("    // We use a oneshot channel to deliver the result from the Nim-managed thread")
-  lines.add("    // to the awaiting tokio task in ffi_call_async; the tx side is passed through")
-  lines.add("    // the user_data pointer. The heap allocation behind Box::from_raw is released")
-  lines.add("    // when `tx` drops (either consumed by `send` or at end of scope).")
-  lines.add("    let tx = Box::from_raw(")
-  lines.add("        user_data as *mut tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>,")
-  lines.add("    );")
+  lines.add("    // Take ownership of the boxed Sender — dropping it at end of scope")
+  lines.add("    // releases the only outstanding handle.")
+  lines.add("    let tx = Box::from_raw(user_data as *mut FfiSender);")
   lines.add("")
   lines.add("    // `tx.send` returns Err only if the awaiting future was dropped (and with it")
   lines.add("    // the Receiver): e.g. tokio::time::timeout elapsed, a tokio::select! branch")
@@ -381,27 +351,43 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   lines.add("    let _ = tx.send(ffi_payload(ret, msg, len));")
   lines.add("}")
   lines.add("")
-  # Scoped block keeps raw/tx/F dead at the single await point so the
-  # returned future is Send regardless of whether F itself is Send.
-  lines.add("async fn ffi_call_async<F>(f: F) -> Result<Vec<u8>, String>")
+  lines.add("fn ffi_call_sync<F>(timeout: Duration, f: F) -> FfiResult")
   lines.add("where")
   lines.add("    F: FnOnce(ffi::FfiCallback, *mut c_void) -> c_int,")
   lines.add("{")
-  lines.add("    let rx = {")
-  lines.add("        let (tx, rx) = tokio::sync::oneshot::channel::<Result<Vec<u8>, String>>();")
-  lines.add("        let raw = Box::into_raw(Box::new(tx)) as *mut c_void;")
-  lines.add("        let ret = f(on_result_async, raw);")
-  lines.add("        if ret == 2 {")
-  lines.add("            drop(unsafe {")
-  lines.add("                Box::from_raw(")
-  lines.add("                    raw as *mut tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>,")
-  lines.add("                )")
-  lines.add("            });")
-  lines.add("            return Err(\"RET_MISSING_CALLBACK (internal error)\".into());")
-  lines.add("        }")
-  lines.add("        rx")
-  lines.add("    };")
-  lines.add("    rx.await.map_err(|_| \"channel closed before callback fired\".to_string())?")
+  lines.add("    let (tx, rx) = flume::bounded::<FfiResult>(1);")
+  lines.add("    let raw = Box::into_raw(Box::new(tx)) as *mut c_void;")
+  lines.add("    let ret = f(on_result, raw);")
+  lines.add("    if ret == 2 {")
+  lines.add("        // Callback will never fire; reclaim the box to avoid a leak.")
+  lines.add("        drop(unsafe { Box::from_raw(raw as *mut FfiSender) });")
+  lines.add("        return Err(\"RET_MISSING_CALLBACK (internal error)\".into());")
+  lines.add("    }")
+  lines.add("    match rx.recv_timeout(timeout) {")
+  lines.add("        Ok(payload) => payload,")
+  lines.add("        Err(flume::RecvTimeoutError::Timeout) =>")
+  lines.add("            Err(format!(\"timed out after {:?}\", timeout)),")
+  lines.add("        Err(flume::RecvTimeoutError::Disconnected) =>")
+  lines.add("            Err(\"callback channel disconnected before delivery\".into()),")
+  lines.add("    }")
+  lines.add("}")
+  lines.add("")
+  lines.add("async fn ffi_call_async<F>(timeout: Duration, f: F) -> FfiResult")
+  lines.add("where")
+  lines.add("    F: FnOnce(ffi::FfiCallback, *mut c_void) -> c_int,")
+  lines.add("{")
+  lines.add("    let (tx, rx) = flume::bounded::<FfiResult>(1);")
+  lines.add("    let raw = Box::into_raw(Box::new(tx)) as *mut c_void;")
+  lines.add("    let ret = f(on_result, raw);")
+  lines.add("    if ret == 2 {")
+  lines.add("        drop(unsafe { Box::from_raw(raw as *mut FfiSender) });")
+  lines.add("        return Err(\"RET_MISSING_CALLBACK (internal error)\".into());")
+  lines.add("    }")
+  lines.add("    match tokio::time::timeout(timeout, rx.recv_async()).await {")
+  lines.add("        Ok(Ok(payload)) => payload,")
+  lines.add("        Ok(Err(_)) => Err(\"callback channel disconnected before delivery\".into()),")
+  lines.add("        Err(_) => Err(format!(\"timed out after {:?}\", timeout)),")
+  lines.add("    }")
   lines.add("}")
   lines.add("")
 
@@ -471,8 +457,13 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
     lines.add("    pub fn create($1) -> Result<Self, String> {" % [ctorParamsStr])
     lines.add("        let req = $1;" % [reqLit])
     lines.add("        let req_bytes = encode_cbor(&req)?;")
-    lines.add("        let raw_bytes = ffi_call(timeout, |cb, ud| unsafe {")
-    lines.add("            ffi::$1(req_bytes.as_ptr(), req_bytes.len(), cb, ud)" % [ctor.procName])
+    # Ctor C ABI returns *mut c_void synchronously AND fires the callback;
+    # the callback carries the success/error payload, so discard the
+    # synchronous return value and yield RET_OK to make the trampoline wait
+    # on the callback.
+    lines.add("        let raw_bytes = ffi_call_sync(timeout, |cb, ud| unsafe {")
+    lines.add("            let _ = ffi::$1(req_bytes.as_ptr(), req_bytes.len(), cb, ud);" % [ctor.procName])
+    lines.add("            0")
     lines.add("        })?;")
     # The ctor success payload is a CBOR text string holding the ctx address.
     lines.add("        let addr_str: String = decode_cbor(&raw_bytes)?;")
@@ -485,8 +476,11 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
     lines.add("    pub async fn new_async($1) -> Result<Self, String> {" % [ctorParamsStr])
     lines.add("        let req = $1;" % [reqLit])
     lines.add("        let req_bytes = encode_cbor(&req)?;")
-    lines.add("        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {")
-    lines.add("            ffi::$1(req_bytes.as_ptr(), req_bytes.len(), cb, ud)" % [ctor.procName])
+    # See `create` above: discard the ctor's *mut c_void synchronous return
+    # and rely on the callback to deliver the ctx address.
+    lines.add("        let raw_bytes = ffi_call_async(timeout, move |cb, ud| unsafe {")
+    lines.add("            let _ = ffi::$1(req_bytes.as_ptr(), req_bytes.len(), cb, ud);" % [ctor.procName])
+    lines.add("            0")
     lines.add("        }).await?;")
     lines.add("        let addr_str: String = decode_cbor(&raw_bytes)?;")
     lines.add("        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;")
@@ -528,7 +522,7 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
     )
     lines.add("        let req = $1;" % [reqLit])
     lines.add("        let req_bytes = encode_cbor(&req)?;")
-    lines.add("        let raw_bytes = ffi_call(self.timeout, |cb, ud| unsafe {")
+    lines.add("        let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {")
     lines.add(
       "            ffi::$1(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())" %
         [m.procName]
@@ -548,7 +542,7 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
     lines.add("        let req = $1;" % [reqLit])
     lines.add("        let req_bytes = encode_cbor(&req)?;")
     lines.add("        let ptr = self.ptr as usize;")
-    lines.add("        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {")
+    lines.add("        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {")
     lines.add(
       "            ffi::$1(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())" %
         [m.procName]
