@@ -790,7 +790,7 @@ macro ffi*(prc: untyped): untyped =
           FFIParamMeta(name: extraParamNames[i], typeName: tn, isPtr: isPtr)
         )
       let retTypeInner = resultInner[1]
-      let retIsPtr = retTypeInner.kind == nnkPtrTy
+      let retIsPtr = isPtr(retTypeInner)
       let retTn =
         if retIsPtr: nimTypeNameRepr(retTypeInner[0])
         else: nimTypeNameRepr(retTypeInner)
@@ -940,7 +940,7 @@ macro ffi*(prc: untyped): untyped =
           FFIParamMeta(name: extraParamNames[i], typeName: tn, isPtr: isPtr)
         )
       let retTypeInnerSync = resultInner[1]
-      let retIsPtrSync = retTypeInnerSync.kind == nnkPtrTy
+      let retIsPtrSync = isPtr(retTypeInnerSync)
       let retTnSync =
         if retIsPtrSync: nimTypeNameRepr(retTypeInnerSync[0])
         else: nimTypeNameRepr(retTypeInnerSync)
@@ -1364,7 +1364,7 @@ macro ffiCtor*(prc: untyped): untyped =
     var ctorExtraParams: seq[FFIParamMeta] = @[]
     for i in 0 ..< paramNames.len:
       let ptype = paramTypes[i]
-      let isPtr = ptype.kind == nnkPtrTy
+      let isPtr = isPtr(ptype)
       let tn =
         if isPtr: nimTypeNameRepr(ptype[0])
         else: nimTypeNameRepr(ptype)
