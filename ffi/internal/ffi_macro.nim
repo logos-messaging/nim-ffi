@@ -271,8 +271,12 @@ proc buildFfiNewReqProc(reqTypeName, body: NimNode): NimNode =
   newBody.add(
     quote do:
       let typeStr = $T
-      let bytes = cborEncode(`reqObjIdent`)
-      return FFIThreadRequest.init(callback, userData, typeStr.cstring, bytes)
+      # Encode directly into shared memory and hand ownership to the request,
+      # avoiding the seq[byte] → allocShared+copyMem second copy.
+      let (sharedData, sharedLen) = cborEncodeShared(`reqObjIdent`)
+      return FFIThreadRequest.initFromOwnedShared(
+        callback, userData, typeStr.cstring, sharedData, sharedLen
+      )
   )
 
   let newReqProc = newProc(

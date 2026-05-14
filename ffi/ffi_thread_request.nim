@@ -48,6 +48,7 @@ proc initFromPtr*(
 ): ptr type T =
   ## Same as init but takes a raw ptr+len, avoiding the need to bind an
   ## openArray to a local for callers that operate on raw FFI buffers.
+  ## The bytes are copied into a fresh shared-memory buffer.
   var ret = createShared(FFIThreadRequest)
   ret[].callback = callback
   ret[].userData = userData
@@ -58,6 +59,37 @@ proc initFromPtr*(
     ret[].data = cast[ptr UncheckedArray[byte]](allocShared(dataLen))
     copyMem(ret[].data, data, dataLen)
     ret[].dataLen = dataLen
+  return ret
+
+proc initFromOwnedShared*(
+    T: typedesc[FFIThreadRequest],
+    callback: FFICallBack,
+    userData: pointer,
+    reqId: cstring,
+    data: ptr UncheckedArray[byte],
+    dataLen: int,
+): ptr type T =
+  ## Takes ownership of an already-allocated shared-memory buffer (`data`)
+  ## and embeds it in the request without copying. Pair with `cborEncodeShared`
+  ## so the request payload travels from encoder to FFI thread with a single
+  ## allocation instead of seq → allocShared + copyMem.
+  ##
+  ## Ownership: `data` must have been allocated via `allocShared` / grown via
+  ## `reallocShared`. After this call, `deleteRequest` will `deallocShared` it.
+  ## Pass `(nil, 0)` for an empty payload.
+  var ret = createShared(FFIThreadRequest)
+  ret[].callback = callback
+  ret[].userData = userData
+  ret[].reqId = reqId.alloc()
+  ret[].data = nil
+  ret[].dataLen = 0
+  if dataLen > 0 and not data.isNil():
+    ret[].data = data
+    ret[].dataLen = dataLen
+  elif not data.isNil():
+    # `cborEncodeShared` returns `(nil, 0)` for empty payloads, but be safe
+    # if a caller hands us a zero-length-but-non-nil buffer.
+    deallocShared(data)
   return ret
 
 proc deleteRequest*(request: ptr FFIThreadRequest) =

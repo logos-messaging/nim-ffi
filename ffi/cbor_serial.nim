@@ -28,31 +28,80 @@ const CborNullByte*: byte = 0xf6'u8
 # Writer
 # ---------------------------------------------------------------------------
 
-type CborWriter* = object
-  buf*: seq[byte]
+type
+  CborWriterKind* = enum
+    cwkSeq    ## Default: writes into a GC-managed seq[byte].
+    cwkShared ## Writes directly into a shared-memory buffer (allocShared);
+              ## the encoded payload can be handed to the FFI thread without
+              ## a second copy. See `cborEncodeShared`.
+  CborWriter* = object
+    case kind*: CborWriterKind
+    of cwkSeq:
+      buf*: seq[byte]
+    of cwkShared:
+      sharedData*: ptr UncheckedArray[byte]
+      sharedLen*: int
+      sharedCap*: int
+
+proc reserveExtra(w: var CborWriter, n: int) =
+  ## For cwkShared: grow the shared buffer to fit at least `n` more bytes.
+  ## For cwkSeq: no-op (seq grows on `add`).
+  if w.kind == cwkShared:
+    let needed = w.sharedLen + n
+    if needed > w.sharedCap:
+      var newCap = max(w.sharedCap * 2, 16)
+      while newCap < needed:
+        newCap *= 2
+      w.sharedData = cast[ptr UncheckedArray[byte]](
+        reallocShared(w.sharedData, newCap)
+      )
+      w.sharedCap = newCap
+
+proc add(w: var CborWriter, b: byte) =
+  case w.kind
+  of cwkSeq:
+    w.buf.add(b)
+  of cwkShared:
+    reserveExtra(w, 1)
+    w.sharedData[w.sharedLen] = b
+    inc w.sharedLen
+
+proc addBytes(w: var CborWriter, src: pointer, n: int) =
+  ## Append `n` bytes from `src` to the writer's buffer.
+  if n <= 0:
+    return
+  case w.kind
+  of cwkSeq:
+    let oldLen = w.buf.len
+    w.buf.setLen(oldLen + n)
+    copyMem(addr w.buf[oldLen], src, n)
+  of cwkShared:
+    reserveExtra(w, n)
+    copyMem(addr w.sharedData[w.sharedLen], src, n)
+    inc w.sharedLen, n
 
 proc writeHead(w: var CborWriter, major: byte, value: uint64) =
   ## Emit a CBOR initial byte + argument for unsigned integer `value`.
   let mt = byte(major shl 5)
   if value < 24'u64:
-    w.buf.add(mt or byte(value))
+    w.add(mt or byte(value))
   elif value < 0x100'u64:
-    w.buf.add(mt or 24'u8)
-    w.buf.add(byte(value))
+    w.add(mt or 24'u8)
+    w.add(byte(value))
   elif value < 0x10000'u64:
-    w.buf.add(mt or 25'u8)
-    w.buf.add(byte((value shr 8) and 0xff))
-    w.buf.add(byte(value and 0xff))
+    w.add(mt or 25'u8)
+    w.add(byte((value shr 8) and 0xff))
+    w.add(byte(value and 0xff))
   elif value < 0x100000000'u64:
-    w.buf.add(mt or 26'u8)
-    w.buf.add(byte((value shr 24) and 0xff))
-    w.buf.add(byte((value shr 16) and 0xff))
-    w.buf.add(byte((value shr 8) and 0xff))
-    w.buf.add(byte(value and 0xff))
+    w.add(mt or 26'u8)
+    w.add(byte((value shr 24) and 0xff))
+    w.add(byte((value shr 16) and 0xff))
+    w.add(byte((value shr 8) and 0xff))
+    w.add(byte(value and 0xff))
   else:
-    w.buf.add(mt or 27'u8)
+    w.add(mt or 27'u8)
     for i in countdown(7, 0):
-      w.buf.add(byte((value shr (i * 8)) and 0xff))
+      w.add(byte((value shr (i * 8)) and 0xff))
 
 # ---------------------------------------------------------------------------
 # Reader
@@ -181,7 +230,7 @@ proc decodeValue*[T: object | tuple](r: var CborReader, dest: var T): Result[voi
 # ---------------------------------------------------------------------------
 
 proc encodeValue*(w: var CborWriter, x: bool) =
-  w.buf.add(if x: 0xf5'u8 else: 0xf4'u8)
+  w.add(if x: 0xf5'u8 else: 0xf4'u8)
 
 proc encodeValue*(w: var CborWriter, x: SomeUnsignedInt) =
   w.writeHead(0, uint64(x))
@@ -194,23 +243,21 @@ proc encodeValue*(w: var CborWriter, x: SomeSignedInt) =
     w.writeHead(1, mag)
 
 proc encodeValue*(w: var CborWriter, x: float64) =
-  w.buf.add(0xfb'u8)
+  w.add(0xfb'u8)
   let bits = cast[uint64](x)
   for i in countdown(7, 0):
-    w.buf.add(byte((bits shr (i * 8)) and 0xff))
+    w.add(byte((bits shr (i * 8)) and 0xff))
 
 proc encodeValue*(w: var CborWriter, x: float32) =
-  w.buf.add(0xfa'u8)
+  w.add(0xfa'u8)
   let bits = cast[uint32](x)
   for i in countdown(3, 0):
-    w.buf.add(byte((bits shr (i * 8)) and 0xff))
+    w.add(byte((bits shr (i * 8)) and 0xff))
 
 proc encodeValue*(w: var CborWriter, x: string) =
   w.writeHead(3, uint64(x.len))
   if x.len > 0:
-    let oldLen = w.buf.len
-    w.buf.setLen(oldLen + x.len)
-    copyMem(addr w.buf[oldLen], unsafeAddr x[0], x.len)
+    w.addBytes(unsafeAddr x[0], x.len)
 
 proc encodeValue*(w: var CborWriter, x: cstring) =
   if x.isNil:
@@ -219,9 +266,7 @@ proc encodeValue*(w: var CborWriter, x: cstring) =
     let s = $x
     w.writeHead(3, uint64(s.len))
     if s.len > 0:
-      let oldLen = w.buf.len
-      w.buf.setLen(oldLen + s.len)
-      copyMem(addr w.buf[oldLen], unsafeAddr s[0], s.len)
+      w.addBytes(unsafeAddr s[0], s.len)
 
 proc encodeValue*(w: var CborWriter, x: pointer) =
   w.writeHead(0, uint64(cast[uint](x)))
@@ -243,7 +288,7 @@ proc encodeValue*[T](w: var CborWriter, x: Option[T]) =
   if x.isSome:
     encodeValue(w, x.get)
   else:
-    w.buf.add(0xf6'u8)
+    w.add(0xf6'u8)
 
 proc encodeValue*[T: enum](w: var CborWriter, x: T) =
   w.writeHead(0, uint64(ord(x)))
@@ -406,9 +451,27 @@ proc decodeValue*[T: object | tuple](r: var CborReader, dest: var T): Result[voi
 # ---------------------------------------------------------------------------
 
 proc cborEncode*[T](x: T): seq[byte] =
-  var w = CborWriter()
+  var w = CborWriter(kind: cwkSeq)
   encodeValue(w, x)
   w.buf
+
+proc cborEncodeShared*[T](x: T): tuple[data: ptr UncheckedArray[byte], len: int] =
+  ## Encodes `x` directly into a shared-memory buffer (allocShared).
+  ##
+  ## The returned `data` is owned by the caller and must be freed via
+  ## `deallocShared` exactly once (the FFIThreadRequest deleteRequest path
+  ## does this automatically). Empty payloads return `(nil, 0)` without
+  ## allocating.
+  ##
+  ## Equivalent in result to `cborEncode` followed by an `allocShared`
+  ## + `copyMem`, but avoids the intermediate `seq[byte]` and its copy.
+  var w = CborWriter(kind: cwkShared)
+  encodeValue(w, x)
+  if w.sharedLen == 0:
+    if not w.sharedData.isNil:
+      deallocShared(w.sharedData)
+    return (nil, 0)
+  return (w.sharedData, w.sharedLen)
 
 proc cborDecode*[T](data: openArray[byte], _: typedesc[T]): Result[T, string] =
   var r = newReader(data)
