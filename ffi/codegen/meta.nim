@@ -22,7 +22,6 @@ type
     extraParams*: seq[FFIParamMeta] # all params except the lib param
     returnTypeName*: string # e.g. "EchoResponse", "string", "pointer"
     returnIsPtr*: bool # true if return type is ptr T
-    isAsync*: bool
 
   FFIFieldMeta* = object
     name*: string # e.g. "delayMs"

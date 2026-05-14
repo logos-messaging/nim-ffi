@@ -47,17 +47,6 @@ proc registerFfiTypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
   ffiTypeRegistry.add(FFITypeMeta(name: typeNameStr, fields: fieldMetas))
   return typeDef
 
-proc bodyHasAwait(n: NimNode): bool =
-  ## Returns true if the AST node `n` contains any `await` or `waitFor` call.
-  if n.kind in {nnkCall, nnkCommand}:
-    let callee = n[0]
-    if callee.kind == nnkIdent and callee.strVal in ["await", "waitFor"]:
-      return true
-  for child in n:
-    if bodyHasAwait(child):
-      return true
-  false
-
 proc isPtr(typ: NimNode): bool =
   ## True iff `typ` is a `ptr T` type expression — i.e. an `nnkPtrTy` AST node.
   ## Used by the binding-generator metadata path to flag pointer-typed params
@@ -677,8 +666,6 @@ macro ffi*(prc: untyped): untyped =
 
   let reqTypeName = ident(camelName & "Req")
 
-  let isAsync = bodyHasAwait(bodyNode)
-
   let userProcName =
     if procName.kind == nnkPostfix:
       procName[1]
@@ -689,10 +676,6 @@ macro ffi*(prc: untyped): untyped =
   ## overload. The C wrapper additionally carries `{.exportc.}` so the foreign
   ## ABI symbol is unchanged.
   let cExportProcName = userProcName
-  ## Sync-only helper that owns the user body when there's no `await`. The
-  ## C-export inlines this for the fast path; the Nim-facing user proc wraps
-  ## its result in a completed Future so the declared `Future[...]` shape holds.
-  let syncBodyProcName = ident($userProcName & "Sync")
 
   let ctxType =
     nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), libTypeName))
@@ -711,42 +694,13 @@ macro ffi*(prc: untyped): untyped =
       pragmas = newTree(nnkPragma, ident("async")),
     )
 
-  proc buildSyncBodyHelperProc(): NimNode =
-    ## proc <syncBodyProcName>*(lib: LibType, extras...): Result[T, string] = <body>
-    var helperParams = newSeq[NimNode]()
-    helperParams.add(resultInner)
-    helperParams.add(newIdentDefs(libParamName, libTypeName))
-    for i in 0 ..< extraParamNames.len:
-      helperParams.add(newIdentDefs(ident(extraParamNames[i]), extraParamTypes[i]))
-    newProc(
-      name = postfix(syncBodyProcName, "*"),
-      params = helperParams,
-      body = newStmtList(bodyNode.copyNimTree()),
-      pragmas = newEmptyNode(),
-    )
-
-  proc buildSyncAsyncWrapperProc(): NimNode =
-    ## proc <userProcName>*(lib: LibType, extras...): Future[Result[T, string]] {.async.} =
-    ##   return <syncBodyProcName>(lib, extras...)
-    var wrapperParams = newSeq[NimNode]()
-    wrapperParams.add(retTypeNode)
-    wrapperParams.add(newIdentDefs(libParamName, libTypeName))
-    for i in 0 ..< extraParamNames.len:
-      wrapperParams.add(newIdentDefs(ident(extraParamNames[i]), extraParamTypes[i]))
-    let callNode = newCall(syncBodyProcName, libParamName)
-    for n in extraParamNames:
-      callNode.add(ident(n))
-    let body = newStmtList(newTree(nnkReturnStmt, callNode))
-    newProc(
-      name = postfix(userProcName, "*"),
-      params = wrapperParams,
-      body = body,
-      pragmas = newTree(nnkPragma, ident("async")),
-    )
-
   proc asyncPath(): NimNode =
-    ## ASYNC PATH — body contains await/waitFor; dispatch via the FFI thread
-    ## channel and reply through the callback when the future resolves.
+    ## Emits the C-exported wrapper and registers the request handler.
+    ## All `.ffi.` procs dispatch through the FFI thread channel and reply
+    ## through the callback when the future resolves — the previous "sync
+    ## fast-path" that ran inline on the foreign caller thread was removed
+    ## (PR #23 review, items 1–5) because it bypassed `foreignThreadGc`,
+    ## `ctx.lock`, and chronos's single-thread invariant.
     let helperProc = buildAsyncHelperProc()
 
     # registerReqFFI lambda: typed params, returns user's typed Result.
@@ -862,134 +816,12 @@ macro ffi*(prc: untyped): untyped =
           extraParams: ffiExtraParams,
           returnTypeName: retTn,
           returnIsPtr: retIsPtr,
-          isAsync: true,
         )
       )
 
     return newStmtList(helperProc, registerReq, ffiProc)
 
-  proc syncPath(): NimNode =
-    ## SYNC PATH — no await/waitFor in body; bypass the FFI-thread channel
-    ## and fire the callback inline on the caller thread.
-    let syncBodyProc = buildSyncBodyHelperProc()
-    let userAsyncWrapper = buildSyncAsyncWrapperProc()
-
-    # Declare the Req type so we can CBOR-decode the incoming payload uniformly.
-    let syncReqTypeDef =
-      buildReqTypeFromFields(reqTypeName, extraParamNames, extraParamTypes)
-
-    let syncExportedParams = cExportedParams(ctxType)
-
-    let syncFfiBody = newStmtList()
-
-    syncFfiBody.add quote do:
-      if callback.isNil:
-        return RET_MISSING_CALLBACK
-
-    let syncPoolIdent = ident($libTypeName & "FFIPool")
-    syncFfiBody.add quote do:
-      if not `syncPoolIdent`.isValidCtx(cast[pointer](ctx)):
-        let errStr = "ctx is not a valid FFI context"
-        callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
-        return RET_ERR
-
-    # CBOR-decode the incoming payload into the Req struct.
-    let decodedIdent = genSym(nskLet, "decoded")
-    syncFfiBody.add quote do:
-      let `decodedIdent` =
-        block:
-          let decodeRes = cborDecodePtr(
-            cast[ptr UncheckedArray[byte]](reqCbor), int(reqCborLen), `reqTypeName`
-          )
-          if decodeRes.isErr:
-            let errStr = "CBOR decode failed: " & decodeRes.error
-            callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
-            return RET_ERR
-          decodeRes.value
-
-    # Unpack fields with the user's original parameter types.
-    for i in 0 ..< extraParamNames.len:
-      syncFfiBody.add unpackReqField(
-        ident(extraParamNames[i]), extraParamTypes[i], decodedIdent
-      )
-
-    let syncCtxMyLib = newDotExpr(newTree(nnkDerefExpr, ident("ctx")), ident("myLib"))
-    let syncLibValDeref = newTree(nnkDerefExpr, syncCtxMyLib)
-    let syncHelperCall = newTree(nnkCall, syncBodyProcName, syncLibValDeref)
-    for name in extraParamNames:
-      syncHelperCall.add(ident(name))
-
-    let retValOrErrIdent = ident("retValOrErr")
-    syncFfiBody.add quote do:
-      let `retValOrErrIdent` = `syncHelperCall`
-      if `retValOrErrIdent`.isErr():
-        let errStr =
-          if `retValOrErrIdent`.error.len > 0: `retValOrErrIdent`.error
-          else: "unknown error"
-        callback(
-          RET_ERR, cast[ptr cchar](errStr.cstring), cast[csize_t](errStr.len), userData
-        )
-        return RET_ERR
-      let encoded = cborEncode(`retValOrErrIdent`.value)
-      if encoded.len > 0:
-        callback(
-          RET_OK, cast[ptr cchar](unsafeAddr encoded[0]),
-          cast[csize_t](encoded.len), userData
-        )
-      else:
-        var sentinel = CborNullByte
-        callback(
-          RET_OK, cast[ptr cchar](addr sentinel), 1.csize_t, userData
-        )
-      return RET_OK
-
-    let syncFfiProc = newProc(
-      name = postfix(cExportProcName, "*"),
-      params = syncExportedParams,
-      body = syncFfiBody,
-      pragmas = newTree(
-        nnkPragma,
-        ident("dynlib"),
-        newTree(nnkExprColonExpr, ident("exportc"), newStrLitNode(cExportName)),
-        ident("cdecl"),
-        newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
-      ),
-    )
-
-    block:
-      var ffiExtraParamsSync: seq[FFIParamMeta] = @[]
-      for i in 0 ..< extraParamNames.len:
-        let ptype = extraParamTypes[i]
-        let isPointer = isPtr(ptype)
-        let tn =
-          if isPointer: nimTypeNameRepr(ptype[0])
-          else: nimTypeNameRepr(ptype)
-        ffiExtraParamsSync.add(
-          FFIParamMeta(name: extraParamNames[i], typeName: tn, isPtr: isPointer)
-        )
-      let retTypeInnerSync = resultInner[1]
-      let retIsPtrSync = isPtr(retTypeInnerSync)
-      let retTnSync =
-        if retIsPtrSync: nimTypeNameRepr(retTypeInnerSync[0])
-        else: nimTypeNameRepr(retTypeInnerSync)
-      ffiProcRegistry.add(
-        FFIProcMeta(
-          procName: cExportName,
-          libName: currentLibName,
-          kind: FFIKind.FFI,
-          libTypeName: $libTypeName,
-          extraParams: ffiExtraParamsSync,
-          returnTypeName: retTnSync,
-          returnIsPtr: retIsPtrSync,
-          isAsync: false,
-        )
-      )
-
-    return newStmtList(
-      syncReqTypeDef, syncBodyProc, userAsyncWrapper, syncFfiProc
-    )
-
-  let stmts = if isAsync: asyncPath() else: syncPath()
+  let stmts = asyncPath()
 
   when defined(ffiDumpMacros):
     echo stmts.repr
@@ -1399,7 +1231,6 @@ macro ffiCtor*(prc: untyped): untyped =
         extraParams: ctorExtraParams,
         returnTypeName: $libTypeName,
         returnIsPtr: false,
-        isAsync: true,
       )
     )
 
@@ -1517,7 +1348,6 @@ macro ffiDtor*(prc: untyped): untyped =
       extraParams: @[],
       returnTypeName: "",
       returnIsPtr: false,
-      isAsync: false,
     )
   )
 

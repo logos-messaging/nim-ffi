@@ -1,4 +1,4 @@
-import std/[locks, options, strutils, os]
+import std/[locks, options, strutils, os, atomics]
 import unittest2
 import results
 import ../ffi
@@ -433,8 +433,12 @@ proc testlib_version*(
 ): Future[Result[string, string]] {.ffi.} =
   return ok("v" & $lib.value)
 
-suite "async/sync detection in .ffi.":
-  test "sync proc invokes callback without thread hop":
+suite "sync-body .ffi. is dispatched on FFI thread":
+  ## Before PR #23 (items 1–5), a `.ffi.` body without `await` was emitted as
+  ## an inline-on-foreign-thread fast path. That was deleted; all `.ffi.`
+  ## procs now go through the FFI thread. This test asserts the round-trip
+  ## still produces the expected payload via the callback.
+  test "sync body still produces correct payload via callback":
     var ctorD: CallbackData
     initCallbackData(ctorD)
     defer: deinitCallbackData(ctorD)
@@ -459,13 +463,13 @@ suite "async/sync detection in .ffi.":
     initCallbackData(d2)
     defer: deinitCallbackData(d2)
 
-    # Sync .ffi. proc takes no extra params; pack an empty Req.
+    # No-extra-param .ffi. proc; pack an empty Req.
     var emptyBytes = cborEncode(TestlibVersionReq())
     let ret = testlib_version(
       ctx, testCallback, addr d2, encodedPtr(emptyBytes), emptyBytes.len.csize_t
     )
     check ret == RET_OK
-    check d2.called
+    waitCallback(d2) # always asynchronous now
     check d2.retCode == RET_OK
     check cborDecode(callbackBytes(d2), string).value == "v3"
 
@@ -595,3 +599,70 @@ suite "ptr return type in .ffi.":
     waitCallback(freeD)
     check freeD.retCode == RET_OK
     check cborDecode(callbackBytes(freeD), string).value == "freed"
+
+# ---------------------------------------------------------------------------
+# Regression for PR #23 review items 1–5: a `.ffi.` body without `await`
+# used to be emitted as an inline-on-foreign-thread fast path, which bypassed
+# `foreignThreadGc`, `ctx.lock`, and chronos's single-thread invariant. The
+# sync fast-path was deleted; this test records `getThreadId()` inside a
+# sync body and asserts the handler runs on the FFI thread, not on the
+# caller's thread.
+# ---------------------------------------------------------------------------
+
+var gRecordedHandlerTid: Atomic[int]
+
+type RecordTidReq {.ffi.} = object
+  dummy: int
+
+proc testlib_record_tid*(
+    lib: SimpleLib, req: RecordTidReq
+): Future[Result[int, string]] {.ffi.} =
+  ## Sync body — used to live on the inline fast-path; must now run on the
+  ## FFI thread.
+  let tid = getThreadId()
+  gRecordedHandlerTid.store(tid)
+  return ok(tid)
+
+suite "sync-body .ffi. runs on FFI thread (PR #23 regression)":
+  test "handler thread id differs from caller's":
+    var ctorD: CallbackData
+    initCallbackData(ctorD)
+    defer: deinitCallbackData(ctorD)
+
+    var cfg = cborEncode(
+      TestlibCreateCtorReq(config: SimpleConfig(initialValue: 0))
+    )
+    let ctorRet = testlib_create(
+      encodedPtr(cfg), cfg.len.csize_t, testCallback, addr ctorD
+    )
+    check not ctorRet.isNil()
+    waitCallback(ctorD)
+    check ctorD.retCode == RET_OK
+    let ctxAddr = ctorAddrFromCbor(callbackBytes(ctorD))
+    check ctxAddr != 0
+    let ctx = cast[ptr FFIContext[SimpleLib]](ctxAddr)
+    defer: check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
+
+    gRecordedHandlerTid.store(0)
+    let callerTid = getThreadId()
+
+    var d: CallbackData
+    initCallbackData(d)
+    defer: deinitCallbackData(d)
+
+    var reqBytes = cborEncode(TestlibRecordTidReq(req: RecordTidReq(dummy: 1)))
+    let ret = testlib_record_tid(
+      ctx, testCallback, addr d, encodedPtr(reqBytes), reqBytes.len.csize_t
+    )
+    check ret == RET_OK
+    waitCallback(d)
+    check d.retCode == RET_OK
+
+    let handlerTid = gRecordedHandlerTid.load()
+    check handlerTid != 0
+    # The whole point of the fix: even a sync-body handler is dispatched off
+    # the caller thread. If this fails the inline fast-path is back.
+    check handlerTid != callerTid
+    # And the callback payload (the recorded tid) matches what the handler stored.
+    check cborDecode(callbackBytes(d), int).value == handlerTid
+
