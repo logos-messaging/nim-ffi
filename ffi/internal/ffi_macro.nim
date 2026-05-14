@@ -58,6 +58,12 @@ proc bodyHasAwait(n: NimNode): bool =
       return true
   false
 
+proc isPtr(typ: NimNode): bool =
+  ## True iff `typ` is a `ptr T` type expression — i.e. an `nnkPtrTy` AST node.
+  ## Used by the binding-generator metadata path to flag pointer-typed params
+  ## and return types so the foreign side can render them as opaque addresses.
+  typ.kind == nnkPtrTy
+
 proc nimTypeNameRepr(typ: NimNode): string =
   ## Stringifies a parameter or field type for the binding-generator registry.
   ## `$ident` works for simple types; bracket/dot/expression types need `repr`.
@@ -776,7 +782,7 @@ macro ffi*(prc: untyped): untyped =
       var ffiExtraParams: seq[FFIParamMeta] = @[]
       for i in 0 ..< extraParamNames.len:
         let ptype = extraParamTypes[i]
-        let isPtr = ptype.kind == nnkPtrTy
+        let isPtr = isPtr(ptype)
         let tn =
           if isPtr: nimTypeNameRepr(ptype[0])
           else: nimTypeNameRepr(ptype)
@@ -926,7 +932,7 @@ macro ffi*(prc: untyped): untyped =
       var ffiExtraParamsSync: seq[FFIParamMeta] = @[]
       for i in 0 ..< extraParamNames.len:
         let ptype = extraParamTypes[i]
-        let isPtr = ptype.kind == nnkPtrTy
+        let isPtr = isPtr(ptype)
         let tn =
           if isPtr: nimTypeNameRepr(ptype[0])
           else: nimTypeNameRepr(ptype)
