@@ -31,12 +31,11 @@ proc init*(
   ret[].callback = callback
   ret[].userData = userData
   ret[].reqId = reqId.alloc()
+  ret[].data = nil
   ret[].dataLen = data.len
   if data.len > 0:
     ret[].data = cast[ptr UncheckedArray[byte]](allocShared(data.len))
     copyMem(ret[].data, unsafeAddr data[0], data.len)
-  else:
-    ret[].data = nil
   return ret
 
 proc initFromPtr*(
@@ -53,13 +52,12 @@ proc initFromPtr*(
   ret[].callback = callback
   ret[].userData = userData
   ret[].reqId = reqId.alloc()
-  ret[].dataLen = dataLen
+  ret[].data = nil
+  ret[].dataLen = 0
   if dataLen > 0 and not data.isNil:
     ret[].data = cast[ptr UncheckedArray[byte]](allocShared(dataLen))
     copyMem(ret[].data, data, dataLen)
-  else:
-    ret[].data = nil
-    ret[].dataLen = 0
+    ret[].dataLen = dataLen
   return ret
 
 proc deleteRequest*(request: ptr FFIThreadRequest) =
