@@ -58,7 +58,7 @@ proc stripLibPrefixCpp(procName, libName: string): string =
   return procName
 
 proc reqStructName(p: FFIProcMeta): string =
-  let camel = toCamelCase(p.procName)
+  let camel = snakeToPascalCase(p.procName)
   if p.kind == FFIKind.CTOR: camel & "CtorReq" else: camel & "Req"
 
 proc cppBracedInit(structName: string, fieldNames: seq[string]): string =

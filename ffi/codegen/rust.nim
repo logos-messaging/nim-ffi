@@ -20,7 +20,7 @@ proc nimTypeToRust*(typeName: string): string =
   of "bool": "bool"
   of "float", "float64": "f64"
   of "pointer": "u64"
-  else: toPascalCase(t)
+  else: capitalizeFirstLetter(t)
 
 proc deriveLibName*(procs: seq[FFIProcMeta]): string =
   ## Extracts the common prefix before the first `_` from proc names.
@@ -45,7 +45,7 @@ proc stripLibPrefix*(procName: string, libName: string): string =
 
 proc reqStructName(p: FFIProcMeta): string =
   ## Mirrors the Nim macro: <CamelCase(procName)>Req or CtorReq for ctors.
-  let camel = toCamelCase(p.procName)
+  let camel = snakeToPascalCase(p.procName)
   if p.kind == FFIKind.CTOR: camel & "CtorReq" else: camel & "Req"
 
 # ---------------------------------------------------------------------------
@@ -201,7 +201,7 @@ proc generateTypesRs*(
     lines.add("#[derive(Debug, Clone, Serialize, Deserialize)]")
     lines.add("pub struct $1 {" % [t.name])
     for f in t.fields:
-      let snakeName = toSnakeCase(f.name)
+      let snakeName = camelToSnakeCase(f.name)
       let rustType = nimTypeToRust(f.typeName)
       # Add serde rename if camelCase name differs from snake_case
       if snakeName != f.name:
@@ -222,7 +222,7 @@ proc generateTypesRs*(
     else:
       lines.add("pub struct $1 {" % [reqName])
       for ep in p.extraParams:
-        let snake = toSnakeCase(ep.name)
+        let snake = camelToSnakeCase(ep.name)
         let rustType =
           if ep.isPtr: "u64"
           else: nimTypeToRust(ep.typeName)
@@ -255,7 +255,7 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
 
   var libTypeName = ""
   if ctors.len > 0: libTypeName = ctors[0].libTypeName
-  else: libTypeName = toPascalCase(libName)
+  else: libTypeName = capitalizeFirstLetter(libName)
 
   let ctxTypeName = libTypeName & "Ctx"
 
@@ -415,7 +415,7 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
     var paramsList: seq[string] = @[]
     var fieldInits: seq[string] = @[]
     for ep in ctor.extraParams:
-      let snake = toSnakeCase(ep.name)
+      let snake = camelToSnakeCase(ep.name)
       let rustType =
         if ep.isPtr: "u64"
         else: nimTypeToRust(ep.typeName)
@@ -468,7 +468,7 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
     var paramsList: seq[string] = @[]
     var fieldInits: seq[string] = @[]
     for ep in m.extraParams:
-      let snake = toSnakeCase(ep.name)
+      let snake = camelToSnakeCase(ep.name)
       let rustType =
         if ep.isPtr: "u64"
         else: nimTypeToRust(ep.typeName)

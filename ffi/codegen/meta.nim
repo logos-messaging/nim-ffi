@@ -1,7 +1,7 @@
 ## Compile-time metadata types for FFI binding generation.
 ## Populated by the {.ffiCtor.} and {.ffi.} macros and consumed by codegen.
 
-import std/strutils
+import std/[strutils, unicode]
 
 type
   FFIParamMeta* = object
@@ -51,27 +51,34 @@ const ffiNimSrcRelPath* {.strdefine.} = ""
 # Name conversion helpers shared by codegen and the ffi macro
 # ---------------------------------------------------------------------------
 
-proc toSnakeCase*(s: string): string =
+proc camelToSnakeCase*(s: string): string =
+  ## Converts camelCase to snake_case. Inserts `_` before each uppercase rune
+  ## that's not the first character and lowercases everything.
+  ## e.g. "delayMs" → "delay_ms", "timerName" → "timer_name"
   var snake = ""
-  for i, c in s:
-    if c.isUpperAscii() and i > 0:
+  var first = true
+  for r in runes(s):
+    if r.isUpper() and not first:
       snake.add('_')
-    snake.add(c.toLowerAscii())
+    snake.add($r.toLower())
+    first = false
   return snake
 
-proc toPascalCase*(s: string): string =
-  ## Returns `s` with the first character uppercased.
+proc capitalizeFirstLetter*(s: string): string =
+  ## Returns `s` with its first rune uppercased; the rest is left unchanged.
+  ## e.g. "abc" → "Abc", "" → "", "Abc" → "Abc"
   if s.len == 0:
     return s
-  var pascal = s
-  pascal[0] = s[0].toUpperAscii()
-  return pascal
+  var runesSeq = toRunes(s)
+  runesSeq[0] = runesSeq[0].toUpper()
+  return $runesSeq
 
-proc toCamelCase*(s: string): string =
-  ## Converts snake_case or mixed identifiers to PascalCase for type names.
-  ## e.g. "testlib_create" -> "TestlibCreate"
+proc snakeToPascalCase*(s: string): string =
+  ## Converts snake_case identifiers to PascalCase: split on `_`, uppercase
+  ## the first rune of each part, concatenate.
+  ## e.g. "testlib_create" → "TestlibCreate", "hello_world" → "HelloWorld"
   let parts = s.split('_')
-  var camel = ""
+  var pascal = ""
   for p in parts:
-    camel.add toPascalCase(p)
-  return camel
+    pascal.add capitalizeFirstLetter(p)
+  return pascal

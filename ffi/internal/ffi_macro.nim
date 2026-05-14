@@ -527,7 +527,7 @@ macro ffi*(prc: untyped): untyped =
     else:
       raw
   let cExportName = nimNameToCExport(procNameStr)
-  let camelName = toCamelCase(procNameStr)
+  let camelName = snakeToPascalCase(procNameStr)
 
   let reqTypeName = ident(camelName & "Req")
 
@@ -1160,7 +1160,7 @@ macro ffiCtor*(prc: untyped): untyped =
     else:
       procNameStr
   let cExportName = nimNameToCExport(cleanName)
-  let reqTypeNameStr = toCamelCase(cleanName) & "CtorReq"
+  let reqTypeNameStr = snakeToPascalCase(cleanName) & "CtorReq"
   let reqTypeName = ident(reqTypeNameStr)
 
   let typeDef = buildCtorRequestType(reqTypeName, paramNames, paramTypes)
