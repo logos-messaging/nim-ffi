@@ -78,8 +78,18 @@ proc fieldStorageType(typ: NimNode): NimNode =
 
 proc buildRequestType(reqTypeName: NimNode, body: NimNode): NimNode =
   ## Builds the per-proc Req object type. Field names match the lambda params;
-  ## field types match the user-typed param types (with cstring rewritten to
-  ## string for transport).
+  ## field types match the user-typed param types (with `cstring` rewritten to
+  ## `string` for trivial CBOR transport).
+  ##
+  ## Builds:
+  ##   type <reqTypeName>* = object
+  ##     <lambdaParam1Name>: <lambdaParam1Type>
+  ##     ...
+  ##
+  ## e.g.:
+  ##   type EchoRequest* = object
+  ##     message: string
+  ##     delayMs: int
 
   var procNode = body
   if procNode.kind == nnkStmtList and procNode.len == 1:
@@ -90,10 +100,12 @@ proc buildRequestType(reqTypeName: NimNode, body: NimNode): NimNode =
   let params = procNode[3]
   var fields: seq[NimNode] = @[]
   for p in params[1 .. ^1]:
+    # Field must be nnkIdentDefs(name, type, defaultExpr)
     let name = p[0]
     let typ = fieldStorageType(p[1])
     fields.add newTree(nnkIdentDefs, name, typ, newEmptyNode())
 
+  # Wrap fields in a rec list
   let recList =
     if fields.len > 0:
       newTree(nnkRecList, fields)
@@ -103,8 +115,10 @@ proc buildRequestType(reqTypeName: NimNode, body: NimNode): NimNode =
         newTree(nnkIdentDefs, ident("_placeholder"), ident("uint8"), newEmptyNode()),
       )
 
+  # object type node: object [of?] [pragma?] recList
   let objTy = newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), recList)
 
+  # Export the type (e.g. EchoRequest*)
   let typeName =
     if reqTypeName.kind == nnkPostfix:
       reqTypeName
@@ -341,13 +355,33 @@ proc addNewRequestToRegistry(reqTypeName, reqHandler: NimNode): NimNode =
   return regAssign
 
 macro registerReqFFI*(reqTypeName, reqHandler, body: untyped): untyped =
-  ## Registers a request type and its FFI-thread handler.
+  ## Registers a request that will be handled by the FFI/working thread.
+  ## The request should be sent from the ffi consumer thread.
+  ##
+  ## The lambda passed to this macro must:
+  ##   - Only have no-GC'ed types as parameters (cstring is allowed; it gets
+  ##     transported as `string` in the per-proc Req struct).
+  ##   - Return Future[Result[string, string]] and be annotated with {.async.}
+  ##     The returned values are sent back to the ffi consumer thread.
   ##
   ## Example:
   ##   registerReqFFI(CreateNodeRequest, ctx: ptr FFIContext[Waku]):
-  ##     proc(config: NodeConfig): Future[Result[string, string]] {.async.} =
-  ##       ...
+  ##     proc(
+  ##         config: NodeConfig, appCallbacks: AppCallbacks
+  ##     ): Future[Result[string, string]] {.async.} =
+  ##       ctx.myLib[] = (await createWaku(config, appCallbacks)).valueOr:
+  ##         return err($error)
+  ##       return ok("")
+  ##
+  ## The created FFI request is then dispatched from the ffi consumer thread
+  ## (generally the main thread) following something like:
+  ##
+  ##   ffi.sendRequestToFFIThread(
+  ##     ctx, CreateNodeRequest.ffiNewReq(callback, userData, config, appCallbacks)
+  ##   ).isOkOr:
+  ##     ...
 
+  # Extract lambda params to generate fields
   let typeDef = buildRequestType(reqTypeName, body)
   let ffiNewReqProc = buildFfiNewReqProc(reqTypeName, body)
   let processProc = buildProcessFFIRequestProc(reqTypeName, reqHandler, body)
@@ -361,7 +395,12 @@ macro registerReqFFI*(reqTypeName, reqHandler, body: untyped): untyped =
 macro processReq*(
     reqType, ctx, callback, userData: untyped, args: varargs[untyped]
 ): untyped =
-  ## Expands T.processReq(ctx, callback, userData, a, b, ...)
+  ## Expands T.processReq(ctx, callback, userData, a, b, ...) into a
+  ## sendRequestToFFIThread call that wraps the args in a freshly-built
+  ## FFIThreadRequest, with inline error reporting via `callback`.
+  ##
+  ## e.g.:
+  ##   waku_dial_peerReq.processReq(ctx, callback, userData, peerMultiAddr, protocol, timeoutMs)
 
   var callArgs = @[reqType, callback, userData]
   for a in args:
@@ -388,8 +427,27 @@ macro processReq*(
 
 macro ffiRaw*(prc: untyped): untyped =
   ## Defines an FFI-exported proc that registers a request handler to be executed
-  ## asynchronously in the FFI thread. {.ffiRaw.} keeps the ctx/callback/userData
-  ## params explicit; additional parameters are encoded as one CBOR blob.
+  ## asynchronously in the FFI thread.
+  ##
+  ## This is the "raw" / legacy form of the macro where the developer writes
+  ## the ctx, callback, and userData parameters explicitly. Additional parameters
+  ## travel as one CBOR blob.
+  ##
+  ## {.ffiRaw.} implicitly implies a Future[Result[string, string]] {.async.}
+  ## return type.
+  ##
+  ## When using {.ffiRaw.}, the first three parameters must be:
+  ##  - ctx: ptr FFIContext[T]  <-- T is the type that handles the FFI requests
+  ##  - callback: FFICallBack
+  ##  - userData: pointer
+  ## Then, additional parameters may be defined as needed, after these first
+  ## three, always considering that only no-GC'ed (or C-like) types are allowed.
+  ##
+  ## e.g.:
+  ##   proc waku_version(
+  ##       ctx: ptr FFIContext[Waku], callback: FFICallBack, userData: pointer
+  ##   ) {.ffiRaw.} =
+  ##     return ok(WakuNodeVersionString)
 
   let procName = prc[0]
   let formalParams = prc[3]
@@ -475,11 +533,23 @@ macro ffiRaw*(prc: untyped): untyped =
 macro ffi*(prc: untyped): untyped =
   ## Simplified FFI macro — applies to procs or types.
   ##
-  ## On a type: `type Foo {.ffi.} = object` registers Foo for binding generation.
+  ## On a type: `type Foo {.ffi.} = object` registers Foo for binding generation
+  ## and lets the generic cborEncode/cborDecode overloads handle serialization.
+  ##
   ## On a proc: the annotated proc must have a first parameter of the library
   ## type, optionally additional Nim-typed parameters, and return
-  ## Future[Result[RetType, string]]. The macro generates a C-exported wrapper
-  ## that takes one CBOR-encoded buffer as the call payload.
+  ## Future[Result[RetType, string]]. It must NOT include ctx, callback, or
+  ## userData in its signature — the macro generates a C-exported wrapper that
+  ## takes one CBOR-encoded buffer as the call payload and fires the callback.
+  ##
+  ## Example (type):
+  ##   type EchoRequest {.ffi.} = object
+  ##     message: string
+  ##     delayMs: int
+  ##
+  ## Example (proc):
+  ##   proc mylib_send*(w: MyLib, cfg: SendConfig): Future[Result[string, string]] {.ffi.} =
+  ##     return ok("done")
 
   if prc.kind == nnkTypeDef:
     var cleanTypeDef = prc.copyNimTree()
@@ -603,9 +673,6 @@ macro ffi*(prc: untyped): untyped =
 
   var stmts: NimNode
   if isAsync:
-    # -------------------------------------------------------------------------
-    # ASYNC PATH
-    # -------------------------------------------------------------------------
     let helperProc = buildAsyncHelperProc()
 
     # registerReqFFI lambda: typed params, returns user's typed Result.
@@ -735,9 +802,6 @@ macro ffi*(prc: untyped): untyped =
 
     stmts = newStmtList(helperProc, registerReq, ffiProc)
   else:
-    # -------------------------------------------------------------------------
-    # SYNC PATH — bypass thread channel; fire callback inline
-    # -------------------------------------------------------------------------
     let syncBodyProc = buildSyncBodyHelperProc()
     let userAsyncWrapper = buildSyncAsyncWrapperProc()
 
@@ -1123,8 +1187,27 @@ proc addCtorRequestToRegistry(reqTypeName, libTypeName: NimNode): NimNode =
   return regAssign
 
 macro ffiCtor*(prc: untyped): untyped =
-  ## Defines a C-exported constructor. The generated wrapper takes a single
-  ## CBOR-encoded request buffer covering all constructor parameters.
+  ## Defines a C-exported constructor that creates an FFIContext and populates
+  ## ctx.myLib asynchronously in the FFI thread.
+  ##
+  ## The annotated proc must:
+  ##   - Have Nim-typed parameters (carried over the wire as a single CBOR blob)
+  ##   - Return Future[Result[LibType, string]]
+  ##   - NOT include ctx, callback, or userData in its signature
+  ##
+  ## Example:
+  ##   proc mylib_create*(config: SimpleConfig): Future[Result[SimpleLib, string]] {.ffiCtor.} =
+  ##     return ok(SimpleLib(value: config.initialValue))
+  ##
+  ## The generated C-exported proc has the signature:
+  ##   proc mylib_create(reqCbor: ptr byte, reqCborLen: csize_t,
+  ##                     callback: FFICallBack, userData: pointer): pointer
+  ##                    {.exportc, cdecl, raises: [].}
+  ##
+  ## Returns the context pointer synchronously, NULL on failure. The callback
+  ## also fires when async initialization completes, passing the ctx address as
+  ## a decimal string on success. The caller should hold the returned pointer
+  ## and pass it to subsequent .ffi. calls.
 
   let procName = prc[0]
   let formalParams = prc[3]
@@ -1305,7 +1388,23 @@ macro ffiCtor*(prc: untyped): untyped =
 # ---------------------------------------------------------------------------
 
 macro ffiDtor*(prc: untyped): untyped =
-  ## Defines a C-exported destructor. Signature unchanged: takes ctx + cb + ud.
+  ## Defines a C-exported destructor that tears down the FFIContext after the
+  ## body runs.
+  ##
+  ## The annotated proc must have exactly one parameter of the library type.
+  ## The body contains any library-level cleanup to run before context teardown.
+  ##
+  ## Example:
+  ##   proc waku_destroy*(w: Waku) {.ffiDtor.} =
+  ##     w.cleanup()
+  ##
+  ## The generated C-exported proc has the signature:
+  ##   int waku_destroy(void* ctx)
+  ##
+  ## It extracts the library value from ctx, runs the body, then calls
+  ## destroyFFIContext to tear down the FFI thread and free the context.
+  ## Returns RET_OK on success, RET_ERR on failure (null/invalid ctx, or
+  ## destroyFFIContext failure).
 
   let procName = prc[0]
   let formalParams = prc[3]
@@ -1408,7 +1507,28 @@ macro genBindings*(
     nimSrcRelPath: static[string] = ffiNimSrcRelPath,
 ): untyped =
   ## Emits C++ or Rust binding files from the compile-time FFI registries.
-  ## See plan: the foreign-side wrapper encodes one CBOR buffer per request.
+  ## The foreign-side wrapper encodes one CBOR buffer per request.
+  ##
+  ## PLACEMENT REQUIREMENT: genBindings() must be called AFTER every {.ffi.},
+  ## {.ffiCtor.} and {.ffiDtor.} annotation in the compilation unit. Each
+  ## pragma populates ffiProcRegistry / ffiTypeRegistry as the compiler
+  ## expands the AST; calling genBindings() earlier produces incomplete
+  ## bindings.
+  ##
+  ## In a single-file library, place it at the bottom of the file.
+  ## In a multi-file library, import all sub-modules first and call
+  ## genBindings() once at the bottom of the top-level compilation-root file.
+  ##
+  ## Supported languages (-d:targetLang): "rust" (default), "cpp".
+  ## Output path and nim source path default to -d:ffiOutputDir and
+  ## -d:ffiNimSrcRelPath, or can be passed as explicit arguments.
+  ## This macro is a no-op unless -d:ffiGenBindings is set.
+  ##
+  ## Example (all via compile flags):
+  ##   genBindings()
+  ##   # nim c -d:ffiGenBindings -d:targetLang=rust \
+  ##   #        -d:ffiOutputDir=examples/timer/rust_bindings \
+  ##   #        -d:ffiNimSrcRelPath=../timer.nim mylib.nim
 
   when defined(ffiGenBindings):
     if outputDir.len == 0:
