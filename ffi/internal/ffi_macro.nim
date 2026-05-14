@@ -820,12 +820,12 @@ macro ffi*(prc: untyped): untyped =
       var ffiExtraParams: seq[FFIParamMeta] = @[]
       for i in 0 ..< extraParamNames.len:
         let ptype = extraParamTypes[i]
-        let isPtr = isPtr(ptype)
+        let isPointer = isPtr(ptype)
         let tn =
-          if isPtr: nimTypeNameRepr(ptype[0])
+          if isPointer: nimTypeNameRepr(ptype[0])
           else: nimTypeNameRepr(ptype)
         ffiExtraParams.add(
-          FFIParamMeta(name: extraParamNames[i], typeName: tn, isPtr: isPtr)
+          FFIParamMeta(name: extraParamNames[i], typeName: tn, isPtr: isPointer)
         )
       let retTypeInner = resultInner[1]
       let retIsPtr = isPtr(retTypeInner)
@@ -946,12 +946,12 @@ macro ffi*(prc: untyped): untyped =
       var ffiExtraParamsSync: seq[FFIParamMeta] = @[]
       for i in 0 ..< extraParamNames.len:
         let ptype = extraParamTypes[i]
-        let isPtr = isPtr(ptype)
+        let isPointer = isPtr(ptype)
         let tn =
-          if isPtr: nimTypeNameRepr(ptype[0])
+          if isPointer: nimTypeNameRepr(ptype[0])
           else: nimTypeNameRepr(ptype)
         ffiExtraParamsSync.add(
-          FFIParamMeta(name: extraParamNames[i], typeName: tn, isPtr: isPtr)
+          FFIParamMeta(name: extraParamNames[i], typeName: tn, isPtr: isPointer)
         )
       let retTypeInnerSync = resultInner[1]
       let retIsPtrSync = isPtr(retTypeInnerSync)
@@ -1378,11 +1378,11 @@ macro ffiCtor*(prc: untyped): untyped =
     var ctorExtraParams: seq[FFIParamMeta] = @[]
     for i in 0 ..< paramNames.len:
       let ptype = paramTypes[i]
-      let isPtr = isPtr(ptype)
+      let isPointer = isPtr(ptype)
       let tn =
-        if isPtr: nimTypeNameRepr(ptype[0])
+        if isPointer: nimTypeNameRepr(ptype[0])
         else: nimTypeNameRepr(ptype)
-      ctorExtraParams.add(FFIParamMeta(name: paramNames[i], typeName: tn, isPtr: isPtr))
+      ctorExtraParams.add(FFIParamMeta(name: paramNames[i], typeName: tn, isPtr: isPointer))
     ffiProcRegistry.add(
       FFIProcMeta(
         procName: cExportName,
