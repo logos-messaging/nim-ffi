@@ -61,17 +61,20 @@ proc bodyHasAwait(n: NimNode): bool =
 proc nimTypeNameRepr(typ: NimNode): string =
   ## Stringifies a parameter or field type for the binding-generator registry.
   ## `$ident` works for simple types; bracket/dot/expression types need `repr`.
-  if typ.kind == nnkIdent: $typ
-  elif typ.kind == nnkPtrTy: "ptr " & nimTypeNameRepr(typ[0])
+  case typ.kind
+  of nnkIdent: $typ
+  of nnkPtrTy: "ptr " & nimTypeNameRepr(typ[0])
   else: typ.repr
 
 proc fieldStorageType(typ: NimNode): NimNode =
   ## Returns the in-Req-struct storage type for a user-declared param type.
   ## `cstring` is stored as `string` for trivial CBOR transport; everything
   ## else is stored as the user typed it.
-  if typ.kind == nnkIdent and $typ == "cstring":
-    return ident("string")
-  return typ
+  case typ.kind
+  of nnkIdent:
+    if $typ == "cstring": ident("string")
+    else: typ
+  else: typ
 
 proc buildRequestType(reqTypeName: NimNode, body: NimNode): NimNode =
   ## Builds the per-proc Req object type. Field names match the lambda params;
