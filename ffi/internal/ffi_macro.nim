@@ -671,8 +671,9 @@ macro ffi*(prc: untyped): untyped =
       pragmas = newTree(nnkPragma, ident("async")),
     )
 
-  var stmts: NimNode
-  if isAsync:
+  proc asyncPath(): NimNode =
+    ## ASYNC PATH — body contains await/waitFor; dispatch via the FFI thread
+    ## channel and reply through the callback when the future resolves.
     let helperProc = buildAsyncHelperProc()
 
     # registerReqFFI lambda: typed params, returns user's typed Result.
@@ -800,8 +801,11 @@ macro ffi*(prc: untyped): untyped =
         )
       )
 
-    stmts = newStmtList(helperProc, registerReq, ffiProc)
-  else:
+    return newStmtList(helperProc, registerReq, ffiProc)
+
+  proc syncPath(): NimNode =
+    ## SYNC PATH — no await/waitFor in body; bypass the FFI-thread channel
+    ## and fire the callback inline on the caller thread.
     let syncBodyProc = buildSyncBodyHelperProc()
     let userAsyncWrapper = buildSyncAsyncWrapperProc()
 
@@ -947,9 +951,11 @@ macro ffi*(prc: untyped): untyped =
         )
       )
 
-    stmts = newStmtList(
+    return newStmtList(
       syncReqTypeDef, syncBodyProc, userAsyncWrapper, syncFfiProc
     )
+
+  let stmts = if isAsync: asyncPath() else: syncPath()
 
   when defined(ffiDumpMacros):
     echo stmts.repr
