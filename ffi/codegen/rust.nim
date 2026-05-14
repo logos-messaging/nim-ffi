@@ -41,7 +41,7 @@ proc stripLibPrefix*(procName: string, libName: string): string =
 proc reqStructName(p: FFIProcMeta): string =
   ## Mirrors the Nim macro: <CamelCase(procName)>Req or CtorReq for ctors.
   let camel = toCamelCase(p.procName)
-  if p.kind == ffiCtorKind: camel & "CtorReq" else: camel & "Req"
+  if p.kind == FFIKind.CTOR: camel & "CtorReq" else: camel & "Req"
 
 # ---------------------------------------------------------------------------
 # File generators
@@ -150,14 +150,14 @@ proc generateFfiRs*(procs: seq[FFIProcMeta]): string =
   for p in procs:
     var params: seq[string] = @[]
     case p.kind
-    of ffiFfiKind:
+    of FFIKind.FFI:
       params.add("ctx: *mut c_void")
       params.add("callback: FfiCallback")
       params.add("user_data: *mut c_void")
       params.add("req_cbor: *const u8")
       params.add("req_cbor_len: usize")
       lines.add("    pub fn $1($2) -> c_int;" % [p.procName, params.join(", ")])
-    of ffiCtorKind:
+    of FFIKind.CTOR:
       params.add("req_cbor: *const u8")
       params.add("req_cbor_len: usize")
       params.add("callback: FfiCallback")
@@ -165,7 +165,7 @@ proc generateFfiRs*(procs: seq[FFIProcMeta]): string =
       lines.add(
         "    pub fn $1($2) -> *mut c_void;" % [p.procName, params.join(", ")]
       )
-    of ffiDtorKind:
+    of FFIKind.DTOR:
       params.add("ctx: *mut c_void")
       lines.add("    pub fn $1($2) -> c_int;" % [p.procName, params.join(", ")])
 
@@ -196,7 +196,7 @@ proc generateTypesRs*(
   # Per-proc Req structs — these wrap the typed parameters and are the unit of
   # CBOR encoding sent across the FFI boundary.
   for p in procs:
-    if p.kind == ffiDtorKind:
+    if p.kind == FFIKind.DTOR:
       continue
     let reqName = reqStructName(p)
     lines.add("#[derive(Debug, Clone, Serialize, Deserialize)]")
@@ -225,8 +225,8 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   var ctors: seq[FFIProcMeta] = @[]
   var methods: seq[FFIProcMeta] = @[]
   for p in procs:
-    if p.kind == ffiCtorKind: ctors.add(p)
-    elif p.kind == ffiFfiKind: methods.add(p)
+    if p.kind == FFIKind.CTOR: ctors.add(p)
+    elif p.kind == FFIKind.FFI: methods.add(p)
 
   var libTypeName = ""
   if ctors.len > 0: libTypeName = ctors[0].libTypeName

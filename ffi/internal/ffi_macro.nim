@@ -721,7 +721,7 @@ macro ffi*(prc: untyped): untyped =
         FFIProcMeta(
           procName: cExportName,
           libName: currentLibName,
-          kind: ffiFfiKind,
+          kind: FFIKind.FFI,
           libTypeName: $libTypeName,
           extraParams: ffiExtraParams,
           returnTypeName: retTn,
@@ -871,7 +871,7 @@ macro ffi*(prc: untyped): untyped =
         FFIProcMeta(
           procName: cExportName,
           libName: currentLibName,
-          kind: ffiFfiKind,
+          kind: FFIKind.FFI,
           libTypeName: $libTypeName,
           extraParams: ffiExtraParamsSync,
           returnTypeName: retTnSync,
@@ -1275,7 +1275,7 @@ macro ffiCtor*(prc: untyped): untyped =
       FFIProcMeta(
         procName: cExportName,
         libName: currentLibName,
-        kind: ffiCtorKind,
+        kind: FFIKind.CTOR,
         libTypeName: $libTypeName,
         extraParams: ctorExtraParams,
         returnTypeName: $libTypeName,
@@ -1377,7 +1377,7 @@ macro ffiDtor*(prc: untyped): untyped =
     FFIProcMeta(
       procName: cExportName,
       libName: currentLibName,
-      kind: ffiDtorKind,
+      kind: FFIKind.DTOR,
       libTypeName: $libTypeName,
       extraParams: @[],
       returnTypeName: "",

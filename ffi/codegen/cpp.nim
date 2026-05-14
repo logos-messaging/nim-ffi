@@ -49,7 +49,7 @@ proc stripLibPrefixCpp(procName, libName: string): string =
 
 proc reqStructName(p: FFIProcMeta): string =
   let camel = toCamelCase(p.procName)
-  if p.kind == ffiCtorKind: camel & "CtorReq" else: camel & "Req"
+  if p.kind == FFIKind.CTOR: camel & "CtorReq" else: camel & "Req"
 
 proc generateCppHeader*(
     procs: seq[FFIProcMeta], types: seq[FFITypeMeta], libName: string
@@ -113,7 +113,7 @@ proc generateCppHeader*(
   lines.add("// ============================================================")
   lines.add("")
   for p in procs:
-    if p.kind == ffiDtorKind:
+    if p.kind == FFIKind.DTOR:
       continue
     let reqName = reqStructName(p)
     lines.add("struct $1 {" % [reqName])
@@ -148,17 +148,17 @@ proc generateCppHeader*(
   lines.add("")
   for p in procs:
     case p.kind
-    of ffiFfiKind:
+    of FFIKind.FFI:
       lines.add(
         "int $1(void* ctx, FfiCallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);" %
           [p.procName]
       )
-    of ffiCtorKind:
+    of FFIKind.CTOR:
       lines.add(
         "void* $1(const uint8_t* req_cbor, size_t req_cbor_len, FfiCallback callback, void* user_data);" %
           [p.procName]
       )
-    of ffiDtorKind:
+    of FFIKind.DTOR:
       lines.add("int $1(void* ctx);" % [p.procName])
   lines.add("} // extern \"C\"")
   lines.add("")
@@ -246,8 +246,8 @@ proc generateCppHeader*(
   var ctors: seq[FFIProcMeta] = @[]
   var methods: seq[FFIProcMeta] = @[]
   for p in procs:
-    if p.kind == ffiCtorKind: ctors.add(p)
-    elif p.kind == ffiFfiKind: methods.add(p)
+    if p.kind == FFIKind.CTOR: ctors.add(p)
+    elif p.kind == FFIKind.FFI: methods.add(p)
 
   let libTypeName =
     if ctors.len > 0: ctors[0].libTypeName
