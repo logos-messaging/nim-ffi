@@ -1413,7 +1413,7 @@ macro ffiCtor*(prc: untyped): untyped =
   return stmts
 
 # ---------------------------------------------------------------------------
-# ffiDtor — destructor macro (unchanged signature)
+# ffiDtor — destructor macro
 # ---------------------------------------------------------------------------
 
 macro ffiDtor*(prc: untyped): untyped =
