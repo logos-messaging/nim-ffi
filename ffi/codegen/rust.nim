@@ -225,8 +225,10 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   var ctors: seq[FFIProcMeta] = @[]
   var methods: seq[FFIProcMeta] = @[]
   for p in procs:
-    if p.kind == FFIKind.CTOR: ctors.add(p)
-    elif p.kind == FFIKind.FFI: methods.add(p)
+    case p.kind
+    of FFIKind.CTOR: ctors.add(p)
+    of FFIKind.FFI: methods.add(p)
+    of FFIKind.DTOR: discard
 
   var libTypeName = ""
   if ctors.len > 0: libTypeName = ctors[0].libTypeName
