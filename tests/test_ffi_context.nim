@@ -666,3 +666,66 @@ suite "sync-body .ffi. runs on FFI thread (PR #23 regression)":
     # And the callback payload (the recorded tid) matches what the handler stored.
     check cborDecode(callbackBytes(d), int).value == handlerTid
 
+# ---------------------------------------------------------------------------
+# Regression for PR #23 review item 6: reentrancy guard on
+# sendRequestToFFIThread. A handler running on the FFI thread that tries to
+# dispatch back through sendRequestToFFIThread used to self-deadlock waiting
+# on `reqReceivedSignal` (which only the FFI thread can fire). The guard now
+# returns an Err immediately.
+# ---------------------------------------------------------------------------
+
+var gReentrantNestedRes: Channel[string]
+gReentrantNestedRes.open()
+
+# Handler runs on the FFI thread; it nests a send back into the same ctx and
+# reports the outcome through gReentrantNestedRes. Carrying the ctx address
+# via the request payload sidesteps the cross-thread visibility issue of
+# thread-local pointers.
+registerReqFFI(ReentrantTriggerReq, lib: ptr TestLib):
+  proc(ctxAddr: int): Future[Result[string, string]] {.async.} =
+    let ctx = cast[ptr FFIContext[TestLib]](cast[uint](ctxAddr))
+    var nestedD: CallbackData
+    initCallbackData(nestedD)
+    defer: deinitCallbackData(nestedD)
+    let res = sendRequestToFFIThread(
+      ctx, PingRequest.ffiNewReq(testCallback, addr nestedD, "x".cstring)
+    )
+    if res.isErr():
+      try:
+        gReentrantNestedRes.send("err:" & res.error)
+      except Exception as exc:
+        return err("channel.send raised: " & exc.msg)
+      return ok("guard-fired")
+    try:
+      gReentrantNestedRes.send("ok-unexpected")
+    except Exception as exc:
+      return err("channel.send raised: " & exc.msg)
+    return ok("ok-unexpected")
+
+suite "reentrancy guard (PR #23 review, item 6)":
+  test "send from inside an FFI handler returns Err instead of deadlocking":
+    var pool: FFIContextPool[TestLib]
+    let ctx = pool.createFFIContext().valueOr:
+      check false
+      return
+    defer: discard pool.destroyFFIContext(ctx)
+
+    var d: CallbackData
+    initCallbackData(d)
+    defer: deinitCallbackData(d)
+
+    let ctxAddrInt = cast[int](cast[uint](ctx))
+    check sendRequestToFFIThread(
+      ctx,
+      ReentrantTriggerReq.ffiNewReq(testCallback, addr d, ctxAddrInt),
+    ).isOk()
+
+    # The outer callback only fires once the handler — including its nested
+    # send attempt — has finished. No polling/sleep needed.
+    waitCallback(d)
+    check d.retCode == RET_OK
+    check cborDecode(callbackBytes(d), string).value == "guard-fired"
+
+    let nestedMsg = gReentrantNestedRes.recv()
+    check nestedMsg.startsWith("err:")
+    check "reentrant ffi call" in nestedMsg

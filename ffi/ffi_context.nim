@@ -39,6 +39,11 @@ type FFIContext*[T] = object
 var ffiCurrentCallbackState* {.threadvar.}: ptr FFICallbackState
   ## Set by ffiThreadBody at thread startup; read by dispatchFfiEvent.
 
+var onFFIThread* {.threadvar.}: bool
+  ## True while executing inside `ffiThreadBody`. Used by
+  ## `sendRequestToFFIThread` to detect re-entrant dispatch from a handler
+  ## (which would self-deadlock on `reqReceivedSignal`).
+
 const git_version* {.strdefine.} = "n/a"
 
 template callEventCallback*(ctx: ptr FFIContext, eventName: string, body: untyped) =
@@ -89,11 +94,21 @@ template dispatchFfiEvent*(eventName: string, body: untyped) =
 proc sendRequestToFFIThread*(
     ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, timeout = InfiniteDuration
 ): Result[void, string] =
+  # Reentrancy guard (PR #23 review, item 6): if a handler running on the FFI
+  # thread tries to dispatch back through this proc, it would wait forever on
+  # `reqReceivedSignal` — which only this thread can fire — and self-deadlock.
+  # Return an error instead so the caller can surface it.
+  if onFFIThread:
+    deleteRequest(ffiRequest)
+    return err(
+      "reentrant ffi call: a handler invoked sendRequestToFFIThread on its own context"
+    )
+
+  # All async submissions serialise on `ctx.lock` for the full
+  # trySend + fireSync + waitSync sequence because `reqChannel` is
+  # single-producer and `reqReceivedSignal` is shared across callers.
+  # Multi-producer redesign is tracked as PR #23 review item 7.
   ctx.lock.acquire()
-  # This lock is only necessary while we use a SP Channel and while the signalling
-  # between threads assumes that there aren't concurrent requests.
-  # Rearchitecting the signaling + migrating to a MP Channel will allow us to receive
-  # requests concurrently and spare us the need of locks
   defer:
     ctx.lock.release()
 
@@ -222,10 +237,12 @@ proc processRequest[T](
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ## FFI thread body that attends library user API requests
   ffiCurrentCallbackState = addr ctx[].callbackState
+  onFFIThread = true
 
   logging.setupLog(logging.LogLevel.DEBUG, logging.LogFormat.TEXT)
 
   defer:
+    onFFIThread = false
     # Signal destroyFFIContext that this thread has exited, so its bounded
     # wait can unblock and proceed with cleanup.
     let fireRes = ctx.threadExitSignal.fireSync()
