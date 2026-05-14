@@ -1,8 +1,12 @@
+use std::time::Duration;
 use timer::{EchoRequest, TimerCtx, TimerConfig};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let ctx = TimerCtx::new_async(TimerConfig { name: "tokio-demo".into() }).await?;
+    let ctx = TimerCtx::new_async(
+        TimerConfig { name: "tokio-demo".into() },
+        Duration::from_secs(30),
+    ).await?;
 
     let version = ctx.version_async().await?;
     println!("[1] Tokio runtime started");

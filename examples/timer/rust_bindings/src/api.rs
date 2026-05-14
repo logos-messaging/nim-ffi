@@ -128,8 +128,25 @@ pub struct TimerCtx {
     timeout: Duration,
 }
 
+// SAFETY: The `ptr` field points to an FFIContext owned by the Nim runtime.
+// Every call through the generated FFI proc goes through
+// `sendRequestToFFIThread` on the Nim side, which serialises every request
+// behind `ctx.lock` and dispatches handlers on a single FFI thread, so the
+// pointer is never accessed concurrently from Rust. The Nim-side reentrancy
+// guard (`onFFIThread` threadvar) prevents handlers from re-entering the
+// dispatcher and self-deadlocking. These invariants make it sound to mark
+// the wrapper as Send + Sync.
 unsafe impl Send for TimerCtx {}
 unsafe impl Sync for TimerCtx {}
+
+impl Drop for TimerCtx {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe { ffi::timer_destroy(self.ptr); }
+            self.ptr = std::ptr::null_mut();
+        }
+    }
+}
 
 impl TimerCtx {
     pub fn create(config: TimerConfig, timeout: Duration) -> Result<Self, String> {
@@ -143,7 +160,7 @@ impl TimerCtx {
         Ok(Self { ptr: addr as *mut c_void, timeout })
     }
 
-    pub async fn new_async(config: TimerConfig) -> Result<Self, String> {
+    pub async fn new_async(config: TimerConfig, timeout: Duration) -> Result<Self, String> {
         let req = TimerCreateCtorReq { config };
         let req_bytes = encode_cbor(&req)?;
         let raw_bytes = ffi_call_async(move |cb, ud| unsafe {
@@ -151,7 +168,7 @@ impl TimerCtx {
         }).await?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
         let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
-        Ok(Self { ptr: addr as *mut c_void, timeout: Duration::from_secs(30) })
+        Ok(Self { ptr: addr as *mut c_void, timeout })
     }
 
     pub fn echo(&self, req: EchoRequest) -> Result<EchoResponse, String> {

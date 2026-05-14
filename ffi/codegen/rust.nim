@@ -252,11 +252,14 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
 
   var ctors: seq[FFIProcMeta] = @[]
   var methods: seq[FFIProcMeta] = @[]
+  var dtorProcName = ""
   for p in procs:
     case p.kind
     of FFIKind.CTOR: ctors.add(p)
     of FFIKind.FFI: methods.add(p)
-    of FFIKind.DTOR: discard
+    of FFIKind.DTOR:
+      if dtorProcName.len == 0:
+        dtorProcName = p.procName
 
   var libTypeName = ""
   if ctors.len > 0: libTypeName = ctors[0].libTypeName
@@ -409,9 +412,34 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   lines.add("    timeout: Duration,")
   lines.add("}")
   lines.add("")
+  # SAFETY block applies to both impls below (PR #23 Rust review, item 7).
+  lines.add("// SAFETY: The `ptr` field points to an FFIContext owned by the Nim runtime.")
+  lines.add("// Every call through the generated FFI proc goes through")
+  lines.add("// `sendRequestToFFIThread` on the Nim side, which serialises every request")
+  lines.add("// behind `ctx.lock` and dispatches handlers on a single FFI thread, so the")
+  lines.add("// pointer is never accessed concurrently from Rust. The Nim-side reentrancy")
+  lines.add("// guard (`onFFIThread` threadvar) prevents handlers from re-entering the")
+  lines.add("// dispatcher and self-deadlocking. These invariants make it sound to mark")
+  lines.add("// the wrapper as Send + Sync.")
   lines.add("unsafe impl Send for $1 {}" % [ctxTypeName])
   lines.add("unsafe impl Sync for $1 {}" % [ctxTypeName])
   lines.add("")
+
+  # ── Drop: tears down the Nim runtime when the ctx goes out of scope ──────
+  # Without this, forgetting the ctx leaks the entire Nim runtime (FFI thread,
+  # watchdog, chronos, lib state). Mirrors the C++ binding's `~$1()` dtor.
+  # PR #23 review (Rust), Critical item 3.
+  if dtorProcName.len > 0:
+    lines.add("impl Drop for $1 {" % [ctxTypeName])
+    lines.add("    fn drop(&mut self) {")
+    lines.add("        if !self.ptr.is_null() {")
+    lines.add("            unsafe { ffi::$1(self.ptr); }" % [dtorProcName])
+    lines.add("            self.ptr = std::ptr::null_mut();")
+    lines.add("        }")
+    lines.add("    }")
+    lines.add("}")
+    lines.add("")
+
   lines.add("impl $1 {" % [ctxTypeName])
 
   # ── Constructors ───────────────────────────────────────────────────────────
@@ -426,8 +454,10 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
         else: nimTypeToRust(ep.typeName)
       paramsList.add("$1: $2" % [snake, rustType])
       fieldInits.add(snake)
-    let asyncParamsStr = paramsList.join(", ")
-    let blockingParamsStr =
+    # Both `create` and `new_async` accept an explicit `timeout: Duration`; the
+    # value flows into `self.timeout` so subsequent method calls inherit it.
+    # (PR #23 Rust review, item 5: don't hardcode 30s for the async ctor.)
+    let ctorParamsStr =
       if paramsList.len > 0: paramsList.join(", ") & ", timeout: Duration"
       else: "timeout: Duration"
 
@@ -438,7 +468,7 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
         reqName & " {}"
 
     # -- blocking create --
-    lines.add("    pub fn create($1) -> Result<Self, String> {" % [blockingParamsStr])
+    lines.add("    pub fn create($1) -> Result<Self, String> {" % [ctorParamsStr])
     lines.add("        let req = $1;" % [reqLit])
     lines.add("        let req_bytes = encode_cbor(&req)?;")
     lines.add("        let raw_bytes = ffi_call(timeout, |cb, ud| unsafe {")
@@ -452,7 +482,7 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
     lines.add("")
 
     # -- async new_async --
-    lines.add("    pub async fn new_async($1) -> Result<Self, String> {" % [asyncParamsStr])
+    lines.add("    pub async fn new_async($1) -> Result<Self, String> {" % [ctorParamsStr])
     lines.add("        let req = $1;" % [reqLit])
     lines.add("        let req_bytes = encode_cbor(&req)?;")
     lines.add("        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {")
@@ -460,7 +490,7 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
     lines.add("        }).await?;")
     lines.add("        let addr_str: String = decode_cbor(&raw_bytes)?;")
     lines.add("        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;")
-    lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout: Duration::from_secs(30) })")
+    lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout })")
     lines.add("    }")
     lines.add("")
 
