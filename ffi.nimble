@@ -11,6 +11,7 @@ requires "nim >= 2.2.4"
 requires "chronos"
 requires "chronicles"
 requires "taskpools"
+requires "cbor_serialization"
 
 const nimFlagsOrc = "--mm:orc -d:chronicles_log_level=WARN"
 const nimFlagsRefc = "--mm:refc -d:chronicles_log_level=WARN"
