@@ -21,27 +21,34 @@ task buildffi, "Compile the library":
 
 task test, "Run all tests under --mm:orc and --mm:refc":
   for flags in [nimFlagsOrc, nimFlagsRefc]:
-    exec "nim c -r " & flags & " tests/test_alloc.nim"
-    exec "nim c -r " & flags & " tests/test_ffi_context.nim"
-    exec "nim c -r " & flags & " tests/test_gc_compat.nim"
-    exec "nim c -r " & flags & " tests/test_serial.nim"
-    exec "nim c -r " & flags & " tests/test_ctx_validation.nim"
-    exec "nim c -r " & flags & " tests/test_nim_native_api.nim"
-    exec "nim c -r " & flags & " tests/test_meta.nim"
-    exec "nim c -r " & flags & " tests/test_string_helpers.nim"
-    exec "nim c -r " & flags & " tests/test_wire_compat.nim"
+    exec "nim c -r " & flags & " tests/unit/test_alloc.nim"
+    exec "nim c -r " & flags & " tests/unit/test_ffi_context.nim"
+    exec "nim c -r " & flags & " tests/unit/test_gc_compat.nim"
+    exec "nim c -r " & flags & " tests/unit/test_serial.nim"
+    exec "nim c -r " & flags & " tests/unit/test_ctx_validation.nim"
+    exec "nim c -r " & flags & " tests/unit/test_nim_native_api.nim"
+    exec "nim c -r " & flags & " tests/unit/test_meta.nim"
+    exec "nim c -r " & flags & " tests/unit/test_string_helpers.nim"
+    exec "nim c -r " & flags & " tests/unit/test_wire_compat.nim"
 
 task test_alloc, "Run alloc unit tests under --mm:orc and --mm:refc":
-  exec "nim c -r " & nimFlagsOrc & " tests/test_alloc.nim"
-  exec "nim c -r " & nimFlagsRefc & " tests/test_alloc.nim"
+  exec "nim c -r " & nimFlagsOrc & " tests/unit/test_alloc.nim"
+  exec "nim c -r " & nimFlagsRefc & " tests/unit/test_alloc.nim"
 
 task test_ffi, "Run FFI context integration tests under --mm:orc and --mm:refc":
-  exec "nim c -r " & nimFlagsOrc & " tests/test_ffi_context.nim"
-  exec "nim c -r " & nimFlagsRefc & " tests/test_ffi_context.nim"
+  exec "nim c -r " & nimFlagsOrc & " tests/unit/test_ffi_context.nim"
+  exec "nim c -r " & nimFlagsRefc & " tests/unit/test_ffi_context.nim"
 
 task test_serial, "Run CBOR codec unit tests":
-  exec "nim c -r " & nimFlagsOrc & " tests/test_serial.nim"
-  exec "nim c -r " & nimFlagsRefc & " tests/test_serial.nim"
+  exec "nim c -r " & nimFlagsOrc & " tests/unit/test_serial.nim"
+  exec "nim c -r " & nimFlagsRefc & " tests/unit/test_serial.nim"
+
+task test_cpp_e2e, "Build and run the C++ end-to-end tests for the timer example":
+  # Regenerate the C++ bindings so the suite always runs against fresh codegen.
+  exec "nimble genbindings_cpp"
+  exec "cmake -S tests/e2e/cpp -B tests/e2e/cpp/build"
+  exec "cmake --build tests/e2e/cpp/build"
+  exec "ctest --test-dir tests/e2e/cpp/build --output-on-failure"
 
 task genbindings_example, "Generate Rust bindings for the timer example":
   exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libtimer -d:ffiGenBindings -o:/dev/null examples/timer/timer.nim"

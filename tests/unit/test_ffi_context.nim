@@ -1,7 +1,7 @@
 import std/[locks, options, strutils, os, atomics]
 import unittest2
 import results
-import ../ffi
+import ffi
 
 type TestLib = object
 

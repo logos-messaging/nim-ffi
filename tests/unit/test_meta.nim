@@ -4,7 +4,7 @@
 
 import unittest
 import std/[macros, strutils]
-import ../ffi/internal/ffi_macro
+import ffi/internal/ffi_macro
 
 suite "unpackReqField":
   ## `unpackReqField` builds AST via `std/macros` helpers (`ident`, `newDotExpr`,
