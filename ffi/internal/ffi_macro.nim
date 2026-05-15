@@ -680,11 +680,9 @@ macro ffi*(prc: untyped): untyped =
 
   let reqTypeName = ident(camelName & "Req")
 
-  let userProcName =
-    if procName.kind == nnkPostfix:
-      procName[1]
-    else:
-      procName
+  var userProcName = procName
+  if procName.kind == nnkPostfix:
+    userProcName = procName[1]
   ## Both the user-facing Nim proc and the C-exported wrapper share the user's
   ## original name; their signatures differ so Nim resolves the call by
   ## overload. The C wrapper additionally carries `{.exportc.}` so the foreign
@@ -1135,11 +1133,9 @@ macro ffiCtor*(prc: untyped): untyped =
   # The user-facing Nim proc keeps the user's original name with their declared
   # signature; the C-exported wrapper moves to `<userProcName>ExportC` and
   # binds the snake_case C symbol via `{.exportc.}`.
-  let userProcName =
-    if procName.kind == nnkPostfix:
-      procName[1]
-    else:
-      procName
+  var userProcName = procName
+  if procName.kind == nnkPostfix:
+    userProcName = procName[1]
   # Both the Nim-facing async ctor and the C-exported wrapper share the user's
   # name as overloads; the C wrapper's `{.exportc.}` keeps the ABI symbol.
   let cExportProcName = userProcName
@@ -1304,8 +1300,9 @@ macro ffiDtor*(prc: untyped): untyped =
   # so it doesn't shadow the user's chosen name (consistent with .ffi. / .ffiCtor.).
   # The dtor only generates a C-exported wrapper; it uses the user's name
   # directly (no overload needed — there's no Nim-facing helper here).
-  let cExportProcName =
-    if procName.kind == nnkPostfix: procName[1] else: procName
+  var cExportProcName = procName
+  if procName.kind == nnkPostfix:
+    cExportProcName = procName[1]
 
   let destroyResIdent = genSym(nskLet, "destroyRes")
 
