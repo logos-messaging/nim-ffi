@@ -65,6 +65,63 @@ proc timerComplex*(
   return
     ok(ComplexResponse(summary: summary, itemCount: count, hasNote: req.note.isSome))
 
+# --- Multiple complex parameters -------------------------------------------
+# Demonstrates how a {.ffi.} proc handles several object-typed parameters at
+# once. Each parameter is its own {.ffi.} type, so it lands in the generated
+# foreign-side bindings as a first-class struct/class, and the per-proc Req
+# envelope (TimerScheduleReq on the wire) carries all three under field names
+# that match the Nim params.
+type JobSpec {.ffi.} = object
+  name: string
+  payload: seq[string]
+  priority: int # higher = runs sooner
+
+type RetryPolicy {.ffi.} = object
+  maxAttempts: int
+  backoffMs: int
+  retryOn: seq[string] # error keywords that should trigger a retry
+
+type ScheduleConfig {.ffi.} = object
+  startAtMs: int
+  intervalMs: int # 0 means "fire once"
+  jitter: Option[int]
+
+type ScheduleResult {.ffi.} = object
+  jobId: string
+  willRunCount: int
+  firstRunAtMs: int
+  effectiveBackoffMs: int
+
+proc timerSchedule*(
+    timer: Timer,
+    job: JobSpec,
+    retry: RetryPolicy,
+    schedule: ScheduleConfig,
+): Future[Result[ScheduleResult, string]] {.ffi.} =
+  ## Composes three independent object-typed parameters (`job`, `retry`,
+  ## `schedule`) into a single scheduling decision. The macro packs them into
+  ## one CBOR-encoded request envelope on the wire and unpacks them back into
+  ## the named locals before this body runs.
+  await sleepAsync(1.milliseconds)
+  if job.name.len == 0:
+    return err("job name must not be empty")
+  if retry.maxAttempts <= 0:
+    return err("retry.maxAttempts must be positive")
+  let willRunCount =
+    if schedule.intervalMs > 0:
+      max(1, 60_000 div schedule.intervalMs) # rough "runs per minute"
+    else:
+      1
+  let jitter = if schedule.jitter.isSome: schedule.jitter.get else: 0
+  return ok(
+    ScheduleResult(
+      jobId: timer.name & ":" & job.name,
+      willRunCount: willRunCount,
+      firstRunAtMs: schedule.startAtMs + jitter,
+      effectiveBackoffMs: retry.backoffMs,
+    )
+  )
+
 proc timer_destroy*(timer: Timer) {.ffiDtor.} =
   ## Tears down the FFI context created by timer_create.
   ## Blocks until the FFI thread and watchdog thread have joined.

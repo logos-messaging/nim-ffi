@@ -35,6 +35,34 @@ int main() {
                   << ", itemCount=" << complex.itemCount
                   << ", hasNote=" << complex.hasNote << "\n";
 
+        // ── 6. Call with three complex parameters ─────────────────────
+        // Each parameter is its own generated C++ struct. The nim-ffi
+        // macro packs all three into one CBOR envelope on the wire — at
+        // the call site, this is just a typed method invocation.
+        auto job = JobSpec{
+            /*name*/ "nightly-rollup",
+            /*payload*/ std::vector<std::string>{"rollup", "v2"},
+            /*priority*/ 10,
+        };
+        auto retry = RetryPolicy{
+            /*maxAttempts*/ 3,
+            /*backoffMs*/ 500,
+            /*retryOn*/ std::vector<std::string>{"timeout", "5xx"},
+        };
+        auto schedule = ScheduleConfig{
+            /*startAtMs*/ 1000,
+            /*intervalMs*/ 15000,
+            /*jitter*/ std::optional<int64_t>(250),
+        };
+
+        auto scheduleFuture = ctx.scheduleAsync(job, retry, schedule);
+        auto scheduleRes = scheduleFuture.get();
+        std::cout << "[6] Schedule (3 complex params): jobId=" << scheduleRes.jobId
+                  << ", willRunCount=" << scheduleRes.willRunCount
+                  << ", firstRunAtMs=" << scheduleRes.firstRunAtMs
+                  << ", effectiveBackoffMs=" << scheduleRes.effectiveBackoffMs
+                  << "\n";
+
         std::cout << "\nDone.\n";
     } catch (const std::exception& ex) {
         std::cerr << "Error: " << ex.what() << "\n";

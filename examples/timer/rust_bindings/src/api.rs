@@ -206,4 +206,23 @@ impl TimerCtx {
         decode_cbor::<ComplexResponse>(&raw_bytes)
     }
 
+    pub fn schedule(&self, job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig) -> Result<ScheduleResult, String> {
+        let req = TimerScheduleReq { job, retry, schedule };
+        let req_bytes = encode_cbor(&req)?;
+        let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
+            ffi::timer_schedule(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        })?;
+        decode_cbor::<ScheduleResult>(&raw_bytes)
+    }
+
+    pub async fn schedule_async(&self, job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig) -> Result<ScheduleResult, String> {
+        let req = TimerScheduleReq { job, retry, schedule };
+        let req_bytes = encode_cbor(&req)?;
+        let ptr = self.ptr as usize;
+        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
+            ffi::timer_schedule(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        }).await?;
+        decode_cbor::<ScheduleResult>(&raw_bytes)
+    }
+
 }

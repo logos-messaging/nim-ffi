@@ -37,6 +37,44 @@ pub struct ComplexResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobSpec {
+    pub name: String,
+    pub payload: Vec<String>,
+    pub priority: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryPolicy {
+    #[serde(rename = "maxAttempts")]
+    pub max_attempts: i64,
+    #[serde(rename = "backoffMs")]
+    pub backoff_ms: i64,
+    #[serde(rename = "retryOn")]
+    pub retry_on: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleConfig {
+    #[serde(rename = "startAtMs")]
+    pub start_at_ms: i64,
+    #[serde(rename = "intervalMs")]
+    pub interval_ms: i64,
+    pub jitter: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleResult {
+    #[serde(rename = "jobId")]
+    pub job_id: String,
+    #[serde(rename = "willRunCount")]
+    pub will_run_count: i64,
+    #[serde(rename = "firstRunAtMs")]
+    pub first_run_at_ms: i64,
+    #[serde(rename = "effectiveBackoffMs")]
+    pub effective_backoff_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimerCreateCtorReq {
     pub config: TimerConfig,
 }
@@ -52,4 +90,11 @@ pub struct TimerVersionReq {}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimerComplexReq {
     pub req: ComplexRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimerScheduleReq {
+    pub job: JobSpec,
+    pub retry: RetryPolicy,
+    pub schedule: ScheduleConfig,
 }

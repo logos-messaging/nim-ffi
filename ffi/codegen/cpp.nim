@@ -208,16 +208,25 @@ proc generateCppHeader*(
 
     let reqInit = cppBracedInit(reqName, epNames)
 
+    # Same `ffi_*_` underscore convention as instance methods so that a ctor
+    # parameter cannot collide with the local Req envelope name.
+    #
+    # The ctor's C symbol returns `void*` (the ctx pointer) synchronously, but
+    # `ffi_call_` expects an int-returning lambda — and we want the callback
+    # path anyway since it carries the CBOR-encoded ctx address. Discard the
+    # synchronous return and yield 0 from the lambda; the address comes back
+    # through the callback's CBOR text-string payload.
     lines.add("    static $1 create($2) {" % [ctxTypeName, ctorParamsWithTimeout])
-    lines.add("        const auto req = $1;" % [reqInit])
-    lines.add("        const auto req_bytes = encodeCborFfi(req);")
-    lines.add("        const auto raw = ffi_call_([&](FfiCallback cb, void* ud) {")
+    lines.add("        const auto ffi_req_ = $1;" % [reqInit])
+    lines.add("        const auto ffi_req_bytes_ = encodeCborFfi(ffi_req_);")
+    lines.add("        const auto ffi_raw_ = ffi_call_([&](FfiCallback cb, void* ud) {")
     lines.add(
-      "            return $1(req_bytes.data(), req_bytes.size(), cb, ud);" %
+      "            (void)$1(ffi_req_bytes_.data(), ffi_req_bytes_.size(), cb, ud);" %
         [ctor.procName]
     )
+    lines.add("            return 0;")
     lines.add("        }, timeout);")
-    lines.add("        const auto addr_str = decodeCborFfi<std::string>(raw);")
+    lines.add("        const auto addr_str = decodeCborFfi<std::string>(ffi_raw_);")
     lines.add("        try {")
     lines.add("            const auto addr = std::stoull(addr_str);")
     lines.add(
@@ -275,32 +284,38 @@ proc generateCppHeader*(
 
     let reqInit = cppBracedInit(reqName, methParamNames)
 
+    # Use a single-underscore-suffixed local for the Req envelope so it can't
+    # shadow a method parameter whose name happens to be `req` (or similar).
     lines.add("    $1 $2($3) const {" % [retCppType, methodName, methParamsStr])
-    lines.add("        const auto req = $1;" % [reqInit])
-    lines.add("        const auto req_bytes = encodeCborFfi(req);")
-    lines.add("        const auto raw = ffi_call_([&](FfiCallback cb, void* ud) {")
+    lines.add("        const auto ffi_req_ = $1;" % [reqInit])
+    lines.add("        const auto ffi_req_bytes_ = encodeCborFfi(ffi_req_);")
+    lines.add("        const auto ffi_raw_ = ffi_call_([&](FfiCallback cb, void* ud) {")
     lines.add(
-      "            return $1(ptr_, cb, ud, req_bytes.data(), req_bytes.size());" %
+      "            return $1(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());" %
         [m.procName]
     )
     lines.add("        }, timeout_);")
-    lines.add("        return decodeCborFfi<$1>(raw);" % [retCppType])
+    lines.add("        return decodeCborFfi<$1>(ffi_raw_);" % [retCppType])
     lines.add("    }")
     lines.add("")
+    # The async wrapper calls the sync method via `this->methodName(...)` so
+    # a method param that happens to share the method's name doesn't shadow
+    # the call target (e.g. `schedule(job, retry, schedule)` would otherwise
+    # parse as invoking the `schedule` parameter).
     if methParamsStr.len > 0:
       lines.add(
         "    std::future<$1> $2Async($3) const {" %
           [retCppType, methodName, methParamsStr]
       )
       lines.add(
-        "        return std::async(std::launch::async, [this, $1]() { return $2($3); });" %
+        "        return std::async(std::launch::async, [this, $1]() { return this->$2($3); });" %
           [methParamNamesStr, methodName, methParamNamesStr]
       )
       lines.add("    }")
     else:
       lines.add("    std::future<$1> $2Async() const {" % [retCppType, methodName])
       lines.add(
-        "        return std::async(std::launch::async, [this]() { return $1(); });" %
+        "        return std::async(std::launch::async, [this]() { return this->$1(); });" %
           [methodName]
       )
       lines.add("    }")

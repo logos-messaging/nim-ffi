@@ -80,6 +80,54 @@ proc counter_chain*(
     current = Counter(start: stepRes.value.value)
   return ok(CounterState(value: current.start))
 
+ffiType:
+  type RangeFilter = object
+    lo: int
+    hi: int
+
+ffiType:
+  type Pagination = object
+    offset: int
+    limit: int
+
+ffiType:
+  type Projection = object
+    fields: seq[string]
+    includeTotals: bool
+
+ffiType:
+  type QueryReport = object
+    matched: int
+    returned: int
+    fieldsKept: seq[string]
+
+proc counter_query*(
+    c: Counter,
+    filter: RangeFilter,
+    page: Pagination,
+    projection: Projection,
+): Future[Result[QueryReport, string]] {.ffi.} =
+  ## Three independent object-typed parameters: `filter`, `page`, `projection`.
+  ## Verifies that the macro packs all three into one CBOR Req envelope on the
+  ## wire and unpacks them back into the typed locals before this body runs.
+  if filter.hi < filter.lo:
+    return err("filter range is empty")
+  if page.limit <= 0:
+    return err("page.limit must be positive")
+  let matched = max(0, filter.hi - filter.lo + 1)
+  let returned = min(matched - min(matched, page.offset), page.limit)
+  return ok(
+    QueryReport(
+      matched: matched + c.start, # surfaces lib state in the response
+      returned: returned,
+      fieldsKept:
+        if projection.includeTotals:
+          projection.fields & @["__totals__"]
+        else:
+          projection.fields,
+    )
+  )
+
 suite "Nim-native API for {.ffi.} / {.ffiCtor.}":
   test "ffiCtor returns the user-typed lib value":
     let res = waitFor counter_create(CounterConfig(initial: 7))
@@ -125,3 +173,25 @@ suite "Nim-native API for {.ffi.} / {.ffiCtor.}":
     let res = waitFor counter_chain(Counter(start: 42), 0)
     check res.isOk
     check res.value.value == 42
+
+  test "three complex object params travel together in one CBOR envelope":
+    let res = waitFor counter_query(
+      Counter(start: 100),
+      RangeFilter(lo: 1, hi: 50),
+      Pagination(offset: 10, limit: 25),
+      Projection(fields: @["id", "name"], includeTotals: true),
+    )
+    check res.isOk
+    check res.value.matched == 150 # filter range 50 + lib state 100
+    check res.value.returned == 25
+    check res.value.fieldsKept == @["id", "name", "__totals__"]
+
+  test "three-complex-param error path":
+    let res = waitFor counter_query(
+      Counter(start: 0),
+      RangeFilter(lo: 10, hi: 1), # inverted range
+      Pagination(offset: 0, limit: 5),
+      Projection(fields: @[], includeTotals: false),
+    )
+    check res.isErr
+    check res.error == "filter range is empty"
