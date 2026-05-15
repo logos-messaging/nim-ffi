@@ -76,11 +76,9 @@ proc fieldStorageType(typ: NimNode): NimNode =
   ## Returns the in-Req-struct storage type for a user-declared param type.
   ## `cstring` is stored as `string` for trivial CBOR transport; everything
   ## else is stored as the user typed it.
-  case typ.kind
-  of nnkIdent:
-    if $typ == "cstring": ident("string")
-    else: typ
-  else: typ
+  if typ.kind == nnkIdent and $typ == "cstring":
+    return ident("string")
+  return typ
 
 proc unpackReqField*(
     fieldIdent, userType, decodedIdent: NimNode
