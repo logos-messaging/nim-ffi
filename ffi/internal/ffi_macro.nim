@@ -97,14 +97,14 @@ proc unpackReqField*(
   ## Built with the runtime AST API rather than `quote do:` so the proc is
   ## callable from both macro context and ordinary code (e.g. unit tests).
   let storedAsString = userType.kind == nnkIdent and $userType == "cstring"
-  if storedAsString:
-    let fieldAccess = newDotExpr(decodedIdent, fieldIdent)
-    let castExpr = newDotExpr(fieldAccess, ident("cstring"))
-    return nnkLetSection.newTree(
-      nnkIdentDefs.newTree(fieldIdent, ident("cstring"), castExpr)
-    )
-  else:
+  if not storedAsString:
     return newLetStmt(fieldIdent, newDotExpr(decodedIdent, fieldIdent))
+
+  let fieldAccess = newDotExpr(decodedIdent, fieldIdent)
+  let castExpr = newDotExpr(fieldAccess, ident("cstring"))
+  return nnkLetSection.newTree(
+    nnkIdentDefs.newTree(fieldIdent, ident("cstring"), castExpr)
+  )
 
 proc cExportedParams(ctxType: NimNode): seq[NimNode] =
   ## Standard parameter list for the C-exported wrapper of a .ffi. proc:
