@@ -72,7 +72,7 @@ proc nimTypeNameRepr(typ: NimNode): string =
   of nnkPtrTy: "ptr " & nimTypeNameRepr(typ[0])
   else: typ.repr
 
-proc fieldStorageType(typ: NimNode): NimNode =
+proc storageType(typ: NimNode): NimNode =
   ## Returns the in-Req-struct storage type for a user-declared param type.
   ## `cstring` is stored as `string` for trivial CBOR transport; everything
   ## else is stored as the user typed it.
@@ -86,7 +86,7 @@ proc unpackReqField*(
   ## Emits AST for unpacking one field from a CBOR-decoded Req struct into a
   ## local typed as the user's original param type.
   ##
-  ## `cstring` params are stored as `string` in the Req (per fieldStorageType)
+  ## `cstring` params are stored as `string` in the Req (per storageType)
   ## and cast back via `.cstring` on unpack — safe because `decodedIdent`
   ## outlives the cstring use within the generated proc body.
   ##
@@ -126,7 +126,7 @@ proc buildReqTypeFromFields(
   ## parallel lists of parameter names and types. The result is the AST for
   ## a `type Foo* = object` declaration that the codegen later emits.
   ##
-  ## `cstring` parameter types are rewritten to `string` (via fieldStorageType)
+  ## `cstring` parameter types are rewritten to `string` (via storageType)
   ## so the request can ride a plain CBOR text string on the wire. Empty
   ## parameter lists get a single `_placeholder: uint8` field so the object
   ## type is well-formed (Nim won't accept an empty `object` body here).
@@ -152,7 +152,7 @@ proc buildReqTypeFromFields(
   ## as-is; otherwise the `*` export marker is added.
   var fields: seq[NimNode] = @[]
   for i in 0 ..< paramNames.len:
-    let storedType = fieldStorageType(paramTypes[i])
+    let storedType = storageType(paramTypes[i])
     fields.add newTree(nnkIdentDefs, ident(paramNames[i]), storedType, newEmptyNode())
 
   let recList =
@@ -851,7 +851,7 @@ proc buildCtorRequestType(reqTypeName: NimNode, paramNames: seq[string],
   var fields: seq[NimNode] = @[]
   for i in 0 ..< paramNames.len:
     let fieldName = ident(paramNames[i])
-    let storedType = fieldStorageType(paramTypes[i])
+    let storedType = storageType(paramTypes[i])
     fields.add newTree(nnkIdentDefs, fieldName, storedType, newEmptyNode())
 
   let recList =
