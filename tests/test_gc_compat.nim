@@ -62,7 +62,12 @@ proc callbackBytes(d: var CallbackData): seq[byte] =
   return bytes
 
 proc callbackOkString(d: var CallbackData): string =
-  ## Decodes the CBOR success payload as a string.
+  ## Decodes the CBOR success payload as a string. Asserts the request
+  ## actually succeeded — silently treating an error payload as the empty
+  ## string would let a regression slip past the test that calls us.
+  doAssert d.retCode == RET_OK,
+    "callbackOkString called on non-OK retCode " & $d.retCode &
+      " (msg=" & callbackMsg(d) & ")"
   cborDecode(callbackBytes(d), string).valueOr:
     return ""
 
