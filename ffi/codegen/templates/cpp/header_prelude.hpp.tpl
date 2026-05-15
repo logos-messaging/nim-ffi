@@ -10,18 +10,8 @@
 #include <future>
 #include <vector>
 #include <optional>
-#include <nlohmann/json.hpp>
-
-namespace nlohmann {
-    template<typename T>
-    void to_json(json& j, const std::optional<T>& opt) {
-        if (opt) j = *opt;
-        else j = nullptr;
-    }
-
-    template<typename T>
-    void from_json(const json& j, std::optional<T>& opt) {
-        if (j.is_null()) opt = std::nullopt;
-        else opt = j.get<T>();
-    }
+#include <type_traits>
+#include <cstring>
+extern "C" {
+#include <tinycbor/cbor.h>
 }

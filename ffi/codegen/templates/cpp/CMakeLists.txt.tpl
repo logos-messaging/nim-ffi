@@ -1,18 +1,8 @@
 cmake_minimum_required(VERSION 3.14)
-project({{LIB}}_cpp_bindings CXX)
+project({{LIB}}_cpp_bindings CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-# ── nlohmann/json ─────────────────────────────────────────────────────────────
-include(FetchContent)
-FetchContent_Declare(
-    nlohmann_json
-    GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG        v3.11.3
-    GIT_SHALLOW    TRUE
-)
-FetchContent_MakeAvailable(nlohmann_json)
 
 # ── Locate the repository root (contains ffi.nimble) ─────────────────────────
 set(_search_dir "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -63,9 +53,25 @@ add_library({{LIB}} SHARED IMPORTED GLOBAL)
 set_target_properties({{LIB}} PROPERTIES IMPORTED_LOCATION "${NIM_LIB_FILE}")
 add_dependencies({{LIB}} nim_lib)
 
+# ── TinyCBOR (vendored at ffi/codegen/templates/cpp/vendor/tinycbor) ─────────
+set(TINYCBOR_SRC_DIR "${REPO_ROOT}/ffi/codegen/templates/cpp/vendor")
+add_library(tinycbor STATIC
+    "${TINYCBOR_SRC_DIR}/tinycbor/cborencoder.c"
+    "${TINYCBOR_SRC_DIR}/tinycbor/cborencoder_close_container_checked.c"
+    "${TINYCBOR_SRC_DIR}/tinycbor/cborparser.c"
+    "${TINYCBOR_SRC_DIR}/tinycbor/cborparser_dup_string.c"
+    "${TINYCBOR_SRC_DIR}/tinycbor/cborerrorstrings.c"
+)
+target_include_directories(tinycbor PUBLIC
+    "${TINYCBOR_SRC_DIR}"            # consumer uses #include <tinycbor/cbor.h>
+    "${TINYCBOR_SRC_DIR}/tinycbor"   # internal _p.h includes resolve here
+)
+set_property(TARGET tinycbor PROPERTY C_STANDARD 99)
+set_property(TARGET tinycbor PROPERTY POSITION_INDEPENDENT_CODE ON)
+
 add_library({{LIB}}_headers INTERFACE)
 target_include_directories({{LIB}}_headers INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries({{LIB}}_headers INTERFACE {{LIB}} nlohmann_json::nlohmann_json)
+target_link_libraries({{LIB}}_headers INTERFACE {{LIB}} tinycbor)
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp")
     add_executable(example main.cpp)

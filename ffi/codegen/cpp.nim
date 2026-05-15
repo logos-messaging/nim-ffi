@@ -1,7 +1,7 @@
 ## C++ binding generator for the nim-ffi framework.
 ## Generates a header-only C++ binding and CMakeLists.txt. Requests/responses
-## travel as CBOR (encoded via nlohmann::json::to_cbor / from_cbor on the C++
-## side, matching the Nim-side cbor_serial codec).
+## travel as CBOR (encoded with vendored TinyCBOR on the C++ side, matching
+## the Nim-side cbor_serial codec on the wire — both ends speak RFC 8949).
 
 import std/[os, strutils]
 import ./meta, ./string_helpers
@@ -61,6 +61,47 @@ proc reqStructName(p: FFIProcMeta): string =
   let camel = snakeToPascalCase(p.procName)
   if p.kind == FFIKind.CTOR: camel & "CtorReq" else: camel & "Req"
 
+proc emitStructCborCodec(
+    lines: var seq[string], structName: string, fields: seq[(string, string)]
+) =
+  ## Appends per-struct TinyCBOR encode_cbor + decode_cbor free functions for
+  ## `structName`. `fields` is a sequence of (field-name, ignored C++ type)
+  ## pairs — the type is unused at the codec layer because the generic
+  ## encode_cbor / decode_cbor overloads in cbor_helpers.hpp.tpl dispatch on
+  ## the struct member's type. We emit a CBOR map with text-string keys to
+  ## match the wire format produced by Nim's cbor_serialization.
+  let n = fields.len
+  # ── encode ────────────────────────────────────────────────────────────────
+  if n == 0:
+    lines.add("inline CborError encode_cbor(CborEncoder& e, const $1&) {" % [structName])
+  else:
+    lines.add("inline CborError encode_cbor(CborEncoder& e, const $1& v) {" % [structName])
+  lines.add("    CborEncoder m;")
+  lines.add("    CborError err = cbor_encoder_create_map(&e, &m, $1);" % [$n])
+  lines.add("    if (err) return err;")
+  for (name, _) in fields:
+    lines.add("    err = cbor_encode_text_stringz(&m, \"$1\"); if (err) return err;" % [name])
+    lines.add("    err = encode_cbor(m, v.$1);              if (err) return err;" % [name])
+  lines.add("    return cbor_encoder_close_container(&e, &m);")
+  lines.add("}")
+  # ── decode ────────────────────────────────────────────────────────────────
+  if n == 0:
+    lines.add("inline CborError decode_cbor(CborValue& it, $1&) {" % [structName])
+    lines.add("    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;")
+    lines.add("    return cbor_value_advance(&it);")
+    lines.add("}")
+    return
+  lines.add("inline CborError decode_cbor(CborValue& it, $1& v) {" % [structName])
+  lines.add("    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;")
+  lines.add("    CborValue field;")
+  lines.add("    CborError err;")
+  for (name, _) in fields:
+    lines.add("    err = cbor_value_map_find_value(&it, \"$1\", &field); if (err) return err;" % [name])
+    lines.add("    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;")
+    lines.add("    err = decode_cbor(field, v.$1); if (err) return err;" % [name])
+  lines.add("    return cbor_value_advance(&it);")
+  lines.add("}")
+
 proc cppBracedInit(structName: string, fieldNames: seq[string]): string =
   ## Produces a C++ braced-init expression for a per-proc Req struct.
   ## Used to construct the request value before CBOR-encoding it for the wire,
@@ -87,6 +128,14 @@ proc generateCppHeader*(
 
   lines.add(HeaderPreludeTpl)
 
+  # CBOR primitive / container helpers must precede the per-struct codecs
+  # below, because each emitted `encode_cbor`/`decode_cbor(T)` calls the
+  # generic overloads for the struct's fields (std::string, std::vector,
+  # std::optional, primitives). The struct codecs are non-template `inline`
+  # functions, so name lookup happens at parse time — the overloads must be
+  # in scope before the struct codecs are parsed.
+  lines.add(CborHelpersTpl)
+
   # ── Types ──────────────────────────────────────────────────────────────────
   if types.len > 0:
     lines.add("// ============================================================")
@@ -98,13 +147,10 @@ proc generateCppHeader*(
       for f in t.fields:
         lines.add("    $1 $2;" % [nimTypeToCpp(f.typeName), f.name])
       lines.add("};")
-      var fieldNames: seq[string] = @[]
+      var fields: seq[(string, string)] = @[]
       for f in t.fields:
-        fieldNames.add(f.name)
-      if fieldNames.len > 0:
-        lines.add(
-          "NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE($1, $2)" % [t.name, fieldNames.join(", ")]
-        )
+        fields.add((f.name, nimTypeToCpp(f.typeName)))
+      emitStructCborCodec(lines, t.name, fields)
       lines.add("")
 
   # ── Per-proc Req structs (CBOR transport units) ───────────────────────────
@@ -123,17 +169,13 @@ proc generateCppHeader*(
         else: nimTypeToCpp(ep.typeName)
       lines.add("    $1 $2;" % [cppType, ep.name])
     lines.add("};")
-    var fieldNames: seq[string] = @[]
+    var fields: seq[(string, string)] = @[]
     for ep in p.extraParams:
-      fieldNames.add(ep.name)
-    if fieldNames.len > 0:
-      lines.add(
-        "NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE($1, $2)" % [reqName, fieldNames.join(", ")]
-      )
-    else:
-      # Empty struct round-trips trivially via inline helpers below.
-      lines.add("inline void to_json(nlohmann::json& j, const $1&) { j = nlohmann::json::object(); }" % [reqName])
-      lines.add("inline void from_json(const nlohmann::json&, $1&) {}" % [reqName])
+      let cppType =
+        if ep.isPtr: CppPtrType
+        else: nimTypeToCpp(ep.typeName)
+      fields.add((ep.name, cppType))
+    emitStructCborCodec(lines, reqName, fields)
     lines.add("")
 
   # ── C FFI declarations ─────────────────────────────────────────────────────
@@ -162,9 +204,6 @@ proc generateCppHeader*(
       lines.add("int $1(void* ctx);" % [p.procName])
   lines.add("} // extern \"C\"")
   lines.add("")
-
-  # ── CBOR helpers ───────────────────────────────────────────────────────────
-  lines.add(CborHelpersTpl)
 
   lines.add(SyncCallHelperTpl)
 
