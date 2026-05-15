@@ -50,9 +50,27 @@ proc waitCallback(d: var CallbackData) =
   release(d.lock)
 
 proc callbackMsg(d: var CallbackData): string =
-  result = newString(d.msgLen)
+  var msg = newString(d.msgLen)
   if d.msgLen > 0:
-    copyMem(addr result[0], addr d.msg[0], d.msgLen)
+    copyMem(addr msg[0], addr d.msg[0], d.msgLen)
+  return msg
+
+proc callbackBytes(d: var CallbackData): seq[byte] =
+  var bytes = newSeq[byte](d.msgLen)
+  if d.msgLen > 0:
+    copyMem(addr bytes[0], addr d.msg[0], d.msgLen)
+  return bytes
+
+proc callbackOkString(d: var CallbackData): string =
+  ## Decodes the CBOR success payload as a string. Asserts the request
+  ## actually succeeded — silently treating an error payload as the empty
+  ## string would let a regression slip past the test that calls us.
+  doAssert d.retCode == RET_OK,
+    "callbackOkString called on non-OK retCode " & $d.retCode & " (msg=" & callbackMsg(
+      d
+    ) & ")"
+  cborDecode(callbackBytes(d), string).valueOr:
+    return ""
 
 # Concatenates GC-allocated strings so the result is not a string literal;
 # exercises the resStr lifetime binding inside handleRes.
@@ -93,60 +111,75 @@ suite "GC safety - string lifetime across thread boundary":
   test "ok string result remains valid when callback fires":
     var d: CallbackData
     initCallbackData(d)
-    defer: deinitCallbackData(d)
+    defer:
+      deinitCallbackData(d)
 
     var pool: FFIContextPool[GcTestLib]
     let ctx = pool.createFFIContext().valueOr:
       checkpoint "createFFIContext failed: " & $error
       check false
       return
-    defer: discard pool.destroyFFIContext(ctx)
+    defer:
+      discard pool.destroyFFIContext(ctx)
 
     check sendRequestToFFIThread(
       ctx, StringLifetimeRequest.ffiNewReq(testCallback, addr d, "hello".cstring)
-    ).isOk()
+    )
+      .isOk()
     waitCallback(d)
     check d.retCode == RET_OK
-    check callbackMsg(d) == "lifetime:hello"
+    check callbackOkString(d) == "lifetime:hello"
 
   test "error string lifetime across thread boundary":
     var d: CallbackData
     initCallbackData(d)
-    defer: deinitCallbackData(d)
+    defer:
+      deinitCallbackData(d)
 
     var pool: FFIContextPool[GcTestLib]
     let ctx = pool.createFFIContext().valueOr:
       check false
       return
-    defer: discard pool.destroyFFIContext(ctx)
+    defer:
+      discard pool.destroyFFIContext(ctx)
 
     check sendRequestToFFIThread(
       ctx, GcErrRequest.ffiNewReq(testCallback, addr d, "test".cstring)
-    ).isOk()
+    )
+      .isOk()
     waitCallback(d)
     check d.retCode == RET_ERR
+    # Error payloads are raw UTF-8, not CBOR.
     check callbackMsg(d) == "gc-err:test"
 
   test "large string result is delivered without corruption":
+    # Round-trip check: build the same 512-char string the FFI handler is
+    # specified to produce, run the request through the FFI thread (which
+    # CBOR-encodes the result), decode the callback payload, and assert
+    # the decoded string is byte-for-byte identical to the original.
+    var expected = newString(512)
+    for i in 0 ..< 512:
+      expected[i] = char(ord('a') + (i mod 26))
+
     var d: CallbackData
     initCallbackData(d)
-    defer: deinitCallbackData(d)
+    defer:
+      deinitCallbackData(d)
 
     var pool: FFIContextPool[GcTestLib]
     let ctx = pool.createFFIContext().valueOr:
       check false
       return
-    defer: discard pool.destroyFFIContext(ctx)
+    defer:
+      discard pool.destroyFFIContext(ctx)
 
     check sendRequestToFFIThread(
       ctx, LargeStringRequest.ffiNewReq(testCallback, addr d)
-    ).isOk()
+    )
+      .isOk()
     waitCallback(d)
     check d.retCode == RET_OK
-    check d.msgLen == 512
-    check d.msg[0] == 'a'
-    check d.msg[25] == 'z'
-    check d.msg[26] == 'a'
+    check callbackOkString(d) == expected
 
 suite "GC stability - repeated requests":
   test "20 sequential requests without GC corruption":
@@ -154,7 +187,8 @@ suite "GC stability - repeated requests":
     let ctx = pool.createFFIContext().valueOr:
       check false
       return
-    defer: discard pool.destroyFFIContext(ctx)
+    defer:
+      discard pool.destroyFFIContext(ctx)
 
     for i in 1 .. 20:
       var d: CallbackData
@@ -162,8 +196,9 @@ suite "GC stability - repeated requests":
       let input = "iter" & $i
       check sendRequestToFFIThread(
         ctx, StringLifetimeRequest.ffiNewReq(testCallback, addr d, input.cstring)
-      ).isOk()
+      )
+        .isOk()
       waitCallback(d)
-      deinitCallbackData(d)
       check d.retCode == RET_OK
-      check callbackMsg(d) == "lifetime:" & input
+      check callbackOkString(d) == "lifetime:" & input
+      deinitCallbackData(d)

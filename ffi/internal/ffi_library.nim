@@ -99,20 +99,18 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
   ## `libType` is the Nim type of the main library object (e.g. `Waku`). It is used
   ## to type the `ctx: ptr FFIContext[libType]` parameter of the generated
   ## `{libraryName}_set_event_callback` proc.
-  result = newStmtList()
+  var stmts = newStmtList()
 
   # Emit the base bootstrap (pragmas, linker flags, NimMain, initializeLibrary)
-  result.add(newCall(ident("declareLibraryBase"), newStrLitNode(libraryName)))
+  stmts.add(newCall(ident("declareLibraryBase"), newStrLitNode(libraryName)))
 
   let funcName = libraryName & "_set_event_callback"
   let funcIdent = ident(funcName)
   let errorMsg = "error: invalid context in " & funcName
 
-  let ctxType = nnkPtrTy.newTree(
-    nnkBracketExpr.newTree(ident("FFIContext"), libType)
-  )
+  let ctxType = nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), libType))
 
-  let procBody = quote do:
+  let procBody = quote:
     if isNil(ctx):
       echo `errorMsg`
       return
@@ -137,4 +135,5 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
     ),
   )
 
-  result.add(procNode)
+  stmts.add(procNode)
+  return stmts

@@ -1,69 +1,144 @@
-## This file contains the base message request type that will be handled.
-## The requests are created by the main thread and processed by
-## the FFI Thread.
+## Carries one CBOR-encoded request blob between the main thread and the FFI
+## thread. The main thread allocates the request (in shared memory), the FFI
+## thread frees it after invoking the user callback.
 
-import std/[json, macros], results, tables
-import chronos, chronos/threadsync
-import ./ffi_types, ./internal/ffi_macro, ./alloc
+import results
+import chronos
+import ./ffi_types, ./alloc, ./cbor_serial
 
-type FFIDestroyContentProc* = proc(content: pointer) {.nimcall, gcsafe.}
+const EmptyErrorMarker = "unknown error"
+  ## Sent verbatim on RET_ERR when the handler produced no message — keeps
+  ## the callback's msg ptr non-nil and gives the foreign side a recognizable
+  ## fallback to log.
 
 type FFIThreadRequest* = object
-  callback: FFICallBack
-  userData: pointer
-  reqId*: cstring
-  reqContent*: pointer
-  deleteReqContent*: FFIDestroyContentProc
-    ## Called by sendRequestToFFIThread on failure to free reqContent when
-    ## the FFI thread will never process (and thus never free) this request.
+  callback*: FFICallBack
+  userData*: pointer
+  reqId*: cstring ## Per-proc Req type name used to look up the handler.
+  data*: ptr UncheckedArray[byte] ## Owned CBOR-encoded request payload.
+  dataLen*: int
+
+proc allocBaseRequest(
+    callback: FFICallBack, userData: pointer, reqId: cstring
+): ptr FFIThreadRequest =
+  ## Allocates the request envelope in shared memory and populates the
+  ## routing fields. Payload setup is delegated to one of the payload helpers
+  ## below depending on whether the bytes need to be copied or adopted.
+  var ret = createShared(FFIThreadRequest)
+  ret[].callback = callback
+  ret[].userData = userData
+  ret[].reqId = reqId.alloc()
+  ret[].data = nil
+  ret[].dataLen = 0
+  return ret
+
+proc copySharedPayload(req: ptr FFIThreadRequest, data: ptr byte, dataLen: int) =
+  ## Allocates a fresh shared buffer and copies `dataLen` bytes from `data`
+  ## into `req`. Empty payloads (non-positive `dataLen` or nil `data`) leave
+  ## the request's payload fields at their zero-initialised state.
+  if dataLen > 0 and not data.isNil():
+    req[].data = cast[ptr UncheckedArray[byte]](allocShared(dataLen))
+    copyMem(req[].data, data, dataLen)
+    req[].dataLen = dataLen
+
+proc adoptOwnedSharedPayload(
+    req: ptr FFIThreadRequest, data: ptr UncheckedArray[byte], dataLen: int
+) =
+  ## Embeds an already-`allocShared` buffer into `req` without copying.
+  ## `(nil, 0)` is the empty-payload contract; a zero-length-but-non-nil
+  ## buffer is treated as empty and disposed here so it doesn't leak.
+  if dataLen > 0 and not data.isNil():
+    req[].data = data
+    req[].dataLen = dataLen
+  elif not data.isNil():
+    deallocShared(data)
+
+proc initFromPtr*(
+    T: typedesc[FFIThreadRequest],
+    callback: FFICallBack,
+    userData: pointer,
+    reqId: cstring,
+    data: ptr byte,
+    dataLen: int,
+): ptr type T =
+  ## Takes a raw ptr+len; the bytes are copied into a fresh shared-memory
+  ## buffer owned by the returned request.
+  var ret = allocBaseRequest(callback, userData, reqId)
+  copySharedPayload(ret, data, dataLen)
+  return ret
 
 proc init*(
     T: typedesc[FFIThreadRequest],
     callback: FFICallBack,
     userData: pointer,
     reqId: cstring,
-    reqContent: pointer,
+    data: openArray[byte],
 ): ptr type T =
-  var ret = createShared(FFIThreadRequest)
-  ret[].callback = callback
-  ret[].userData = userData
-  ret[].reqId = reqId.alloc()
-  ret[].reqContent = reqContent
+  ## Same contract as `initFromPtr` but accepts a Nim openArray, copying its
+  ## bytes into a fresh shared-memory buffer owned by the returned request.
+  let dataPtr =
+    if data.len > 0:
+      cast[ptr byte](unsafeAddr data[0])
+    else:
+      nil
+  initFromPtr(T, callback, userData, reqId, dataPtr, data.len)
+
+proc initFromOwnedShared*(
+    T: typedesc[FFIThreadRequest],
+    callback: FFICallBack,
+    userData: pointer,
+    reqId: cstring,
+    data: ptr UncheckedArray[byte],
+    dataLen: int,
+): ptr type T =
+  ## Takes ownership of an already-allocated shared-memory buffer (`data`)
+  ## and embeds it in the request without copying. Pair with `cborEncodeShared`
+  ## so the request payload travels from encoder to FFI thread with a single
+  ## allocation instead of seq → allocShared + copyMem.
+  ##
+  ## Ownership: `data` must have been allocated via `allocShared` / grown via
+  ## `reallocShared`. After this call, `deleteRequest` will `deallocShared` it.
+  ## Pass `(nil, 0)` for an empty payload.
+  var ret = allocBaseRequest(callback, userData, reqId)
+  adoptOwnedSharedPayload(ret, data, dataLen)
   return ret
 
 proc deleteRequest*(request: ptr FFIThreadRequest) =
-  if not request[].deleteReqContent.isNil():
-    request[].deleteReqContent(request[].reqContent)
-  deallocShared(request[].reqId)
+  if not request[].data.isNil:
+    deallocShared(request[].data)
+  if not request[].reqId.isNil:
+    deallocShared(request[].reqId)
   deallocShared(request)
 
-proc handleRes*[T: string | void](
-    res: Result[T, string], request: ptr FFIThreadRequest
-) =
-  ## Handles the Result responses, which can either be Result[string, string] or
-  ## Result[void, string].
-
+proc handleRes*(res: Result[seq[byte], string], request: ptr FFIThreadRequest) =
+  ## Fires the registered callback exactly once and frees the request.
+  ## Success payload is CBOR bytes; error payload is the raw UTF-8 error string.
   defer:
     deleteRequest(request)
 
   if res.isErr():
     foreignThreadGc:
-      let msg = res.error
+      let msg = if res.error.len > 0: res.error else: EmptyErrorMarker
       request[].callback(
-        RET_ERR, unsafeAddr msg[0], cast[csize_t](len(msg)), request[].userData
+        RET_ERR, unsafeAddr msg[0], cast[csize_t](msg.len), request[].userData
       )
     return
 
   foreignThreadGc:
-    var resStr: string
-      ## we need to bind the string to extend its lifetime to callback's in ARC/ORC
-    when T is string:
-      resStr = res.get()
-    let msg: cstring = resStr.cstring()
-    request[].callback(
-      RET_OK, unsafeAddr msg[0], cast[csize_t](len(msg)), request[].userData
-    )
-  return
+    let bytes = res.get()
+    if bytes.len > 0:
+      request[].callback(
+        RET_OK,
+        cast[ptr cchar](unsafeAddr bytes[0]),
+        cast[csize_t](bytes.len),
+        request[].userData,
+      )
+    else:
+      # Always hand the callback a real buffer; CBOR null marks "no value".
+      var sentinel = CborNullByte
+      request[].callback(
+        RET_OK, cast[ptr cchar](addr sentinel), 1.csize_t, request[].userData
+      )
 
-proc nilProcess*(reqId: cstring): Future[Result[string, string]] {.async.} =
+proc nilProcess*(reqId: cstring): Future[Result[seq[byte], string]] {.async.} =
   return err("This request type is not implemented: " & $reqId)

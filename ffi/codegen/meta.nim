@@ -7,20 +7,19 @@ type
     typeName*: string # Nim type name, e.g. "EchoRequest"
     isPtr*: bool # true if the type is `ptr T`
 
-  FFIProcKind* = enum
-    ffiCtorKind
-    ffiFfiKind
-    ffiDtorKind
+  FFIKind* {.pure.} = enum
+    FFI
+    CTOR
+    DTOR
 
   FFIProcMeta* = object
-    procName*: string # e.g. "nimtimer_echo"
-    libName*: string # library name, e.g. "nimtimer"
-    kind*: FFIProcKind
-    libTypeName*: string # e.g. "NimTimer"
+    procName*: string # e.g. "timer_echo"
+    libName*: string # library name, e.g. "timer"
+    kind*: FFIKind
+    libTypeName*: string # e.g. "Timer"
     extraParams*: seq[FFIParamMeta] # all params except the lib param
     returnTypeName*: string # e.g. "EchoResponse", "string", "pointer"
     returnIsPtr*: bool # true if return type is ptr T
-    isAsync*: bool
 
   FFIFieldMeta* = object
     name*: string # e.g. "delayMs"

@@ -18,8 +18,10 @@ const RET_MISSING_CALLBACK*: cint = 2
 ################################################################################
 ### FFI utils
 
-type FFIRequestProc* =
-  proc(request: pointer, reqHandler: pointer): Future[Result[string, string]] {.async.}
+type FFIRequestProc* = proc(
+  request: pointer, reqHandler: pointer
+): Future[Result[seq[byte], string]] {.async.}
+  ## The OK payload is a CBOR-encoded response body. Errors are plain UTF-8.
 
 template foreignThreadGc*(body: untyped) =
   when declared(setupForeignThreadGc):

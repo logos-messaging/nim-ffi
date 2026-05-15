@@ -4,7 +4,7 @@
 
 import std/[atomics, locks, json, tables]
 import chronicles, chronos, chronos/threadsync, taskpools/channels_spsc_single, results
-import ./ffi_types, ./ffi_thread_request, ./internal/ffi_macro, ./logging
+import ./ffi_types, ./ffi_thread_request, ./internal/ffi_macro, ./logging, ./cbor_serial
 
 type FFICallbackState* = object
   ## Holds the C event callback and its associated user-data pointer.
@@ -37,7 +37,12 @@ type FFIContext*[T] = object
     # Pointer to with the registered requests at compile time
 
 var ffiCurrentCallbackState* {.threadvar.}: ptr FFICallbackState
-  ## Set by ffiThreadBody at thread startup; read by dispatchFfiEvent.
+  ## Set by ffiThreadBody at thread startup; read by dispatchFFIEvent.
+
+var onFFIThread* {.threadvar.}: bool
+  ## True while executing inside `ffiThreadBody`. Used by
+  ## `sendRequestToFFIThread` to detect re-entrant dispatch from a handler
+  ## (which would self-deadlock on `reqReceivedSignal`).
 
 const git_version* {.strdefine.} = "n/a"
 
@@ -66,7 +71,7 @@ template callEventCallback*(ctx: ptr FFIContext, eventName: string, body: untype
         ctx[].callbackState.userData,
       )
 
-template dispatchFfiEvent*(eventName: string, body: untyped) =
+template dispatchFFIEvent*(eventName: string, body: untyped) =
   ## Dispatches an FFI event to the callback registered via `{libName}_set_event_callback`.
   ## `body` is evaluated lazily — only when a callback is registered.
   ## Valid only on the FFI thread (i.e., inside {.ffi.} proc bodies and their async closures).
@@ -89,11 +94,21 @@ template dispatchFfiEvent*(eventName: string, body: untyped) =
 proc sendRequestToFFIThread*(
     ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, timeout = InfiniteDuration
 ): Result[void, string] =
+  # Reentrancy guard (PR #23 review, item 6): if a handler running on the FFI
+  # thread tries to dispatch back through this proc, it would wait forever on
+  # `reqReceivedSignal` — which only this thread can fire — and self-deadlock.
+  # Return an error instead so the caller can surface it.
+  if onFFIThread:
+    deleteRequest(ffiRequest)
+    return err(
+      "reentrant ffi call: a handler invoked sendRequestToFFIThread on its own context"
+    )
+
+  # All async submissions serialise on `ctx.lock` for the full
+  # trySend + fireSync + waitSync sequence because `reqChannel` is
+  # single-producer and `reqReceivedSignal` is shared across callers.
+  # Multi-producer redesign is tracked as PR #23 review item 7.
   ctx.lock.acquire()
-  # This lock is only necessary while we use a SP Channel and while the signalling
-  # between threads assumes that there aren't concurrent requests.
-  # Rearchitecting the signaling + migrating to a MP Channel will allow us to receive
-  # requests concurrently and spare us the need of locks
   defer:
     ctx.lock.release()
 
@@ -201,13 +216,13 @@ proc processRequest[T](
       ## That shouldn't happen because only registered requests should be sent to the FFI thread.
       nilProcess(request[].reqId)
     else:
-      ctx[].registeredRequests[][reqIdCs](request[].reqContent, ctx)
+      ctx[].registeredRequests[][reqIdCs](cast[pointer](request), ctx)
 
   let res =
     try:
       await retFut
     except AsyncError as exc:
-      Result[string, string].err(
+      Result[seq[byte], string].err(
         "Async error in processRequest for " & reqId & ": " & exc.msg
       )
 
@@ -222,10 +237,12 @@ proc processRequest[T](
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ## FFI thread body that attends library user API requests
   ffiCurrentCallbackState = addr ctx[].callbackState
+  onFFIThread = true
 
   logging.setupLog(logging.LogLevel.DEBUG, logging.LogFormat.TEXT)
 
   defer:
+    onFFIThread = false
     # Signal destroyFFIContext that this thread has exited, so its bounded
     # wait can unblock and proceed with cleanup.
     let fireRes = ctx.threadExitSignal.fireSync()

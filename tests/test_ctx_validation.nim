@@ -42,7 +42,7 @@ suite "ctx pointer validation at the FFI entry point":
     var s: CallbackState
     initCbState(s)
     let nilCtx: ptr FFIContext[TestLib] = nil
-    let ret = ctxval_ping(nilCtx, validationCallback, addr s)
+    let ret = ctxval_ping(nilCtx, validationCallback, addr s, nil, 0.csize_t)
     check ret == RET_ERR
     check s.called.load()
     check s.retCode == RET_ERR
@@ -51,7 +51,7 @@ suite "ctx pointer validation at the FFI entry point":
     var s: CallbackState
     initCbState(s)
     let invalidCtx = cast[ptr FFIContext[TestLib]](123)
-    let ret = ctxval_ping(invalidCtx, validationCallback, addr s)
+    let ret = ctxval_ping(invalidCtx, validationCallback, addr s, nil, 0.csize_t)
     check ret == RET_ERR
     check s.called.load()
     check s.retCode == RET_ERR

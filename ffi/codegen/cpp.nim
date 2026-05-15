@@ -1,8 +1,24 @@
 ## C++ binding generator for the nim-ffi framework.
-## Generates a header-only C++ binding and CMakeLists.txt from compile-time FFI metadata.
+## Generates a header-only C++ binding and CMakeLists.txt. Requests/responses
+## travel as CBOR (encoded with vendored TinyCBOR on the C++ side, matching
+## the Nim-side cbor_serial codec on the wire — both ends speak RFC 8949).
 
 import std/[os, strutils]
-import ./meta
+import ./meta, ./string_helpers
+
+## Wire-format C++ type used for any Nim `ptr T` / `pointer`. Fixed 64-bit so
+## the CBOR payload size is stable regardless of host architecture.
+const CppPtrType* = "uint64_t"
+
+## Static template blocks live as real C++ / CMake files under templates/cpp/
+## and are slurped into the binary at compile time. Edits to those files are
+## reflected in the generated bindings without touching this codegen.
+const
+  HeaderPreludeTpl = staticRead("templates/cpp/header_prelude.hpp.tpl")
+  CborHelpersTpl = staticRead("templates/cpp/cbor_helpers.hpp.tpl")
+  SyncCallHelperTpl = staticRead("templates/cpp/sync_call_helper.hpp.tpl")
+  ContextRuleOf5Tpl = staticRead("templates/cpp/context_rule_of_5.hpp.tpl")
+  CMakeListsTpl = staticRead("templates/cpp/CMakeLists.txt.tpl")
 
 proc genericInnerType(typeName, prefix: string): string =
   if typeName.startsWith(prefix) and typeName.endsWith("]"):
@@ -14,7 +30,7 @@ proc genericInnerType(typeName, prefix: string): string =
 proc nimTypeToCpp*(typeName: string): string =
   let trimmed = typeName.strip()
   if trimmed.startsWith("ptr "):
-    return "void*"
+    return CppPtrType
   else:
     let seqInner = genericInnerType(trimmed, "seq[")
     if seqInner.len > 0:
@@ -32,7 +48,7 @@ proc nimTypeToCpp*(typeName: string): string =
   of "bool": "bool"
   of "float": "float"
   of "float64": "double"
-  of "pointer": "void*"
+  of "pointer": CppPtrType
   else: trimmed
 
 proc stripLibPrefixCpp(procName, libName: string): string =
@@ -41,47 +57,103 @@ proc stripLibPrefixCpp(procName, libName: string): string =
     return procName[prefix.len .. ^1]
   return procName
 
+proc reqStructName(p: FFIProcMeta): string =
+  let camel = snakeToPascalCase(p.procName)
+  if p.kind == FFIKind.CTOR:
+    camel & "CtorReq"
+  else:
+    camel & "Req"
+
+proc emitStructCborCodec(
+    lines: var seq[string], structName: string, fields: seq[(string, string)]
+) =
+  ## Appends per-struct TinyCBOR encode_cbor + decode_cbor free functions for
+  ## `structName`. `fields` is a sequence of (field-name, ignored C++ type)
+  ## pairs — the type is unused at the codec layer because the generic
+  ## encode_cbor / decode_cbor overloads in cbor_helpers.hpp.tpl dispatch on
+  ## the struct member's type. We emit a CBOR map with text-string keys to
+  ## match the wire format produced by Nim's cbor_serialization.
+  let n = fields.len
+  # ── encode ────────────────────────────────────────────────────────────────
+  if n == 0:
+    lines.add(
+      "inline CborError encode_cbor(CborEncoder& e, const $1&) {" % [structName]
+    )
+  else:
+    lines.add(
+      "inline CborError encode_cbor(CborEncoder& e, const $1& v) {" % [structName]
+    )
+  lines.add("    CborEncoder m;")
+  lines.add("    CborError err = cbor_encoder_create_map(&e, &m, $1);" % [$n])
+  lines.add("    if (err) return err;")
+  for (name, _) in fields:
+    lines.add(
+      "    err = cbor_encode_text_stringz(&m, \"$1\"); if (err) return err;" % [name]
+    )
+    lines.add(
+      "    err = encode_cbor(m, v.$1);              if (err) return err;" % [name]
+    )
+  lines.add("    return cbor_encoder_close_container(&e, &m);")
+  lines.add("}")
+  # ── decode ────────────────────────────────────────────────────────────────
+  if n == 0:
+    lines.add("inline CborError decode_cbor(CborValue& it, $1&) {" % [structName])
+    lines.add("    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;")
+    lines.add("    return cbor_value_advance(&it);")
+    lines.add("}")
+    return
+  lines.add("inline CborError decode_cbor(CborValue& it, $1& v) {" % [structName])
+  lines.add("    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;")
+  lines.add("    CborValue field;")
+  lines.add("    CborError err;")
+  for (name, _) in fields:
+    lines.add(
+      "    err = cbor_value_map_find_value(&it, \"$1\", &field); if (err) return err;" %
+        [name]
+    )
+    lines.add("    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;")
+    lines.add("    err = decode_cbor(field, v.$1); if (err) return err;" % [name])
+  lines.add("    return cbor_value_advance(&it);")
+  lines.add("}")
+
+proc cppBracedInit(structName: string, fieldNames: seq[string]): string =
+  ## Produces a C++ braced-init expression for a per-proc Req struct.
+  ## Used to construct the request value before CBOR-encoding it for the wire,
+  ## as in `const auto req = TimerEchoReq{message, count};` in the generated
+  ## header. The field order must match the struct's declaration order, which
+  ## in turn mirrors the user's Nim FFI signature.
+  ##
+  ## Examples:
+  ##   cppBracedInit("TimerEchoReq", @["message", "count"])
+  ##     → "TimerEchoReq{message, count}"
+  ##   cppBracedInit("TimerVersionReq", @[])
+  ##     → "TimerVersionReq{}"
+  ##   cppBracedInit("TimerCreateCtorReq", @["config"])
+  ##     → "TimerCreateCtorReq{config}"
+  ##
+  ## Empty `fieldNames` collapses cleanly because `join` on an empty seq
+  ## returns "", so the result is the well-formed empty-init `Name{}`.
+  return structName & "{" & fieldNames.join(", ") & "}"
+
 proc generateCppHeader*(
     procs: seq[FFIProcMeta], types: seq[FFITypeMeta], libName: string
 ): string =
   var lines: seq[string] = @[]
 
-  # ── Includes ───────────────────────────────────────────────────────────────
-  lines.add("#pragma once")
-  lines.add("#include <string>")
-  lines.add("#include <cstdint>")
-  lines.add("#include <chrono>")
-  lines.add("#include <stdexcept>")
-  lines.add("#include <mutex>")
-  lines.add("#include <condition_variable>")
-  lines.add("#include <memory>")
-  lines.add("#include <functional>")
-  lines.add("#include <future>")
-  lines.add("#include <vector>")
-  lines.add("#include <optional>")
-  lines.add("#include <nlohmann/json.hpp>")
-  lines.add("")
+  lines.add(HeaderPreludeTpl)
 
-  # ── nlohmann optional<T> support ──────────────────────────────────────────
-  lines.add("namespace nlohmann {")
-  lines.add("    template<typename T>")
-  lines.add("    void to_json(json& j, const std::optional<T>& opt) {")
-  lines.add("        if (opt) j = *opt;")
-  lines.add("        else j = nullptr;")
-  lines.add("    }")
-  lines.add("")
-  lines.add("    template<typename T>")
-  lines.add("    void from_json(const json& j, std::optional<T>& opt) {")
-  lines.add("        if (j.is_null()) opt = std::nullopt;")
-  lines.add("        else opt = j.get<T>();")
-  lines.add("    }")
-  lines.add("}")
-  lines.add("")
+  # CBOR primitive / container helpers must precede the per-struct codecs
+  # below, because each emitted `encode_cbor`/`decode_cbor(T)` calls the
+  # generic overloads for the struct's fields (std::string, std::vector,
+  # std::optional, primitives). The struct codecs are non-template `inline`
+  # functions, so name lookup happens at parse time — the overloads must be
+  # in scope before the struct codecs are parsed.
+  lines.add(CborHelpersTpl)
 
   # ── Types ──────────────────────────────────────────────────────────────────
   if types.len > 0:
     lines.add("// ============================================================")
-    lines.add("// Types")
+    lines.add("// User-declared FFI types")
     lines.add("// ============================================================")
     lines.add("")
     for t in types:
@@ -89,13 +161,40 @@ proc generateCppHeader*(
       for f in t.fields:
         lines.add("    $1 $2;" % [nimTypeToCpp(f.typeName), f.name])
       lines.add("};")
-      var fieldNames: seq[string] = @[]
+      var fields: seq[(string, string)] = @[]
       for f in t.fields:
-        fieldNames.add(f.name)
-      lines.add(
-        "NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE($1, $2)" % [t.name, fieldNames.join(", ")]
-      )
+        fields.add((f.name, nimTypeToCpp(f.typeName)))
+      emitStructCborCodec(lines, t.name, fields)
       lines.add("")
+
+  # ── Per-proc Req structs (CBOR transport units) ───────────────────────────
+  lines.add("// ============================================================")
+  lines.add("// Per-proc request envelopes (CBOR encoded on the wire)")
+  lines.add("// ============================================================")
+  lines.add("")
+  for p in procs:
+    if p.kind == FFIKind.DTOR:
+      continue
+    let reqName = reqStructName(p)
+    lines.add("struct $1 {" % [reqName])
+    for ep in p.extraParams:
+      let cppType =
+        if ep.isPtr:
+          CppPtrType
+        else:
+          nimTypeToCpp(ep.typeName)
+      lines.add("    $1 $2;" % [cppType, ep.name])
+    lines.add("};")
+    var fields: seq[(string, string)] = @[]
+    for ep in p.extraParams:
+      let cppType =
+        if ep.isPtr:
+          CppPtrType
+        else:
+          nimTypeToCpp(ep.typeName)
+      fields.add((ep.name, cppType))
+    emitStructCborCodec(lines, reqName, fields)
+    lines.add("")
 
   # ── C FFI declarations ─────────────────────────────────────────────────────
   lines.add("// ============================================================")
@@ -104,135 +203,45 @@ proc generateCppHeader*(
   lines.add("")
   lines.add("extern \"C\" {")
   lines.add(
-    "typedef void (*FfiCallback)(int ret, const char* msg, size_t len, void* user_data);"
+    "typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_data);"
   )
   lines.add("")
   for p in procs:
-    var params: seq[string] = @[]
-    if p.kind in {ffiFfiKind, ffiDtorKind}:
-      params.add("void* ctx")
-      params.add("FfiCallback callback")
-      params.add("void* user_data")
-      for ep in p.extraParams:
-        params.add("const char* $1_json" % [ep.name])
-    else: # ffiCtorKind
-      for ep in p.extraParams:
-        params.add("const char* $1_json" % [ep.name])
-      params.add("FfiCallback callback")
-      params.add("void* user_data")
-    lines.add("int $1($2);" % [p.procName, params.join(", ")])
+    case p.kind
+    of FFIKind.FFI:
+      lines.add(
+        "int $1(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);" %
+          [p.procName]
+      )
+    of FFIKind.CTOR:
+      lines.add(
+        "void* $1(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback callback, void* user_data);" %
+          [p.procName]
+      )
+    of FFIKind.DTOR:
+      lines.add("int $1(void* ctx);" % [p.procName])
   lines.add("} // extern \"C\"")
   lines.add("")
 
-  # ── Serialization helpers ──────────────────────────────────────────────────
-  lines.add("template<typename T>")
-  lines.add("inline std::string serializeFfiArg(const T& value) {")
-  lines.add("    return nlohmann::json(value).dump();")
-  lines.add("}")
-  lines.add("")
-  lines.add("inline std::string serializeFfiArg(void* value) {")
-  lines.add("    return std::to_string(reinterpret_cast<uintptr_t>(value));")
-  lines.add("}")
-  lines.add("")
-  # Wrap parse + get in a single try/catch so callers get a clear FFI error
-  # rather than a raw nlohmann exception with an opaque JSON pointer message.
-  lines.add("template<typename T>")
-  lines.add("inline T deserializeFfiResult(const std::string& raw) {")
-  lines.add("    try {")
-  lines.add("        return nlohmann::json::parse(raw).get<T>();")
-  lines.add("    } catch (const nlohmann::json::exception& e) {")
-  lines.add(
-    "        throw std::runtime_error(std::string(\"FFI response deserialization failed: \") + e.what());"
-  )
-  lines.add("    }")
-  lines.add("}")
-  lines.add("")
-  lines.add("template<>")
-  lines.add("inline void* deserializeFfiResult<void*>(const std::string& raw) {")
-  lines.add("    try {")
-  lines.add(
-    "        return reinterpret_cast<void*>(static_cast<uintptr_t>(std::stoull(raw)));"
-  )
-  lines.add("    } catch (const std::exception& e) {")
-  lines.add(
-    "        throw std::runtime_error(std::string(\"FFI returned non-numeric address: \") + raw);"
-  )
-  lines.add("    }")
-  lines.add("}")
-  lines.add("")
-
-  # ── Call helper (anonymous namespace, header-only) ─────────────────────────
-  lines.add("// ============================================================")
-  lines.add("// Synchronous call helper (anonymous namespace, header-only)")
-  lines.add("// ============================================================")
-  lines.add("")
-  lines.add("namespace {")
-  lines.add("")
-  lines.add("struct FfiCallState_ {")
-  lines.add("    std::mutex              mtx;")
-  lines.add("    std::condition_variable cv;")
-  lines.add("    bool                    done{false};")
-  lines.add("    bool                    ok{false};")
-  lines.add("    std::string             msg;")
-  lines.add("};")
-  lines.add("")
-  # user_data is a heap-allocated shared_ptr<FfiCallState_>.
-  # Ownership: ffi_call_ holds one copy; this callback holds the other.
-  # When ffi_call_ times out and returns before the callback fires, the
-  # state stays alive (refcount 1) until Nim eventually calls back and
-  # deletes cb_ref — eliminating the UAF that a stack-allocated state has.
-  lines.add("inline void ffi_cb_(int ret, const char* msg, size_t /*len*/, void* ud) {")
-  lines.add("    auto* sptr = static_cast<std::shared_ptr<FfiCallState_>*>(ud);")
-  lines.add("    {")
-  lines.add("        auto& s = **sptr;")
-  lines.add("        std::lock_guard<std::mutex> lock(s.mtx);")
-  lines.add("        s.ok   = (ret == 0);")
-  lines.add("        s.msg  = msg ? std::string(msg) : std::string{};")
-  lines.add("        s.done = true;")
-  lines.add("        s.cv.notify_one();")
-  lines.add("    }")
-  lines.add("    delete sptr;")
-  lines.add("}")
-  lines.add("")
-  lines.add(
-    "inline std::string ffi_call_(std::function<int(FfiCallback, void*)> f,"
-  )
-  lines.add("                             std::chrono::milliseconds timeout) {")
-  lines.add("    auto state = std::make_shared<FfiCallState_>();")
-  lines.add("    auto* cb_ref = new std::shared_ptr<FfiCallState_>(state);")
-  lines.add("    const int ret = f(ffi_cb_, cb_ref);")
-  lines.add("    if (ret == 2) {")
-  lines.add("        delete cb_ref;")
-  lines.add(
-    "        throw std::runtime_error(\"RET_MISSING_CALLBACK (internal error)\");"
-  )
-  lines.add("    }")
-  lines.add("    std::unique_lock<std::mutex> lock(state->mtx);")
-  lines.add(
-    "    const bool fired = state->cv.wait_for(lock, timeout, [&]{ return state->done; });"
-  )
-  lines.add("    if (!fired)")
-  lines.add(
-    "        throw std::runtime_error(\"FFI call timed out after \" + std::to_string(timeout.count()) + \"ms\");"
-  )
-  lines.add("    if (!state->ok)")
-  lines.add("        throw std::runtime_error(state->msg);")
-  lines.add("    return state->msg;")
-  lines.add("}")
-  lines.add("")
-  lines.add("} // anonymous namespace")
-  lines.add("")
+  lines.add(SyncCallHelperTpl)
 
   # ── High-level C++ context class ──────────────────────────────────────────
   var ctors: seq[FFIProcMeta] = @[]
   var methods: seq[FFIProcMeta] = @[]
   for p in procs:
-    if p.kind == ffiCtorKind: ctors.add(p)
-    else: methods.add(p)
+    case p.kind
+    of FFIKind.CTOR:
+      ctors.add(p)
+    of FFIKind.FFI:
+      methods.add(p)
+    of FFIKind.DTOR:
+      discard
 
   let libTypeName =
-    if ctors.len > 0: ctors[0].libTypeName
-    else: libName[0 .. 0].toUpperAscii() & libName[1 .. ^1]
+    if ctors.len > 0:
+      ctors[0].libTypeName
+    else:
+      capitalizeFirstLetter(libName)
 
   let ctxTypeName = libTypeName & "Ctx"
 
@@ -245,49 +254,69 @@ proc generateCppHeader*(
 
   # ── Constructors ────────────────────────────────────────────────────────
   for ctor in ctors:
+    let reqName = reqStructName(ctor)
     var ctorParams: seq[string] = @[]
     var epNames: seq[string] = @[]
     for ep in ctor.extraParams:
-      ctorParams.add("const $1& $2" % [nimTypeToCpp(ep.typeName), ep.name])
+      let cppType =
+        if ep.isPtr:
+          CppPtrType
+        else:
+          nimTypeToCpp(ep.typeName)
+      ctorParams.add("const $1& $2" % [cppType, ep.name])
       epNames.add(ep.name)
     let timeoutParam = "std::chrono::milliseconds timeout = std::chrono::seconds{30}"
     let ctorParamsWithTimeout =
-      if ctorParams.len > 0: ctorParams.join(", ") & ", " & timeoutParam
-      else: timeoutParam
+      if ctorParams.len > 0:
+        ctorParams.join(", ") & ", " & timeoutParam
+      else:
+        timeoutParam
 
-    # -- create() factory --
+    let reqInit = cppBracedInit(reqName, epNames)
+
+    # Same `ffi_*_` underscore convention as instance methods so that a ctor
+    # parameter cannot collide with the local Req envelope name.
+    #
+    # The ctor's C symbol returns `void*` (the ctx pointer) synchronously, but
+    # `ffi_call_` expects an int-returning lambda — and we want the callback
+    # path anyway since it carries the CBOR-encoded ctx address. Discard the
+    # synchronous return and yield 0 from the lambda; the address comes back
+    # through the callback's CBOR text-string payload.
     lines.add("    static $1 create($2) {" % [ctxTypeName, ctorParamsWithTimeout])
-    for ep in ctor.extraParams:
-      lines.add("        const auto $1_json = serializeFfiArg($1);" % [ep.name])
-    var callArgs: seq[string] = @[]
-    for ep in ctor.extraParams:
-      callArgs.add("$1_json.c_str()" % [ep.name])
-    callArgs.add("cb")
-    callArgs.add("ud")
-    lines.add("        const auto raw = ffi_call_([&](FfiCallback cb, void* ud) {")
-    lines.add("            return $1($2);" % [ctor.procName, callArgs.join(", ")])
+    lines.add("        const auto ffi_req_ = $1;" % [reqInit])
+    lines.add("        const auto ffi_req_bytes_ = encodeCborFFI(ffi_req_);")
+    lines.add("        const auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {")
+    lines.add(
+      "            (void)$1(ffi_req_bytes_.data(), ffi_req_bytes_.size(), cb, ud);" %
+        [ctor.procName]
+    )
+    lines.add("            return 0;")
     lines.add("        }, timeout);")
+    lines.add("        const auto addr_str = decodeCborFFI<std::string>(ffi_raw_);")
     lines.add("        try {")
-    lines.add("            const auto addr = std::stoull(raw);")
+    lines.add("            const auto addr = std::stoull(addr_str);")
     lines.add(
       "            return $1(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout);" %
         [ctxTypeName]
     )
     lines.add("        } catch (const std::exception&) {")
     lines.add(
-      "            throw std::runtime_error(\"FFI create returned non-numeric address: \" + raw);"
+      "            throw std::runtime_error(\"FFI create returned non-numeric address: \" + addr_str);"
     )
     lines.add("        }")
     lines.add("    }")
     lines.add("")
 
-    # -- createAsync() factory: uses actual param types, not hardcoded --
     let captureList =
-      if epNames.len > 0: epNames.join(", ") & ", timeout"
-      else: "timeout"
+      if epNames.len > 0:
+        epNames.join(", ") & ", timeout"
+      else:
+        "timeout"
     let callList =
-      if epNames.len > 0: epNames.join(", ") & ", timeout"
-      else: "timeout"
+      if epNames.len > 0:
+        epNames.join(", ") & ", timeout"
+      else:
+        "timeout"
     lines.add(
       "    static std::future<$1> createAsync($2) {" %
         [ctxTypeName, ctorParamsWithTimeout]
@@ -300,76 +329,67 @@ proc generateCppHeader*(
     lines.add("")
 
   # ── Rule of 5 ──────────────────────────────────────────────────────────
-  # Destructor tears down Nim threads; copies are deleted; moves transfer ownership.
-  lines.add("    ~$1() {" % [ctxTypeName])
-  lines.add("        if (ptr_) {")
-  lines.add("            $1_destroy(ptr_);" % [libName])
-  lines.add("            ptr_ = nullptr;")
-  lines.add("        }")
-  lines.add("    }")
-  lines.add("")
-  lines.add("    $1(const $1&) = delete;" % [ctxTypeName])
-  lines.add("    $1& operator=(const $1&) = delete;" % [ctxTypeName])
-  lines.add("")
   lines.add(
-    "    $1($1&& other) noexcept : ptr_(other.ptr_), timeout_(other.timeout_) {" %
-      [ctxTypeName]
+    ContextRuleOf5Tpl.multiReplace(("{{CTX}}", ctxTypeName), ("{{LIB}}", libName))
   )
-  lines.add("        other.ptr_ = nullptr;")
-  lines.add("    }")
-  lines.add("    $1& operator=($1&& other) noexcept {" % [ctxTypeName])
-  lines.add("        if (this != &other) {")
-  lines.add("            if (ptr_) $1_destroy(ptr_);" % [libName])
-  lines.add("            ptr_ = other.ptr_;")
-  lines.add("            timeout_ = other.timeout_;")
-  lines.add("            other.ptr_ = nullptr;")
-  lines.add("        }")
-  lines.add("        return *this;")
-  lines.add("    }")
-  lines.add("")
 
   # ── Instance methods ────────────────────────────────────────────────────
   for m in methods:
     let methodName = stripLibPrefixCpp(m.procName, libName)
-    let retCppType = nimTypeToCpp(m.returnTypeName)
+    let retCppType =
+      if m.returnIsPtr:
+        CppPtrType
+      else:
+        nimTypeToCpp(m.returnTypeName)
+    let reqName = reqStructName(m)
 
     var methParams: seq[string] = @[]
     var methParamNames: seq[string] = @[]
     for ep in m.extraParams:
-      methParams.add("const $1& $2" % [nimTypeToCpp(ep.typeName), ep.name])
+      let cppType =
+        if ep.isPtr:
+          CppPtrType
+        else:
+          nimTypeToCpp(ep.typeName)
+      methParams.add("const $1& $2" % [cppType, ep.name])
       methParamNames.add(ep.name)
     let methParamsStr = methParams.join(", ")
     let methParamNamesStr = methParamNames.join(", ")
 
+    let reqInit = cppBracedInit(reqName, methParamNames)
+
+    # Use a single-underscore-suffixed local for the Req envelope so it can't
+    # shadow a method parameter whose name happens to be `req` (or similar).
     lines.add("    $1 $2($3) const {" % [retCppType, methodName, methParamsStr])
-    for ep in m.extraParams:
-      lines.add("        const auto $1_json = serializeFfiArg($1);" % [ep.name])
-    var callArgs = @["ptr_", "cb", "ud"]
-    for ep in m.extraParams:
-      callArgs.add("$1_json.c_str()" % [ep.name])
-    lines.add("        const auto raw = ffi_call_([&](FfiCallback cb, void* ud) {")
-    lines.add("            return $1($2);" % [m.procName, callArgs.join(", ")])
+    lines.add("        const auto ffi_req_ = $1;" % [reqInit])
+    lines.add("        const auto ffi_req_bytes_ = encodeCborFFI(ffi_req_);")
+    lines.add("        const auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {")
+    lines.add(
+      "            return $1(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());" %
+        [m.procName]
+    )
     lines.add("        }, timeout_);")
-    if retCppType == "void*":
-      lines.add("        return deserializeFfiResult<void*>(raw);")
-    else:
-      lines.add("        return deserializeFfiResult<$1>(raw);" % [retCppType])
+    lines.add("        return decodeCborFFI<$1>(ffi_raw_);" % [retCppType])
     lines.add("    }")
     lines.add("")
+    # The async wrapper calls the sync method via `this->methodName(...)` so
+    # a method param that happens to share the method's name doesn't shadow
+    # the call target (e.g. `schedule(job, retry, schedule)` would otherwise
+    # parse as invoking the `schedule` parameter).
     if methParamsStr.len > 0:
       lines.add(
         "    std::future<$1> $2Async($3) const {" %
           [retCppType, methodName, methParamsStr]
       )
       lines.add(
-        "        return std::async(std::launch::async, [this, $1]() { return $2($3); });" %
+        "        return std::async(std::launch::async, [this, $1]() { return this->$2($3); });" %
           [methParamNamesStr, methodName, methParamNamesStr]
       )
       lines.add("    }")
     else:
       lines.add("    std::future<$1> $2Async() const {" % [retCppType, methodName])
       lines.add(
-        "        return std::async(std::launch::async, [this]() { return $1(); });" %
+        "        return std::async(std::launch::async, [this]() { return this->$1(); });" %
           [methodName]
       )
       lines.add("    }")
@@ -385,119 +405,11 @@ proc generateCppHeader*(
   lines.add("};")
   lines.add("")
 
-  result = lines.join("\n")
+  return lines.join("\n")
 
 proc generateCppCMakeLists*(libName: string, nimSrcRelPath: string): string =
-  ## Generates CMakeLists.txt for the C++ bindings directory.
-  ## CMake uses ${...} which would clash with Nim's % format operator,
-  ## so we build the file line by line using string concatenation.
   let src = nimSrcRelPath.replace("\\", "/")
-  let cv = "${CMAKE_CURRENT_SOURCE_DIR}" # CMake variable shorthand
-  let rv = "${REPO_ROOT}"
-  let lf = "${NIM_LIB_FILE}"
-  let nm = "${NIM_EXECUTABLE}"
-  let ns = "${NIM_SRC}"
-  let sd = "${_search_dir}"
-  var L: seq[string] = @[]
-  L.add("cmake_minimum_required(VERSION 3.14)")
-  L.add("project(" & libName & "_cpp_bindings CXX)")
-  L.add("")
-  L.add("set(CMAKE_CXX_STANDARD 17)")
-  L.add("set(CMAKE_CXX_STANDARD_REQUIRED ON)")
-  L.add("")
-  L.add(
-    "# ── nlohmann/json ─────────────────────────────────────────────────────────────"
-  )
-  L.add("include(FetchContent)")
-  L.add("FetchContent_Declare(")
-  L.add("    nlohmann_json")
-  L.add("    GIT_REPOSITORY https://github.com/nlohmann/json.git")
-  L.add("    GIT_TAG        v3.11.3")
-  L.add("    GIT_SHALLOW    TRUE")
-  L.add(")")
-  L.add("FetchContent_MakeAvailable(nlohmann_json)")
-  L.add("")
-  L.add(
-    "# ── Locate the repository root (contains ffi.nimble) ─────────────────────────"
-  )
-  L.add("set(_search_dir \"" & cv & "\")")
-  L.add("set(REPO_ROOT \"\")")
-  L.add("foreach(_i RANGE 10)")
-  L.add("    if(EXISTS \"" & sd & "/ffi.nimble\")")
-  L.add("        set(REPO_ROOT \"" & sd & "\")")
-  L.add("        break()")
-  L.add("    endif()")
-  L.add("    get_filename_component(_search_dir \"" & sd & "\" DIRECTORY)")
-  L.add("endforeach()")
-  L.add("if(\"${REPO_ROOT}\" STREQUAL \"\")")
-  L.add(
-    "    message(FATAL_ERROR \"Cannot find repo root (no ffi.nimble in any ancestor)\")"
-  )
-  L.add("endif()")
-  L.add("")
-  L.add(
-    "# ── Nim source path ───────────────────────────────────────────────────────────"
-  )
-  L.add("get_filename_component(NIM_SRC")
-  L.add("    \"" & cv & "/" & src & "\"")
-  L.add("    ABSOLUTE)")
-  L.add("")
-  L.add(
-    "# ── Compile the Nim shared library ───────────────────────────────────────────"
-  )
-  L.add("find_program(NIM_EXECUTABLE nim REQUIRED)")
-  L.add("")
-  L.add("if(CMAKE_SYSTEM_NAME STREQUAL \"Darwin\")")
-  L.add("    set(NIM_LIB_FILE \"" & rv & "/lib" & libName & ".dylib\")")
-  L.add("elseif(CMAKE_SYSTEM_NAME STREQUAL \"Windows\")")
-  L.add("    set(NIM_LIB_FILE \"" & rv & "/" & libName & ".dll\")")
-  L.add("else()")
-  L.add("    set(NIM_LIB_FILE \"" & rv & "/lib" & libName & ".so\")")
-  L.add("endif()")
-  L.add("")
-  L.add("add_custom_command(")
-  L.add("    OUTPUT  \"" & lf & "\"")
-  L.add("    COMMAND \"" & nm & "\" c")
-  L.add("                --mm:orc")
-  L.add("                -d:chronicles_log_level=WARN")
-  L.add("                --app:lib")
-  L.add("                --noMain")
-  L.add("                \"--nimMainPrefix:lib" & libName & "\"")
-  L.add("                \"-o:" & lf & "\"")
-  L.add("                \"" & ns & "\"")
-  L.add("    WORKING_DIRECTORY \"" & rv & "\"")
-  L.add("    DEPENDS \"" & ns & "\"")
-  L.add("    COMMENT \"Compiling Nim library lib" & libName & "\"")
-  L.add("    VERBATIM")
-  L.add(")")
-  L.add("add_custom_target(nim_lib ALL DEPENDS \"" & lf & "\")")
-  L.add("")
-  L.add("add_library(" & libName & " SHARED IMPORTED GLOBAL)")
-  L.add(
-    "set_target_properties(" & libName & " PROPERTIES IMPORTED_LOCATION \"" & lf & "\")"
-  )
-  L.add("add_dependencies(" & libName & " nim_lib)")
-  L.add("")
-  L.add(
-    "# ── Interface target exposing the generated header ────────────────────────────"
-  )
-  L.add("add_library(" & libName & "_headers INTERFACE)")
-  L.add("target_include_directories(" & libName & "_headers INTERFACE \"" & cv & "\")")
-  L.add(
-    "target_link_libraries(" & libName & "_headers INTERFACE " & libName &
-      " nlohmann_json::nlohmann_json)"
-  )
-  L.add("")
-  L.add(
-    "# ── Optional example executable ───────────────────────────────────────────────"
-  )
-  L.add("if(EXISTS \"" & cv & "/main.cpp\")")
-  L.add("    add_executable(example main.cpp)")
-  L.add("    target_link_libraries(example PRIVATE " & libName & "_headers)")
-  L.add("    add_dependencies(example nim_lib)")
-  L.add("endif()")
-  L.add("")
-  result = L.join("\n")
+  return CMakeListsTpl.multiReplace(("{{LIB}}", libName), ("{{SRC}}", src))
 
 proc generateCppBindings*(
     procs: seq[FFIProcMeta],
