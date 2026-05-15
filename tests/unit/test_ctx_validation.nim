@@ -1,7 +1,7 @@
 import std/[atomics, locks]
 import unittest2
 import results
-import ../ffi
+import ffi
 
 type TestLib = object
 

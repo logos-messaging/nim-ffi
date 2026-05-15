@@ -1,7 +1,7 @@
 import std/options
 import unittest
 import results
-import ../ffi
+import ffi
 
 type Point {.ffi.} = object
   x: int

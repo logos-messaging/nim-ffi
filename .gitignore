@@ -35,3 +35,7 @@ PLAN.md
 .vscode/
 .idea/
 .DS_Store
+
+# Compiled test binaries (extensionless executables, also under tests/unit/)
+tests/unit/test_*
+!tests/unit/test_*.nim

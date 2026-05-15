@@ -4,7 +4,7 @@
 ## for binding generation, so it's worth pinning their behaviour with tests.
 
 import unittest
-import ../ffi/codegen/string_helpers
+import ffi/codegen/string_helpers
 
 suite "camelToSnakeCase":
   test "empty string":
