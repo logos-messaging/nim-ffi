@@ -20,23 +20,44 @@ type FFIThreadRequest* = object
     ## Owned CBOR-encoded request payload.
   dataLen*: int
 
-proc init*(
-    T: typedesc[FFIThreadRequest],
-    callback: FFICallBack,
-    userData: pointer,
-    reqId: cstring,
-    data: openArray[byte],
-): ptr type T =
+proc allocBaseRequest(
+    callback: FFICallBack, userData: pointer, reqId: cstring
+): ptr FFIThreadRequest =
+  ## Allocates the request envelope in shared memory and populates the
+  ## routing fields. Payload setup is delegated to one of the payload helpers
+  ## below depending on whether the bytes need to be copied or adopted.
   var ret = createShared(FFIThreadRequest)
   ret[].callback = callback
   ret[].userData = userData
   ret[].reqId = reqId.alloc()
   ret[].data = nil
-  ret[].dataLen = data.len
-  if data.len > 0:
-    ret[].data = cast[ptr UncheckedArray[byte]](allocShared(data.len))
-    copyMem(ret[].data, unsafeAddr data[0], data.len)
+  ret[].dataLen = 0
   return ret
+
+proc copySharedPayload(
+    req: ptr FFIThreadRequest, data: ptr byte, dataLen: int
+) =
+  ## Allocates a fresh shared buffer and copies `dataLen` bytes from `data`
+  ## into `req`. Empty payloads (non-positive `dataLen` or nil `data`) leave
+  ## the request's payload fields at their zero-initialised state.
+  if dataLen > 0 and not data.isNil():
+    req[].data = cast[ptr UncheckedArray[byte]](allocShared(dataLen))
+    copyMem(req[].data, data, dataLen)
+    req[].dataLen = dataLen
+
+proc adoptOwnedSharedPayload(
+    req: ptr FFIThreadRequest,
+    data: ptr UncheckedArray[byte],
+    dataLen: int,
+) =
+  ## Embeds an already-`allocShared` buffer into `req` without copying.
+  ## `(nil, 0)` is the empty-payload contract; a zero-length-but-non-nil
+  ## buffer is treated as empty and disposed here so it doesn't leak.
+  if dataLen > 0 and not data.isNil():
+    req[].data = data
+    req[].dataLen = dataLen
+  elif not data.isNil():
+    deallocShared(data)
 
 proc initFromPtr*(
     T: typedesc[FFIThreadRequest],
@@ -46,20 +67,25 @@ proc initFromPtr*(
     data: ptr byte,
     dataLen: int,
 ): ptr type T =
-  ## Same as init but takes a raw ptr+len, avoiding the need to bind an
-  ## openArray to a local for callers that operate on raw FFI buffers.
-  ## The bytes are copied into a fresh shared-memory buffer.
-  var ret = createShared(FFIThreadRequest)
-  ret[].callback = callback
-  ret[].userData = userData
-  ret[].reqId = reqId.alloc()
-  ret[].data = nil
-  ret[].dataLen = 0
-  if dataLen > 0 and not data.isNil:
-    ret[].data = cast[ptr UncheckedArray[byte]](allocShared(dataLen))
-    copyMem(ret[].data, data, dataLen)
-    ret[].dataLen = dataLen
+  ## Takes a raw ptr+len; the bytes are copied into a fresh shared-memory
+  ## buffer owned by the returned request.
+  var ret = allocBaseRequest(callback, userData, reqId)
+  copySharedPayload(ret, data, dataLen)
   return ret
+
+proc init*(
+    T: typedesc[FFIThreadRequest],
+    callback: FFICallBack,
+    userData: pointer,
+    reqId: cstring,
+    data: openArray[byte],
+): ptr type T =
+  ## Same contract as `initFromPtr` but accepts a Nim openArray, copying its
+  ## bytes into a fresh shared-memory buffer owned by the returned request.
+  let dataPtr =
+    if data.len > 0: cast[ptr byte](unsafeAddr data[0])
+    else: nil
+  initFromPtr(T, callback, userData, reqId, dataPtr, data.len)
 
 proc initFromOwnedShared*(
     T: typedesc[FFIThreadRequest],
@@ -77,19 +103,8 @@ proc initFromOwnedShared*(
   ## Ownership: `data` must have been allocated via `allocShared` / grown via
   ## `reallocShared`. After this call, `deleteRequest` will `deallocShared` it.
   ## Pass `(nil, 0)` for an empty payload.
-  var ret = createShared(FFIThreadRequest)
-  ret[].callback = callback
-  ret[].userData = userData
-  ret[].reqId = reqId.alloc()
-  ret[].data = nil
-  ret[].dataLen = 0
-  if dataLen > 0 and not data.isNil():
-    ret[].data = data
-    ret[].dataLen = dataLen
-  elif not data.isNil():
-    # `cborEncodeShared` returns `(nil, 0)` for empty payloads, but be safe
-    # if a caller hands us a zero-length-but-non-nil buffer.
-    deallocShared(data)
+  var ret = allocBaseRequest(callback, userData, reqId)
+  adoptOwnedSharedPayload(ret, data, dataLen)
   return ret
 
 proc deleteRequest*(request: ptr FFIThreadRequest) =
