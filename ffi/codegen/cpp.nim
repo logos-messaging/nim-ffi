@@ -4,7 +4,7 @@
 ## side, matching the Nim-side cbor_serial codec).
 
 import std/[os, strutils]
-import ./meta
+import ./meta, ./string_helpers
 
 ## Wire-format C++ type used for any Nim `ptr T` / `pointer`. Fixed 64-bit so
 ## the CBOR payload size is stable regardless of host architecture.

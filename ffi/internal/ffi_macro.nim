@@ -1,7 +1,7 @@
 import std/[macros, tables, strutils]
 import chronos
 import ../ffi_types
-import ../codegen/meta
+import ../codegen/[meta, string_helpers]
 when defined(ffiGenBindings):
   import ../codegen/rust
   import ../codegen/cpp

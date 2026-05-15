@@ -2,7 +2,7 @@
 ## Generates a complete Rust crate that uses CBOR (ciborium) on the wire.
 
 import std/[os, strutils]
-import ./meta
+import ./meta, ./string_helpers
 
 ## Wire-format Rust type used for any Nim `ptr T` / `pointer`. Fixed 64-bit so
 ## the CBOR payload size is stable regardless of host architecture (mirrors

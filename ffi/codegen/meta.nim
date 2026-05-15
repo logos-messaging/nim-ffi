@@ -1,8 +1,6 @@
 ## Compile-time metadata types for FFI binding generation.
 ## Populated by the {.ffiCtor.} and {.ffi.} macros and consumed by codegen.
 
-import std/[strutils, unicode]
-
 type
   FFIParamMeta* = object
     name*: string # Nim param name, e.g. "req"
@@ -46,38 +44,3 @@ const ffiOutputDir* {.strdefine.} = ""
 # set with -d:ffiNimSrcRelPath=../relative/path.nim
 const ffiNimSrcRelPath* {.strdefine.} = ""
 
-# ---------------------------------------------------------------------------
-# Name conversion helpers shared by codegen and the ffi macro
-# ---------------------------------------------------------------------------
-
-proc camelToSnakeCase*(s: string): string =
-  ## Converts camelCase to snake_case. Inserts `_` before each uppercase rune
-  ## that's not the first character and lowercases everything.
-  ## e.g. "delayMs" → "delay_ms", "timerName" → "timer_name"
-  var snake = ""
-  var first = true
-  for r in runes(s):
-    if r.isUpper() and not first:
-      snake.add('_')
-    snake.add($r.toLower())
-    first = false
-  return snake
-
-proc capitalizeFirstLetter*(s: string): string =
-  ## Returns `s` with its first rune uppercased; the rest is left unchanged.
-  ## e.g. "abc" → "Abc", "" → "", "Abc" → "Abc"
-  if s.len == 0:
-    return s
-  var runesSeq = toRunes(s)
-  runesSeq[0] = runesSeq[0].toUpper()
-  return $runesSeq
-
-proc snakeToPascalCase*(s: string): string =
-  ## Converts snake_case identifiers to PascalCase: split on `_`, uppercase
-  ## the first rune of each part, concatenate.
-  ## e.g. "testlib_create" → "TestlibCreate", "hello_world" → "HelloWorld"
-  let parts = s.split('_')
-  var pascal = ""
-  for p in parts:
-    pascal.add capitalizeFirstLetter(p)
-  return pascal
