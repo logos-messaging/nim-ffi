@@ -24,9 +24,7 @@
 ##     `.ffiCtor.`, which is validated against `FFIContextPool` on every
 ##     re-entry. Arbitrary user pointers would lack that validation.
 
-import std/macros
 import cbor_serialization, cbor_serialization/std/options, results
-import ./codegen/meta
 
 export cbor_serialization, options, results
 
@@ -77,41 +75,3 @@ proc cborDecodePtr*[T](
     return cborDecode(default(seq[byte]), T)
   cborDecode(toOpenArray(data, 0, dataLen - 1), T)
 
-# ---------------------------------------------------------------------------
-# ffiType macro — registers the type in ffiTypeRegistry for binding generation.
-# Serialization itself is handled by cbor_serialization's generic machinery.
-# ---------------------------------------------------------------------------
-
-macro ffiType*(body: untyped): untyped =
-  let typeSection = body[0]
-  let typeDef = typeSection[0]
-  let typeName =
-    if typeDef[0].kind == nnkPostfix:
-      typeDef[0][1]
-    else:
-      typeDef[0]
-
-  let typeNameStr = $typeName
-  var fieldMetas: seq[FFIFieldMeta] = @[]
-  let objTy = typeDef[2]
-  if objTy.kind == nnkObjectTy and objTy.len >= 3:
-    let recList = objTy[2]
-    if recList.kind == nnkRecList:
-      for identDef in recList:
-        if identDef.kind == nnkIdentDefs:
-          let fieldType = identDef[^2]
-          for i in 0 ..< identDef.len - 2:
-            if fieldType.kind == nnkPtrTy:
-              error("ffiType " & typeNameStr & "." & $identDef[i] &
-                ": raw `ptr T` is not allowed across the FFI boundary")
-            if fieldType.kind == nnkIdent and $fieldType == "pointer":
-              error("ffiType " & typeNameStr & "." & $identDef[i] &
-                ": raw `pointer` is not allowed across the FFI boundary")
-          let fieldTypeName =
-            if fieldType.kind == nnkIdent: $fieldType
-            else: fieldType.repr
-          for i in 0 ..< identDef.len - 2:
-            fieldMetas.add(FFIFieldMeta(name: $identDef[i], typeName: fieldTypeName))
-
-  ffiTypeRegistry.add(FFITypeMeta(name: typeNameStr, fields: fieldMetas))
-  return body

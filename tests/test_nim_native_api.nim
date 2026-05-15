@@ -12,17 +12,14 @@ import ../ffi
 type Counter = object
   start: int
 
-ffiType:
-  type CounterConfig = object
-    initial: int
+type CounterConfig {.ffi.} = object
+  initial: int
 
-ffiType:
-  type IncRequest = object
-    by: int
+type IncRequest {.ffi.} = object
+  by: int
 
-ffiType:
-  type CounterState = object
-    value: int
+type CounterState {.ffi.} = object
+  value: int
 
 proc counter_create*(
     cfg: CounterConfig
@@ -80,26 +77,22 @@ proc counter_chain*(
     current = Counter(start: stepRes.value.value)
   return ok(CounterState(value: current.start))
 
-ffiType:
-  type RangeFilter = object
-    lo: int
-    hi: int
+type RangeFilter {.ffi.} = object
+  lo: int
+  hi: int
 
-ffiType:
-  type Pagination = object
-    offset: int
-    limit: int
+type Pagination {.ffi.} = object
+  offset: int
+  limit: int
 
-ffiType:
-  type Projection = object
-    fields: seq[string]
-    includeTotals: bool
+type Projection {.ffi.} = object
+  fields: seq[string]
+  includeTotals: bool
 
-ffiType:
-  type QueryReport = object
-    matched: int
-    returned: int
-    fieldsKept: seq[string]
+type QueryReport {.ffi.} = object
+  matched: int
+  returned: int
+  fieldsKept: seq[string]
 
 proc counter_query*(
     c: Counter,

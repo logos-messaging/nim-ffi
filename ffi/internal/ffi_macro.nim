@@ -65,7 +65,7 @@ proc registerFfiTypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
           let fieldType = identDef[^2]
           for i in 0 ..< identDef.len - 2:
             rejectRawPtrType(fieldType,
-              "ffiType " & typeNameStr & "." & $identDef[i])
+              "{.ffi.} type " & typeNameStr & "." & $identDef[i])
           let fieldTypeName =
             if fieldType.kind == nnkIdent: $fieldType
             else: fieldType.repr

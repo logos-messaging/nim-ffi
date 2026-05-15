@@ -1,22 +1,19 @@
 import std/options
 import unittest
 import results
-import ../ffi/cbor_serial
+import ../ffi
 
-ffiType:
-  type Point = object
-    x: int
-    y: int
+type Point {.ffi.} = object
+  x: int
+  y: int
 
-ffiType:
-  type Nested = object
-    label: string
-    point: Point
+type Nested {.ffi.} = object
+  label: string
+  point: Point
 
-ffiType:
-  type RefBox = object
-    label: string
-    n: int
+type RefBox {.ffi.} = object
+  label: string
+  n: int
 
 type Color = enum
   cRed, cGreen, cBlue
