@@ -3,13 +3,26 @@
 ## FFI plumbing expects, and adds the few transport-only details the FFI layer
 ## needs on top:
 ##
-##   - `pointer` / `ptr T` are encoded as CBOR unsigned int holding the raw
-##     address (in-process transport only — see notes in plan).
 ##   - `cborEncodeShared` writes into an `allocShared` buffer so the FFI thread
 ##     can take ownership of the bytes without a second copy.
 ##   - `CborNullByte` is the canonical "successful but no value" wire sentinel.
 ##
 ## `cborEncode` / `cborDecode` are the public API the macros and tests use.
+##
+## Type contract for `.ffi.` payloads:
+##
+##   - Plain `object` types flow as value copies — fields are serialized and
+##     the foreign side reconstructs an independent value.
+##   - `ref T` is *also* a value copy: `cbor_serialization`'s default `ref T`
+##     writer dereferences and encodes the pointee, so the receiving side
+##     allocates a fresh `ref` local to its own GC heap. No object identity
+##     is preserved across the boundary — the two sides own independent
+##     copies after decode.
+##   - Raw `pointer` / `ptr T` are rejected at macro-expansion time (see
+##     `rejectRawPtrType` in `internal/ffi_macro.nim`). The only address that
+##     legitimately crosses the boundary is the opaque ctx handle returned by
+##     `.ffiCtor.`, which is validated against `FFIContextPool` on every
+##     re-entry. Arbitrary user pointers would lack that validation.
 
 import std/macros
 import cbor_serialization, cbor_serialization/std/options, results
@@ -19,32 +32,6 @@ export cbor_serialization, options, results
 
 const CborNullByte*: byte = 0xf6'u8
   ## CBOR encoding of `null` — used as the wire sentinel for empty OK payloads.
-
-# ---------------------------------------------------------------------------
-# Custom write/read for raw `pointer` and `ptr T`.
-#
-# The library's default `ref T` writer dereferences and encodes the pointee;
-# we want the opposite for FFI transport — encode the address as a uint64 so
-# the foreign side can round-trip it as an opaque handle.
-# ---------------------------------------------------------------------------
-
-proc write*(w: var CborWriter, val: pointer) {.raises: [IOError].} =
-  w.write(cast[uint64](val))
-
-proc read*(
-    r: var CborReader, val: var pointer
-) {.raises: [IOError, SerializationError].} =
-  val = cast[pointer](r.readValue(uint64))
-
-proc write*[PtrT](w: var CborWriter, val: ptr PtrT) {.raises: [IOError].} =
-  w.write(cast[uint64](val))
-
-proc read*[PtrT](
-    r: var CborReader, val: var ptr PtrT
-) {.raises: [IOError, SerializationError].} =
-  val = cast[ptr PtrT](r.readValue(uint64))
-
-Cbor.defaultSerialization(pointer)
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -113,9 +100,15 @@ macro ffiType*(body: untyped): untyped =
       for identDef in recList:
         if identDef.kind == nnkIdentDefs:
           let fieldType = identDef[^2]
+          for i in 0 ..< identDef.len - 2:
+            if fieldType.kind == nnkPtrTy:
+              error("ffiType " & typeNameStr & "." & $identDef[i] &
+                ": raw `ptr T` is not allowed across the FFI boundary")
+            if fieldType.kind == nnkIdent and $fieldType == "pointer":
+              error("ffiType " & typeNameStr & "." & $identDef[i] &
+                ": raw `pointer` is not allowed across the FFI boundary")
           let fieldTypeName =
             if fieldType.kind == nnkIdent: $fieldType
-            elif fieldType.kind == nnkPtrTy: "ptr " & $fieldType[0]
             else: fieldType.repr
           for i in 0 ..< identDef.len - 2:
             fieldMetas.add(FFIFieldMeta(name: $identDef[i], typeName: fieldTypeName))

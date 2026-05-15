@@ -21,6 +21,32 @@ proc nimNameToCExport(s: string): string =
     snake.add(c.toLowerAscii())
   return snake
 
+proc isPtr(typ: NimNode): bool =
+  ## True iff `typ` is a `ptr T` type expression — i.e. an `nnkPtrTy` AST node.
+  ## Used by the binding-generator metadata path to flag pointer-typed params
+  ## and return types so the foreign side can render them as opaque addresses.
+  typ.kind == nnkPtrTy
+
+proc rejectRawPtrType(typ: NimNode, where: string) =
+  ## Errors out at macro-expansion time if `typ` is `pointer` or `ptr T`.
+  ## Raw addresses must not cross the FFI boundary in user-declared fields,
+  ## parameters, or return types: the only pointer that legitimately crosses
+  ## the boundary is the opaque ctx handle returned by `.ffiCtor.` and passed
+  ## back as the first C-ABI argument, which the framework validates via
+  ## FFIContextPool.isValidCtx before dereferencing. Any other raw pointer
+  ## would hand the foreign caller an address with no way to validate its
+  ## memory state — see PR #23 review (discussion_r3236531712).
+  ##
+  ## `object` and `ref T` are not rejected: they flow as value copies through
+  ## cbor_serialization (the library's default `ref T` writer dereferences
+  ## and encodes the pointee, so no address crosses the boundary).
+  if typ.kind == nnkPtrTy:
+    error(where & ": raw `ptr T` is not allowed across the FFI boundary " &
+      "(only the ctx handle, managed by the framework, may be a pointer)")
+  if typ.kind == nnkIdent and $typ == "pointer":
+    error(where & ": raw `pointer` is not allowed across the FFI boundary " &
+      "(only the ctx handle, managed by the framework, may be a pointer)")
+
 proc registerFfiTypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
   ## Registers the type in ffiTypeRegistry for binding generation and returns
   ## the clean typeDef. Serialization is handled by the generic overloads in
@@ -37,21 +63,17 @@ proc registerFfiTypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
       for identDef in recList:
         if identDef.kind == nnkIdentDefs:
           let fieldType = identDef[^2]
+          for i in 0 ..< identDef.len - 2:
+            rejectRawPtrType(fieldType,
+              "ffiType " & typeNameStr & "." & $identDef[i])
           let fieldTypeName =
             if fieldType.kind == nnkIdent: $fieldType
-            elif fieldType.kind == nnkPtrTy: "ptr " & $fieldType[0]
             else: fieldType.repr
           for i in 0 ..< identDef.len - 2:
             fieldMetas.add(FFIFieldMeta(name: $identDef[i], typeName: fieldTypeName))
 
   ffiTypeRegistry.add(FFITypeMeta(name: typeNameStr, fields: fieldMetas))
   return typeDef
-
-proc isPtr(typ: NimNode): bool =
-  ## True iff `typ` is a `ptr T` type expression — i.e. an `nnkPtrTy` AST node.
-  ## Used by the binding-generator metadata path to flag pointer-typed params
-  ## and return types so the foreign side can render them as opaque addresses.
-  typ.kind == nnkPtrTy
 
 proc nimTypeNameRepr(typ: NimNode): string =
   ## Stringifies a parameter or field type for the binding-generator registry.
@@ -647,11 +669,16 @@ macro ffi*(prc: untyped): untyped =
         retTypeNode.repr
     )
 
+  let resultRetType = resultInner[1]
+  rejectRawPtrType(resultRetType, "`.ffi.` proc " & $procName & " return type")
+
   var extraParamNames: seq[string] = @[]
   var extraParamTypes: seq[NimNode] = @[]
   for i in 2 ..< formalParams.len:
     let p = formalParams[i]
     for j in 0 ..< p.len - 2:
+      rejectRawPtrType(p[^2],
+        "`.ffi.` proc " & $procName & " parameter " & $p[j])
       extraParamNames.add($p[j])
       extraParamTypes.add(p[^2])
 
@@ -1101,6 +1128,8 @@ macro ffiCtor*(prc: untyped): untyped =
   for i in 1 ..< formalParams.len:
     let p = formalParams[i]
     for j in 0 ..< p.len - 2:
+      rejectRawPtrType(p[^2],
+        "`.ffiCtor.` proc " & $procName & " parameter " & $p[j])
       paramNames.add($p[j])
       paramTypes.add(p[^2])
 

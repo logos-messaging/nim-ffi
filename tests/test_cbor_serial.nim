@@ -13,6 +13,11 @@ ffiType:
     label: string
     point: Point
 
+ffiType:
+  type RefBox = object
+    label: string
+    n: int
+
 type Color = enum
   cRed, cGreen, cBlue
 
@@ -75,18 +80,6 @@ suite "CBOR primitives round-trip":
     let bytes = cborEncode(s)
     check cborDecode(bytes, string).value == s
 
-suite "CBOR pointer / ptr":
-  test "pointer round-trip":
-    var x = 12345
-    let p = cast[pointer](addr x)
-    let bytes = cborEncode(p)
-    check cborDecode(bytes, pointer).value == p
-
-  test "nil pointer":
-    let p: pointer = nil
-    let bytes = cborEncode(p)
-    check cborDecode(bytes, pointer).value == nil
-
 suite "CBOR object":
   test "Point round-trip":
     let pt = Point(x: 10, y: -20)
@@ -104,6 +97,34 @@ suite "CBOR object":
     check back.value.label == "origin"
     check back.value.point.x == 1
     check back.value.point.y == 2
+
+suite "CBOR ref T (value-copy contract)":
+  ## cbor_serialization's default `ref T` writer dereferences and encodes the
+  ## pointee. On decode the receiving side allocates a fresh `ref` local to
+  ## its own GC heap — no address crosses the boundary and the two refs are
+  ## independent. Documented in ffi/cbor_serial.nim's module header.
+
+  test "ref RefBox round-trip produces an independent ref":
+    let original = (ref RefBox)(label: "hi", n: 7)
+    let bytes = cborEncode(original)
+    let back = cborDecode(bytes, ref RefBox)
+    check back.isOk
+    check back.value != nil
+    check back.value.label == "hi"
+    check back.value.n == 7
+    # Mutate the decoded copy; the original must be untouched (proving no
+    # aliasing). If the wire format ever switched to identity-preserving
+    # transport, this would fail.
+    back.value.label = "mutated"
+    check original.label == "hi"
+    check cast[pointer](back.value) != cast[pointer](original)
+
+  test "nil ref round-trips as nil":
+    let original: ref RefBox = nil
+    let bytes = cborEncode(original)
+    let back = cborDecode(bytes, ref RefBox)
+    check back.isOk
+    check back.value == nil
 
 suite "CBOR seq / array":
   test "seq[int] round-trip":
