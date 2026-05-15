@@ -10,17 +10,6 @@ when defined(ffiGenBindings):
 # String helpers used by multiple macros
 # ---------------------------------------------------------------------------
 
-proc nimNameToCExport(s: string): string =
-  ## Converts a camelCase Nim proc name to a snake_case C export name.
-  ## Leaves already-snake_case names unchanged.
-  ## e.g. "timerCreate" → "timer_create", "timer_echo" → "timer_echo"
-  var snake = ""
-  for i, c in s:
-    if c.isUpperAscii() and i > 0:
-      snake.add('_')
-    snake.add(c.toLowerAscii())
-  return snake
-
 proc isPtr(typ: NimNode): bool =
   ## True iff `typ` is a `ptr T` type expression — i.e. an `nnkPtrTy` AST node.
   ## Used by the binding-generator metadata path to flag pointer-typed params
@@ -688,7 +677,7 @@ macro ffi*(prc: untyped): untyped =
       raw[0 ..^ 2]
     else:
       raw
-  let cExportName = nimNameToCExport(procNameStr)
+  let cExportName = camelToSnakeCase(procNameStr)
   let camelName = snakeToPascalCase(procNameStr)
 
   let reqTypeName = ident(camelName & "Req")
@@ -1139,7 +1128,7 @@ macro ffiCtor*(prc: untyped): untyped =
       procNameStr[0 ..^ 2]
     else:
       procNameStr
-  let cExportName = nimNameToCExport(cleanName)
+  let cExportName = camelToSnakeCase(cleanName)
   let reqTypeNameStr = snakeToPascalCase(cleanName) & "CtorReq"
   let reqTypeName = ident(reqTypeNameStr)
 
@@ -1312,7 +1301,7 @@ macro ffiDtor*(prc: untyped): untyped =
   let procNameStr = block:
     let raw = $procName
     if raw.endsWith("*"): raw[0 ..^ 2] else: raw
-  let cExportName = nimNameToCExport(procNameStr)
+  let cExportName = camelToSnakeCase(procNameStr)
   # The dtor only needs a C-exported wrapper; rename to a synthetic Nim ident
   # so it doesn't shadow the user's chosen name (consistent with .ffi. / .ffiCtor.).
   # The dtor only generates a C-exported wrapper; it uses the user's name
@@ -1428,7 +1417,7 @@ macro genBindings*(
         "genBindings: output directory is empty." &
         " Pass it as an argument or set -d:ffiOutputDir=path/to/output"
       )
-    let lang = targetLang.toLowerAscii()
+    let lang = string_helpers.toLower(targetLang)
     let libName = deriveLibName(ffiProcRegistry)
     case lang
     of "rust":

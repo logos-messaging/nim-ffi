@@ -4,6 +4,14 @@
 
 import std/[strutils, unicode]
 
+proc toLower*(s: string): string =
+  ## Unicode-aware lowercase for an entire string. Wraps `std/unicode`'s
+  ## per-Rune `toLower` so callers don't have to iterate manually.
+  var buf = ""
+  for r in runes(s):
+    buf.add($r.toLower())
+  return buf
+
 proc camelToSnakeCase*(s: string): string =
   ## Converts camelCase to snake_case. Inserts `_` before each uppercase rune
   ## that's not the first character and lowercases everything.

@@ -179,7 +179,7 @@ proc generateCppHeader*(
 
   let libTypeName =
     if ctors.len > 0: ctors[0].libTypeName
-    else: libName[0 .. 0].toUpperAscii() & libName[1 .. ^1]
+    else: capitalizeFirstLetter(libName)
 
   let ctxTypeName = libTypeName & "Ctx"
 
