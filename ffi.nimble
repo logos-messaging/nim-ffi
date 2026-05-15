@@ -24,7 +24,7 @@ task test, "Run all tests under --mm:orc and --mm:refc":
     exec "nim c -r " & flags & " tests/test_alloc.nim"
     exec "nim c -r " & flags & " tests/test_ffi_context.nim"
     exec "nim c -r " & flags & " tests/test_gc_compat.nim"
-    exec "nim c -r " & flags & " tests/test_cbor_serial.nim"
+    exec "nim c -r " & flags & " tests/test_serial.nim"
     exec "nim c -r " & flags & " tests/test_ctx_validation.nim"
     exec "nim c -r " & flags & " tests/test_nim_native_api.nim"
     exec "nim c -r " & flags & " tests/test_meta.nim"
@@ -37,9 +37,9 @@ task test_ffi, "Run FFI context integration tests under --mm:orc and --mm:refc":
   exec "nim c -r " & nimFlagsOrc & " tests/test_ffi_context.nim"
   exec "nim c -r " & nimFlagsRefc & " tests/test_ffi_context.nim"
 
-task test_cbor_serial, "Run CBOR codec unit tests":
-  exec "nim c -r " & nimFlagsOrc & " tests/test_cbor_serial.nim"
-  exec "nim c -r " & nimFlagsRefc & " tests/test_cbor_serial.nim"
+task test_serial, "Run CBOR codec unit tests":
+  exec "nim c -r " & nimFlagsOrc & " tests/test_serial.nim"
+  exec "nim c -r " & nimFlagsRefc & " tests/test_serial.nim"
 
 task genbindings_example, "Generate Rust bindings for the timer example":
   exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libtimer -d:ffiGenBindings -o:/dev/null examples/timer/timer.nim"
