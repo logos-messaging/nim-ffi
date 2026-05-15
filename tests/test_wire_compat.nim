@@ -54,8 +54,7 @@ suite "wire format — int field":
     let v = WireWithInt(message: "hi", delayMs: 200)
     let bytes = cborEncode(v)
     # map(2), "message"->"hi", "delayMs"->200 (uint8 form: 0x18 0xc8)
-    check toHex(bytes) ==
-      "a2676d65737361676562686967" & "64656c61794d7318c8"
+    check toHex(bytes) == "a2676d65737361676562686967" & "64656c61794d7318c8"
     let back = cborDecode(bytes, WireWithInt)
     check back.isOk
     check back.value.message == "hi"
@@ -86,8 +85,7 @@ suite "wire format — Option[T]":
     let v = WireWithOption(label: "x", note: some("hi"))
     let bytes = cborEncode(v)
     # map(2): "label"->"x", "note"->"hi" (text strings, no null/tag wrapping)
-    check toHex(bytes) ==
-      "a2656c6162656c6178646e6f7465626869"
+    check toHex(bytes) == "a2656c6162656c6178646e6f7465626869"
 
   test "Option.none yields a smaller map without the optional key":
     let v = WireWithOption(label: "x", note: none(string))

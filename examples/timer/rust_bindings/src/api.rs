@@ -16,8 +16,8 @@ fn decode_cbor<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
     ciborium::de::from_reader(bytes).map_err(|e| e.to_string())
 }
 
-type FfiResult = Result<Vec<u8>, String>;
-type FfiSender = flume::Sender<FfiResult>;
+type FFIResult = Result<Vec<u8>, String>;
+type FFISender = flume::Sender<FFIResult>;
 
 // Reconstruct the (ret, msg, len) tuple delivered by the C callback
 // into a Result<Vec<u8>, String>: payload on success, UTF-8 message on error.
@@ -25,7 +25,7 @@ type FfiSender = flume::Sender<FfiResult>;
 // alternative would be to dispatch a separate Err for invalid UTF-8, but the
 // codegen contract is that Nim handlers emit `string` error payloads, so
 // invalid UTF-8 here would be a Nim-side bug.
-unsafe fn ffi_payload(ret: c_int, msg: *const c_char, len: usize) -> FfiResult {
+unsafe fn ffi_payload(ret: c_int, msg: *const c_char, len: usize) -> FFIResult {
     let bytes = if msg.is_null() || len == 0 {
         Vec::new()
     } else {
@@ -43,7 +43,7 @@ unsafe extern "C" fn on_result(
 ) {
     // Take ownership of the boxed Sender — dropping it at end of scope
     // releases the only outstanding handle.
-    let tx = Box::from_raw(user_data as *mut FfiSender);
+    let tx = Box::from_raw(user_data as *mut FFISender);
 
     // `tx.send` returns Err only if the awaiting future was dropped (and with it
     // the Receiver): e.g. tokio::time::timeout elapsed, a tokio::select! branch
@@ -59,16 +59,16 @@ unsafe extern "C" fn on_result(
     let _ = tx.send(ffi_payload(ret, msg, len));
 }
 
-fn ffi_call_sync<F>(timeout: Duration, f: F) -> FfiResult
+fn ffi_call_sync<F>(timeout: Duration, f: F) -> FFIResult
 where
-    F: FnOnce(ffi::FfiCallback, *mut c_void) -> c_int,
+    F: FnOnce(ffi::FFICallback, *mut c_void) -> c_int,
 {
-    let (tx, rx) = flume::bounded::<FfiResult>(1);
+    let (tx, rx) = flume::bounded::<FFIResult>(1);
     let raw = Box::into_raw(Box::new(tx)) as *mut c_void;
     let ret = f(on_result, raw);
     if ret == 2 {
         // Callback will never fire; reclaim the box to avoid a leak.
-        drop(unsafe { Box::from_raw(raw as *mut FfiSender) });
+        drop(unsafe { Box::from_raw(raw as *mut FFISender) });
         return Err("RET_MISSING_CALLBACK (internal error)".into());
     }
     match rx.recv_timeout(timeout) {
@@ -80,15 +80,15 @@ where
     }
 }
 
-async fn ffi_call_async<F>(timeout: Duration, f: F) -> FfiResult
+async fn ffi_call_async<F>(timeout: Duration, f: F) -> FFIResult
 where
-    F: FnOnce(ffi::FfiCallback, *mut c_void) -> c_int,
+    F: FnOnce(ffi::FFICallback, *mut c_void) -> c_int,
 {
-    let (tx, rx) = flume::bounded::<FfiResult>(1);
+    let (tx, rx) = flume::bounded::<FFIResult>(1);
     let raw = Box::into_raw(Box::new(tx)) as *mut c_void;
     let ret = f(on_result, raw);
     if ret == 2 {
-        drop(unsafe { Box::from_raw(raw as *mut FfiSender) });
+        drop(unsafe { Box::from_raw(raw as *mut FFISender) });
         return Err("RET_MISSING_CALLBACK (internal error)".into());
     }
     match tokio::time::timeout(timeout, rx.recv_async()).await {

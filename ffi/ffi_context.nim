@@ -37,7 +37,7 @@ type FFIContext*[T] = object
     # Pointer to with the registered requests at compile time
 
 var ffiCurrentCallbackState* {.threadvar.}: ptr FFICallbackState
-  ## Set by ffiThreadBody at thread startup; read by dispatchFfiEvent.
+  ## Set by ffiThreadBody at thread startup; read by dispatchFFIEvent.
 
 var onFFIThread* {.threadvar.}: bool
   ## True while executing inside `ffiThreadBody`. Used by
@@ -71,7 +71,7 @@ template callEventCallback*(ctx: ptr FFIContext, eventName: string, body: untype
         ctx[].callbackState.userData,
       )
 
-template dispatchFfiEvent*(eventName: string, body: untyped) =
+template dispatchFFIEvent*(eventName: string, body: untyped) =
   ## Dispatches an FFI event to the callback registered via `{libName}_set_event_callback`.
   ## `body` is evaluated lazily — only when a callback is registered.
   ## Valid only on the FFI thread (i.e., inside {.ffi.} proc bodies and their async closures).

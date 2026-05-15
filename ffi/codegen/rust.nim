@@ -19,13 +19,20 @@ proc nimTypeToRust*(typeName: string): string =
   if t.startsWith("Maybe[") and t.endsWith("]"):
     return "Option<" & nimTypeToRust(t[6 .. ^2]) & ">"
   case t
-  of "string", "cstring": "String"
-  of "int", "int64": "i64"
-  of "int32": "i32"
-  of "bool": "bool"
-  of "float", "float64": "f64"
-  of "pointer": RustPtrType
-  else: capitalizeFirstLetter(t)
+  of "string", "cstring":
+    "String"
+  of "int", "int64":
+    "i64"
+  of "int32":
+    "i32"
+  of "bool":
+    "bool"
+  of "float", "float64":
+    "f64"
+  of "pointer":
+    RustPtrType
+  else:
+    capitalizeFirstLetter(t)
 
 proc deriveLibName*(procs: seq[FFIProcMeta]): string =
   ## Extracts the common prefix before the first `_` from proc names.
@@ -51,7 +58,10 @@ proc stripLibPrefix*(procName: string, libName: string): string =
 proc reqStructName(p: FFIProcMeta): string =
   ## Mirrors the Nim macro: <CamelCase(procName)>Req or CtorReq for ctors.
   let camel = snakeToPascalCase(p.procName)
-  if p.kind == FFIKind.CTOR: camel & "CtorReq" else: camel & "Req"
+  if p.kind == FFIKind.CTOR:
+    camel & "CtorReq"
+  else:
+    camel & "Req"
 
 # ---------------------------------------------------------------------------
 # File generators
@@ -64,7 +74,8 @@ proc generateCargoToml*(libName: string): string =
   # pulling its async-std/futures shims.
   # `tokio` is needed only for `tokio::time::timeout` around the async
   # `recv_async`. Feature-gating tokio (item 11) is a follow-up commit.
-  return """[package]
+  return
+    """[package]
 name = "$1"
 version = "0.1.0"
 edition = "2021"
@@ -81,7 +92,8 @@ proc generateBuildRs*(libName: string, nimSrcRelPath: string): string =
   ## Generates build.rs that compiles the Nim library.
   ## nimSrcRelPath is relative to the output (crate) directory.
   let escapedSrc = nimSrcRelPath.replace("\\", "\\\\")
-  return """use std::path::PathBuf;
+  return
+    """use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
@@ -139,13 +151,13 @@ pub use types::*;
 pub use api::*;
 """
 
-proc generateFfiRs*(procs: seq[FFIProcMeta]): string =
+proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
   ## Generates ffi.rs with extern "C" declarations. Each Nim FFI proc takes a
   ## single CBOR buffer (ptr+len) for its request payload.
   var lines: seq[string] = @[]
   lines.add("use std::os::raw::{c_char, c_int, c_void};")
   lines.add("")
-  lines.add("pub type FfiCallback = unsafe extern \"C\" fn(")
+  lines.add("pub type FFICallback = unsafe extern \"C\" fn(")
   lines.add("    ret: c_int,")
   lines.add("    msg: *const c_char,")
   lines.add("    len: usize,")
@@ -179,7 +191,7 @@ proc generateFfiRs*(procs: seq[FFIProcMeta]): string =
     of FFIKind.FFI:
       # Method/destructor-style: ctx comes first
       params.add("ctx: *mut c_void")
-      params.add("callback: FfiCallback")
+      params.add("callback: FFICallback")
       params.add("user_data: *mut c_void")
       params.add("req_cbor: *const u8")
       params.add("req_cbor_len: usize")
@@ -188,11 +200,9 @@ proc generateFfiRs*(procs: seq[FFIProcMeta]): string =
       # Constructor: no ctx; returns the freshly-allocated handle
       params.add("req_cbor: *const u8")
       params.add("req_cbor_len: usize")
-      params.add("callback: FfiCallback")
+      params.add("callback: FFICallback")
       params.add("user_data: *mut c_void")
-      lines.add(
-        "    pub fn $1($2) -> *mut c_void;" % [p.procName, params.join(", ")]
-      )
+      lines.add("    pub fn $1($2) -> *mut c_void;" % [p.procName, params.join(", ")])
     of FFIKind.DTOR:
       params.add("ctx: *mut c_void")
       lines.add("    pub fn $1($2) -> c_int;" % [p.procName, params.join(", ")])
@@ -200,9 +210,7 @@ proc generateFfiRs*(procs: seq[FFIProcMeta]): string =
   lines.add("}")
   return lines.join("\n") & "\n"
 
-proc generateTypesRs*(
-    types: seq[FFITypeMeta], procs: seq[FFIProcMeta]
-): string =
+proc generateTypesRs*(types: seq[FFITypeMeta], procs: seq[FFIProcMeta]): string =
   ## Generates types.rs with Rust structs for all user-declared FFI types and
   ## for each per-proc Req struct (matching the Nim macro's generated types).
   var lines: seq[string] = @[]
@@ -236,8 +244,10 @@ proc generateTypesRs*(
       for ep in p.extraParams:
         let snake = camelToSnakeCase(ep.name)
         let rustType =
-          if ep.isPtr: RustPtrType
-          else: nimTypeToRust(ep.typeName)
+          if ep.isPtr:
+            RustPtrType
+          else:
+            nimTypeToRust(ep.typeName)
         if snake != ep.name:
           lines.add("    #[serde(rename = \"$1\")]" % [ep.name])
         lines.add("    pub $1: $2," % [snake, rustType])
@@ -262,15 +272,19 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   var dtorProcName = ""
   for p in procs:
     case p.kind
-    of FFIKind.CTOR: ctors.add(p)
-    of FFIKind.FFI: methods.add(p)
+    of FFIKind.CTOR:
+      ctors.add(p)
+    of FFIKind.FFI:
+      methods.add(p)
     of FFIKind.DTOR:
       if dtorProcName.len == 0:
         dtorProcName = p.procName
 
   var libTypeName = ""
-  if ctors.len > 0: libTypeName = ctors[0].libTypeName
-  else: libTypeName = capitalizeFirstLetter(libName)
+  if ctors.len > 0:
+    libTypeName = ctors[0].libTypeName
+  else:
+    libTypeName = capitalizeFirstLetter(libName)
 
   let ctxTypeName = libTypeName & "Ctx"
 
@@ -287,13 +301,13 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   # ── CBOR helpers ───────────────────────────────────────────────────────────
   lines.add("fn encode_cbor<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {")
   lines.add("    let mut buf = Vec::new();")
-  lines.add("    ciborium::ser::into_writer(value, &mut buf).map_err(|e| e.to_string())?;")
+  lines.add(
+    "    ciborium::ser::into_writer(value, &mut buf).map_err(|e| e.to_string())?;"
+  )
   lines.add("    Ok(buf)")
   lines.add("}")
   lines.add("")
-  lines.add(
-    "fn decode_cbor<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {"
-  )
+  lines.add("fn decode_cbor<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {")
   lines.add("    ciborium::de::from_reader(bytes).map_err(|e| e.to_string())")
   lines.add("}")
   lines.add("")
@@ -308,16 +322,24 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   # out sends into a closed receiver, which is harmless: the Err is
   # discarded and the box drops cleanly. No Arc/Condvar; no Box leak; no
   # late-fire UAF; no double trampoline.
-  lines.add("type FfiResult = Result<Vec<u8>, String>;")
-  lines.add("type FfiSender = flume::Sender<FfiResult>;")
+  lines.add("type FFIResult = Result<Vec<u8>, String>;")
+  lines.add("type FFISender = flume::Sender<FFIResult>;")
   lines.add("")
   lines.add("// Reconstruct the (ret, msg, len) tuple delivered by the C callback")
-  lines.add("// into a Result<Vec<u8>, String>: payload on success, UTF-8 message on error.")
-  lines.add("// `from_utf8_lossy` accepts non-UTF-8 error bytes by inserting U+FFFD; the")
-  lines.add("// alternative would be to dispatch a separate Err for invalid UTF-8, but the")
+  lines.add(
+    "// into a Result<Vec<u8>, String>: payload on success, UTF-8 message on error."
+  )
+  lines.add(
+    "// `from_utf8_lossy` accepts non-UTF-8 error bytes by inserting U+FFFD; the"
+  )
+  lines.add(
+    "// alternative would be to dispatch a separate Err for invalid UTF-8, but the"
+  )
   lines.add("// codegen contract is that Nim handlers emit `string` error payloads, so")
   lines.add("// invalid UTF-8 here would be a Nim-side bug.")
-  lines.add("unsafe fn ffi_payload(ret: c_int, msg: *const c_char, len: usize) -> FfiResult {")
+  lines.add(
+    "unsafe fn ffi_payload(ret: c_int, msg: *const c_char, len: usize) -> FFIResult {"
+  )
   lines.add("    let bytes = if msg.is_null() || len == 0 {")
   lines.add("        Vec::new()")
   lines.add("    } else {")
@@ -335,32 +357,48 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   lines.add(") {")
   lines.add("    // Take ownership of the boxed Sender — dropping it at end of scope")
   lines.add("    // releases the only outstanding handle.")
-  lines.add("    let tx = Box::from_raw(user_data as *mut FfiSender);")
+  lines.add("    let tx = Box::from_raw(user_data as *mut FFISender);")
   lines.add("")
-  lines.add("    // `tx.send` returns Err only if the awaiting future was dropped (and with it")
-  lines.add("    // the Receiver): e.g. tokio::time::timeout elapsed, a tokio::select! branch")
-  lines.add("    // lost the race, or the future was dropped before being awaited. This cannot")
-  lines.add("    // happen with the current rust_client demo but may occur in arbitrary")
+  lines.add(
+    "    // `tx.send` returns Err only if the awaiting future was dropped (and with it"
+  )
+  lines.add(
+    "    // the Receiver): e.g. tokio::time::timeout elapsed, a tokio::select! branch"
+  )
+  lines.add(
+    "    // lost the race, or the future was dropped before being awaited. This cannot"
+  )
+  lines.add(
+    "    // happen with the current rust_client demo but may occur in arbitrary"
+  )
   lines.add("    // downstream consumers, so we discard the Err safely.")
-  lines.add("    // Given that this is invoked from a Nim thread, we can't propagate the error by panicking or")
-  lines.add("    // returning a Result. Furthermore, an API dev may intentionally set a timeout in the await,")
-  lines.add("    // in which case is also fine to discard the send error in this case because the API user will")
+  lines.add(
+    "    // Given that this is invoked from a Nim thread, we can't propagate the error by panicking or"
+  )
+  lines.add(
+    "    // returning a Result. Furthermore, an API dev may intentionally set a timeout in the await,"
+  )
+  lines.add(
+    "    // in which case is also fine to discard the send error in this case because the API user will"
+  )
   lines.add("    // handle the timeout expiry in their own code.")
-  lines.add("    // The important part is to ensure that the callback doesn't panic or block indefinitely if the")
+  lines.add(
+    "    // The important part is to ensure that the callback doesn't panic or block indefinitely if the"
+  )
   lines.add("    // receiver is gone.")
   lines.add("    let _ = tx.send(ffi_payload(ret, msg, len));")
   lines.add("}")
   lines.add("")
-  lines.add("fn ffi_call_sync<F>(timeout: Duration, f: F) -> FfiResult")
+  lines.add("fn ffi_call_sync<F>(timeout: Duration, f: F) -> FFIResult")
   lines.add("where")
-  lines.add("    F: FnOnce(ffi::FfiCallback, *mut c_void) -> c_int,")
+  lines.add("    F: FnOnce(ffi::FFICallback, *mut c_void) -> c_int,")
   lines.add("{")
-  lines.add("    let (tx, rx) = flume::bounded::<FfiResult>(1);")
+  lines.add("    let (tx, rx) = flume::bounded::<FFIResult>(1);")
   lines.add("    let raw = Box::into_raw(Box::new(tx)) as *mut c_void;")
   lines.add("    let ret = f(on_result, raw);")
   lines.add("    if ret == 2 {")
   lines.add("        // Callback will never fire; reclaim the box to avoid a leak.")
-  lines.add("        drop(unsafe { Box::from_raw(raw as *mut FfiSender) });")
+  lines.add("        drop(unsafe { Box::from_raw(raw as *mut FFISender) });")
   lines.add("        return Err(\"RET_MISSING_CALLBACK (internal error)\".into());")
   lines.add("    }")
   lines.add("    match rx.recv_timeout(timeout) {")
@@ -368,24 +406,28 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   lines.add("        Err(flume::RecvTimeoutError::Timeout) =>")
   lines.add("            Err(format!(\"timed out after {:?}\", timeout)),")
   lines.add("        Err(flume::RecvTimeoutError::Disconnected) =>")
-  lines.add("            Err(\"callback channel disconnected before delivery\".into()),")
+  lines.add(
+    "            Err(\"callback channel disconnected before delivery\".into()),"
+  )
   lines.add("    }")
   lines.add("}")
   lines.add("")
-  lines.add("async fn ffi_call_async<F>(timeout: Duration, f: F) -> FfiResult")
+  lines.add("async fn ffi_call_async<F>(timeout: Duration, f: F) -> FFIResult")
   lines.add("where")
-  lines.add("    F: FnOnce(ffi::FfiCallback, *mut c_void) -> c_int,")
+  lines.add("    F: FnOnce(ffi::FFICallback, *mut c_void) -> c_int,")
   lines.add("{")
-  lines.add("    let (tx, rx) = flume::bounded::<FfiResult>(1);")
+  lines.add("    let (tx, rx) = flume::bounded::<FFIResult>(1);")
   lines.add("    let raw = Box::into_raw(Box::new(tx)) as *mut c_void;")
   lines.add("    let ret = f(on_result, raw);")
   lines.add("    if ret == 2 {")
-  lines.add("        drop(unsafe { Box::from_raw(raw as *mut FfiSender) });")
+  lines.add("        drop(unsafe { Box::from_raw(raw as *mut FFISender) });")
   lines.add("        return Err(\"RET_MISSING_CALLBACK (internal error)\".into());")
   lines.add("    }")
   lines.add("    match tokio::time::timeout(timeout, rx.recv_async()).await {")
   lines.add("        Ok(Ok(payload)) => payload,")
-  lines.add("        Ok(Err(_)) => Err(\"callback channel disconnected before delivery\".into()),")
+  lines.add(
+    "        Ok(Err(_)) => Err(\"callback channel disconnected before delivery\".into()),"
+  )
   lines.add("        Err(_) => Err(format!(\"timed out after {:?}\", timeout)),")
   lines.add("    }")
   lines.add("}")
@@ -399,13 +441,23 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   lines.add("}")
   lines.add("")
   # SAFETY block applies to both impls below (PR #23 Rust review, item 7).
-  lines.add("// SAFETY: The `ptr` field points to an FFIContext owned by the Nim runtime.")
+  lines.add(
+    "// SAFETY: The `ptr` field points to an FFIContext owned by the Nim runtime."
+  )
   lines.add("// Every call through the generated FFI proc goes through")
-  lines.add("// `sendRequestToFFIThread` on the Nim side, which serialises every request")
-  lines.add("// behind `ctx.lock` and dispatches handlers on a single FFI thread, so the")
-  lines.add("// pointer is never accessed concurrently from Rust. The Nim-side reentrancy")
+  lines.add(
+    "// `sendRequestToFFIThread` on the Nim side, which serialises every request"
+  )
+  lines.add(
+    "// behind `ctx.lock` and dispatches handlers on a single FFI thread, so the"
+  )
+  lines.add(
+    "// pointer is never accessed concurrently from Rust. The Nim-side reentrancy"
+  )
   lines.add("// guard (`onFFIThread` threadvar) prevents handlers from re-entering the")
-  lines.add("// dispatcher and self-deadlocking. These invariants make it sound to mark")
+  lines.add(
+    "// dispatcher and self-deadlocking. These invariants make it sound to mark"
+  )
   lines.add("// the wrapper as Send + Sync.")
   lines.add("unsafe impl Send for $1 {}" % [ctxTypeName])
   lines.add("unsafe impl Sync for $1 {}" % [ctxTypeName])
@@ -436,16 +488,20 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
     for ep in ctor.extraParams:
       let snake = camelToSnakeCase(ep.name)
       let rustType =
-        if ep.isPtr: RustPtrType
-        else: nimTypeToRust(ep.typeName)
+        if ep.isPtr:
+          RustPtrType
+        else:
+          nimTypeToRust(ep.typeName)
       paramsList.add("$1: $2" % [snake, rustType])
       fieldInits.add(snake)
     # Both `create` and `new_async` accept an explicit `timeout: Duration`; the
     # value flows into `self.timeout` so subsequent method calls inherit it.
     # (PR #23 Rust review, item 5: don't hardcode 30s for the async ctor.)
     let ctorParamsStr =
-      if paramsList.len > 0: paramsList.join(", ") & ", timeout: Duration"
-      else: "timeout: Duration"
+      if paramsList.len > 0:
+        paramsList.join(", ") & ", timeout: Duration"
+      else:
+        "timeout: Duration"
 
     let reqLit =
       if fieldInits.len > 0:
@@ -462,28 +518,40 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
     # synchronous return value and yield RET_OK to make the trampoline wait
     # on the callback.
     lines.add("        let raw_bytes = ffi_call_sync(timeout, |cb, ud| unsafe {")
-    lines.add("            let _ = ffi::$1(req_bytes.as_ptr(), req_bytes.len(), cb, ud);" % [ctor.procName])
+    lines.add(
+      "            let _ = ffi::$1(req_bytes.as_ptr(), req_bytes.len(), cb, ud);" %
+        [ctor.procName]
+    )
     lines.add("            0")
     lines.add("        })?;")
     # The ctor success payload is a CBOR text string holding the ctx address.
     lines.add("        let addr_str: String = decode_cbor(&raw_bytes)?;")
-    lines.add("        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;")
+    lines.add(
+      "        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;"
+    )
     lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout })")
     lines.add("    }")
     lines.add("")
 
     # -- async new_async --
-    lines.add("    pub async fn new_async($1) -> Result<Self, String> {" % [ctorParamsStr])
+    lines.add(
+      "    pub async fn new_async($1) -> Result<Self, String> {" % [ctorParamsStr]
+    )
     lines.add("        let req = $1;" % [reqLit])
     lines.add("        let req_bytes = encode_cbor(&req)?;")
     # See `create` above: discard the ctor's *mut c_void synchronous return
     # and rely on the callback to deliver the ctx address.
     lines.add("        let raw_bytes = ffi_call_async(timeout, move |cb, ud| unsafe {")
-    lines.add("            let _ = ffi::$1(req_bytes.as_ptr(), req_bytes.len(), cb, ud);" % [ctor.procName])
+    lines.add(
+      "            let _ = ffi::$1(req_bytes.as_ptr(), req_bytes.len(), cb, ud);" %
+        [ctor.procName]
+    )
     lines.add("            0")
     lines.add("        }).await?;")
     lines.add("        let addr_str: String = decode_cbor(&raw_bytes)?;")
-    lines.add("        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;")
+    lines.add(
+      "        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;"
+    )
     lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout })")
     lines.add("    }")
     lines.add("")
@@ -499,11 +567,17 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
     for ep in m.extraParams:
       let snake = camelToSnakeCase(ep.name)
       let rustType =
-        if ep.isPtr: RustPtrType
-        else: nimTypeToRust(ep.typeName)
+        if ep.isPtr:
+          RustPtrType
+        else:
+          nimTypeToRust(ep.typeName)
       paramsList.add("$1: $2" % [snake, rustType])
       fieldInits.add(snake)
-    let paramsStr = if paramsList.len > 0: ", " & paramsList.join(", ") else: ""
+    let paramsStr =
+      if paramsList.len > 0:
+        ", " & paramsList.join(", ")
+      else:
+        ""
 
     let reqLit =
       if fieldInits.len > 0:
@@ -511,9 +585,7 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
       else:
         reqName & " {}"
 
-    let retTypeForApi =
-      if m.returnIsPtr: RustPtrType
-      else: retRustType
+    let retTypeForApi = if m.returnIsPtr: RustPtrType else: retRustType
 
     # -- blocking method --
     lines.add(
@@ -542,7 +614,9 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
     lines.add("        let req = $1;" % [reqLit])
     lines.add("        let req_bytes = encode_cbor(&req)?;")
     lines.add("        let ptr = self.ptr as usize;")
-    lines.add("        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {")
+    lines.add(
+      "        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {"
+    )
     lines.add(
       "            ffi::$1(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())" %
         [m.procName]
@@ -569,6 +643,6 @@ proc generateRustCrate*(
   writeFile(outputDir / "Cargo.toml", generateCargoToml(libName))
   writeFile(outputDir / "build.rs", generateBuildRs(libName, nimSrcRelPath))
   writeFile(outputDir / "src" / "lib.rs", generateLibRs())
-  writeFile(outputDir / "src" / "ffi.rs", generateFfiRs(procs))
+  writeFile(outputDir / "src" / "ffi.rs", generateFFIRs(procs))
   writeFile(outputDir / "src" / "types.rs", generateTypesRs(types, procs))
   writeFile(outputDir / "src" / "api.rs", generateApiRs(procs, libName))

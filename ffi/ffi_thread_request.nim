@@ -14,10 +14,8 @@ const EmptyErrorMarker = "unknown error"
 type FFIThreadRequest* = object
   callback*: FFICallBack
   userData*: pointer
-  reqId*: cstring
-    ## Per-proc Req type name used to look up the handler.
-  data*: ptr UncheckedArray[byte]
-    ## Owned CBOR-encoded request payload.
+  reqId*: cstring ## Per-proc Req type name used to look up the handler.
+  data*: ptr UncheckedArray[byte] ## Owned CBOR-encoded request payload.
   dataLen*: int
 
 proc allocBaseRequest(
@@ -34,9 +32,7 @@ proc allocBaseRequest(
   ret[].dataLen = 0
   return ret
 
-proc copySharedPayload(
-    req: ptr FFIThreadRequest, data: ptr byte, dataLen: int
-) =
+proc copySharedPayload(req: ptr FFIThreadRequest, data: ptr byte, dataLen: int) =
   ## Allocates a fresh shared buffer and copies `dataLen` bytes from `data`
   ## into `req`. Empty payloads (non-positive `dataLen` or nil `data`) leave
   ## the request's payload fields at their zero-initialised state.
@@ -46,9 +42,7 @@ proc copySharedPayload(
     req[].dataLen = dataLen
 
 proc adoptOwnedSharedPayload(
-    req: ptr FFIThreadRequest,
-    data: ptr UncheckedArray[byte],
-    dataLen: int,
+    req: ptr FFIThreadRequest, data: ptr UncheckedArray[byte], dataLen: int
 ) =
   ## Embeds an already-`allocShared` buffer into `req` without copying.
   ## `(nil, 0)` is the empty-payload contract; a zero-length-but-non-nil
@@ -83,8 +77,10 @@ proc init*(
   ## Same contract as `initFromPtr` but accepts a Nim openArray, copying its
   ## bytes into a fresh shared-memory buffer owned by the returned request.
   let dataPtr =
-    if data.len > 0: cast[ptr byte](unsafeAddr data[0])
-    else: nil
+    if data.len > 0:
+      cast[ptr byte](unsafeAddr data[0])
+    else:
+      nil
   initFromPtr(T, callback, userData, reqId, dataPtr, data.len)
 
 proc initFromOwnedShared*(
@@ -114,9 +110,7 @@ proc deleteRequest*(request: ptr FFIThreadRequest) =
     deallocShared(request[].reqId)
   deallocShared(request)
 
-proc handleRes*(
-    res: Result[seq[byte], string], request: ptr FFIThreadRequest
-) =
+proc handleRes*(res: Result[seq[byte], string], request: ptr FFIThreadRequest) =
   ## Fires the registered callback exactly once and frees the request.
   ## Success payload is CBOR bytes; error payload is the raw UTF-8 error string.
   defer:
@@ -124,9 +118,7 @@ proc handleRes*(
 
   if res.isErr():
     foreignThreadGc:
-      let msg =
-        if res.error.len > 0: res.error
-        else: EmptyErrorMarker
+      let msg = if res.error.len > 0: res.error else: EmptyErrorMarker
       request[].callback(
         RET_ERR, unsafeAddr msg[0], cast[csize_t](msg.len), request[].userData
       )
@@ -136,7 +128,9 @@ proc handleRes*(
     let bytes = res.get()
     if bytes.len > 0:
       request[].callback(
-        RET_OK, cast[ptr cchar](unsafeAddr bytes[0]), cast[csize_t](bytes.len),
+        RET_OK,
+        cast[ptr cchar](unsafeAddr bytes[0]),
+        cast[csize_t](bytes.len),
         request[].userData,
       )
     else:

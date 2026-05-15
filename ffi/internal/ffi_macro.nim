@@ -30,18 +30,25 @@ proc rejectRawPtrType(typ: NimNode, where: string) =
   ## cbor_serialization (the library's default `ref T` writer dereferences
   ## and encodes the pointee, so no address crosses the boundary).
   if typ.kind == nnkPtrTy:
-    error(where & ": raw `ptr T` is not allowed across the FFI boundary " &
-      "(only the ctx handle, managed by the framework, may be a pointer)")
+    error(
+      where & ": raw `ptr T` is not allowed across the FFI boundary " &
+        "(only the ctx handle, managed by the framework, may be a pointer)"
+    )
   if typ.kind == nnkIdent and $typ == "pointer":
-    error(where & ": raw `pointer` is not allowed across the FFI boundary " &
-      "(only the ctx handle, managed by the framework, may be a pointer)")
+    error(
+      where & ": raw `pointer` is not allowed across the FFI boundary " &
+        "(only the ctx handle, managed by the framework, may be a pointer)"
+    )
 
-proc registerFfiTypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
+proc registerFFITypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
   ## Registers the type in ffiTypeRegistry for binding generation and returns
   ## the clean typeDef. Serialization is handled by the generic overloads in
   ## cbor_serial.nim.
   let typeName =
-    if typeDef[0].kind == nnkPostfix: typeDef[0][1] else: typeDef[0]
+    if typeDef[0].kind == nnkPostfix:
+      typeDef[0][1]
+    else:
+      typeDef[0]
   let typeNameStr = $typeName
 
   var fieldMetas: seq[FFIFieldMeta] = @[]
@@ -53,11 +60,14 @@ proc registerFfiTypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
         if identDef.kind == nnkIdentDefs:
           let fieldType = identDef[^2]
           for i in 0 ..< identDef.len - 2:
-            rejectRawPtrType(fieldType,
-              "{.ffi.} type " & typeNameStr & "." & $identDef[i])
+            rejectRawPtrType(
+              fieldType, "{.ffi.} type " & typeNameStr & "." & $identDef[i]
+            )
           let fieldTypeName =
-            if fieldType.kind == nnkIdent: $fieldType
-            else: fieldType.repr
+            if fieldType.kind == nnkIdent:
+              $fieldType
+            else:
+              fieldType.repr
           for i in 0 ..< identDef.len - 2:
             fieldMetas.add(FFIFieldMeta(name: $identDef[i], typeName: fieldTypeName))
 
@@ -68,9 +78,12 @@ proc nimTypeNameRepr(typ: NimNode): string =
   ## Stringifies a parameter or field type for the binding-generator registry.
   ## `$ident` works for simple types; bracket/dot/expression types need `repr`.
   case typ.kind
-  of nnkIdent: $typ
-  of nnkPtrTy: "ptr " & nimTypeNameRepr(typ[0])
-  else: typ.repr
+  of nnkIdent:
+    $typ
+  of nnkPtrTy:
+    "ptr " & nimTypeNameRepr(typ[0])
+  else:
+    typ.repr
 
 proc storageType(typ: NimNode): NimNode =
   ## Returns the in-Req-struct storage type for a user-declared param type.
@@ -80,9 +93,7 @@ proc storageType(typ: NimNode): NimNode =
     return ident("string")
   return typ
 
-proc unpackReqField*(
-    fieldIdent, userType, decodedIdent: NimNode
-): NimNode =
+proc unpackReqField*(fieldIdent, userType, decodedIdent: NimNode): NimNode =
   ## Emits AST for unpacking one field from a CBOR-decoded Req struct into a
   ## local typed as the user's original param type.
   ##
@@ -102,9 +113,8 @@ proc unpackReqField*(
 
   let fieldAccess = newDotExpr(decodedIdent, fieldIdent)
   let castExpr = newDotExpr(fieldAccess, ident("cstring"))
-  return nnkLetSection.newTree(
-    nnkIdentDefs.newTree(fieldIdent, ident("cstring"), castExpr)
-  )
+  return
+    nnkLetSection.newTree(nnkIdentDefs.newTree(fieldIdent, ident("cstring"), castExpr))
 
 proc cExportedParams(ctxType: NimNode): seq[NimNode] =
   ## Standard parameter list for the C-exported wrapper of a .ffi. proc:
@@ -167,12 +177,13 @@ proc buildReqTypeFromFields(
   let objTy = newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), recList)
 
   let typeName =
-    if reqTypeName.kind == nnkPostfix: reqTypeName
-    else: postfix(reqTypeName, "*")
+    if reqTypeName.kind == nnkPostfix:
+      reqTypeName
+    else:
+      postfix(reqTypeName, "*")
 
-  return newNimNode(nnkTypeSection).add(
-    newTree(nnkTypeDef, typeName, newEmptyNode(), objTy)
-  )
+  return
+    newNimNode(nnkTypeSection).add(newTree(nnkTypeDef, typeName, newEmptyNode(), objTy))
 
 proc buildRequestType(reqTypeName: NimNode, body: NimNode): NimNode =
   ## Builds the per-proc Req object type from a registerReqFFI lambda body.
@@ -208,7 +219,7 @@ proc buildRequestType(reqTypeName: NimNode, body: NimNode): NimNode =
     echo typeSection.repr
   return typeSection
 
-proc buildFfiNewReqProc(reqTypeName, body: NimNode): NimNode =
+proc buildFFINewReqProc(reqTypeName, body: NimNode): NimNode =
   ## Builds ffiNewReq: takes the user's typed params, packs them into a Req
   ## object, CBOR-encodes the Req into one byte buffer, and constructs the
   ## FFIThreadRequest that owns the buffer.
@@ -225,10 +236,8 @@ proc buildFfiNewReqProc(reqTypeName, body: NimNode): NimNode =
     error "registerReqFFI expects a lambda definition. Found: " & $procNode.kind
 
   # T: typedesc[XxxReq]
-  let typedescParam = newIdentDefs(
-    ident("T"),
-    nnkBracketExpr.newTree(ident("typedesc"), reqTypeName),
-  )
+  let typedescParam =
+    newIdentDefs(ident("T"), nnkBracketExpr.newTree(ident("typedesc"), reqTypeName))
   formalParams.add(typedescParam)
   formalParams.add(newIdentDefs(ident("callback"), ident("FFICallBack")))
   formalParams.add(newIdentDefs(ident("userData"), ident("pointer")))
@@ -253,8 +262,7 @@ proc buildFfiNewReqProc(reqTypeName, body: NimNode): NimNode =
   for p in procParams[1 .. ^1]:
     let fieldName = ident($p[0])
     let userType = p[1]
-    let storeAsString =
-      userType.kind == nnkIdent and $userType == "cstring"
+    let storeAsString = userType.kind == nnkIdent and $userType == "cstring"
     if storeAsString:
       newBody.add(
         quote do:
@@ -330,15 +338,13 @@ proc buildProcessFFIRequestProc(reqTypeName, reqHandler, body: NimNode): NimNode
   let decodedIdent = genSym(nskLet, "decoded")
 
   newBody.add quote do:
-    let `reqIdent`: ptr FFIThreadRequest =
-      cast[ptr FFIThreadRequest](request)
-    let `decodedIdent` =
-      cborDecodePtr(
-        cast[ptr UncheckedArray[byte]](`reqIdent`[].data),
-        `reqIdent`[].dataLen,
-        `reqTypeName`,
-      ).valueOr:
-        return err("CBOR decode failed for " & $T & ": " & $error)
+    let `reqIdent`: ptr FFIThreadRequest = cast[ptr FFIThreadRequest](request)
+    let `decodedIdent` = cborDecodePtr(
+      cast[ptr UncheckedArray[byte]](`reqIdent`[].data),
+      `reqIdent`[].dataLen,
+      `reqTypeName`,
+    ).valueOr:
+      return err("CBOR decode failed for " & $T & ": " & $error)
 
   # Unpack each field as a local typed as the user's original param type.
   for p in procParams[1 ..^ 1]:
@@ -382,11 +388,7 @@ proc addNewRequestToRegistry(reqTypeName, reqHandler: NimNode): NimNode =
     else:
       error "Second argument must be a typed parameter, e.g. waku: ptr Waku"
 
-  let castedHandler = newTree(
-    nnkCast,
-    rhsType,
-    ident("reqHandler"),
-  )
+  let castedHandler = newTree(nnkCast, rhsType, ident("reqHandler"))
 
   let callExpr = newCall(
     newDotExpr(reqTypeName, ident("processFFIRequest")), ident("request"), castedHandler
@@ -454,7 +456,7 @@ macro registerReqFFI*(reqTypeName, reqHandler, body: untyped): untyped =
 
   # Extract lambda params to generate fields
   let typeDef = buildRequestType(reqTypeName, body)
-  let ffiNewReqProc = buildFfiNewReqProc(reqTypeName, body)
+  let ffiNewReqProc = buildFFINewReqProc(reqTypeName, body)
   let processProc = buildProcessFFIRequestProc(reqTypeName, reqHandler, body)
   let addNewReqToReg = addNewRequestToRegistry(reqTypeName, reqHandler)
   let stmts = newStmtList(typeDef, ffiNewReqProc, processProc, addNewReqToReg)
@@ -626,7 +628,7 @@ macro ffi*(prc: untyped): untyped =
     var cleanTypeDef = prc.copyNimTree()
     if cleanTypeDef[0].kind == nnkPragmaExpr:
       cleanTypeDef[0] = cleanTypeDef[0][0]
-    return registerFfiTypeInfo(cleanTypeDef)
+    return registerFFITypeInfo(cleanTypeDef)
 
   let procName = prc[0]
   let formalParams = prc[3]
@@ -664,8 +666,7 @@ macro ffi*(prc: untyped): untyped =
   for i in 2 ..< formalParams.len:
     let p = formalParams[i]
     for j in 0 ..< p.len - 2:
-      rejectRawPtrType(p[^2],
-        "`.ffi.` proc " & $procName & " parameter " & $p[j])
+      rejectRawPtrType(p[^2], "`.ffi.` proc " & $procName & " parameter " & $p[j])
       extraParamNames.add($p[j])
       extraParamTypes.add(p[^2])
 
@@ -717,15 +718,13 @@ macro ffi*(prc: untyped): untyped =
 
     # registerReqFFI lambda: typed params, returns user's typed Result.
     let ctxHandlerName = ident("ffiCtxHandler")
-    let ptrFfiCtx =
+    let ptrFFICtx =
       nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), libTypeName))
 
     var lambdaParams = newSeq[NimNode]()
     lambdaParams.add(retTypeNode) # Future[Result[RetType, string]]
     for i in 0 ..< extraParamNames.len:
-      lambdaParams.add(
-        newIdentDefs(ident(extraParamNames[i]), extraParamTypes[i])
-      )
+      lambdaParams.add(newIdentDefs(ident(extraParamNames[i]), extraParamTypes[i]))
 
     let ctxMyLib = newDotExpr(newTree(nnkDerefExpr, ctxHandlerName), ident("myLib"))
     let libValDeref = newTree(nnkDerefExpr, ctxMyLib)
@@ -748,7 +747,7 @@ macro ffi*(prc: untyped): untyped =
     )
 
     let registerReq = quote:
-      registerReqFFI(`reqTypeName`, `ctxHandlerName`: `ptrFfiCtx`):
+      registerReqFFI(`reqTypeName`, `ctxHandlerName`: `ptrFFICtx`):
         `lambdaNode`
 
     # -------------------------------------------------------------------------
@@ -809,16 +808,20 @@ macro ffi*(prc: untyped): untyped =
         let ptype = extraParamTypes[i]
         let isPointer = isPtr(ptype)
         let tn =
-          if isPointer: nimTypeNameRepr(ptype[0])
-          else: nimTypeNameRepr(ptype)
+          if isPointer:
+            nimTypeNameRepr(ptype[0])
+          else:
+            nimTypeNameRepr(ptype)
         ffiExtraParams.add(
           FFIParamMeta(name: extraParamNames[i], typeName: tn, isPtr: isPointer)
         )
       let retTypeInner = resultInner[1]
       let retIsPtr = isPtr(retTypeInner)
       let retTn =
-        if retIsPtr: nimTypeNameRepr(retTypeInner[0])
-        else: nimTypeNameRepr(retTypeInner)
+        if retIsPtr:
+          nimTypeNameRepr(retTypeInner[0])
+        else:
+          nimTypeNameRepr(retTypeInner)
       ffiProcRegistry.add(
         FFIProcMeta(
           procName: cExportName,
@@ -843,8 +846,9 @@ macro ffi*(prc: untyped): untyped =
 # ffiCtor — constructor macro
 # ---------------------------------------------------------------------------
 
-proc buildCtorRequestType(reqTypeName: NimNode, paramNames: seq[string],
-                          paramTypes: seq[NimNode]): NimNode =
+proc buildCtorRequestType(
+    reqTypeName: NimNode, paramNames: seq[string], paramTypes: seq[NimNode]
+): NimNode =
   ## Builds the ctor's Req object using the user's actual Nim types.
   var fields: seq[NimNode] = @[]
   for i in 0 ..< paramNames.len:
@@ -870,9 +874,7 @@ proc buildCtorRequestType(reqTypeName: NimNode, paramNames: seq[string],
     echo typeSection.repr
   return typeSection
 
-proc buildCtorFfiNewReqProc(
-    reqTypeName: NimNode, paramNames: seq[string]
-): NimNode =
+proc buildCtorFFINewReqProc(reqTypeName: NimNode, paramNames: seq[string]): NimNode =
   ## Wraps a CBOR byte buffer into an FFIThreadRequest for the ctor request type.
 
   var formalParams = newSeq[NimNode]()
@@ -882,9 +884,7 @@ proc buildCtorFfiNewReqProc(
   formalParams.add(typedescParam)
   formalParams.add(newIdentDefs(ident("callback"), ident("FFICallBack")))
   formalParams.add(newIdentDefs(ident("userData"), ident("pointer")))
-  formalParams.add(
-    newIdentDefs(ident("reqCbor"), nnkPtrTy.newTree(ident("byte")))
-  )
+  formalParams.add(newIdentDefs(ident("reqCbor"), nnkPtrTy.newTree(ident("byte"))))
   formalParams.add(newIdentDefs(ident("reqCborLen"), ident("csize_t")))
 
   let retType = newTree(nnkPtrTy, ident("FFIThreadRequest"))
@@ -969,18 +969,15 @@ proc buildCtorProcessFFIRequestProc(
 
   newBody.add quote do:
     let `reqIdent` = cast[ptr FFIThreadRequest](request)
-    let `decodedIdent` =
-      cborDecodePtr(
-        cast[ptr UncheckedArray[byte]](`reqIdent`[].data),
-        `reqIdent`[].dataLen,
-        `reqTypeName`,
-      ).valueOr:
-        return err("CBOR decode failed for " & $T & ": " & $error)
+    let `decodedIdent` = cborDecodePtr(
+      cast[ptr UncheckedArray[byte]](`reqIdent`[].data),
+      `reqIdent`[].dataLen,
+      `reqTypeName`,
+    ).valueOr:
+      return err("CBOR decode failed for " & $T & ": " & $error)
 
   for i in 0 ..< paramNames.len:
-    newBody.add unpackReqField(
-      ident(paramNames[i]), paramTypes[i], decodedIdent
-    )
+    newBody.add unpackReqField(ident(paramNames[i]), paramTypes[i], decodedIdent)
 
   let helperCallNode = newTree(nnkCall, helperName)
   for name in paramNames:
@@ -1113,8 +1110,7 @@ macro ffiCtor*(prc: untyped): untyped =
   for i in 1 ..< formalParams.len:
     let p = formalParams[i]
     for j in 0 ..< p.len - 2:
-      rejectRawPtrType(p[^2],
-        "`.ffiCtor.` proc " & $procName & " parameter " & $p[j])
+      rejectRawPtrType(p[^2], "`.ffiCtor.` proc " & $procName & " parameter " & $p[j])
       paramNames.add($p[j])
       paramTypes.add(p[^2])
 
@@ -1129,7 +1125,7 @@ macro ffiCtor*(prc: untyped): untyped =
   let reqTypeName = ident(reqTypeNameStr)
 
   let typeDef = buildCtorRequestType(reqTypeName, paramNames, paramTypes)
-  let ffiNewReqProc = buildCtorFfiNewReqProc(reqTypeName, paramNames)
+  let ffiNewReqProc = buildCtorFFINewReqProc(reqTypeName, paramNames)
   # The user-facing Nim proc keeps the user's original name with their declared
   # signature; the C-exported wrapper moves to `<userProcName>ExportC` and
   # binds the snake_case C symbol via `{.exportc.}`.
@@ -1149,9 +1145,7 @@ macro ffiCtor*(prc: untyped): untyped =
   # C-exported proc: (reqCbor, reqCborLen, callback, userData) -> pointer
   var exportedParams = newSeq[NimNode]()
   exportedParams.add(ident("pointer"))
-  exportedParams.add(
-    newIdentDefs(ident("reqCbor"), nnkPtrTy.newTree(ident("byte")))
-  )
+  exportedParams.add(newIdentDefs(ident("reqCbor"), nnkPtrTy.newTree(ident("byte"))))
   exportedParams.add(newIdentDefs(ident("reqCborLen"), ident("csize_t")))
   exportedParams.add(newIdentDefs(ident("callback"), ident("FFICallBack")))
   exportedParams.add(newIdentDefs(ident("userData"), ident("pointer")))
@@ -1231,9 +1225,13 @@ macro ffiCtor*(prc: untyped): untyped =
       let ptype = paramTypes[i]
       let isPointer = isPtr(ptype)
       let tn =
-        if isPointer: nimTypeNameRepr(ptype[0])
-        else: nimTypeNameRepr(ptype)
-      ctorExtraParams.add(FFIParamMeta(name: paramNames[i], typeName: tn, isPtr: isPointer))
+        if isPointer:
+          nimTypeNameRepr(ptype[0])
+        else:
+          nimTypeNameRepr(ptype)
+      ctorExtraParams.add(
+        FFIParamMeta(name: paramNames[i], typeName: tn, isPtr: isPointer)
+      )
     ffiProcRegistry.add(
       FFIProcMeta(
         procName: cExportName,
@@ -1246,13 +1244,12 @@ macro ffiCtor*(prc: untyped): untyped =
       )
     )
 
-  let poolDecl = quote do:
+  let poolDecl = quote:
     when not declared(`poolIdent`):
       var `poolIdent`: FFIContextPool[`libTypeName`]
 
   let stmts = newStmtList(
-    typeDef, ffiNewReqProc, helperProc, processProc, addToReg, poolDecl,
-    ffiProc,
+    typeDef, ffiNewReqProc, helperProc, processProc, addToReg, poolDecl, ffiProc
   )
 
   when defined(ffiDumpMacros):
@@ -1294,7 +1291,10 @@ macro ffiDtor*(prc: untyped): untyped =
 
   let procNameStr = block:
     let raw = $procName
-    if raw.endsWith("*"): raw[0 ..^ 2] else: raw
+    if raw.endsWith("*"):
+      raw[0 ..^ 2]
+    else:
+      raw
   let cExportName = camelToSnakeCase(procNameStr)
   # The dtor only needs a C-exported wrapper; rename to a synthetic Nim ident
   # so it doesn't shadow the user's chosen name (consistent with .ffi. / .ffiCtor.).
@@ -1320,9 +1320,10 @@ macro ffiDtor*(prc: untyped): untyped =
     let `libParamName` = cast[ptr FFIContext[`libTypeName`]](ctx)[].myLib[]
 
   let isNoop =
-    bodyNode.kind == nnkEmpty or
-    (bodyNode.kind == nnkStmtList and bodyNode.len == 1 and
-      bodyNode[0].kind == nnkDiscardStmt)
+    bodyNode.kind == nnkEmpty or (
+      bodyNode.kind == nnkStmtList and bodyNode.len == 1 and
+      bodyNode[0].kind == nnkDiscardStmt
+    )
   if not isNoop:
     ffiBody.add(bodyNode)
 
@@ -1338,10 +1339,7 @@ macro ffiDtor*(prc: untyped): untyped =
 
   let ffiProc = newProc(
     name = postfix(cExportProcName, "*"),
-    params = @[
-      ident("cint"),
-      newIdentDefs(ident("ctx"), ident("pointer")),
-    ],
+    params = @[ident("cint"), newIdentDefs(ident("ctx"), ident("pointer"))],
     body = ffiBody,
     pragmas = newTree(
       nnkPragma,
@@ -1364,7 +1362,7 @@ macro ffiDtor*(prc: untyped): untyped =
     )
   )
 
-  let poolDecl = quote do:
+  let poolDecl = quote:
     when not declared(`poolIdent`):
       var `poolIdent`: FFIContextPool[`libTypeName`]
 
@@ -1410,7 +1408,7 @@ macro genBindings*(
     if outputDir.len == 0:
       error(
         "genBindings: output directory is empty." &
-        " Pass it as an argument or set -d:ffiOutputDir=path/to/output"
+          " Pass it as an argument or set -d:ffiOutputDir=path/to/output"
       )
     let lang = string_helpers.toLower(targetLang)
     let libName = deriveLibName(ffiProcRegistry)

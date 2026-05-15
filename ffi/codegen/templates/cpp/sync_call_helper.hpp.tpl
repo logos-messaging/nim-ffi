@@ -4,7 +4,7 @@
 
 namespace {
 
-struct FfiCallState_ {
+struct FFICallState_ {
     std::mutex              mtx;
     std::condition_variable cv;
     bool                    done{false};
@@ -16,9 +16,9 @@ struct FfiCallState_ {
 inline void ffi_cb_(int ret, const char* msg, size_t len, void* ud) {
     // ffi_call_ heap-allocated a shared_ptr and passed its address as ud;
     // take ownership here so it's freed on every exit path.
-    std::unique_ptr<std::shared_ptr<FfiCallState_>> handle(
-        static_cast<std::shared_ptr<FfiCallState_>*>(ud));
-    FfiCallState_& s = **handle;
+    std::unique_ptr<std::shared_ptr<FFICallState_>> handle(
+        static_cast<std::shared_ptr<FFICallState_>*>(ud));
+    FFICallState_& s = **handle;
 
     std::lock_guard<std::mutex> lock(s.mtx);
     s.ok = (ret == 0);
@@ -31,10 +31,10 @@ inline void ffi_cb_(int ret, const char* msg, size_t len, void* ud) {
     s.cv.notify_one();
 }
 
-inline std::vector<std::uint8_t> ffi_call_(std::function<int(FfiCallback, void*)> f,
+inline std::vector<std::uint8_t> ffi_call_(std::function<int(FFICallback, void*)> f,
                                           std::chrono::milliseconds timeout) {
-    auto state = std::make_shared<FfiCallState_>();
-    auto* cb_ref = new std::shared_ptr<FfiCallState_>(state);
+    auto state = std::make_shared<FFICallState_>();
+    auto* cb_ref = new std::shared_ptr<FFICallState_>(state);
     const int ret = f(ffi_cb_, cb_ref);
     if (ret == 2) {
         delete cb_ref;

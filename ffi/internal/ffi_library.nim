@@ -108,11 +108,9 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
   let funcIdent = ident(funcName)
   let errorMsg = "error: invalid context in " & funcName
 
-  let ctxType = nnkPtrTy.newTree(
-    nnkBracketExpr.newTree(ident("FFIContext"), libType)
-  )
+  let ctxType = nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), libType))
 
-  let procBody = quote do:
+  let procBody = quote:
     if isNil(ctx):
       echo `errorMsg`
       return

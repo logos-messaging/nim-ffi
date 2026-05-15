@@ -66,8 +66,9 @@ proc callbackOkString(d: var CallbackData): string =
   ## actually succeeded — silently treating an error payload as the empty
   ## string would let a regression slip past the test that calls us.
   doAssert d.retCode == RET_OK,
-    "callbackOkString called on non-OK retCode " & $d.retCode &
-      " (msg=" & callbackMsg(d) & ")"
+    "callbackOkString called on non-OK retCode " & $d.retCode & " (msg=" & callbackMsg(
+      d
+    ) & ")"
   cborDecode(callbackBytes(d), string).valueOr:
     return ""
 
@@ -110,18 +111,21 @@ suite "GC safety - string lifetime across thread boundary":
   test "ok string result remains valid when callback fires":
     var d: CallbackData
     initCallbackData(d)
-    defer: deinitCallbackData(d)
+    defer:
+      deinitCallbackData(d)
 
     var pool: FFIContextPool[GcTestLib]
     let ctx = pool.createFFIContext().valueOr:
       checkpoint "createFFIContext failed: " & $error
       check false
       return
-    defer: discard pool.destroyFFIContext(ctx)
+    defer:
+      discard pool.destroyFFIContext(ctx)
 
     check sendRequestToFFIThread(
       ctx, StringLifetimeRequest.ffiNewReq(testCallback, addr d, "hello".cstring)
-    ).isOk()
+    )
+      .isOk()
     waitCallback(d)
     check d.retCode == RET_OK
     check callbackOkString(d) == "lifetime:hello"
@@ -129,17 +133,20 @@ suite "GC safety - string lifetime across thread boundary":
   test "error string lifetime across thread boundary":
     var d: CallbackData
     initCallbackData(d)
-    defer: deinitCallbackData(d)
+    defer:
+      deinitCallbackData(d)
 
     var pool: FFIContextPool[GcTestLib]
     let ctx = pool.createFFIContext().valueOr:
       check false
       return
-    defer: discard pool.destroyFFIContext(ctx)
+    defer:
+      discard pool.destroyFFIContext(ctx)
 
     check sendRequestToFFIThread(
       ctx, GcErrRequest.ffiNewReq(testCallback, addr d, "test".cstring)
-    ).isOk()
+    )
+      .isOk()
     waitCallback(d)
     check d.retCode == RET_ERR
     # Error payloads are raw UTF-8, not CBOR.
@@ -156,17 +163,20 @@ suite "GC safety - string lifetime across thread boundary":
 
     var d: CallbackData
     initCallbackData(d)
-    defer: deinitCallbackData(d)
+    defer:
+      deinitCallbackData(d)
 
     var pool: FFIContextPool[GcTestLib]
     let ctx = pool.createFFIContext().valueOr:
       check false
       return
-    defer: discard pool.destroyFFIContext(ctx)
+    defer:
+      discard pool.destroyFFIContext(ctx)
 
     check sendRequestToFFIThread(
       ctx, LargeStringRequest.ffiNewReq(testCallback, addr d)
-    ).isOk()
+    )
+      .isOk()
     waitCallback(d)
     check d.retCode == RET_OK
     check callbackOkString(d) == expected
@@ -177,7 +187,8 @@ suite "GC stability - repeated requests":
     let ctx = pool.createFFIContext().valueOr:
       check false
       return
-    defer: discard pool.destroyFFIContext(ctx)
+    defer:
+      discard pool.destroyFFIContext(ctx)
 
     for i in 1 .. 20:
       var d: CallbackData
@@ -185,7 +196,8 @@ suite "GC stability - repeated requests":
       let input = "iter" & $i
       check sendRequestToFFIThread(
         ctx, StringLifetimeRequest.ffiNewReq(testCallback, addr d, input.cstring)
-      ).isOk()
+      )
+        .isOk()
       waitCallback(d)
       check d.retCode == RET_OK
       check callbackOkString(d) == "lifetime:" & input

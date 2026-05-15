@@ -33,9 +33,7 @@ type ComplexResponse {.ffi.} = object
 # --- Constructor -----------------------------------------------------------
 # Called once from Rust. Creates the FFIContext + Timer.
 # Uses chronos (await sleepAsync) so the body is async.
-proc timerCreate*(
-    config: TimerConfig
-): Future[Result[Timer, string]] {.ffiCtor.} =
+proc timerCreate*(config: TimerConfig): Future[Result[Timer, string]] {.ffiCtor.} =
   await sleepAsync(1.milliseconds) # proves chronos is live on the FFI thread
   return ok(Timer(name: config.name))
 
@@ -93,10 +91,7 @@ type ScheduleResult {.ffi.} = object
   effectiveBackoffMs: int
 
 proc timerSchedule*(
-    timer: Timer,
-    job: JobSpec,
-    retry: RetryPolicy,
-    schedule: ScheduleConfig,
+    timer: Timer, job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig
 ): Future[Result[ScheduleResult, string]] {.ffi.} =
   ## Composes three independent object-typed parameters (`job`, `retry`,
   ## `schedule`) into a single scheduling decision. The macro packs them into

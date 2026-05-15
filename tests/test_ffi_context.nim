@@ -186,11 +186,10 @@ suite "destroyFFIContext does not hang":
 
     var d: CallbackData
     initCallbackData(d)
-    defer: deinitCallbackData(d)
+    defer:
+      deinitCallbackData(d)
 
-    check sendRequestToFFIThread(
-      ctx, SlowRequest.ffiNewReq(testCallback, addr d)
-    ).isOk()
+    check sendRequestToFFIThread(ctx, SlowRequest.ffiNewReq(testCallback, addr d)).isOk()
 
     let t0 = Moment.now()
     check pool.destroyFFIContext(ctx).isOk()
@@ -206,9 +205,8 @@ suite "destroyFFIContext does not hang when event loop is blocked":
     let d = createShared(CallbackData)
     initCallbackData(d[])
 
-    check sendRequestToFFIThread(
-      ctx, SyncBlockingRequest.ffiNewReq(testCallback, d)
-    ).isOk()
+    check sendRequestToFFIThread(ctx, SyncBlockingRequest.ffiNewReq(testCallback, d))
+      .isOk()
 
     discard gSyncBlockStarted.recv()
 
@@ -230,11 +228,13 @@ suite "destroyFFIContext refc workaround":
 
     var d: CallbackData
     initCallbackData(d)
-    defer: deinitCallbackData(d)
+    defer:
+      deinitCallbackData(d)
 
     check sendRequestToFFIThread(
       ctx, HeavyRefAllocRequest.ffiNewReq(testCallback, addr d)
-    ).isOk()
+    )
+      .isOk()
     waitCallback(d)
     check d.retCode == RET_OK
 
@@ -355,14 +355,11 @@ suite "ffiCtor macro":
   test "creates context and returns pointer via callback":
     var d: CallbackData
     initCallbackData(d)
-    defer: deinitCallbackData(d)
+    defer:
+      deinitCallbackData(d)
 
-    var cfg = cborEncode(
-      TestlibCreateCtorReq(config: SimpleConfig(initialValue: 42))
-    )
-    let ret = testlib_create(
-      encodedPtr(cfg), cfg.len.csize_t, testCallback, addr d
-    )
+    var cfg = cborEncode(TestlibCreateCtorReq(config: SimpleConfig(initialValue: 42)))
+    let ret = testlib_create(encodedPtr(cfg), cfg.len.csize_t, testCallback, addr d)
 
     check not ret.isNil()
 
@@ -394,14 +391,12 @@ suite "simplified .ffi. macro":
   test "sends request and gets serialized response via callback":
     var ctorD: CallbackData
     initCallbackData(ctorD)
-    defer: deinitCallbackData(ctorD)
+    defer:
+      deinitCallbackData(ctorD)
 
-    var cfg = cborEncode(
-      TestlibCreateCtorReq(config: SimpleConfig(initialValue: 7))
-    )
-    let ctorRet = testlib_create(
-      encodedPtr(cfg), cfg.len.csize_t, testCallback, addr ctorD
-    )
+    var cfg = cborEncode(TestlibCreateCtorReq(config: SimpleConfig(initialValue: 7)))
+    let ctorRet =
+      testlib_create(encodedPtr(cfg), cfg.len.csize_t, testCallback, addr ctorD)
     check not ctorRet.isNil()
 
     waitCallback(ctorD)
@@ -410,11 +405,13 @@ suite "simplified .ffi. macro":
     let ctxAddr = ctorAddrFromCbor(callbackBytes(ctorD))
     check ctxAddr != 0
     let ctx = cast[ptr FFIContext[SimpleLib]](ctxAddr)
-    defer: check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
+    defer:
+      check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
 
     var d: CallbackData
     initCallbackData(d)
-    defer: deinitCallbackData(d)
+    defer:
+      deinitCallbackData(d)
 
     # The .ffi. macro packs all extra params into one CBOR Req struct.
     var reqBytes = cborEncode(TestlibSendReq(cfg: SendConfig(message: "hello")))
@@ -428,9 +425,7 @@ suite "simplified .ffi. macro":
 
     check cborDecode(callbackBytes(d), string).value == "echo:hello:7"
 
-proc testlib_version*(
-    lib: SimpleLib
-): Future[Result[string, string]] {.ffi.} =
+proc testlib_version*(lib: SimpleLib): Future[Result[string, string]] {.ffi.} =
   return ok("v" & $lib.value)
 
 suite "sync-body .ffi. is dispatched on FFI thread":
@@ -441,14 +436,12 @@ suite "sync-body .ffi. is dispatched on FFI thread":
   test "sync body still produces correct payload via callback":
     var ctorD: CallbackData
     initCallbackData(ctorD)
-    defer: deinitCallbackData(ctorD)
+    defer:
+      deinitCallbackData(ctorD)
 
-    var cfg = cborEncode(
-      TestlibCreateCtorReq(config: SimpleConfig(initialValue: 3))
-    )
-    let ctorRet = testlib_create(
-      encodedPtr(cfg), cfg.len.csize_t, testCallback, addr ctorD
-    )
+    var cfg = cborEncode(TestlibCreateCtorReq(config: SimpleConfig(initialValue: 3)))
+    let ctorRet =
+      testlib_create(encodedPtr(cfg), cfg.len.csize_t, testCallback, addr ctorD)
     check not ctorRet.isNil()
 
     waitCallback(ctorD)
@@ -457,11 +450,13 @@ suite "sync-body .ffi. is dispatched on FFI thread":
     let ctxAddr = ctorAddrFromCbor(callbackBytes(ctorD))
     check ctxAddr != 0
     let ctx = cast[ptr FFIContext[SimpleLib]](ctxAddr)
-    defer: check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
+    defer:
+      check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
 
     var d2: CallbackData
     initCallbackData(d2)
-    defer: deinitCallbackData(d2)
+    defer:
+      deinitCallbackData(d2)
 
     # No-extra-param .ffi. proc; pack an empty Req.
     var emptyBytes = cborEncode(TestlibVersionReq())
@@ -524,28 +519,28 @@ suite "sync-body .ffi. runs on FFI thread (PR #23 regression)":
   test "handler thread id differs from caller's":
     var ctorD: CallbackData
     initCallbackData(ctorD)
-    defer: deinitCallbackData(ctorD)
+    defer:
+      deinitCallbackData(ctorD)
 
-    var cfg = cborEncode(
-      TestlibCreateCtorReq(config: SimpleConfig(initialValue: 0))
-    )
-    let ctorRet = testlib_create(
-      encodedPtr(cfg), cfg.len.csize_t, testCallback, addr ctorD
-    )
+    var cfg = cborEncode(TestlibCreateCtorReq(config: SimpleConfig(initialValue: 0)))
+    let ctorRet =
+      testlib_create(encodedPtr(cfg), cfg.len.csize_t, testCallback, addr ctorD)
     check not ctorRet.isNil()
     waitCallback(ctorD)
     check ctorD.retCode == RET_OK
     let ctxAddr = ctorAddrFromCbor(callbackBytes(ctorD))
     check ctxAddr != 0
     let ctx = cast[ptr FFIContext[SimpleLib]](ctxAddr)
-    defer: check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
+    defer:
+      check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
 
     gRecordedHandlerTid.store(0)
     let callerTid = getThreadId()
 
     var d: CallbackData
     initCallbackData(d)
-    defer: deinitCallbackData(d)
+    defer:
+      deinitCallbackData(d)
 
     var reqBytes = cborEncode(TestlibRecordTidReq(req: RecordTidReq(dummy: 1)))
     let ret = testlib_record_tid(
@@ -583,7 +578,8 @@ registerReqFFI(ReentrantTriggerReq, lib: ptr TestLib):
     let ctx = cast[ptr FFIContext[TestLib]](cast[uint](ctxAddr))
     var nestedD: CallbackData
     initCallbackData(nestedD)
-    defer: deinitCallbackData(nestedD)
+    defer:
+      deinitCallbackData(nestedD)
     let res = sendRequestToFFIThread(
       ctx, PingRequest.ffiNewReq(testCallback, addr nestedD, "x".cstring)
     )
@@ -605,17 +601,19 @@ suite "reentrancy guard (PR #23 review, item 6)":
     let ctx = pool.createFFIContext().valueOr:
       check false
       return
-    defer: discard pool.destroyFFIContext(ctx)
+    defer:
+      discard pool.destroyFFIContext(ctx)
 
     var d: CallbackData
     initCallbackData(d)
-    defer: deinitCallbackData(d)
+    defer:
+      deinitCallbackData(d)
 
     let ctxAddrInt = cast[int](cast[uint](ctx))
     check sendRequestToFFIThread(
-      ctx,
-      ReentrantTriggerReq.ffiNewReq(testCallback, addr d, ctxAddrInt),
-    ).isOk()
+      ctx, ReentrantTriggerReq.ffiNewReq(testCallback, addr d, ctxAddrInt)
+    )
+      .isOk()
 
     # The outer callback only fires once the handler — including its nested
     # send attempt — has finished. No polling/sleep needed.

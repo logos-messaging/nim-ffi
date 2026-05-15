@@ -21,16 +21,12 @@ type IncRequest {.ffi.} = object
 type CounterState {.ffi.} = object
   value: int
 
-proc counter_create*(
-    cfg: CounterConfig
-): Future[Result[Counter, string]] {.ffiCtor.} =
+proc counter_create*(cfg: CounterConfig): Future[Result[Counter, string]] {.ffiCtor.} =
   ## Async ctor body — exercises the chronos path on the FFI thread.
   await sleepAsync(1.milliseconds)
   return ok(Counter(start: cfg.initial))
 
-proc counter_value*(
-    c: Counter
-): Future[Result[CounterState, string]] {.ffi.} =
+proc counter_value*(c: Counter): Future[Result[CounterState, string]] {.ffi.} =
   ## Sync body (no `await`); the Nim-facing wrapper still returns
   ## Future[Result[...]] so the source-level shape is preserved.
   return ok(CounterState(value: c.start))
@@ -42,9 +38,7 @@ proc counter_add*(
   await sleepAsync(1.milliseconds)
   return ok(CounterState(value: c.start + req.by))
 
-proc counter_compose*(
-    c: Counter, a: int, b: int
-): Future[Result[int, string]] {.ffi.} =
+proc counter_compose*(c: Counter, a: int, b: int): Future[Result[int, string]] {.ffi.} =
   ## Multiple primitive params plus a non-object return type.
   return ok(c.start + a + b)
 
@@ -55,9 +49,7 @@ proc counter_greet*(
   let n = if name.isSome: name.get else: "anon"
   return ok("hello " & n & " (start=" & $c.start & ")")
 
-proc counter_fail*(
-    c: Counter, reason: string
-): Future[Result[string, string]] {.ffi.} =
+proc counter_fail*(c: Counter, reason: string): Future[Result[string, string]] {.ffi.} =
   ## Error path — the failure surfaces as Result.err on the caller side.
   return err("rejected: " & reason)
 
@@ -95,10 +87,7 @@ type QueryReport {.ffi.} = object
   fieldsKept: seq[string]
 
 proc counter_query*(
-    c: Counter,
-    filter: RangeFilter,
-    page: Pagination,
-    projection: Projection,
+    c: Counter, filter: RangeFilter, page: Pagination, projection: Projection
 ): Future[Result[QueryReport, string]] {.ffi.} =
   ## Three independent object-typed parameters: `filter`, `page`, `projection`.
   ## Verifies that the macro packs all three into one CBOR Req envelope on the

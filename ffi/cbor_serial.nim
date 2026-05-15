@@ -40,9 +40,7 @@ proc cborEncode*[T](x: T): seq[byte] =
   ## via our custom writers) into a fresh `seq[byte]`.
   return Cbor.encode(x)
 
-proc cborEncodeShared*[T](
-    x: T
-): tuple[data: ptr UncheckedArray[byte], len: int] =
+proc cborEncodeShared*[T](x: T): tuple[data: ptr UncheckedArray[byte], len: int] =
   ## Encodes `x` into a shared-memory buffer (`allocShared`).
   ##
   ## The returned `data` is owned by the caller and must be freed exactly once
@@ -55,9 +53,7 @@ proc cborEncodeShared*[T](
   copyMem(buf, unsafeAddr bytes[0], bytes.len)
   return (buf, bytes.len)
 
-proc cborDecode*[T](
-    data: openArray[byte], _: typedesc[T]
-): Result[T, string] =
+proc cborDecode*[T](data: openArray[byte], _: typedesc[T]): Result[T, string] =
   ## Decode `data` into a `T`, converting any cbor_serialization exception
   ## into a `Result.err` carrying the exception message.
   try:
@@ -74,4 +70,3 @@ proc cborDecodePtr*[T](
   if dataLen <= 0:
     return cborDecode(default(seq[byte]), T)
   cborDecode(toOpenArray(data, 0, dataLen - 1), T)
-

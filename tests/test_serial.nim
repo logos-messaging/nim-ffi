@@ -16,7 +16,9 @@ type RefBox {.ffi.} = object
   n: int
 
 type Color = enum
-  cRed, cGreen, cBlue
+  cRed
+  cGreen
+  cBlue
 
 suite "CBOR primitives round-trip":
   test "bool true":

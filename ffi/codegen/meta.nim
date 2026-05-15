@@ -43,4 +43,3 @@ const ffiOutputDir* {.strdefine.} = ""
 # Nim source path (relative to outputDir) embedded in generated build files;
 # set with -d:ffiNimSrcRelPath=../relative/path.nim
 const ffiNimSrcRelPath* {.strdefine.} = ""
-

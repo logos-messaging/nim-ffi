@@ -145,7 +145,7 @@ inline CborError decode_cbor(CborValue& it, std::optional<T>& out) {
 // ── Public entry points ─────────────────────────────────────────────────
 
 template<typename T>
-inline std::vector<std::uint8_t> encodeCborFfi(const T& value) {
+inline std::vector<std::uint8_t> encodeCborFFI(const T& value) {
     // Start with a generous 4 KiB buffer; double on overflow until it fits.
     std::vector<std::uint8_t> buf(4096);
     while (true) {
@@ -168,7 +168,7 @@ inline std::vector<std::uint8_t> encodeCborFfi(const T& value) {
 }
 
 template<typename T>
-inline T decodeCborFfi(const std::vector<std::uint8_t>& bytes) {
+inline T decodeCborFFI(const std::vector<std::uint8_t>& bytes) {
     CborParser parser;
     CborValue it;
     CborError err = cbor_parser_init(bytes.data(), bytes.size(), 0, &parser, &it);
@@ -592,13 +592,13 @@ inline CborError decode_cbor(CborValue& it, TimerScheduleReq& v) {
 // ============================================================
 
 extern "C" {
-typedef void (*FfiCallback)(int ret, const char* msg, size_t len, void* user_data);
+typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_data);
 
-void* timer_create(const uint8_t* req_cbor, size_t req_cbor_len, FfiCallback callback, void* user_data);
-int timer_echo(void* ctx, FfiCallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
-int timer_version(void* ctx, FfiCallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
-int timer_complex(void* ctx, FfiCallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
-int timer_schedule(void* ctx, FfiCallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+void* timer_create(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback callback, void* user_data);
+int timer_echo(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int timer_version(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int timer_complex(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int timer_schedule(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int timer_destroy(void* ctx);
 } // extern "C"
 
@@ -608,7 +608,7 @@ int timer_destroy(void* ctx);
 
 namespace {
 
-struct FfiCallState_ {
+struct FFICallState_ {
     std::mutex              mtx;
     std::condition_variable cv;
     bool                    done{false};
@@ -620,9 +620,9 @@ struct FfiCallState_ {
 inline void ffi_cb_(int ret, const char* msg, size_t len, void* ud) {
     // ffi_call_ heap-allocated a shared_ptr and passed its address as ud;
     // take ownership here so it's freed on every exit path.
-    std::unique_ptr<std::shared_ptr<FfiCallState_>> handle(
-        static_cast<std::shared_ptr<FfiCallState_>*>(ud));
-    FfiCallState_& s = **handle;
+    std::unique_ptr<std::shared_ptr<FFICallState_>> handle(
+        static_cast<std::shared_ptr<FFICallState_>*>(ud));
+    FFICallState_& s = **handle;
 
     std::lock_guard<std::mutex> lock(s.mtx);
     s.ok = (ret == 0);
@@ -635,10 +635,10 @@ inline void ffi_cb_(int ret, const char* msg, size_t len, void* ud) {
     s.cv.notify_one();
 }
 
-inline std::vector<std::uint8_t> ffi_call_(std::function<int(FfiCallback, void*)> f,
+inline std::vector<std::uint8_t> ffi_call_(std::function<int(FFICallback, void*)> f,
                                           std::chrono::milliseconds timeout) {
-    auto state = std::make_shared<FfiCallState_>();
-    auto* cb_ref = new std::shared_ptr<FfiCallState_>(state);
+    auto state = std::make_shared<FFICallState_>();
+    auto* cb_ref = new std::shared_ptr<FFICallState_>(state);
     const int ret = f(ffi_cb_, cb_ref);
     if (ret == 2) {
         delete cb_ref;
@@ -663,12 +663,12 @@ class TimerCtx {
 public:
     static TimerCtx create(const TimerConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
         const auto ffi_req_ = TimerCreateCtorReq{config};
-        const auto ffi_req_bytes_ = encodeCborFfi(ffi_req_);
-        const auto ffi_raw_ = ffi_call_([&](FfiCallback cb, void* ud) {
+        const auto ffi_req_bytes_ = encodeCborFFI(ffi_req_);
+        const auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
             (void)timer_create(ffi_req_bytes_.data(), ffi_req_bytes_.size(), cb, ud);
             return 0;
         }, timeout);
-        const auto addr_str = decodeCborFfi<std::string>(ffi_raw_);
+        const auto addr_str = decodeCborFFI<std::string>(ffi_raw_);
         try {
             const auto addr = std::stoull(addr_str);
             return TimerCtx(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout);
@@ -718,11 +718,11 @@ public:
 
     EchoResponse echo(const EchoRequest& req) const {
         const auto ffi_req_ = TimerEchoReq{req};
-        const auto ffi_req_bytes_ = encodeCborFfi(ffi_req_);
-        const auto ffi_raw_ = ffi_call_([&](FfiCallback cb, void* ud) {
+        const auto ffi_req_bytes_ = encodeCborFFI(ffi_req_);
+        const auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
             return timer_echo(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
         }, timeout_);
-        return decodeCborFfi<EchoResponse>(ffi_raw_);
+        return decodeCborFFI<EchoResponse>(ffi_raw_);
     }
 
     std::future<EchoResponse> echoAsync(const EchoRequest& req) const {
@@ -731,11 +731,11 @@ public:
 
     std::string version() const {
         const auto ffi_req_ = TimerVersionReq{};
-        const auto ffi_req_bytes_ = encodeCborFfi(ffi_req_);
-        const auto ffi_raw_ = ffi_call_([&](FfiCallback cb, void* ud) {
+        const auto ffi_req_bytes_ = encodeCborFFI(ffi_req_);
+        const auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
             return timer_version(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
         }, timeout_);
-        return decodeCborFfi<std::string>(ffi_raw_);
+        return decodeCborFFI<std::string>(ffi_raw_);
     }
 
     std::future<std::string> versionAsync() const {
@@ -744,11 +744,11 @@ public:
 
     ComplexResponse complex(const ComplexRequest& req) const {
         const auto ffi_req_ = TimerComplexReq{req};
-        const auto ffi_req_bytes_ = encodeCborFfi(ffi_req_);
-        const auto ffi_raw_ = ffi_call_([&](FfiCallback cb, void* ud) {
+        const auto ffi_req_bytes_ = encodeCborFFI(ffi_req_);
+        const auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
             return timer_complex(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
         }, timeout_);
-        return decodeCborFfi<ComplexResponse>(ffi_raw_);
+        return decodeCborFFI<ComplexResponse>(ffi_raw_);
     }
 
     std::future<ComplexResponse> complexAsync(const ComplexRequest& req) const {
@@ -757,11 +757,11 @@ public:
 
     ScheduleResult schedule(const JobSpec& job, const RetryPolicy& retry, const ScheduleConfig& schedule) const {
         const auto ffi_req_ = TimerScheduleReq{job, retry, schedule};
-        const auto ffi_req_bytes_ = encodeCborFfi(ffi_req_);
-        const auto ffi_raw_ = ffi_call_([&](FfiCallback cb, void* ud) {
+        const auto ffi_req_bytes_ = encodeCborFFI(ffi_req_);
+        const auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
             return timer_schedule(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
         }, timeout_);
-        return decodeCborFfi<ScheduleResult>(ffi_raw_);
+        return decodeCborFFI<ScheduleResult>(ffi_raw_);
     }
 
     std::future<ScheduleResult> scheduleAsync(const JobSpec& job, const RetryPolicy& retry, const ScheduleConfig& schedule) const {

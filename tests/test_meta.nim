@@ -32,10 +32,8 @@ suite "unpackReqField":
 
   test "cstring field unpacks with .cstring cast":
     static:
-      let node =
-        unpackReqField(ident("message"), ident("cstring"), ident("decoded"))
-      doAssert normalise(node.repr) ==
-        "let message: cstring = decoded.message.cstring"
+      let node = unpackReqField(ident("message"), ident("cstring"), ident("decoded"))
+      doAssert normalise(node.repr) == "let message: cstring = decoded.message.cstring"
 
   test "non-cstring (string) does NOT add the .cstring cast":
     static:
@@ -54,6 +52,5 @@ suite "unpackReqField":
 
   test "decoded identifier is used verbatim":
     static:
-      let node =
-        unpackReqField(ident("delayMs"), ident("int"), ident("myDecodedReq"))
+      let node = unpackReqField(ident("delayMs"), ident("int"), ident("myDecodedReq"))
       doAssert normalise(node.repr) == "let delayMs = myDecodedReq.delayMs"

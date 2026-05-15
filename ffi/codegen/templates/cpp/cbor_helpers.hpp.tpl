@@ -127,7 +127,7 @@ inline CborError decode_cbor(CborValue& it, std::optional<T>& out) {
 // ── Public entry points ─────────────────────────────────────────────────
 
 template<typename T>
-inline std::vector<std::uint8_t> encodeCborFfi(const T& value) {
+inline std::vector<std::uint8_t> encodeCborFFI(const T& value) {
     // Start with a generous 4 KiB buffer; double on overflow until it fits.
     std::vector<std::uint8_t> buf(4096);
     while (true) {
@@ -150,7 +150,7 @@ inline std::vector<std::uint8_t> encodeCborFfi(const T& value) {
 }
 
 template<typename T>
-inline T decodeCborFfi(const std::vector<std::uint8_t>& bytes) {
+inline T decodeCborFFI(const std::vector<std::uint8_t>& bytes) {
     CborParser parser;
     CborValue it;
     CborError err = cbor_parser_init(bytes.data(), bytes.size(), 0, &parser, &it);
