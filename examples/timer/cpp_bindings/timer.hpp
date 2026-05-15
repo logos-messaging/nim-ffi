@@ -230,6 +230,18 @@ public:
         return std::async(std::launch::async, [config, timeout]() { return create(config, timeout); });
     }
 
+    // Rule of Five: because this class owns a raw resource (the timer
+    // context pointer freed in the destructor), the compiler-generated copy
+    // and move special members would do the wrong thing — copies would
+    // double-free, and a default move would leave both objects pointing at
+    // the same context. So we define all five special members explicitly:
+    //   1. destructor          — releases the context.
+    //   2. copy constructor    — deleted; contexts are not copyable.
+    //   3. copy assignment     — deleted; same reason.
+    //   4. move constructor    — transfers ownership, nulls the source.
+    //   5. move assignment     — destroys the current context, then
+    //                            transfers ownership from `other`.
+    // See: https://en.cppreference.com/w/cpp/language/rule_of_three
     ~TimerCtx() {
         if (ptr_) {
             timer_destroy(ptr_);
