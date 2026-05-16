@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(timer_cpp_bindings CXX C)
+project(my_timer_cpp_bindings CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -25,11 +25,11 @@ get_filename_component(NIM_SRC
 find_program(NIM_EXECUTABLE nim REQUIRED)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    set(NIM_LIB_FILE "${REPO_ROOT}/libtimer.dylib")
+    set(NIM_LIB_FILE "${REPO_ROOT}/libmy_timer.dylib")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    set(NIM_LIB_FILE "${REPO_ROOT}/timer.dll")
+    set(NIM_LIB_FILE "${REPO_ROOT}/my_timer.dll")
 else()
-    set(NIM_LIB_FILE "${REPO_ROOT}/libtimer.so")
+    set(NIM_LIB_FILE "${REPO_ROOT}/libmy_timer.so")
 endif()
 
 add_custom_command(
@@ -39,19 +39,19 @@ add_custom_command(
                 -d:chronicles_log_level=WARN
                 --app:lib
                 --noMain
-                "--nimMainPrefix:libtimer"
+                "--nimMainPrefix:libmy_timer"
                 "-o:${NIM_LIB_FILE}"
                 "${NIM_SRC}"
     WORKING_DIRECTORY "${REPO_ROOT}"
     DEPENDS "${NIM_SRC}"
-    COMMENT "Compiling Nim library libtimer"
+    COMMENT "Compiling Nim library libmy_timer"
     VERBATIM
 )
 add_custom_target(nim_lib ALL DEPENDS "${NIM_LIB_FILE}")
 
-add_library(timer SHARED IMPORTED GLOBAL)
-set_target_properties(timer PROPERTIES IMPORTED_LOCATION "${NIM_LIB_FILE}")
-add_dependencies(timer nim_lib)
+add_library(my_timer SHARED IMPORTED GLOBAL)
+set_target_properties(my_timer PROPERTIES IMPORTED_LOCATION "${NIM_LIB_FILE}")
+add_dependencies(my_timer nim_lib)
 
 # ── TinyCBOR (vendored at ffi/codegen/templates/cpp/vendor/tinycbor) ─────────
 set(TINYCBOR_SRC_DIR "${REPO_ROOT}/ffi/codegen/templates/cpp/vendor")
@@ -69,12 +69,12 @@ target_include_directories(tinycbor PUBLIC
 set_property(TARGET tinycbor PROPERTY C_STANDARD 99)
 set_property(TARGET tinycbor PROPERTY POSITION_INDEPENDENT_CODE ON)
 
-add_library(timer_headers INTERFACE)
-target_include_directories(timer_headers INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(timer_headers INTERFACE timer tinycbor)
+add_library(my_timer_headers INTERFACE)
+target_include_directories(my_timer_headers INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(my_timer_headers INTERFACE my_timer tinycbor)
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp")
     add_executable(example main.cpp)
-    target_link_libraries(example PRIVATE timer_headers)
+    target_link_libraries(example PRIVATE my_timer_headers)
     add_dependencies(example nim_lib)
 endif()

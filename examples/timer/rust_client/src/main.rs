@@ -1,26 +1,25 @@
-// Rust client for the timer shared library built with nim-ffi + chronos.
+// Rust client for the my_timer shared library built with nim-ffi + chronos.
 //
-// This file uses the generated `timer` crate, which wraps all the raw FFI
+// This file uses the generated `my_timer` crate, which wraps all the raw FFI
 // boilerplate (extern "C" declarations, callback machinery, CBOR encode/decode).
 //
 // To regenerate the `rust_bindings` crate:
-//   nim c --mm:orc -d:chronicles_log_level=WARN --nimMainPrefix:libtimer \
-//         -d:ffiGenBindings examples/timer/timer.nim
+//   nimble genbindings_rust
 use std::time::Duration;
-use timer::{
-    EchoRequest, JobSpec, RetryPolicy, ScheduleConfig, TimerConfig, TimerCtx,
+use my_timer::{
+    EchoRequest, JobSpec, MyTimerCtx, RetryPolicy, ScheduleConfig, TimerConfig,
 };
 
 fn main() {
     let timeout = Duration::from_secs(5);
 
     // ── 1. Create the timer service ────────────────────────────────────────
-    let ctx = TimerCtx::create(TimerConfig { name: "demo".into() }, timeout)
-        .expect("timer_create failed");
+    let ctx = MyTimerCtx::create(TimerConfig { name: "demo".into() }, timeout)
+        .expect("my_timer_create failed");
     println!("[1] Context created");
 
     // ── 2. Sync call: version ──────────────────────────────────────────────
-    let version = ctx.version().expect("timer_version failed");
+    let version = ctx.version().expect("my_timer_version failed");
     println!("[2] Version (sync call, callback fired inline): {version}");
 
     // ── 3. Async call: echo (200 ms delay) ────────────────────────────────
@@ -29,7 +28,7 @@ fn main() {
             message: "hello from Rust".into(),
             delay_ms: 200,
         })
-        .expect("timer_echo failed");
+        .expect("my_timer_echo failed");
     println!(
         "[3] Echo (async, 200 ms chronos delay): echoed={}, timerName={}",
         echo.echoed, echo.timer_name
@@ -41,7 +40,7 @@ fn main() {
             message: "second request".into(),
             delay_ms: 50,
         })
-        .expect("second timer_echo failed");
+        .expect("second my_timer_echo failed");
     println!("[4] Echo: echoed={}, timerName={}", echo2.echoed, echo2.timer_name);
 
     // ── 5. Call with three complex parameters ─────────────────────────────
@@ -66,7 +65,7 @@ fn main() {
                 jitter: Some(250),
             },
         )
-        .expect("timer_schedule failed");
+        .expect("my_timer_schedule failed");
     println!(
         "[5] Schedule (3 complex params): jobId={}, willRunCount={}, firstRunAtMs={}, effectiveBackoffMs={}",
         schedule.job_id,
@@ -76,5 +75,5 @@ fn main() {
     );
 
     println!("\nDone. The Nim FFI thread and watchdog are still running.");
-    println!("(In a real app, call timer_destroy to join them gracefully.)");
+    println!("(In a real app, call my_timer_destroy to join them gracefully.)");
 }
