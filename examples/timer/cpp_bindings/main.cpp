@@ -1,10 +1,10 @@
-#include "timer.hpp"
+#include "my_timer.hpp"
 #include <iostream>
 #include <future>
 
 int main() {
     try {
-        auto ctx = TimerCtx::create(TimerConfig{"cpp-demo"});
+        auto ctx = MyTimerCtx::create(TimerConfig{"cpp-demo"});
         std::cout << "[1] Context created\n";
 
         auto versionFuture = ctx.versionAsync();

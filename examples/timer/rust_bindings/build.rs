@@ -26,7 +26,7 @@ fn main() {
     #[cfg(target_os = "linux")]
     let lib_ext = "so";
 
-    let out_lib = repo_root.join(format!("libtimer.{lib_ext}"));
+    let out_lib = repo_root.join(format!("libmy_timer.{lib_ext}"));
 
     let mut cmd = Command::new("nim");
     cmd.arg("c")
@@ -34,7 +34,7 @@ fn main() {
         .arg("-d:chronicles_log_level=WARN")
         .arg("--app:lib")
         .arg("--noMain")
-        .arg(format!("--nimMainPrefix:libtimer"))
+        .arg(format!("--nimMainPrefix:libmy_timer"))
         .arg(format!("-o:{}", out_lib.display()));
     cmd.arg(&nim_src).current_dir(&repo_root);
 
@@ -42,6 +42,6 @@ fn main() {
     assert!(status.success(), "Nim compilation failed");
 
     println!("cargo:rustc-link-search={}", repo_root.display());
-    println!("cargo:rustc-link-lib=timer");
+    println!("cargo:rustc-link-lib=my_timer");
     println!("cargo:rerun-if-changed={}", nim_src.display());
 }

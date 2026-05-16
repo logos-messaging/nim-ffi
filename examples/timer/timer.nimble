@@ -14,14 +14,14 @@ const nimFlags = "--mm:orc -d:chronicles_log_level=WARN"
 
 task build, "Compile the timer library":
   exec "nim c " & nimFlags &
-    " --app:lib --noMain --nimMainPrefix:libtimer timer.nim"
+    " --app:lib --noMain --nimMainPrefix:libmy_timer timer.nim"
 
 task genbindings_rust, "Generate Rust bindings for the timer example":
-  exec "nim c " & nimFlags & " --app:lib --noMain --nimMainPrefix:libtimer" &
+  exec "nim c " & nimFlags & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
     " -d:ffiGenBindings -d:targetLang=rust" & " -d:ffiOutputDir=rust_bindings" &
     " -d:ffiNimSrcRelPath=timer.nim" & " -o:/dev/null timer.nim"
 
 task genbindings_cpp, "Generate C++ bindings for the timer example":
-  exec "nim c " & nimFlags & " --app:lib --noMain --nimMainPrefix:libtimer" &
+  exec "nim c " & nimFlags & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
     " -d:ffiGenBindings -d:targetLang=cpp" & " -d:ffiOutputDir=cpp_bindings" &
     " -d:ffiNimSrcRelPath=timer.nim" & " -o:/dev/null timer.nim"

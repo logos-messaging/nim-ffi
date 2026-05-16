@@ -51,18 +51,18 @@ task test_cpp_e2e, "Build and run the C++ end-to-end tests for the timer example
   exec "ctest --test-dir tests/e2e/cpp/build --output-on-failure"
 
 task genbindings_example, "Generate Rust bindings for the timer example":
-  exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libtimer -d:ffiGenBindings -o:/dev/null examples/timer/timer.nim"
-  exec "nim c " & nimFlagsRefc & " --app:lib --noMain --nimMainPrefix:libtimer -d:ffiGenBindings -o:/dev/null examples/timer/timer.nim"
+  exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libmy_timer -d:ffiGenBindings -o:/dev/null examples/timer/timer.nim"
+  exec "nim c " & nimFlagsRefc & " --app:lib --noMain --nimMainPrefix:libmy_timer -d:ffiGenBindings -o:/dev/null examples/timer/timer.nim"
 
 task genbindings_rust, "Generate Rust bindings for the timer example":
   exec "nim c " & nimFlagsOrc &
-    " --app:lib --noMain --nimMainPrefix:libtimer" &
+    " --app:lib --noMain --nimMainPrefix:libmy_timer" &
     " -d:ffiGenBindings -d:targetLang=rust" &
     " -d:ffiOutputDir=examples/timer/rust_bindings" &
     " -d:ffiNimSrcRelPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
   exec "nim c " & nimFlagsRefc &
-    " --app:lib --noMain --nimMainPrefix:libtimer" &
+    " --app:lib --noMain --nimMainPrefix:libmy_timer" &
     " -d:ffiGenBindings -d:targetLang=rust" &
     " -d:ffiOutputDir=examples/timer/rust_bindings" &
     " -d:ffiNimSrcRelPath=../timer.nim" &
@@ -70,13 +70,13 @@ task genbindings_rust, "Generate Rust bindings for the timer example":
 
 task genbindings_cpp, "Generate C++ bindings for the timer example":
   exec "nim c " & nimFlagsOrc &
-    " --app:lib --noMain --nimMainPrefix:libtimer" &
+    " --app:lib --noMain --nimMainPrefix:libmy_timer" &
     " -d:ffiGenBindings -d:targetLang=cpp" &
     " -d:ffiOutputDir=examples/timer/cpp_bindings" &
     " -d:ffiNimSrcRelPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
   exec "nim c " & nimFlagsRefc &
-    " --app:lib --noMain --nimMainPrefix:libtimer" &
+    " --app:lib --noMain --nimMainPrefix:libmy_timer" &
     " -d:ffiGenBindings -d:targetLang=cpp" &
     " -d:ffiOutputDir=examples/timer/cpp_bindings" &
     " -d:ffiNimSrcRelPath=../timer.nim" &

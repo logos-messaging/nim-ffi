@@ -75,25 +75,25 @@ pub struct ScheduleResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TimerCreateCtorReq {
+pub struct MyTimerCreateCtorReq {
     pub config: TimerConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TimerEchoReq {
+pub struct MyTimerEchoReq {
     pub req: EchoRequest,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TimerVersionReq {}
+pub struct MyTimerVersionReq {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TimerComplexReq {
+pub struct MyTimerComplexReq {
     pub req: ComplexRequest,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TimerScheduleReq {
+pub struct MyTimerScheduleReq {
     pub job: JobSpec,
     pub retry: RetryPolicy,
     pub schedule: ScheduleConfig,

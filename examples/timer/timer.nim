@@ -3,10 +3,14 @@ import ffi, chronos, options
 type Maybe[T] = Option[T]
 
 # The library's main state type. The FFI context owns one instance.
-type Timer = object
+# Named `MyTimer` (not `Timer`) so the C-exported symbols are
+# `my_timer_create` / `my_timer_destroy` / ... — `timer_create` would
+# collide with POSIX `<time.h>`'s `int timer_create(clockid_t, ...)` which
+# `<pthread.h>` transitively drags in on Linux.
+type MyTimer = object
   name: string # set at creation time, read back in each response
 
-declareLibrary("timer", Timer)
+declareLibrary("my_timer", MyTimer)
 
 type TimerConfig {.ffi.} = object
   name: string
@@ -31,17 +35,17 @@ type ComplexResponse {.ffi.} = object
   hasNote: bool
 
 # --- Constructor -----------------------------------------------------------
-# Called once from Rust. Creates the FFIContext + Timer.
+# Called once from Rust. Creates the FFIContext + MyTimer.
 # Uses chronos (await sleepAsync) so the body is async.
-proc timerCreate*(config: TimerConfig): Future[Result[Timer, string]] {.ffiCtor.} =
+proc myTimerCreate*(config: TimerConfig): Future[Result[MyTimer, string]] {.ffiCtor.} =
   await sleepAsync(1.milliseconds) # proves chronos is live on the FFI thread
-  return ok(Timer(name: config.name))
+  return ok(MyTimer(name: config.name))
 
 # --- Async method ----------------------------------------------------------
 # Waits `delayMs` milliseconds (non-blocking, on the chronos event loop)
 # then echoes the message back with a request counter.
-proc timerEcho*(
-    timer: Timer, req: EchoRequest
+proc myTimerEcho*(
+    timer: MyTimer, req: EchoRequest
 ): Future[Result[EchoResponse, string]] {.ffi.} =
   await sleepAsync(req.delayMs.milliseconds)
   return ok(EchoResponse(echoed: req.message, timerName: timer.name))
@@ -49,11 +53,11 @@ proc timerEcho*(
 # --- Sync method -----------------------------------------------------------
 # No await — the macro detects this and fires the callback inline,
 # without going through the request channel.
-proc timerVersion*(timer: Timer): Future[Result[string, string]] {.ffi.} =
+proc myTimerVersion*(timer: MyTimer): Future[Result[string, string]] {.ffi.} =
   return ok("nim-timer v0.1.0")
 
-proc timerComplex*(
-    timer: Timer, req: ComplexRequest
+proc myTimerComplex*(
+    timer: MyTimer, req: ComplexRequest
 ): Future[Result[ComplexResponse, string]] {.ffi.} =
   let note = if req.note.isSome: req.note.get else: "<none>"
   let retries = if req.retries.isSome: req.retries.get else: 0
@@ -67,8 +71,8 @@ proc timerComplex*(
 # Demonstrates how a {.ffi.} proc handles several object-typed parameters at
 # once. Each parameter is its own {.ffi.} type, so it lands in the generated
 # foreign-side bindings as a first-class struct/class, and the per-proc Req
-# envelope (TimerScheduleReq on the wire) carries all three under field names
-# that match the Nim params.
+# envelope (MyTimerScheduleReq on the wire) carries all three under field
+# names that match the Nim params.
 type JobSpec {.ffi.} = object
   name: string
   payload: seq[string]
@@ -90,8 +94,8 @@ type ScheduleResult {.ffi.} = object
   firstRunAtMs: int
   effectiveBackoffMs: int
 
-proc timerSchedule*(
-    timer: Timer, job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig
+proc myTimerSchedule*(
+    timer: MyTimer, job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig
 ): Future[Result[ScheduleResult, string]] {.ffi.} =
   ## Composes three independent object-typed parameters (`job`, `retry`,
   ## `schedule`) into a single scheduling decision. The macro packs them into
@@ -117,8 +121,8 @@ proc timerSchedule*(
     )
   )
 
-proc timer_destroy*(timer: Timer) {.ffiDtor.} =
-  ## Tears down the FFI context created by timer_create.
+proc my_timer_destroy*(timer: MyTimer) {.ffiDtor.} =
+  ## Tears down the FFI context created by my_timer_create.
   ## Blocks until the FFI thread and watchdog thread have joined.
   discard
 

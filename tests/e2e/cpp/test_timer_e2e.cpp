@@ -6,7 +6,7 @@
 // decode -> C++ — to validate that a binding produced by `nimble
 // genbindings_cpp` is callable end-to-end from C++.
 
-#include "timer.hpp"
+#include "my_timer.hpp"
 
 #include <chrono>
 #include <future>
@@ -17,15 +17,15 @@
 
 namespace {
 
-TimerCtx makeCtx(const std::string& name = "e2e") {
-    return TimerCtx::create(TimerConfig{name});
+MyTimerCtx makeCtx(const std::string& name = "e2e") {
+    return MyTimerCtx::create(TimerConfig{name});
 }
 
 } // namespace
 
 TEST(TimerE2E, CreateAndDestroy) {
     auto ctx = makeCtx("create-destroy");
-    // Destruction happens at scope exit via TimerCtx::~TimerCtx,
+    // Destruction happens at scope exit via MyTimerCtx::~MyTimerCtx,
     // which invokes timer_destroy on the underlying FFI context.
     SUCCEED();
 }
