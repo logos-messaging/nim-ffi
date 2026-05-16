@@ -4,7 +4,9 @@
 
 import std/[atomics, locks, json, tables]
 import chronicles, chronos, chronos/threadsync, taskpools/channels_spsc_single, results
-import ./ffi_types, ./ffi_thread_request, ./internal/ffi_macro, ./logging, ./cbor_serial
+import
+  ./ffi_types, ./ffi_thread_request, ./internal/ffi_macro,
+  ./internal/c_wire, ./logging, ./cbor_serial
 
 type FFICallbackState* = object
   ## Holds the C event callback and its associated user-data pointer.

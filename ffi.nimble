@@ -30,6 +30,10 @@ task test, "Run all tests under --mm:orc and --mm:refc":
     exec "nim c -r " & flags & " tests/unit/test_meta.nim"
     exec "nim c -r " & flags & " tests/unit/test_string_helpers.nim"
     exec "nim c -r " & flags & " tests/unit/test_wire_compat.nim"
+    # C-target additions
+    exec "nim c -r " & flags & " tests/unit/test_c_codegen.nim"
+    exec "nim c -r " & flags & " tests/unit/test_c_macro_helpers.nim"
+    exec "nim c -r " & flags & " tests/unit/test_c_thread_request.nim"
 
 task test_alloc, "Run alloc unit tests under --mm:orc and --mm:refc":
   exec "nim c -r " & nimFlagsOrc & " tests/unit/test_alloc.nim"
@@ -81,3 +85,25 @@ task genbindings_cpp, "Generate C++ bindings for the timer example":
     " -d:ffiOutputDir=examples/timer/cpp_bindings" &
     " -d:ffiNimSrcRelPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
+
+task genbindings_c, "Generate pure-C bindings for the timer + echoer examples":
+  # timer
+  exec "nim c " & nimFlagsOrc &
+    " --app:lib --noMain --nimMainPrefix:libmy_timer" &
+    " -d:ffiGenBindings -d:targetLang=c" &
+    " -d:ffiOutputDir=examples/timer/c_bindings" &
+    " -d:ffiNimSrcRelPath=../timer.nim" &
+    " -o:libmy_timer.dylib examples/timer/timer.nim"
+  # echoer (cross-library e2e companion)
+  exec "nim c " & nimFlagsOrc &
+    " --app:lib --noMain --nimMainPrefix:libechoer" &
+    " -d:ffiGenBindings -d:targetLang=c" &
+    " -d:ffiOutputDir=examples/echoer/c_bindings" &
+    " -d:ffiNimSrcRelPath=../echoer.nim" &
+    " -o:libechoer.dylib examples/echoer/echoer.nim"
+
+task test_c_e2e, "Build and run the pure-C end-to-end tests (timer + cross-library)":
+  exec "nimble genbindings_c"
+  exec "cmake -S tests/e2e/c -B tests/e2e/c/build"
+  exec "cmake --build tests/e2e/c/build"
+  exec "ctest --test-dir tests/e2e/c/build --output-on-failure"
