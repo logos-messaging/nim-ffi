@@ -1,6 +1,6 @@
 ## Runtime helpers used by the macro-generated *_CWire companion types.
 ##
-## When `-d:targetLang=c` is active, the {.ffi.} macro emits — alongside
+## When `-d:ffiMode=raw` is active, the {.ffi.} macro emits — alongside
 ## every user-declared {.ffi.} type and every per-proc Req/Resp — a parallel
 ## `*_CWire` Nim object whose field layout matches the C struct emitted by
 ## ffi/codegen/c.nim. Strings become `cstring`, `seq[T]` becomes the
@@ -50,7 +50,9 @@ proc cwireAllocOpt*[T](src: pointer): pointer {.inline.} =
   ## macro-generated cwireFree for the inner type.
   return src
 
-proc cwireFreeOpt*[T](p: pointer, freeInner: proc(p: pointer) {.nimcall, raises: [], gcsafe.}) =
+proc cwireFreeOpt*[T](
+    p: pointer, freeInner: proc(p: pointer) {.nimcall, raises: [], gcsafe.}
+) =
   if p.isNil:
     return
   freeInner(p)

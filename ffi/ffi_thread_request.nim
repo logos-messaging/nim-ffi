@@ -6,7 +6,7 @@
 ##   - **CBOR mode** (default; cpp / rust targets): `data` points to
 ##     CBOR-encoded request bytes that the FFI thread's `processFFIRequest`
 ##     decodes back into a Nim Req object.
-##   - **C-wire mode** (-d:targetLang=c): `data` points to a *typed* wire
+##   - **C-wire mode** (-d:ffiMode=raw): `data` points to a *typed* wire
 ##     struct (a `Req_CWire` in shared memory) whose layout matches the C
 ##     `Req` struct seen by the foreign caller. The FFI thread casts it back
 ##     to the right `ptr Req_CWire` and unpacks fields without serialisation.

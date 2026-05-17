@@ -21,7 +21,7 @@ nimble genbindings_rust
 ```
 
 This command:
-1. Invokes the Nim compiler with `-d:targetLang:rust` flag
+1. Invokes the Nim compiler with `-d:ffiMode=cbor -d:ffiLang=rust` flags
 2. Triggers `genBindings("examples/timer/rust_bindings", "../timer.nim")` in `timer.nim`
 3. Creates/updates the generated binding files
 

@@ -158,7 +158,7 @@ int main(void) {
     sync_init(&s);
     EchoRequest er = { .message = "relay", .delayMs = 1 };
     MyTimerEchoReq teReq = { .req = er };
-    int rc = my_timer_echo(timer_ctx, &teReq, cb_timer_echo, &s);
+    int rc = my_timer_echo(timer_ctx, cb_timer_echo, &s, &teReq);
     if (rc != 0) {
         fprintf(stderr, "my_timer_echo dispatch failed rc=%d\n", rc);
         return 1;
@@ -184,7 +184,7 @@ int main(void) {
     sync_init(&s);
     ShoutRequest sr = { .message = relayed, .exclamations = 3 };
     EchoerShoutReq esReq = { .req = sr };
-    rc = echoer_shout(echoer_ctx, &esReq, cb_echoer_shout, &s);
+    rc = echoer_shout(echoer_ctx, cb_echoer_shout, &s, &esReq);
     if (rc != 0) {
         fprintf(stderr, "echoer_shout dispatch failed rc=%d\n", rc);
         return 1;

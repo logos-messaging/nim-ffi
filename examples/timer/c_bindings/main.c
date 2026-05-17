@@ -136,7 +136,7 @@ int main(void) {
     /* ── version ──────────────────────────────────────────────────────── */
     cb_state_init(&state);
     MyTimerVersionReq vreq = { 0 };
-    int rc = my_timer_version(ctx, &vreq, on_version, &state);
+    int rc = my_timer_version(ctx, on_version, &state, &vreq);
     if (rc != 0) {
         fprintf(stderr, "my_timer_version dispatch failed rc=%d\n", rc);
         return 1;
@@ -156,7 +156,7 @@ int main(void) {
     cb_state_init(&state);
     EchoRequest er = { .message = "hello from C", .delayMs = 1 };
     MyTimerEchoReq ereq = { .req = er };
-    rc = my_timer_echo(ctx, &ereq, on_echo, &state);
+    rc = my_timer_echo(ctx, on_echo, &state, &ereq);
     if (rc != 0) {
         fprintf(stderr, "my_timer_echo dispatch failed rc=%d\n", rc);
         return 1;

@@ -20,7 +20,7 @@ glue:
 
 ```sh
 # 1. Generate the C++ bindings (writes examples/timer/cpp_bindings/)
-nimble genbindings_cpp
+nimble genbindings_cpp_cbor
 
 # 2. Configure + build + run the tests
 cmake -S tests/e2e/cpp -B tests/e2e/cpp/build

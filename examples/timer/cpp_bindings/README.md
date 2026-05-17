@@ -18,7 +18,7 @@ nimble genbindings_cpp
 ```
 
 This command:
-1. Invokes the Nim compiler with `-d:targetLang:cpp` flag
+1. Invokes the Nim compiler with `-d:ffiMode=cbor -d:ffiLang=cpp` flags
 2. Triggers `genBindings("examples/timer/cpp_bindings", "../timer.nim")` in `timer.nim`
 3. Creates/updates the generated binding files
 

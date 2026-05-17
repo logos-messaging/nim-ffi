@@ -14,7 +14,7 @@ import ./meta, ./string_helpers
 ## and are slurped into the binary at compile time.
 const
   HeaderPreludeTpl = staticRead("templates/c/header_prelude.h.tpl")
-  CMakeListsTpl    = staticRead("templates/c/CMakeLists.txt.tpl")
+  CMakeListsTpl = staticRead("templates/c/CMakeLists.txt.tpl")
 
 proc genericInnerType(typeName, prefix: string): string =
   ## If `typeName` looks like `Prefix[Inner]`, return `Inner`. Otherwise "".
@@ -53,12 +53,12 @@ proc nimTypeToC*(typeName: string): string =
   of "int", "int64": "int64_t"
   of "int32": "int32_t"
   of "int16": "int16_t"
-  of "int8":  "int8_t"
+  of "int8": "int8_t"
   of "uint", "uint64": "uint64_t"
   of "uint32": "uint32_t"
   of "uint16": "uint16_t"
-  of "uint8":  "uint8_t"
-  of "bool":   "bool"
+  of "uint8": "uint8_t"
+  of "bool": "bool"
   of "float", "float32": "float"
   of "float64": "double"
   of "pointer": "void*"
@@ -71,9 +71,8 @@ proc isPrimitiveC*(typeName: string): bool =
   ## differs).
   let t = typeName.strip()
   case t
-  of "int", "int64", "int32", "int16", "int8",
-     "uint", "uint64", "uint32", "uint16", "uint8",
-     "bool", "float", "float32", "float64", "pointer":
+  of "int", "int64", "int32", "int16", "int8", "uint", "uint64", "uint32", "uint16",
+      "uint8", "bool", "float", "float32", "float64", "pointer":
     true
   else:
     false
@@ -88,7 +87,10 @@ proc reqStructName*(p: FFIProcMeta): string =
   ## Per-proc Req struct name — same convention as cpp.nim so callers
   ## consuming both generators see consistent names.
   let camel = snakeToPascalCase(p.procName)
-  if p.kind == FFIKind.CTOR: camel & "CtorReq" else: camel & "Req"
+  if p.kind == FFIKind.CTOR:
+    camel & "CtorReq"
+  else:
+    camel & "Req"
 
 proc respStructName*(p: FFIProcMeta): string =
   ## Per-proc Resp struct name. The C target wraps every non-ctor return in
@@ -106,8 +108,10 @@ proc emitFieldDecl(typeName, fieldName: string, indent: string): seq[string] =
     let inner = cType[7 .. ^1]
     # Avoid double-const for seq[string] (inner already has `const`).
     let qualified =
-      if inner.startsWith("const "): inner
-      else: "const " & inner
+      if inner.startsWith("const "):
+        inner
+      else:
+        "const " & inner
     return @[
       indent & qualified & "* " & fieldName & ";",
       indent & "size_t " & fieldName & "_len;",
@@ -158,9 +162,7 @@ proc generateCHeader*(
       lines.add("    uint8_t _placeholder;")
     else:
       for ep in p.extraParams:
-        let typeForC =
-          if ep.isPtr: "void*"
-          else: ep.typeName
+        let typeForC = if ep.isPtr: "void*" else: ep.typeName
         for line in emitFieldDecl(typeForC, ep.name, "    "):
           lines.add(line)
     lines.add("} " & reqName & ";")
@@ -178,9 +180,7 @@ proc generateCHeader*(
     if p.returnTypeName.len == 0 or p.returnTypeName == "void":
       continue
     let respName = respStructName(p)
-    let typeForC =
-      if p.returnIsPtr: "void*"
-      else: p.returnTypeName
+    let typeForC = if p.returnIsPtr: "void*" else: p.returnTypeName
     lines.add("typedef struct " & respName & " {")
     for line in emitFieldDecl(typeForC, "value", "    "):
       lines.add(line)
@@ -188,25 +188,54 @@ proc generateCHeader*(
     lines.add("")
 
   # ── Function declarations ─────────────────────────────────────────────────
+  #
+  # Procs with a non-empty `abiHash` are declared with a versioned symbol
+  # (`<proc>_v<hash>`) and exposed to consumers under their unsuffixed name
+  # via a `#define`. This way:
+  #   - Consumer source code keeps writing `my_timer_echo(ctx, &req, ...)`.
+  #   - The macro expands to `my_timer_echo_v2e32s2(...)` at *the consumer's*
+  #     build time, baking that exact hash into the binary.
+  #   - If the library later evolves the request/response layout, the new
+  #     library exports `my_timer_echo_v9a1b3c` and the stale consumer
+  #     binary fails to link with a loud "undefined symbol" error rather
+  #     than reading garbage from a layout mismatch.
+  # The dtor's signature is structurally invariant so it has no hash.
   lines.add("/* ============================================================")
   lines.add(" * Function declarations")
+  lines.add(" *")
+  lines.add(" * Procs with a `_v<hash>` suffix are content-addressed: changing")
+  lines.add(" * the canonical signature (param/return types, transitive {.ffi.}")
+  lines.add(" * type fields) changes the hash and therefore the symbol name.")
+  lines.add(" * Stale consumers fail to link with a loud `undefined symbol`")
+  lines.add(" * error rather than silently reading mismatched layouts.")
   lines.add(" * ============================================================ */")
   lines.add("")
   for p in procs:
     let reqName = reqStructName(p)
+    let symbol =
+      if p.abiHash.len > 0:
+        p.procName & "_v" & p.abiHash
+      else:
+        p.procName
     case p.kind
     of FFIKind.CTOR:
       lines.add(
-        "void* " & p.procName & "(const " & reqName & "* req, " &
+        "void* " & symbol & "(const " & reqName & "* req, " &
           "FfiCallback cb, void* user_data);"
       )
+      if symbol != p.procName:
+        lines.add("#define " & p.procName & " " & symbol)
     of FFIKind.FFI:
+      # Param order matches the cbor shape's prefix: (ctx, cb, user_data, …).
+      # The trailing `req` is the only mode-specific tail.
       lines.add(
-        "int " & p.procName & "(void* ctx, const " & reqName & "* req, " &
-          "FfiCallback cb, void* user_data);"
+        "int " & symbol & "(void* ctx, FfiCallback cb, void* user_data, " &
+          "const " & reqName & "* req);"
       )
+      if symbol != p.procName:
+        lines.add("#define " & p.procName & " " & symbol)
     of FFIKind.DTOR:
-      lines.add("int " & p.procName & "(void* ctx);")
+      lines.add("int " & symbol & "(void* ctx);")
   lines.add("")
 
   lines.add("#ifdef __cplusplus")
@@ -220,6 +249,28 @@ proc generateCCMakeLists*(libName: string, nimSrcRelPath: string): string =
   let src = nimSrcRelPath.replace("\\", "/")
   return CMakeListsTpl.multiReplace(("{{LIB}}", libName), ("{{SRC}}", src))
 
+proc cHeaderBanner(nimSrcRelPath: string): string =
+  ## /* ... */ banner stamped at the top of every generated `<lib>.h` so
+  ## a reader who lands in the file via grep or an IDE sees instantly
+  ## that it is auto-produced and where to look to regenerate.
+  return
+    "/* ============================================================\n" &
+    " * AUTO-GENERATED by nim-ffi v" & NimFFIVersion &
+    "  (ffiMode=raw, ffiLang=cpp). DO NOT EDIT.\n" & " *\n" & " *   Source:     " &
+    nimSrcRelPath & "\n" & " *   Generator:  ffi/codegen/c.nim\n" &
+    " *   Regenerate: nimble genbindings_cpp_rawc\n" &
+    " * ============================================================ */\n\n"
+
+proc cMakeBanner(nimSrcRelPath: string): string =
+  ## `#` banner for the generated CMakeLists.txt.
+  return
+    "# ============================================================\n" &
+    "# AUTO-GENERATED by nim-ffi v" & NimFFIVersion &
+    "  (ffiMode=raw, ffiLang=cpp). DO NOT EDIT.\n" & "#\n" & "#   Source:     " &
+    nimSrcRelPath & "\n" & "#   Generator:  ffi/codegen/c.nim\n" &
+    "#   Regenerate: nimble genbindings_cpp_rawc\n" &
+    "# ============================================================\n\n"
+
 proc generateCBindings*(
     procs: seq[FFIProcMeta],
     types: seq[FFITypeMeta],
@@ -228,5 +279,11 @@ proc generateCBindings*(
     nimSrcRelPath: string,
 ) =
   createDir(outputDir)
-  writeFile(outputDir / (libName & ".h"), generateCHeader(procs, types, libName))
-  writeFile(outputDir / "CMakeLists.txt", generateCCMakeLists(libName, nimSrcRelPath))
+  writeFile(
+    outputDir / (libName & ".h"),
+    cHeaderBanner(nimSrcRelPath) & generateCHeader(procs, types, libName),
+  )
+  writeFile(
+    outputDir / "CMakeLists.txt",
+    cMakeBanner(nimSrcRelPath) & generateCCMakeLists(libName, nimSrcRelPath),
+  )
