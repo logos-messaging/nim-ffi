@@ -60,13 +60,13 @@ task genbindings_rust, "Generate Rust bindings for the timer example":
     " --app:lib --noMain --nimMainPrefix:libmy_timer" &
     " -d:ffiGenBindings -d:targetLang=rust" &
     " -d:ffiOutputDir=examples/timer/rust_bindings" &
-    " -d:ffiNimSrcRelPath=../timer.nim" &
+    " -d:ffiSrcPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
   exec "nim c " & nimFlagsRefc &
     " --app:lib --noMain --nimMainPrefix:libmy_timer" &
     " -d:ffiGenBindings -d:targetLang=rust" &
     " -d:ffiOutputDir=examples/timer/rust_bindings" &
-    " -d:ffiNimSrcRelPath=../timer.nim" &
+    " -d:ffiSrcPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
 
 task genbindings_cddl, "Generate CDDL schema for the timer example":
@@ -74,7 +74,7 @@ task genbindings_cddl, "Generate CDDL schema for the timer example":
     " --app:lib --noMain --nimMainPrefix:libtimer" &
     " -d:ffiGenBindings -d:targetLang=cddl" &
     " -d:ffiOutputDir=examples/timer/cddl_bindings" &
-    " -d:ffiNimSrcRelPath=../timer.nim" &
+    " -d:ffiSrcPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
 
 task genbindings_cpp, "Generate C++ bindings for the timer example":
@@ -82,11 +82,11 @@ task genbindings_cpp, "Generate C++ bindings for the timer example":
     " --app:lib --noMain --nimMainPrefix:libmy_timer" &
     " -d:ffiGenBindings -d:targetLang=cpp" &
     " -d:ffiOutputDir=examples/timer/cpp_bindings" &
-    " -d:ffiNimSrcRelPath=../timer.nim" &
+    " -d:ffiSrcPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
   exec "nim c " & nimFlagsRefc &
     " --app:lib --noMain --nimMainPrefix:libmy_timer" &
     " -d:ffiGenBindings -d:targetLang=cpp" &
     " -d:ffiOutputDir=examples/timer/cpp_bindings" &
-    " -d:ffiNimSrcRelPath=../timer.nim" &
+    " -d:ffiSrcPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
