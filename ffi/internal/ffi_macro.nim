@@ -5,6 +5,7 @@ import ../codegen/[meta, string_helpers]
 when defined(ffiGenBindings):
   import ../codegen/rust
   import ../codegen/cpp
+  import ../codegen/cddl
 
 # ---------------------------------------------------------------------------
 # String helpers used by multiple macros
@@ -1377,8 +1378,7 @@ macro ffiDtor*(prc: untyped): untyped =
 # ---------------------------------------------------------------------------
 
 macro genBindings*(
-    outputDir: static[string] = ffiOutputDir,
-    nimSrcRelPath: static[string] = ffiNimSrcRelPath,
+    outputDir: static[string] = ffiOutputDir, nimSrcRelPath: static[string] = ffiSrcPath
 ): untyped =
   ## Emits C++ or Rust binding files from the compile-time FFI registries.
   ## The foreign-side wrapper encodes one CBOR buffer per request.
@@ -1395,14 +1395,14 @@ macro genBindings*(
   ##
   ## Supported languages (-d:targetLang): "rust" (default), "cpp".
   ## Output path and nim source path default to -d:ffiOutputDir and
-  ## -d:ffiNimSrcRelPath, or can be passed as explicit arguments.
+  ## -d:ffiSrcPath, or can be passed as explicit arguments.
   ## This macro is a no-op unless -d:ffiGenBindings is set.
   ##
   ## Example (all via compile flags):
   ##   genBindings()
   ##   # nim c -d:ffiGenBindings -d:targetLang=rust \
   ##   #        -d:ffiOutputDir=examples/timer/rust_bindings \
-  ##   #        -d:ffiNimSrcRelPath=../timer.nim mylib.nim
+  ##   #        -d:ffiSrcPath=../timer.nim mylib.nim
 
   when defined(ffiGenBindings):
     if outputDir.len == 0:
@@ -1421,7 +1421,13 @@ macro genBindings*(
       generateCppBindings(
         ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath
       )
+    of "cddl":
+      generateCddlBindings(
+        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath
+      )
     else:
-      error("genBindings: unknown targetLang '" & lang & "'. Use 'rust' or 'cpp'.")
+      error(
+        "genBindings: unknown targetLang '" & lang & "'. Use 'rust', 'cpp', or 'cddl'."
+      )
 
   return newEmptyNode()

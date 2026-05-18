@@ -1,0 +1,45 @@
+; CDDL schema for `timer` — auto-generated from ../timer.nim
+; Wire format: CBOR (RFC 8949). Errors return raw UTF-8 (not CBOR) and
+; are intentionally absent from this schema.
+
+; ─── User-declared FFI types ──────────────────────────────────────
+TimerConfig = { name: tstr }
+EchoRequest = { message: tstr, delayMs: int }
+EchoResponse = { echoed: tstr, timerName: tstr }
+ComplexRequest = { messages: [* EchoRequest], tags: [* tstr], note: tstr / nil, retries: int / nil }
+ComplexResponse = { summary: tstr, itemCount: int, hasNote: bool }
+JobSpec = { name: tstr, payload: [* tstr], priority: int }
+RetryPolicy = { maxAttempts: int, backoffMs: int, retryOn: [* tstr] }
+ScheduleConfig = { startAtMs: int, intervalMs: int, jitter: int / nil }
+ScheduleResult = { jobId: tstr, willRunCount: int, firstRunAtMs: int, effectiveBackoffMs: int }
+
+; ─── Request envelopes (one CBOR blob per request) ────────────────
+TimerCreateCtorReq = { config: TimerConfig }
+TimerEchoReq = { req: EchoRequest }
+TimerVersionReq = { }
+TimerComplexReq = { req: ComplexRequest }
+TimerScheduleReq = { job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig }
+
+; ─── Procs ─────────────────────────────────────────────────────────
+; timer_create (ctor)
+timer_create-request = TimerCreateCtorReq
+timer_create-response = tstr
+
+; timer_echo (ffi)
+timer_echo-request = TimerEchoReq
+timer_echo-response = EchoResponse
+
+; timer_version (ffi)
+timer_version-request = TimerVersionReq
+timer_version-response = tstr
+
+; timer_complex (ffi)
+timer_complex-request = TimerComplexReq
+timer_complex-response = ComplexResponse
+
+; timer_schedule (ffi)
+timer_schedule-request = TimerScheduleReq
+timer_schedule-response = ScheduleResult
+
+; timer_destroy (dtor)
+timer_destroy-response = nil

@@ -30,6 +30,7 @@ task test, "Run all tests under --mm:orc and --mm:refc":
     exec "nim c -r " & flags & " tests/test_meta.nim"
     exec "nim c -r " & flags & " tests/test_string_helpers.nim"
     exec "nim c -r " & flags & " tests/test_wire_compat.nim"
+    exec "nim c -r " & flags & " tests/test_cddl_codegen.nim"
 
 task test_alloc, "Run alloc unit tests under --mm:orc and --mm:refc":
   exec "nim c -r " & nimFlagsOrc & " tests/test_alloc.nim"
@@ -58,6 +59,14 @@ task genbindings_rust, "Generate Rust bindings for the timer example":
     " --app:lib --noMain --nimMainPrefix:libtimer" &
     " -d:ffiGenBindings -d:targetLang=rust" &
     " -d:ffiOutputDir=examples/timer/rust_bindings" &
+    " -d:ffiNimSrcRelPath=../timer.nim" &
+    " -o:/dev/null examples/timer/timer.nim"
+
+task genbindings_cddl, "Generate CDDL schema for the timer example":
+  exec "nim c " & nimFlagsOrc &
+    " --app:lib --noMain --nimMainPrefix:libtimer" &
+    " -d:ffiGenBindings -d:targetLang=cddl" &
+    " -d:ffiOutputDir=examples/timer/cddl_bindings" &
     " -d:ffiNimSrcRelPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
 

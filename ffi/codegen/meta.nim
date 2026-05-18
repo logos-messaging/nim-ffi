@@ -41,5 +41,5 @@ const targetLang* {.strdefine.} = "rust"
 const ffiOutputDir* {.strdefine.} = ""
 
 # Nim source path (relative to outputDir) embedded in generated build files;
-# set with -d:ffiNimSrcRelPath=../relative/path.nim
-const ffiNimSrcRelPath* {.strdefine.} = ""
+# set with -d:ffiSrcPath=../relative/path.nim
+const ffiSrcPath* {.strdefine.} = ""
