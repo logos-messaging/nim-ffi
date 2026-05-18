@@ -29,8 +29,6 @@ proc nimTypeToCddl*(typeName: string): string =
   ## CDDL equivalent. Unknown PascalCase names are passed through as references
   ## to other CDDL rules in the same document.
   let t = typeName.strip()
-  if t.startsWith("ptr "):
-    return "uint" # in-process pointer; documented inline at the call site
   let seqI = innerOf(t, "seq[")
   if seqI.len > 0:
     return "[* " & nimTypeToCddl(seqI) & "]"
@@ -88,13 +86,7 @@ proc emitMap(
 proc emitObjectFields(t: FFITypeMeta): string =
   var fields: seq[tuple[name: string, typeName: string, isPtr: bool]] = @[]
   for f in t.fields:
-    let isPtr = f.typeName.startsWith("ptr ")
-    let tn =
-      if isPtr:
-        f.typeName[4 .. ^1]
-      else:
-        f.typeName
-    fields.add((name: f.name, typeName: tn, isPtr: isPtr))
+    fields.add((name: f.name, typeName: f.typeName, isPtr: false))
   emitMap(fields)
 
 proc emitReqFields(p: FFIProcMeta): string =
