@@ -3,7 +3,7 @@
 ## user-declared {.ffi.} type becomes a CDDL rule, every {.ffi.} / {.ffiCtor.}
 ## proc gets a request envelope rule plus a response shape rule.
 
-import std/[os, strutils]
+import std/[os, strutils, unicode]
 import ./meta
 
 proc innerOf(typeName, prefix: string): string =
@@ -14,9 +14,7 @@ proc innerOf(typeName, prefix: string): string =
 proc capitalizeFirstLetter(s: string): string =
   if s.len == 0:
     return s
-  var res = s
-  res[0] = s[0].toUpperAscii()
-  return res
+  return s.capitalize()
 
 proc toCamelCase(s: string): string =
   ## "testlib_create" → "TestlibCreate"
