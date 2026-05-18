@@ -12,16 +12,19 @@ proc innerOf(typeName, prefix: string): string =
   return ""
 
 proc capitalizeFirstLetter(s: string): string =
-  if s.len == 0: return s
-  result = s
-  result[0] = s[0].toUpperAscii()
+  if s.len == 0:
+    return s
+  var res = s
+  res[0] = s[0].toUpperAscii()
+  return res
 
 proc toCamelCase(s: string): string =
   ## "testlib_create" → "TestlibCreate"
   var parts = s.split('_')
-  result = ""
+  var res = ""
   for p in parts:
-    result.add capitalizeFirstLetter(p)
+    res.add capitalizeFirstLetter(p)
+  return res
 
 proc nimTypeToCddl*(typeName: string): string =
   ## Maps a Nim type name (as recorded in the compile-time registries) to its
@@ -38,7 +41,11 @@ proc nimTypeToCddl*(typeName: string): string =
     # CDDL has no fixed-length array literal as ergonomic as Nim's array; emit
     # an unbounded array whose element type is the user-declared element type.
     let commaIdx = arrI.find(',')
-    let elemT = if commaIdx >= 0: arrI[commaIdx + 1 .. ^1].strip() else: arrI
+    let elemT =
+      if commaIdx >= 0:
+        arrI[commaIdx + 1 .. ^1].strip()
+      else:
+        arrI
     return "[* " & nimTypeToCddl(elemT) & "]"
   let optI = innerOf(t, "Option[")
   if optI.len > 0:
@@ -54,21 +61,29 @@ proc nimTypeToCddl*(typeName: string): string =
   of "float", "float64": "float64"
   of "float32": "float32"
   of "pointer": "uint"
-  else: t # reference to another rule in this CDDL document
+  else: t
+    # reference to another rule in this CDDL document
 
 proc reqStructName(p: FFIProcMeta): string =
   ## Mirrors the Nim macro: <CamelCase(procName)>{Ctor}Req.
   let camel = toCamelCase(p.procName)
-  if p.kind == FFIKind.CTOR: camel & "CtorReq" else: camel & "Req"
+  if p.kind == FFIKind.CTOR:
+    camel & "CtorReq"
+  else:
+    camel & "Req"
 
-proc emitMap(fields: openArray[tuple[name: string, typeName: string, isPtr: bool]]): string =
+proc emitMap(
+    fields: openArray[tuple[name: string, typeName: string, isPtr: bool]]
+): string =
   if fields.len == 0:
     return "{ }"
   var parts: seq[string] = @[]
   for f in fields:
     let cddlType =
-      if f.isPtr: "uint"
-      else: nimTypeToCddl(f.typeName)
+      if f.isPtr:
+        "uint"
+      else:
+        nimTypeToCddl(f.typeName)
     parts.add(f.name & ": " & cddlType)
   "{ " & parts.join(", ") & " }"
 
@@ -76,7 +91,11 @@ proc emitObjectFields(t: FFITypeMeta): string =
   var fields: seq[tuple[name: string, typeName: string, isPtr: bool]] = @[]
   for f in t.fields:
     let isPtr = f.typeName.startsWith("ptr ")
-    let tn = if isPtr: f.typeName[4 .. ^1] else: f.typeName
+    let tn =
+      if isPtr:
+        f.typeName[4 .. ^1]
+      else:
+        f.typeName
     fields.add((name: f.name, typeName: tn, isPtr: isPtr))
   emitMap(fields)
 
@@ -97,8 +116,10 @@ proc responseRule(p: FFIProcMeta): string =
     # The dtor has no meaningful payload — handleRes sends a CBOR null sentinel.
     "nil"
   of FFIKind.FFI:
-    if p.returnIsPtr: "uint"
-    else: nimTypeToCddl(p.returnTypeName)
+    if p.returnIsPtr:
+      "uint"
+    else:
+      nimTypeToCddl(p.returnTypeName)
 
 proc generateCddlSchema*(
     procs: seq[FFIProcMeta],
@@ -113,7 +134,9 @@ proc generateCddlSchema*(
   L.add("")
 
   if types.len > 0:
-    L.add("; ─── User-declared FFI types ──────────────────────────────────────")
+    L.add(
+      "; ─── User-declared FFI types ──────────────────────────────────────"
+    )
     for t in types:
       L.add(t.name & " = " & emitObjectFields(t))
     L.add("")
@@ -122,16 +145,21 @@ proc generateCddlSchema*(
   let nonDtor = block:
     var r: seq[FFIProcMeta] = @[]
     for p in procs:
-      if p.kind != FFIKind.DTOR: r.add(p)
+      if p.kind != FFIKind.DTOR:
+        r.add(p)
     r
   if nonDtor.len > 0:
-    L.add("; ─── Request envelopes (one CBOR blob per request) ────────────────")
+    L.add(
+      "; ─── Request envelopes (one CBOR blob per request) ────────────────"
+    )
     for p in nonDtor:
       L.add(reqStructName(p) & " = " & emitReqFields(p))
     L.add("")
 
   # Per-proc request/response rules.
-  L.add("; ─── Procs ─────────────────────────────────────────────────────────")
+  L.add(
+    "; ─── Procs ─────────────────────────────────────────────────────────"
+  )
   for p in procs:
     let kindTag =
       case p.kind
@@ -144,7 +172,7 @@ proc generateCddlSchema*(
     L.add(p.procName & "-response = " & responseRule(p))
     L.add("")
 
-  result = L.join("\n")
+  return L.join("\n")
 
 proc generateCddlBindings*(
     procs: seq[FFIProcMeta],

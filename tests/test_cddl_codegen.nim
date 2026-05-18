@@ -7,14 +7,16 @@ import unittest2
 import ../ffi/codegen/[meta, cddl]
 
 proc fieldsOf(pairs: openArray[(string, string)]): seq[FFIFieldMeta] =
-  result = @[]
+  var res = @[]
   for p in pairs:
-    result.add(FFIFieldMeta(name: p[0], typeName: p[1]))
+    res.add(FFIFieldMeta(name: p[0], typeName: p[1]))
+  return res
 
 proc paramsOf(triples: openArray[(string, string, bool)]): seq[FFIParamMeta] =
-  result = @[]
+  var res = @[]
   for t in triples:
-    result.add(FFIParamMeta(name: t[0], typeName: t[1], isPtr: t[2]))
+    res.add(FFIParamMeta(name: t[0], typeName: t[1], isPtr: t[2]))
+  return res
 
 proc field(n, t: string): FFIFieldMeta =
   FFIFieldMeta(name: n, typeName: t)
