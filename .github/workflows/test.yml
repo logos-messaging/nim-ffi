@@ -34,13 +34,6 @@ jobs:
     name: ${{ matrix.label }} · Nim ${{ matrix.nim-version }} · ${{ matrix.mm }}
 
     steps:
-      - name: Disable git autocrlf (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          git config --global core.autocrlf false
-          git config --global core.eol lf
-
       - uses: actions/checkout@v4
 
       - name: Setup Nim
