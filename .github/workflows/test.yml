@@ -16,7 +16,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-15, windows-latest]
-        nim-version: ['2.2.4', 'stable']
+        nim-version: ['2.2.10', 'stable']
         mm: [orc, refc]
         include:
           - os: ubuntu-22.04

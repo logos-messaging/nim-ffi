@@ -7,7 +7,7 @@ license = "MIT or Apache License 2.0"
 
 packageName = "ffi"
 
-requires "nim >= 2.2.4"
+requires "nim >= 2.2.6"
 requires "chronos"
 requires "chronicles"
 requires "taskpools"

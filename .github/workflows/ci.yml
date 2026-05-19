@@ -44,7 +44,7 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       NIMBLE_VERSION: '0.22.3'
-      NIM_VERSION: '2.2.4'
+      NIM_VERSION: '2.2.10'
     steps:
       - uses: actions/checkout@v4
 

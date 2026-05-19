@@ -4,7 +4,7 @@ author = "Institute of Free Technology"
 description = "Example Nim timer library using nim-ffi"
 license = "MIT or Apache License 2.0"
 
-requires "nim >= 2.2.4"
+requires "nim >= 2.2.6"
 requires "chronos"
 requires "chronicles"
 requires "taskpools"
