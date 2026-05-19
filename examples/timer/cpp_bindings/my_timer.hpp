@@ -478,10 +478,10 @@ inline CborError decode_cbor(CborValue& it, ScheduleResult& v) {
 // Per-proc request envelopes (CBOR encoded on the wire)
 // ============================================================
 
-struct TimerCreateCtorReq {
+struct MyTimerCreateCtorReq {
     TimerConfig config;
 };
-inline CborError encode_cbor(CborEncoder& e, const TimerCreateCtorReq& v) {
+inline CborError encode_cbor(CborEncoder& e, const MyTimerCreateCtorReq& v) {
     CborEncoder m;
     CborError err = cbor_encoder_create_map(&e, &m, 1);
     if (err) return err;
@@ -489,7 +489,7 @@ inline CborError encode_cbor(CborEncoder& e, const TimerCreateCtorReq& v) {
     err = encode_cbor(m, v.config);              if (err) return err;
     return cbor_encoder_close_container(&e, &m);
 }
-inline CborError decode_cbor(CborValue& it, TimerCreateCtorReq& v) {
+inline CborError decode_cbor(CborValue& it, MyTimerCreateCtorReq& v) {
     if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
     CborValue field;
     CborError err;
@@ -499,10 +499,10 @@ inline CborError decode_cbor(CborValue& it, TimerCreateCtorReq& v) {
     return cbor_value_advance(&it);
 }
 
-struct TimerEchoReq {
+struct MyTimerEchoReq {
     EchoRequest req;
 };
-inline CborError encode_cbor(CborEncoder& e, const TimerEchoReq& v) {
+inline CborError encode_cbor(CborEncoder& e, const MyTimerEchoReq& v) {
     CborEncoder m;
     CborError err = cbor_encoder_create_map(&e, &m, 1);
     if (err) return err;
@@ -510,7 +510,7 @@ inline CborError encode_cbor(CborEncoder& e, const TimerEchoReq& v) {
     err = encode_cbor(m, v.req);              if (err) return err;
     return cbor_encoder_close_container(&e, &m);
 }
-inline CborError decode_cbor(CborValue& it, TimerEchoReq& v) {
+inline CborError decode_cbor(CborValue& it, MyTimerEchoReq& v) {
     if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
     CborValue field;
     CborError err;
@@ -520,23 +520,23 @@ inline CborError decode_cbor(CborValue& it, TimerEchoReq& v) {
     return cbor_value_advance(&it);
 }
 
-struct TimerVersionReq {
+struct MyTimerVersionReq {
 };
-inline CborError encode_cbor(CborEncoder& e, const TimerVersionReq&) {
+inline CborError encode_cbor(CborEncoder& e, const MyTimerVersionReq&) {
     CborEncoder m;
     CborError err = cbor_encoder_create_map(&e, &m, 0);
     if (err) return err;
     return cbor_encoder_close_container(&e, &m);
 }
-inline CborError decode_cbor(CborValue& it, TimerVersionReq&) {
+inline CborError decode_cbor(CborValue& it, MyTimerVersionReq&) {
     if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
     return cbor_value_advance(&it);
 }
 
-struct TimerComplexReq {
+struct MyTimerComplexReq {
     ComplexRequest req;
 };
-inline CborError encode_cbor(CborEncoder& e, const TimerComplexReq& v) {
+inline CborError encode_cbor(CborEncoder& e, const MyTimerComplexReq& v) {
     CborEncoder m;
     CborError err = cbor_encoder_create_map(&e, &m, 1);
     if (err) return err;
@@ -544,7 +544,7 @@ inline CborError encode_cbor(CborEncoder& e, const TimerComplexReq& v) {
     err = encode_cbor(m, v.req);              if (err) return err;
     return cbor_encoder_close_container(&e, &m);
 }
-inline CborError decode_cbor(CborValue& it, TimerComplexReq& v) {
+inline CborError decode_cbor(CborValue& it, MyTimerComplexReq& v) {
     if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
     CborValue field;
     CborError err;
@@ -554,12 +554,12 @@ inline CborError decode_cbor(CborValue& it, TimerComplexReq& v) {
     return cbor_value_advance(&it);
 }
 
-struct TimerScheduleReq {
+struct MyTimerScheduleReq {
     JobSpec job;
     RetryPolicy retry;
     ScheduleConfig schedule;
 };
-inline CborError encode_cbor(CborEncoder& e, const TimerScheduleReq& v) {
+inline CborError encode_cbor(CborEncoder& e, const MyTimerScheduleReq& v) {
     CborEncoder m;
     CborError err = cbor_encoder_create_map(&e, &m, 3);
     if (err) return err;
@@ -571,7 +571,7 @@ inline CborError encode_cbor(CborEncoder& e, const TimerScheduleReq& v) {
     err = encode_cbor(m, v.schedule);              if (err) return err;
     return cbor_encoder_close_container(&e, &m);
 }
-inline CborError decode_cbor(CborValue& it, TimerScheduleReq& v) {
+inline CborError decode_cbor(CborValue& it, MyTimerScheduleReq& v) {
     if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
     CborValue field;
     CborError err;
@@ -594,12 +594,12 @@ inline CborError decode_cbor(CborValue& it, TimerScheduleReq& v) {
 extern "C" {
 typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_data);
 
-void* timer_create(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback callback, void* user_data);
-int timer_echo(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
-int timer_version(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
-int timer_complex(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
-int timer_schedule(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
-int timer_destroy(void* ctx);
+void* my_timer_create(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback callback, void* user_data);
+int my_timer_echo(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int my_timer_version(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int my_timer_complex(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int my_timer_schedule(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int my_timer_destroy(void* ctx);
 } // extern "C"
 
 // ============================================================
@@ -659,29 +659,29 @@ inline std::vector<std::uint8_t> ffi_call_(std::function<int(FFICallback, void*)
 // High-level C++ context class
 // ============================================================
 
-class TimerCtx {
+class MyTimerCtx {
 public:
-    static TimerCtx create(const TimerConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
-        const auto ffi_req_ = TimerCreateCtorReq{config};
+    static MyTimerCtx create(const TimerConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
+        const auto ffi_req_ = MyTimerCreateCtorReq{config};
         const auto ffi_req_bytes_ = encodeCborFFI(ffi_req_);
         const auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            (void)timer_create(ffi_req_bytes_.data(), ffi_req_bytes_.size(), cb, ud);
+            (void)my_timer_create(ffi_req_bytes_.data(), ffi_req_bytes_.size(), cb, ud);
             return 0;
         }, timeout);
         const auto addr_str = decodeCborFFI<std::string>(ffi_raw_);
         try {
             const auto addr = std::stoull(addr_str);
-            return TimerCtx(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout);
+            return MyTimerCtx(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout);
         } catch (const std::exception&) {
             throw std::runtime_error("FFI create returned non-numeric address: " + addr_str);
         }
     }
 
-    static std::future<TimerCtx> createAsync(const TimerConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
+    static std::future<MyTimerCtx> createAsync(const TimerConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
         return std::async(std::launch::async, [config, timeout]() { return create(config, timeout); });
     }
 
-    // Rule of Five: because this class owns a raw resource (the timer
+    // Rule of Five: because this class owns a raw resource (the my_timer
     // context pointer freed in the destructor), the compiler-generated copy
     // and move special members would do the wrong thing — copies would
     // double-free, and a default move would leave both objects pointing at
@@ -693,22 +693,22 @@ public:
     //   5. move assignment     — destroys the current context, then
     //                            transfers ownership from `other`.
     // See: https://en.cppreference.com/w/cpp/language/rule_of_three
-    ~TimerCtx() {
+    ~MyTimerCtx() {
         if (ptr_) {
-            timer_destroy(ptr_);
+            my_timer_destroy(ptr_);
             ptr_ = nullptr;
         }
     }
 
-    TimerCtx(const TimerCtx&) = delete;
-    TimerCtx& operator=(const TimerCtx&) = delete;
+    MyTimerCtx(const MyTimerCtx&) = delete;
+    MyTimerCtx& operator=(const MyTimerCtx&) = delete;
 
-    TimerCtx(TimerCtx&& other) noexcept : ptr_(other.ptr_), timeout_(other.timeout_) {
+    MyTimerCtx(MyTimerCtx&& other) noexcept : ptr_(other.ptr_), timeout_(other.timeout_) {
         other.ptr_ = nullptr;
     }
-    TimerCtx& operator=(TimerCtx&& other) noexcept {
+    MyTimerCtx& operator=(MyTimerCtx&& other) noexcept {
         if (this != &other) {
-            if (ptr_) timer_destroy(ptr_);
+            if (ptr_) my_timer_destroy(ptr_);
             ptr_ = other.ptr_;
             timeout_ = other.timeout_;
             other.ptr_ = nullptr;
@@ -717,10 +717,10 @@ public:
     }
 
     EchoResponse echo(const EchoRequest& req) const {
-        const auto ffi_req_ = TimerEchoReq{req};
+        const auto ffi_req_ = MyTimerEchoReq{req};
         const auto ffi_req_bytes_ = encodeCborFFI(ffi_req_);
         const auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return timer_echo(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+            return my_timer_echo(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
         }, timeout_);
         return decodeCborFFI<EchoResponse>(ffi_raw_);
     }
@@ -730,10 +730,10 @@ public:
     }
 
     std::string version() const {
-        const auto ffi_req_ = TimerVersionReq{};
+        const auto ffi_req_ = MyTimerVersionReq{};
         const auto ffi_req_bytes_ = encodeCborFFI(ffi_req_);
         const auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return timer_version(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+            return my_timer_version(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
         }, timeout_);
         return decodeCborFFI<std::string>(ffi_raw_);
     }
@@ -743,10 +743,10 @@ public:
     }
 
     ComplexResponse complex(const ComplexRequest& req) const {
-        const auto ffi_req_ = TimerComplexReq{req};
+        const auto ffi_req_ = MyTimerComplexReq{req};
         const auto ffi_req_bytes_ = encodeCborFFI(ffi_req_);
         const auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return timer_complex(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+            return my_timer_complex(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
         }, timeout_);
         return decodeCborFFI<ComplexResponse>(ffi_raw_);
     }
@@ -756,10 +756,10 @@ public:
     }
 
     ScheduleResult schedule(const JobSpec& job, const RetryPolicy& retry, const ScheduleConfig& schedule) const {
-        const auto ffi_req_ = TimerScheduleReq{job, retry, schedule};
+        const auto ffi_req_ = MyTimerScheduleReq{job, retry, schedule};
         const auto ffi_req_bytes_ = encodeCborFFI(ffi_req_);
         const auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return timer_schedule(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+            return my_timer_schedule(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
         }, timeout_);
         return decodeCborFFI<ScheduleResult>(ffi_raw_);
     }
@@ -771,5 +771,5 @@ public:
 private:
     void* ptr_;
     std::chrono::milliseconds timeout_;
-    explicit TimerCtx(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}
+    explicit MyTimerCtx(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}
 };

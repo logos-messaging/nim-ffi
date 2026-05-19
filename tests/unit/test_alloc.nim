@@ -1,5 +1,5 @@
 import unittest2
-import ../ffi/alloc
+import ffi/alloc
 
 suite "alloc(cstring)":
   test "nil input returns empty cstring":

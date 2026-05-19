@@ -17,7 +17,7 @@
 import std/[options, strutils]
 import unittest
 import results
-import ../ffi
+import ffi
 
 type WireSimple {.ffi.} = object
   name: string

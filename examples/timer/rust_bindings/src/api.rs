@@ -98,8 +98,8 @@ where
     }
 }
 
-/// High-level context for `Timer`.
-pub struct TimerCtx {
+/// High-level context for `MyTimer`.
+pub struct MyTimerCtx {
     ptr: *mut c_void,
     timeout: Duration,
 }
@@ -112,24 +112,24 @@ pub struct TimerCtx {
 // guard (`onFFIThread` threadvar) prevents handlers from re-entering the
 // dispatcher and self-deadlocking. These invariants make it sound to mark
 // the wrapper as Send + Sync.
-unsafe impl Send for TimerCtx {}
-unsafe impl Sync for TimerCtx {}
+unsafe impl Send for MyTimerCtx {}
+unsafe impl Sync for MyTimerCtx {}
 
-impl Drop for TimerCtx {
+impl Drop for MyTimerCtx {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
-            unsafe { ffi::timer_destroy(self.ptr); }
+            unsafe { ffi::my_timer_destroy(self.ptr); }
             self.ptr = std::ptr::null_mut();
         }
     }
 }
 
-impl TimerCtx {
+impl MyTimerCtx {
     pub fn create(config: TimerConfig, timeout: Duration) -> Result<Self, String> {
-        let req = TimerCreateCtorReq { config };
+        let req = MyTimerCreateCtorReq { config };
         let req_bytes = encode_cbor(&req)?;
         let raw_bytes = ffi_call_sync(timeout, |cb, ud| unsafe {
-            let _ = ffi::timer_create(req_bytes.as_ptr(), req_bytes.len(), cb, ud);
+            let _ = ffi::my_timer_create(req_bytes.as_ptr(), req_bytes.len(), cb, ud);
             0
         })?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
@@ -138,10 +138,10 @@ impl TimerCtx {
     }
 
     pub async fn new_async(config: TimerConfig, timeout: Duration) -> Result<Self, String> {
-        let req = TimerCreateCtorReq { config };
+        let req = MyTimerCreateCtorReq { config };
         let req_bytes = encode_cbor(&req)?;
         let raw_bytes = ffi_call_async(timeout, move |cb, ud| unsafe {
-            let _ = ffi::timer_create(req_bytes.as_ptr(), req_bytes.len(), cb, ud);
+            let _ = ffi::my_timer_create(req_bytes.as_ptr(), req_bytes.len(), cb, ud);
             0
         }).await?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
@@ -150,77 +150,77 @@ impl TimerCtx {
     }
 
     pub fn echo(&self, req: EchoRequest) -> Result<EchoResponse, String> {
-        let req = TimerEchoReq { req };
+        let req = MyTimerEchoReq { req };
         let req_bytes = encode_cbor(&req)?;
         let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
-            ffi::timer_echo(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+            ffi::my_timer_echo(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         })?;
         decode_cbor::<EchoResponse>(&raw_bytes)
     }
 
     pub async fn echo_async(&self, req: EchoRequest) -> Result<EchoResponse, String> {
-        let req = TimerEchoReq { req };
+        let req = MyTimerEchoReq { req };
         let req_bytes = encode_cbor(&req)?;
         let ptr = self.ptr as usize;
         let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
-            ffi::timer_echo(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+            ffi::my_timer_echo(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         }).await?;
         decode_cbor::<EchoResponse>(&raw_bytes)
     }
 
     pub fn version(&self) -> Result<String, String> {
-        let req = TimerVersionReq {};
+        let req = MyTimerVersionReq {};
         let req_bytes = encode_cbor(&req)?;
         let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
-            ffi::timer_version(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+            ffi::my_timer_version(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         })?;
         decode_cbor::<String>(&raw_bytes)
     }
 
     pub async fn version_async(&self) -> Result<String, String> {
-        let req = TimerVersionReq {};
+        let req = MyTimerVersionReq {};
         let req_bytes = encode_cbor(&req)?;
         let ptr = self.ptr as usize;
         let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
-            ffi::timer_version(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+            ffi::my_timer_version(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         }).await?;
         decode_cbor::<String>(&raw_bytes)
     }
 
     pub fn complex(&self, req: ComplexRequest) -> Result<ComplexResponse, String> {
-        let req = TimerComplexReq { req };
+        let req = MyTimerComplexReq { req };
         let req_bytes = encode_cbor(&req)?;
         let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
-            ffi::timer_complex(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+            ffi::my_timer_complex(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         })?;
         decode_cbor::<ComplexResponse>(&raw_bytes)
     }
 
     pub async fn complex_async(&self, req: ComplexRequest) -> Result<ComplexResponse, String> {
-        let req = TimerComplexReq { req };
+        let req = MyTimerComplexReq { req };
         let req_bytes = encode_cbor(&req)?;
         let ptr = self.ptr as usize;
         let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
-            ffi::timer_complex(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+            ffi::my_timer_complex(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         }).await?;
         decode_cbor::<ComplexResponse>(&raw_bytes)
     }
 
     pub fn schedule(&self, job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig) -> Result<ScheduleResult, String> {
-        let req = TimerScheduleReq { job, retry, schedule };
+        let req = MyTimerScheduleReq { job, retry, schedule };
         let req_bytes = encode_cbor(&req)?;
         let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
-            ffi::timer_schedule(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+            ffi::my_timer_schedule(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         })?;
         decode_cbor::<ScheduleResult>(&raw_bytes)
     }
 
     pub async fn schedule_async(&self, job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig) -> Result<ScheduleResult, String> {
-        let req = TimerScheduleReq { job, retry, schedule };
+        let req = MyTimerScheduleReq { job, retry, schedule };
         let req_bytes = encode_cbor(&req)?;
         let ptr = self.ptr as usize;
         let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
-            ffi::timer_schedule(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+            ffi::my_timer_schedule(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         }).await?;
         decode_cbor::<ScheduleResult>(&raw_bytes)
     }

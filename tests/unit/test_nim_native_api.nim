@@ -7,7 +7,7 @@
 import std/options
 import unittest2
 import results
-import ../ffi
+import ffi
 
 type Counter = object
   start: int

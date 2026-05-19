@@ -2,9 +2,9 @@
 
 ## Purpose
 
-This folder contains **auto-generated C++ bindings** for the `timer` Nim library. It is generated from `../timer.nim` and provides:
+This folder contains **auto-generated C++ bindings** for the `my_timer` Nim library. It is generated from `../timer.nim` and provides:
 
-- `timer.hpp`: High-level C++ class (`TimerCtx`) wrapping the FFI interface
+- `my_timer.hpp`: High-level C++ class (`MyTimerCtx`) wrapping the FFI interface
 - `main.cpp`: Example executable demonstrating how to use the bindings
 - `CMakeLists.txt`: Build configuration that compiles the Nim library and links the C++ example
 

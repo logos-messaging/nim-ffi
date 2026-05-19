@@ -82,4 +82,4 @@ jobs:
           if [ "$RUNNER_OS" == "Windows" ]; then
             export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
           fi
-          nim c -r --mm:${{ matrix.mm }} -d:chronicles_log_level=WARN tests/${{ inputs.test }}.nim
+          nim c -r --mm:${{ matrix.mm }} -d:chronicles_log_level=WARN tests/unit/${{ inputs.test }}.nim

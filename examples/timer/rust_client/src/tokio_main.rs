@@ -1,11 +1,11 @@
 use std::time::Duration;
-use timer::{
-    EchoRequest, JobSpec, RetryPolicy, ScheduleConfig, TimerConfig, TimerCtx,
+use my_timer::{
+    EchoRequest, JobSpec, MyTimerCtx, RetryPolicy, ScheduleConfig, TimerConfig,
 };
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let ctx = TimerCtx::new_async(
+    let ctx = MyTimerCtx::new_async(
         TimerConfig { name: "tokio-demo".into() },
         Duration::from_secs(30),
     ).await?;

@@ -8,7 +8,7 @@
 import std/locks
 import unittest2
 import results
-import ../ffi
+import ffi
 
 type GcTestLib = object
 
