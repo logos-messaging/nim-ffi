@@ -70,16 +70,6 @@ jobs:
         if: steps.cache-nimbledeps.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          if [ "$RUNNER_OS" == "Windows" ]; then
-            export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
-            # Nimble's lockfile checksum is computed over file contents; if
-            # git's autocrlf converts LF→CRLF during clone, the Windows-side
-            # hash diverges from the recorded one. Force both global and
-            # system git to leave line endings alone for the nimble clones.
-            git config --global core.autocrlf false
-            git config --global core.eol lf
-            git config --system core.autocrlf false || true
-          fi
           nimble setup --localdeps -y
 
       - name: Build

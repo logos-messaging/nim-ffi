@@ -16,11 +16,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04-arm]
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
         mm: [orc, refc]
 
     runs-on: ${{ matrix.os }}
     name: ${{ inputs.sanitizer }} · ${{ matrix.os }} · ${{ matrix.mm }}
+    # refc's GC conservatively scans the stack via setjmp+walk, which
+    # intentionally reads one word past the saved-registers buffer to
+    # transition into scanning the rest of the thread stack. ASan flags
+    # that as a stack-buffer-overflow (false positive — see its "custom
+    # stack unwind mechanism" hint). orc doesn't conservatively scan, so
+    # it's the only mm we sanitize under asan-ubsan. refc keeps coverage
+    # in the non-sanitized matrix (test.yml) and under tsan.
+    if: ${{ !(inputs.sanitizer == 'asan-ubsan' && matrix.mm == 'refc') }}
 
     env:
       NIM_FFI_MM:    ${{ matrix.mm }}
