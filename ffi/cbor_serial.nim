@@ -3,8 +3,11 @@
 ## FFI plumbing expects, and adds the few transport-only details the FFI layer
 ## needs on top:
 ##
-##   - `cborEncodeShared` writes into an `allocShared` buffer so the FFI thread
-##     can take ownership of the bytes without a second copy.
+##   - `cborEncodeShared` writes into a `c_malloc` buffer so the FFI thread
+##     can take ownership of the bytes without a second copy. `c_malloc`
+##     (not `allocShared`) because the buffer must be freeable from the FFI
+##     thread after the producing thread may have exited — see the note in
+##     `ffi/ffi_thread_request.nim`.
 ##   - `CborNullByte` is the canonical "successful but no value" wire sentinel.
 ##
 ## `cborEncode` / `cborDecode` are the public API the macros and tests use.
@@ -24,6 +27,7 @@
 ##     `.ffiCtor.`, which is validated against `FFIContextPool` on every
 ##     re-entry. Arbitrary user pointers would lack that validation.
 
+import system/ansi_c
 import cbor_serialization, cbor_serialization/std/options, results
 
 export cbor_serialization, options, results
@@ -41,15 +45,15 @@ proc cborEncode*[T](x: T): seq[byte] =
   return Cbor.encode(x)
 
 proc cborEncodeShared*[T](x: T): tuple[data: ptr UncheckedArray[byte], len: int] =
-  ## Encodes `x` into a shared-memory buffer (`allocShared`).
+  ## Encodes `x` into a `c_malloc` buffer.
   ##
-  ## The returned `data` is owned by the caller and must be freed exactly once
-  ## via `deallocShared` (the FFIThreadRequest `deleteRequest` path does this
+  ## The returned `data` is owned by the caller and must be freed exactly
+  ## once via `c_free` (the FFIThreadRequest `deleteRequest` path does this
   ## automatically). Empty payloads return `(nil, 0)` without allocating.
   let bytes = Cbor.encode(x)
   if bytes.len == 0:
     return (nil, 0)
-  let buf = cast[ptr UncheckedArray[byte]](allocShared(bytes.len))
+  let buf = cast[ptr UncheckedArray[byte]](c_malloc(csize_t(bytes.len)))
   copyMem(buf, unsafeAddr bytes[0], bytes.len)
   return (buf, bytes.len)
 

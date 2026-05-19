@@ -187,10 +187,12 @@ suite "CBOR error handling":
 
 # ---------------------------------------------------------------------------
 # Regression for PR #23 review item 9: cborEncodeShared writes directly into
-# a shared-memory buffer (allocShared), letting the FFI thread request take
-# ownership without an intermediate seq[byte] copy. The shared-encoder must
-# produce byte-for-byte the same output as the seq-encoder.
+# a c_malloc buffer, letting the FFI thread request take ownership without
+# an intermediate seq[byte] copy. The shared-encoder must produce
+# byte-for-byte the same output as the seq-encoder.
 # ---------------------------------------------------------------------------
+
+import system/ansi_c
 
 suite "cborEncodeShared":
   test "object payload round-trips":
@@ -198,7 +200,7 @@ suite "cborEncodeShared":
     let (sd, sl) = cborEncodeShared(n)
     defer:
       if not sd.isNil:
-        deallocShared(sd)
+        c_free(sd)
     check sl > 0
     let back = cborDecodePtr(sd, sl, Nested).value
     check back.label == ""
@@ -211,7 +213,7 @@ suite "cborEncodeShared":
     let (sd, sl) = cborEncodeShared(n)
     defer:
       if not sd.isNil:
-        deallocShared(sd)
+        c_free(sd)
     check sl == seqBytes.len
     for i in 0 ..< sl:
       check sd[i] == seqBytes[i]
@@ -220,8 +222,8 @@ suite "cborEncodeShared":
     check back.point.x == 3
     check back.point.y == 4
 
-  test "large string growth (exercises reallocShared)":
-    # Larger than the initial 16-byte cap so reallocShared must run several
+  test "large string growth":
+    # Larger than the initial 16-byte cap so the encoder must grow several
     # times; verifies the shared-mode grower handles repeated reallocations.
     var big = newString(4096)
     for i in 0 ..< big.len:
@@ -229,7 +231,7 @@ suite "cborEncodeShared":
     let (sd, sl) = cborEncodeShared(big)
     defer:
       if not sd.isNil:
-        deallocShared(sd)
+        c_free(sd)
     let back = cborDecodePtr(sd, sl, string).value
     check back == big
 
@@ -237,6 +239,6 @@ suite "cborEncodeShared":
     let (sd, sl) = cborEncodeShared("")
     defer:
       if not sd.isNil:
-        deallocShared(sd)
+        c_free(sd)
     check sl == 1
     check sd[0] == 0x60'u8

@@ -1,7 +1,16 @@
 ## Carries one CBOR-encoded request blob between the main thread and the FFI
-## thread. The main thread allocates the request (in shared memory), the FFI
-## thread frees it after invoking the user callback.
+## thread. The main thread allocates the request, the FFI thread frees it
+## after invoking the user callback.
+##
+## All three pieces (envelope, reqId copy, payload buffer) are obtained from
+## libc `malloc` and released by libc `free`. Nim's `allocShared` under
+## `--mm:orc` is backed by a per-thread `MemRegion` stored in TLS; if the
+## producer thread (commonly a transient `std::async` worker on the foreign
+## side) has exited by the time the FFI thread runs `deleteRequest`, the
+## chunk's `owner` pointer dangles into reclaimed TLS and the deallocator
+## segfaults. `malloc`/`free` are process-global and immune to that.
 
+import system/ansi_c
 import results
 import chronos
 import ./ffi_types, ./alloc, ./cbor_serial
@@ -21,10 +30,10 @@ type FFIThreadRequest* = object
 proc allocBaseRequest(
     callback: FFICallBack, userData: pointer, reqId: cstring
 ): ptr FFIThreadRequest =
-  ## Allocates the request envelope in shared memory and populates the
-  ## routing fields. Payload setup is delegated to one of the payload helpers
-  ## below depending on whether the bytes need to be copied or adopted.
-  var ret = createShared(FFIThreadRequest)
+  ## Allocates the request envelope via `c_malloc` and populates the routing
+  ## fields. Payload setup is delegated to one of the payload helpers below
+  ## depending on whether the bytes need to be copied or adopted.
+  var ret = cast[ptr FFIThreadRequest](c_malloc(csize_t(sizeof(FFIThreadRequest))))
   ret[].callback = callback
   ret[].userData = userData
   ret[].reqId = reqId.alloc()
@@ -33,25 +42,26 @@ proc allocBaseRequest(
   return ret
 
 proc copySharedPayload(req: ptr FFIThreadRequest, data: ptr byte, dataLen: int) =
-  ## Allocates a fresh shared buffer and copies `dataLen` bytes from `data`
-  ## into `req`. Empty payloads (non-positive `dataLen` or nil `data`) leave
-  ## the request's payload fields at their zero-initialised state.
+  ## Allocates a fresh `c_malloc` buffer and copies `dataLen` bytes from
+  ## `data` into `req`. Empty payloads (non-positive `dataLen` or nil
+  ## `data`) leave the request's payload fields at their zero-initialised
+  ## state.
   if dataLen > 0 and not data.isNil():
-    req[].data = cast[ptr UncheckedArray[byte]](allocShared(dataLen))
+    req[].data = cast[ptr UncheckedArray[byte]](c_malloc(csize_t(dataLen)))
     copyMem(req[].data, data, dataLen)
     req[].dataLen = dataLen
 
 proc adoptOwnedSharedPayload(
     req: ptr FFIThreadRequest, data: ptr UncheckedArray[byte], dataLen: int
 ) =
-  ## Embeds an already-`allocShared` buffer into `req` without copying.
+  ## Embeds an already-`c_malloc`'d buffer into `req` without copying.
   ## `(nil, 0)` is the empty-payload contract; a zero-length-but-non-nil
   ## buffer is treated as empty and disposed here so it doesn't leak.
   if dataLen > 0 and not data.isNil():
     req[].data = data
     req[].dataLen = dataLen
   elif not data.isNil():
-    deallocShared(data)
+    c_free(data)
 
 proc initFromPtr*(
     T: typedesc[FFIThreadRequest],
@@ -91,24 +101,24 @@ proc initFromOwnedShared*(
     data: ptr UncheckedArray[byte],
     dataLen: int,
 ): ptr type T =
-  ## Takes ownership of an already-allocated shared-memory buffer (`data`)
-  ## and embeds it in the request without copying. Pair with `cborEncodeShared`
-  ## so the request payload travels from encoder to FFI thread with a single
-  ## allocation instead of seq → allocShared + copyMem.
+  ## Takes ownership of an already-allocated buffer (`data`) and embeds it
+  ## in the request without copying. Pair with `cborEncodeShared` so the
+  ## request payload travels from encoder to FFI thread with a single
+  ## allocation instead of seq → c_malloc + copyMem.
   ##
-  ## Ownership: `data` must have been allocated via `allocShared` / grown via
-  ## `reallocShared`. After this call, `deleteRequest` will `deallocShared` it.
-  ## Pass `(nil, 0)` for an empty payload.
+  ## Ownership: `data` must have been allocated via `c_malloc`. After this
+  ## call, `deleteRequest` will `c_free` it. Pass `(nil, 0)` for an empty
+  ## payload.
   var ret = allocBaseRequest(callback, userData, reqId)
   adoptOwnedSharedPayload(ret, data, dataLen)
   return ret
 
 proc deleteRequest*(request: ptr FFIThreadRequest) =
   if not request[].data.isNil:
-    deallocShared(request[].data)
+    c_free(request[].data)
   if not request[].reqId.isNil:
-    deallocShared(request[].reqId)
-  deallocShared(request)
+    c_free(cast[pointer](request[].reqId))
+  c_free(request)
 
 proc handleRes*(res: Result[seq[byte], string], request: ptr FFIThreadRequest) =
   ## Fires the registered callback exactly once and frees the request.

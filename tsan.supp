@@ -1,0 +1,18 @@
+# ThreadSanitizer suppressions for the FFI test suite.
+#
+# Format reference: https://github.com/google/sanitizers/wiki/ThreadSanitizerSuppressions
+#
+# Suppress the intentional thread leak from
+# `destroyFFIContext does not hang when event loop is blocked`:
+# when the FFI event loop is wedged by a synchronous handler, clearContext
+# in ffi/ffi_context.nim deliberately skips joinThread on ThreadExitTimeout
+# rather than hang the caller forever. The thread terminates cleanly, but
+# was never joined — TSan reports that as a thread leak.
+thread:*initContextResources*
+
+# Same intentional-leak path: because the FFI thread is never joined,
+# TSan cannot prove happens-before between its writes (inside Nim's
+# threadProcWrapper / the embedded Thread[T] struct on the test's stack)
+# and the next test's reuse of the same stack region. Reported as a
+# data race; root cause is the documented leak above.
+race:*threadProcWrapper*

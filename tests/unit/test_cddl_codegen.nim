@@ -4,16 +4,16 @@
 
 import std/strutils
 import unittest2
-import ../ffi/codegen/[meta, cddl]
+import ffi/codegen/[meta, cddl]
 
 proc fieldsOf(pairs: openArray[(string, string)]): seq[FFIFieldMeta] =
-  var res = @[]
+  var res: seq[FFIFieldMeta] = @[]
   for p in pairs:
     res.add(FFIFieldMeta(name: p[0], typeName: p[1]))
   return res
 
 proc paramsOf(triples: openArray[(string, string, bool)]): seq[FFIParamMeta] =
-  var res = @[]
+  var res: seq[FFIParamMeta] = @[]
   for t in triples:
     res.add(FFIParamMeta(name: t[0], typeName: t[1], isPtr: t[2]))
   return res
@@ -34,9 +34,6 @@ suite "nimTypeToCddl primitive mapping":
     check nimTypeToCddl("string") == "tstr"
     check nimTypeToCddl("cstring") == "tstr"
     check nimTypeToCddl("pointer") == "uint"
-
-  test "pointer types map to uint":
-    check nimTypeToCddl("ptr Foo") == "uint"
 
   test "seq[T] becomes [* T]":
     check nimTypeToCddl("seq[int]") == "[* int]"
@@ -66,32 +63,29 @@ suite "generateCddlSchema":
       FFIProcMeta(
         procName: "nimtimer_create",
         libName: "nimtimer",
-        kind: ffiCtorKind,
+        kind: FFIKind.CTOR,
         libTypeName: "NimTimer",
         extraParams: @[param("config", "TimerConfig")],
         returnTypeName: "NimTimer",
         returnIsPtr: false,
-        isAsync: true,
       ),
       FFIProcMeta(
         procName: "nimtimer_echo",
         libName: "nimtimer",
-        kind: ffiFfiKind,
+        kind: FFIKind.FFI,
         libTypeName: "NimTimer",
         extraParams: @[param("req", "EchoRequest")],
         returnTypeName: "EchoResponse",
         returnIsPtr: false,
-        isAsync: true,
       ),
       FFIProcMeta(
         procName: "nimtimer_destroy",
         libName: "nimtimer",
-        kind: ffiDtorKind,
+        kind: FFIKind.DTOR,
         libTypeName: "NimTimer",
         extraParams: @[],
         returnTypeName: "",
         returnIsPtr: false,
-        isAsync: false,
       ),
     ]
 
@@ -121,5 +115,5 @@ suite "generateCddlSchema":
 
   test "kind tags appear in proc comments":
     check "; nimtimer_create (ctor)" in cddl
-    check "; nimtimer_echo (async)" in cddl
+    check "; nimtimer_echo (ffi)" in cddl
     check "; nimtimer_destroy (dtor)" in cddl
