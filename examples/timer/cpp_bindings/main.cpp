@@ -7,9 +7,9 @@ int main() {
         auto ctx = MyTimerCtx::create(TimerConfig{"cpp-demo"});
         std::cout << "[1] Context created\n";
 
-        auto versionFuture = ctx.versionAsync();
-        auto echo1Future = ctx.echoAsync(EchoRequest{"hello from C++", 200});
-        auto echo2Future = ctx.echoAsync(EchoRequest{"second C++ request", 50});
+        auto versionFuture = ctx->versionAsync();
+        auto echo1Future = ctx->echoAsync(EchoRequest{"hello from C++", 200});
+        auto echo2Future = ctx->echoAsync(EchoRequest{"second C++ request", 50});
 
         auto version = versionFuture.get();
         std::cout << "[2] Version: " << version << "\n";
@@ -29,7 +29,7 @@ int main() {
             std::optional<int64_t>(3)
         };
 
-        auto complexFuture = ctx.complexAsync(complexReq);
+        auto complexFuture = ctx->complexAsync(complexReq);
         auto complex = complexFuture.get();
         std::cout << "[5] Complex: summary=" << complex.summary
                   << ", itemCount=" << complex.itemCount
@@ -55,7 +55,7 @@ int main() {
             /*jitter*/ std::optional<int64_t>(250),
         };
 
-        auto scheduleFuture = ctx.scheduleAsync(job, retry, schedule);
+        auto scheduleFuture = ctx->scheduleAsync(job, retry, schedule);
         auto scheduleRes = scheduleFuture.get();
         std::cout << "[6] Schedule (3 complex params): jobId=" << scheduleRes.jobId
                   << ", willRunCount=" << scheduleRes.willRunCount
