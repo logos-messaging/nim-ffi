@@ -7,51 +7,86 @@ on:
     branches: [master, main]
 
 jobs:
+  # Single source of truth for Nim / Nimble versions used by every job and
+  # every reusable workflow below. Values live in .github/versions.env so
+  # they're greppable and editable in one place. The job exposes them as
+  # outputs because the `with:` of a reusable-workflow call only accepts
+  # the `needs`, `inputs`, `vars`, and `github` contexts — `env` is not
+  # allowed there, which rules out plain workflow-level env vars.
+  versions:
+    runs-on: ubuntu-latest
+    outputs:
+      nim-versions: ${{ steps.load.outputs.NIM_VERSIONS }}
+      nimble:       ${{ steps.load.outputs.NIMBLE_VERSION }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: load
+        run: cat .github/versions.env >> "$GITHUB_OUTPUT"
+
   alloc:
     name: Alloc
+    needs: versions
     uses: ./.github/workflows/test.yml
     with:
       test: test_alloc
+      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
+      nimble-version: ${{ needs.versions.outputs.nimble }}
 
   ffi-context:
     name: FFI Context
+    needs: versions
     uses: ./.github/workflows/test.yml
     with:
       test: test_ffi_context
+      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
+      nimble-version: ${{ needs.versions.outputs.nimble }}
 
   gc-compat:
     name: GC Compatibility
+    needs: versions
     uses: ./.github/workflows/test.yml
     with:
       test: test_gc_compat
+      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
+      nimble-version: ${{ needs.versions.outputs.nimble }}
 
   serial:
     name: Serial
+    needs: versions
     uses: ./.github/workflows/test.yml
     with:
       test: test_serial
+      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
+      nimble-version: ${{ needs.versions.outputs.nimble }}
 
   ctx-validation:
     name: Context Validation
+    needs: versions
     uses: ./.github/workflows/test.yml
     with:
       test: test_ctx_validation
+      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
+      nimble-version: ${{ needs.versions.outputs.nimble }}
 
   cpp-e2e:
     name: C++ E2E
+    needs: versions
     # Codegen output doesn't vary with mm and CMake/FetchContent is most
-    # reliable on Linux, so we run a single config rather than the full matrix.
+    # reliable on Linux, so we don't matrix over OS or mm here — just Nim.
+    strategy:
+      fail-fast: false
+      matrix:
+        nim-version: ${{ fromJSON(needs.versions.outputs.nim-versions) }}
     runs-on: ubuntu-22.04
     env:
-      NIMBLE_VERSION: '0.22.3'
-      NIM_VERSION: '2.2.4'
+      NIMBLE_VERSION: ${{ needs.versions.outputs.nimble }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Nim
         uses: jiro4989/setup-nim-action@v2
         with:
-          nim-version: ${{ env.NIM_VERSION }}
+          nim-version: ${{ matrix.nim-version }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Nimble ${{ env.NIMBLE_VERSION }}
@@ -66,9 +101,9 @@ jobs:
           path: |
             nimbledeps/
             nimble.paths
-          key: ${{ runner.os }}-nimbledeps-${{ env.NIM_VERSION }}-${{ hashFiles('*.nimble') }}
+          key: ${{ runner.os }}-nimbledeps-${{ matrix.nim-version }}-${{ hashFiles('*.nimble') }}
           restore-keys: |
-            ${{ runner.os }}-nimbledeps-${{ env.NIM_VERSION }}-
+            ${{ runner.os }}-nimbledeps-${{ matrix.nim-version }}-
             ${{ runner.os }}-nimbledeps-
 
       - name: Install nimble deps
@@ -86,12 +121,18 @@ jobs:
 
   tests-asan-ubsan:
     name: Tests · ASan+UBSan+LSan
+    needs: versions
     uses: ./.github/workflows/tests-sanitized.yml
     with:
-      sanitizer: asan-ubsan
+      sanitizer:      asan-ubsan
+      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
+      nimble-version: ${{ needs.versions.outputs.nimble }}
 
   tests-tsan:
     name: Tests · TSan
+    needs: versions
     uses: ./.github/workflows/tests-sanitized.yml
     with:
-      sanitizer: tsan
+      sanitizer:      tsan
+      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
+      nimble-version: ${{ needs.versions.outputs.nimble }}
