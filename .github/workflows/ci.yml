@@ -83,3 +83,15 @@ jobs:
 
       - name: Run C++ e2e tests
         run: nimble test_cpp_e2e -y
+
+  tests-asan-ubsan:
+    name: Tests · ASan+UBSan+LSan
+    uses: ./.github/workflows/tests-sanitized.yml
+    with:
+      sanitizer: asan-ubsan
+
+  tests-tsan:
+    name: Tests · TSan
+    uses: ./.github/workflows/tests-sanitized.yml
+    with:
+      sanitizer: tsan

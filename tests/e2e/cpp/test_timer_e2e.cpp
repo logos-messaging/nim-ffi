@@ -8,9 +8,11 @@
 
 #include "my_timer.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -127,4 +129,37 @@ TEST(TimerE2E, IndependentContextsKeepTheirOwnState) {
 
     EXPECT_EQ(rA.timerName, "alpha");
     EXPECT_EQ(rB.timerName, "beta");
+}
+
+// Concurrency workload for ThreadSanitizer: many threads hammering both a
+// shared context (multi-producer into the same SPSC request queue — where
+// producer-side races would live) and per-thread contexts (validates
+// independent FFI threads stay isolated). Mixes sync and async paths so
+// both code paths are exercised.
+TEST(TimerE2E, ThreadedHammer) {
+    constexpr int kThreads = 8;
+    constexpr int kIters   = 50;
+
+    auto shared = makeCtx("hammer-shared");
+
+    std::vector<std::thread> workers;
+    std::atomic<int> errors{0};
+    workers.reserve(kThreads);
+
+    for (int t = 0; t < kThreads; ++t) {
+        workers.emplace_back([&, t] {
+            auto own = makeCtx("hammer-t" + std::to_string(t));
+            for (int i = 0; i < kIters; ++i) {
+                if ((i & 1) == 0) {
+                    const auto r = shared.echo(EchoRequest{"s", 0});
+                    if (r.echoed != "s") ++errors;
+                } else {
+                    auto f = own.echoAsync(EchoRequest{"a", 1});
+                    if (f.get().echoed != "a") ++errors;
+                }
+            }
+        });
+    }
+    for (auto& w : workers) w.join();
+    EXPECT_EQ(errors.load(), 0);
 }

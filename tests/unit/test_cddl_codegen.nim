@@ -4,7 +4,7 @@
 
 import std/strutils
 import unittest2
-import ../ffi/codegen/[meta, cddl]
+import ffi/codegen/[meta, cddl]
 
 proc fieldsOf(pairs: openArray[(string, string)]): seq[FFIFieldMeta] =
   var res = @[]

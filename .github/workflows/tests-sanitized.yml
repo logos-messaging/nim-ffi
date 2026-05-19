@@ -1,0 +1,78 @@
+name: tests-sanitized
+
+on:
+  workflow_call:
+    inputs:
+      sanitizer:
+        required: true
+        type: string
+
+env:
+  NIMBLE_VERSION: '0.22.3'
+  NIM_VERSION:    '2.2.4'
+
+jobs:
+  run:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04-arm]
+        mm: [orc, refc]
+
+    runs-on: ${{ matrix.os }}
+    name: ${{ inputs.sanitizer }} · ${{ matrix.os }} · ${{ matrix.mm }}
+
+    env:
+      NIM_FFI_MM:    ${{ matrix.mm }}
+      NIM_FFI_SAN:   ${{ inputs.sanitizer }}
+      # Per-sanitizer runtime options. Mirrors what tests/e2e/cpp/CMakeLists.txt
+      # injects via gtest_discover_tests so unit and e2e runs agree.
+      #
+      # `asan-ubsan` enables leak detection inside ASan (detect_leaks=1);
+      # LSAN_OPTIONS is honoured for suppressions when LSan runs under ASan.
+      ASAN_OPTIONS:  halt_on_error=1:abort_on_error=1:detect_leaks=1:strict_string_checks=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      LSAN_OPTIONS:  suppressions=${{ github.workspace }}/tests/e2e/cpp/lsan.supp:print_suppressions=0
+      TSAN_OPTIONS:  halt_on_error=1:second_deadlock_stack=1:history_size=7
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: ${{ env.NIM_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Nimble ${{ env.NIMBLE_VERSION }}
+        run: |
+          cd /tmp && nimble install "nimble@${{ env.NIMBLE_VERSION }}" -y
+          echo "$HOME/.nimble/bin" >> $GITHUB_PATH
+
+      - name: Cache nimble deps
+        id: cache-nimbledeps
+        uses: actions/cache@v4
+        with:
+          path: |
+            nimbledeps/
+            nimble.paths
+          key: ${{ runner.os }}-${{ runner.arch }}-nimbledeps-${{ env.NIM_VERSION }}-${{ hashFiles('*.nimble') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-nimbledeps-${{ env.NIM_VERSION }}-
+            ${{ runner.os }}-${{ runner.arch }}-nimbledeps-
+
+      - name: Install nimble deps
+        if: steps.cache-nimbledeps.outputs.cache-hit != 'true'
+        run: nimble setup --localdeps -y
+
+      - name: Cache CMake FetchContent (GoogleTest + nlohmann_json)
+        uses: actions/cache@v4
+        with:
+          path: tests/e2e/cpp/build/_deps
+          key: ${{ runner.os }}-${{ runner.arch }}-cpp-e2e-deps-${{ inputs.sanitizer }}-${{ hashFiles('tests/e2e/cpp/CMakeLists.txt') }}
+
+      - name: Run unit tests (${{ inputs.sanitizer }})
+        run: nimble test_sanitized -y
+
+      - name: Run C++ e2e tests (${{ inputs.sanitizer }})
+        run: nimble test_cpp_e2e_sanitized -y

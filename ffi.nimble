@@ -16,6 +16,44 @@ requires "cbor_serialization"
 const nimFlagsOrc = "--mm:orc -d:chronicles_log_level=WARN"
 const nimFlagsRefc = "--mm:refc -d:chronicles_log_level=WARN"
 
+const unitTests = @[
+  "test_alloc",
+  "test_ffi_context",
+  "test_gc_compat",
+  "test_serial",
+  "test_ctx_validation",
+  "test_nim_native_api",
+  "test_meta",
+  "test_string_helpers",
+  "test_wire_compat",
+  "test_cddl_codegen",
+]
+
+proc sanFlags(san: string): string =
+  # Each --passC / --passL adds one literal flag to the C compiler / linker
+  # invocation — avoids any quoting ambiguity that arises from putting
+  # space-separated flags inside a single --passC argument.
+  #
+  # `asan-ubsan` enables LeakSanitizer too: ASan includes LSan, so leaks are
+  # reported when ASAN_OPTIONS=detect_leaks=1 (set by the sanitizer CI job).
+  case san
+  of "none", "":
+    ""
+  of "asan-ubsan":
+    " --passC:-fsanitize=address,undefined" &
+    " --passC:-fno-sanitize-recover=all" &
+    " --passC:-fno-omit-frame-pointer" &
+    " --passC:-g" &
+    " --passL:-fsanitize=address,undefined"
+  of "tsan":
+    " --passC:-fsanitize=thread" &
+    " --passC:-fno-omit-frame-pointer" &
+    " --passC:-g" &
+    " --passC:-O1" &
+    " --passL:-fsanitize=thread"
+  else:
+    raise newException(ValueError, "unknown NIM_FFI_SAN: " & san)
+
 task buildffi, "Compile the library":
   exec "nim c " & nimFlagsOrc & " --app:lib --noMain ffi.nim"
 
@@ -49,6 +87,28 @@ task test_cpp_e2e, "Build and run the C++ end-to-end tests for the timer example
   exec "nimble genbindings_cpp"
   exec "cmake -S tests/e2e/cpp -B tests/e2e/cpp/build"
   exec "cmake --build tests/e2e/cpp/build"
+  exec "ctest --test-dir tests/e2e/cpp/build --output-on-failure"
+
+task test_sanitized, "Run all unit tests under a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
+  let san = getEnv("NIM_FFI_SAN", "none")
+  let mm  = getEnv("NIM_FFI_MM",  "")
+  let extra = sanFlags(san)
+  let modes =
+    if mm == "orc": @[nimFlagsOrc]
+    elif mm == "refc": @[nimFlagsRefc]
+    else: @[nimFlagsOrc, nimFlagsRefc]
+  for flags in modes:
+    for t in unitTests:
+      exec "nim c -r " & flags & extra & " tests/unit/" & t & ".nim"
+
+task test_cpp_e2e_sanitized, "Build and run the C++ e2e tests with a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
+  let mm  = getEnv("NIM_FFI_MM",  "orc")
+  let san = getEnv("NIM_FFI_SAN", "none")
+  exec "nimble genbindings_cpp"
+  exec "cmake -S tests/e2e/cpp -B tests/e2e/cpp/build" &
+       " -DNIM_FFI_MM=" & mm &
+       " -DNIM_FFI_SANITIZER=" & san
+  exec "cmake --build tests/e2e/cpp/build -j"
   exec "ctest --test-dir tests/e2e/cpp/build --output-on-failure"
 
 task genbindings_example, "Generate Rust bindings for the timer example":
