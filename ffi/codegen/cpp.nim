@@ -282,7 +282,14 @@ proc generateCppHeader*(
     # path anyway since it carries the CBOR-encoded ctx address. Discard the
     # synchronous return and yield 0 from the lambda; the address comes back
     # through the callback's CBOR text-string payload.
-    lines.add("    static $1 create($2) {" % [ctxTypeName, ctorParamsWithTimeout])
+    # `create` returns std::unique_ptr<Ctx> rather than a Ctx by value: the
+    # context owns library threads, so we forbid copy/move on the class
+    # itself (see ContextRuleOf5Tpl) and hand out ownership through a
+    # smart pointer that callers can move, store in containers, etc.
+    lines.add(
+      "    static std::unique_ptr<$1> create($2) {" %
+        [ctxTypeName, ctorParamsWithTimeout]
+    )
     lines.add("        const auto ffi_req_ = $1;" % [reqInit])
     lines.add("        const auto ffi_req_bytes_ = encodeCborFFI(ffi_req_);")
     lines.add("        const auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {")
@@ -295,8 +302,9 @@ proc generateCppHeader*(
     lines.add("        const auto addr_str = decodeCborFFI<std::string>(ffi_raw_);")
     lines.add("        try {")
     lines.add("            const auto addr = std::stoull(addr_str);")
+    # Use `new` directly (not std::make_unique) so the ctor can stay private.
     lines.add(
-      "            return $1(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout);" %
+      "            return std::unique_ptr<$1>(new $1(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout));" %
         [ctxTypeName]
     )
     lines.add("        } catch (const std::exception&) {")
@@ -318,7 +326,7 @@ proc generateCppHeader*(
       else:
         "timeout"
     lines.add(
-      "    static std::future<$1> createAsync($2) {" %
+      "    static std::future<std::unique_ptr<$1>> createAsync($2) {" %
         [ctxTypeName, ctorParamsWithTimeout]
     )
     lines.add(

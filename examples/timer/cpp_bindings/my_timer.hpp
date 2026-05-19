@@ -661,7 +661,7 @@ inline std::vector<std::uint8_t> ffi_call_(std::function<int(FFICallback, void*)
 
 class MyTimerCtx {
 public:
-    static MyTimerCtx create(const TimerConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
+    static std::unique_ptr<MyTimerCtx> create(const TimerConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
         const auto ffi_req_ = MyTimerCreateCtorReq{config};
         const auto ffi_req_bytes_ = encodeCborFFI(ffi_req_);
         const auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
@@ -671,28 +671,25 @@ public:
         const auto addr_str = decodeCborFFI<std::string>(ffi_raw_);
         try {
             const auto addr = std::stoull(addr_str);
-            return MyTimerCtx(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout);
+            return std::unique_ptr<MyTimerCtx>(new MyTimerCtx(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout));
         } catch (const std::exception&) {
             throw std::runtime_error("FFI create returned non-numeric address: " + addr_str);
         }
     }
 
-    static std::future<MyTimerCtx> createAsync(const TimerConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
+    static std::future<std::unique_ptr<MyTimerCtx>> createAsync(const TimerConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
         return std::async(std::launch::async, [config, timeout]() { return create(config, timeout); });
     }
 
-    // Rule of Five: because this class owns a raw resource (the my_timer
-    // context pointer freed in the destructor), the compiler-generated copy
-    // and move special members would do the wrong thing — copies would
-    // double-free, and a default move would leave both objects pointing at
-    // the same context. So we define all five special members explicitly:
-    //   1. destructor          — releases the context.
-    //   2. copy constructor    — deleted; contexts are not copyable.
-    //   3. copy assignment     — deleted; same reason.
-    //   4. move constructor    — transfers ownership, nulls the source.
-    //   5. move assignment     — destroys the current context, then
-    //                            transfers ownership from `other`.
-    // See: https://en.cppreference.com/w/cpp/language/rule_of_three
+    // Special-member policy: this class owns a my_timer context, which in
+    // turn owns the library's worker thread(s) and internal state. Moving
+    // such an object out from under a caller silently tears that state
+    // down and is easy to misuse (e.g. storing in a container that
+    // relocates its elements). It also has no clean analogue in the other
+    // binding languages we generate. So copies and moves are both
+    // deleted; ownership is transferred via MyTimerCtx::create returning a
+    // std::unique_ptr<MyTimerCtx>. The destructor still releases the
+    // context.
     ~MyTimerCtx() {
         if (ptr_) {
             my_timer_destroy(ptr_);
@@ -702,19 +699,8 @@ public:
 
     MyTimerCtx(const MyTimerCtx&) = delete;
     MyTimerCtx& operator=(const MyTimerCtx&) = delete;
-
-    MyTimerCtx(MyTimerCtx&& other) noexcept : ptr_(other.ptr_), timeout_(other.timeout_) {
-        other.ptr_ = nullptr;
-    }
-    MyTimerCtx& operator=(MyTimerCtx&& other) noexcept {
-        if (this != &other) {
-            if (ptr_) my_timer_destroy(ptr_);
-            ptr_ = other.ptr_;
-            timeout_ = other.timeout_;
-            other.ptr_ = nullptr;
-        }
-        return *this;
-    }
+    MyTimerCtx(MyTimerCtx&&) = delete;
+    MyTimerCtx& operator=(MyTimerCtx&&) = delete;
 
     EchoResponse echo(const EchoRequest& req) const {
         const auto ffi_req_ = MyTimerEchoReq{req};
