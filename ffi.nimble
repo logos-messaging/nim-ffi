@@ -31,6 +31,10 @@ task test, "Run all tests under --mm:orc and --mm:refc":
     exec "nim c -r " & flags & " tests/unit/test_string_helpers.nim"
     exec "nim c -r " & flags & " tests/unit/test_wire_compat.nim"
     exec "nim c -r " & flags & " tests/unit/test_cddl_codegen.nim"
+    # C-target additions (raw FFI mode codegen + macro helpers + thread request)
+    exec "nim c -r " & flags & " tests/unit/test_c_codegen.nim"
+    exec "nim c -r " & flags & " tests/unit/test_c_macro_helpers.nim"
+    exec "nim c -r " & flags & " tests/unit/test_c_thread_request.nim"
 
 task test_alloc, "Run alloc unit tests under --mm:orc and --mm:refc":
   exec "nim c -r " & nimFlagsOrc & " tests/unit/test_alloc.nim"

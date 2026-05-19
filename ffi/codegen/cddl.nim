@@ -49,6 +49,8 @@ proc nimTypeToCddl*(typeName: string): string =
   let mayI = innerOf(t, "Maybe[")
   if mayI.len > 0:
     return nimTypeToCddl(mayI) & " / nil"
+  if t.startsWith("ptr "):
+    return "uint"
   case t
   of "bool": "bool"
   of "int", "int64", "int32", "int16", "int8": "int"

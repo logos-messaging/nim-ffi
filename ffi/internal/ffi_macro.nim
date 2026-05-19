@@ -2,9 +2,11 @@ import std/[macros, tables, strutils]
 import chronos
 import ../ffi_types
 import ../codegen/[meta, string_helpers]
+import ./c_macro_helpers
 when defined(ffiGenBindings):
   import ../codegen/rust
   import ../codegen/cpp
+  import ../codegen/c
   import ../codegen/cddl
 
 # ---------------------------------------------------------------------------
@@ -44,7 +46,13 @@ proc rejectRawPtrType(typ: NimNode, where: string) =
 proc registerFFITypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
   ## Registers the type in ffiTypeRegistry for binding generation and returns
   ## the clean typeDef. Serialization is handled by the generic overloads in
-  ## cbor_serial.nim.
+  ## cbor_serial.nim (CBOR target) or by the *_CWire companion type + its
+  ## conversion procs (C target).
+  ##
+  ## When `ffiMode == "raw"`, the returned StmtList carries both the
+  ## original user type *and* the cwire companion + procs. The CBOR target
+  ## still receives just the user type wrapped in a section, so callers
+  ## that don't need the wire form see no extra symbols.
   let typeName =
     if typeDef[0].kind == nnkPostfix:
       typeDef[0][1]
@@ -73,6 +81,11 @@ proc registerFFITypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
             fieldMetas.add(FFIFieldMeta(name: $identDef[i], typeName: fieldTypeName))
 
   ffiTypeRegistry.add(FFITypeMeta(name: typeNameStr, fields: fieldMetas))
+
+  # The cwire companion types/procs cannot be emitted from a type-pragma
+  # macro (Nim's macro contract returns a single TypeDef). They are instead
+  # emitted in bulk from `genBindings()` so the user types are fully
+  # registered before any cwire AST is built.
   return typeDef
 
 proc nimTypeNameRepr(typ: NimNode): string =
@@ -118,9 +131,21 @@ proc unpackReqField*(fieldIdent, userType, decodedIdent: NimNode): NimNode =
     nnkLetSection.newTree(nnkIdentDefs.newTree(fieldIdent, ident("cstring"), castExpr))
 
 proc cExportedParams(ctxType: NimNode): seq[NimNode] =
-  ## Standard parameter list for the C-exported wrapper of a .ffi. proc:
+  ## Standard parameter list for the C-exported wrapper of a `.ffi.` proc.
+  ## Both modes share the same prefix — `cint; ctx, callback, userData, …`
+  ## — and differ only in the trailing request-payload params:
+  ##
+  ## CBOR (`-d:ffiMode=cbor`, the default):
   ##   (returns cint; ctx, callback, userData, reqCbor, reqCborLen)
-  ## Shared by the async and sync paths so both wrappers carry the same ABI.
+  ##
+  ## Raw / pure C (`-d:ffiMode=raw`):
+  ##   (returns cint; ctx, callback, userData, req: ptr <ReqType_CWire>)
+  ##
+  ## The CBOR shape carries an opaque byte-buffer payload; the raw shape
+  ## mirrors the C struct emitted by ffi/codegen/c.nim so callers of the
+  ## generated `<lib>.h` see a flat C-typed parameter list. The actual
+  ## wire-payload params are appended by the caller (they vary per proc),
+  ## so this helper just emits the leading prefix.
   var params: seq[NimNode] = @[]
   params.add(ident("cint"))
   params.add(newIdentDefs(ident("ctx"), ctxType))
@@ -128,6 +153,18 @@ proc cExportedParams(ctxType: NimNode): seq[NimNode] =
   params.add(newIdentDefs(ident("userData"), ident("pointer")))
   params.add(newIdentDefs(ident("reqCbor"), nnkPtrTy.newTree(ident("byte"))))
   params.add(newIdentDefs(ident("reqCborLen"), ident("csize_t")))
+  return params
+
+proc cTargetExportedParams(ctxType, reqWireType: NimNode): seq[NimNode] =
+  ## Raw-mode variant of `cExportedParams`. `reqWireType` is the Nim wire
+  ## type whose layout matches the C `<ReqType>` struct emitted by c.nim.
+  ## Trailing `req` keeps the leading prefix identical to the CBOR shape.
+  var params: seq[NimNode] = @[]
+  params.add(ident("cint"))
+  params.add(newIdentDefs(ident("ctx"), ctxType))
+  params.add(newIdentDefs(ident("callback"), ident("FFICallBack")))
+  params.add(newIdentDefs(ident("userData"), ident("pointer")))
+  params.add(newIdentDefs(ident("req"), nnkPtrTy.newTree(reqWireType)))
   return params
 
 proc buildReqTypeFromFields(
@@ -299,8 +336,15 @@ proc buildFFINewReqProc(reqTypeName, body: NimNode): NimNode =
 
 proc buildProcessFFIRequestProc(reqTypeName, reqHandler, body: NimNode): NimNode =
   ## Generates the FFI-thread-side processor for the Req type.
-  ## Decodes the CBOR payload into a Req struct, unpacks each field into a
-  ## local, then runs the user lambda body.
+  ##
+  ## CBOR target: decodes the CBOR payload into a Req struct via
+  ## `cborDecodePtr`, unpacks each field into a local, then runs the user
+  ## lambda body.
+  ##
+  ## C target: `data` is a `ptr <ReqType>_CWire` (deep-copied into shared
+  ## memory by the exportc shim). The processor casts it back, calls
+  ## `cwireUnpack` to obtain a natural Nim `<ReqType>` value, and unpacks
+  ## from there. CBOR is never invoked on this path.
 
   if reqHandler.kind != nnkExprColonExpr:
     error(
@@ -338,14 +382,20 @@ proc buildProcessFFIRequestProc(reqTypeName, reqHandler, body: NimNode): NimNode
   let reqIdent = genSym(nskLet, "ffiReq")
   let decodedIdent = genSym(nskLet, "decoded")
 
-  newBody.add quote do:
-    let `reqIdent`: ptr FFIThreadRequest = cast[ptr FFIThreadRequest](request)
-    let `decodedIdent` = cborDecodePtr(
-      cast[ptr UncheckedArray[byte]](`reqIdent`[].data),
-      `reqIdent`[].dataLen,
-      `reqTypeName`,
-    ).valueOr:
-      return err("CBOR decode failed for " & $T & ": " & $error)
+  if isPureCMode():
+    let wireTypeName = ident(cwireTypeName($reqTypeName))
+    newBody.add quote do:
+      let `reqIdent`: ptr FFIThreadRequest = cast[ptr FFIThreadRequest](request)
+      let `decodedIdent` = cwireUnpack(cast[ptr `wireTypeName`](`reqIdent`[].data)[])
+  else:
+    newBody.add quote do:
+      let `reqIdent`: ptr FFIThreadRequest = cast[ptr FFIThreadRequest](request)
+      let `decodedIdent` = cborDecodePtr(
+        cast[ptr UncheckedArray[byte]](`reqIdent`[].data),
+        `reqIdent`[].dataLen,
+        `reqTypeName`,
+      ).valueOr:
+        return err("CBOR decode failed for " & $T & ": " & $error)
 
   # Unpack each field as a local typed as the user's original param type.
   for p in procParams[1 ..^ 1]:
@@ -369,10 +419,22 @@ proc buildProcessFFIRequestProc(reqTypeName, reqHandler, body: NimNode): NimNode
     echo processProc.repr
   return processProc
 
-proc addNewRequestToRegistry(reqTypeName, reqHandler: NimNode): NimNode =
+proc addNewRequestToRegistry(
+    reqTypeName, reqHandler: NimNode, respTypeName: NimNode = nil
+): NimNode =
   ## Generates the dispatcher that the FFI thread calls: it invokes
   ## processFFIRequest (which returns the user's typed Result[T, string]) and
-  ## encodes a successful T value with cborEncode into the seq[byte] payload.
+  ## encodes the success path appropriately for the active target.
+  ##
+  ## CBOR target: the success value goes through `cborEncode` so the
+  ## consumer's wrapper can decode it on the other side.
+  ##
+  ## C target: the value is wrapped in a `<RespType>_CWire` envelope
+  ## allocated in shared memory, the request envelope's cleanup hooks are
+  ## set to free that envelope after the callback fires, and the returned
+  ## seq[byte] is a struct snapshot whose pointer fields stay valid until
+  ## handleRes runs the cleanup hook. `respTypeName` (non-nil only for the
+  ## C target) names the synthesised response type, e.g. `MyTimerEchoResp`.
 
   let returnType = nnkBracketExpr.newTree(
     ident("Future"),
@@ -398,16 +460,46 @@ proc addNewRequestToRegistry(reqTypeName, reqHandler: NimNode): NimNode =
   let typedResIdent = genSym(nskLet, "typedRes")
 
   var newBody = newStmtList()
-  newBody.add quote do:
-    let `typedResIdent` = await `callExpr`
-    if `typedResIdent`.isErr:
-      return err(`typedResIdent`.error)
-    when typeof(`typedResIdent`.value) is seq[byte]:
-      return ok(`typedResIdent`.value)
-    elif typeof(`typedResIdent`.value) is void:
-      return ok(newSeq[byte]())
-    else:
-      return ok(cborEncode(`typedResIdent`.value))
+
+  if isPureCMode() and not respTypeName.isNil:
+    let wireRespName = ident(cwireTypeName($respTypeName))
+    let thunkName = ident("cwireFreePtr_" & $respTypeName)
+    newBody.add quote do:
+      let `typedResIdent` = await `callExpr`
+      if `typedResIdent`.isErr:
+        return err(`typedResIdent`.error)
+      when typeof(`typedResIdent`.value) is void:
+        return ok(newSeq[byte]())
+      else:
+        # Wrap in the synthesised <RespType> Nim envelope.
+        let respObj = `respTypeName`(value: `typedResIdent`.value)
+        # Allocate the wire envelope in shared memory and pack the value
+        # (this strdup's any cstrings inside).
+        let respWirePtr = cast[ptr `wireRespName`](allocShared(sizeof(`wireRespName`)))
+        zeroMem(respWirePtr, sizeof(`wireRespName`))
+        cwirePack(respWirePtr[], respObj)
+        # Stash the cleanup pair on the request envelope so handleRes can
+        # release shared memory *after* the foreign callback returns.
+        let reqEnv = cast[ptr FFIThreadRequest](request)
+        reqEnv[].cleanupRespData = cast[pointer](respWirePtr)
+        reqEnv[].cleanupRespProc = `thunkName`
+        # Hand a struct-byte snapshot to handleRes for the callback. The
+        # pointers inside still reach into shared memory and remain valid
+        # until cleanupRespProc runs.
+        var bytes = newSeq[byte](sizeof(`wireRespName`))
+        copyMem(unsafeAddr bytes[0], respWirePtr, sizeof(`wireRespName`))
+        return ok(bytes)
+  else:
+    newBody.add quote do:
+      let `typedResIdent` = await `callExpr`
+      if `typedResIdent`.isErr:
+        return err(`typedResIdent`.error)
+      when typeof(`typedResIdent`.value) is seq[byte]:
+        return ok(`typedResIdent`.value)
+      elif typeof(`typedResIdent`.value) is void:
+        return ok(newSeq[byte]())
+      else:
+        return ok(cborEncode(`typedResIdent`.value))
 
   let asyncProc = newProc(
     name = newEmptyNode(),
@@ -459,8 +551,124 @@ macro registerReqFFI*(reqTypeName, reqHandler, body: untyped): untyped =
   let typeDef = buildRequestType(reqTypeName, body)
   let ffiNewReqProc = buildFFINewReqProc(reqTypeName, body)
   let processProc = buildProcessFFIRequestProc(reqTypeName, reqHandler, body)
-  let addNewReqToReg = addNewRequestToRegistry(reqTypeName, reqHandler)
-  let stmts = newStmtList(typeDef, ffiNewReqProc, processProc, addNewReqToReg)
+
+  # Derive (per-proc) response wrapper type. For C target this wraps the
+  # user's logical return value in a single-`value` envelope whose wire
+  # form matches the C `<Proc>Resp` struct in the generated `<lib>.h`.
+  proc derivedRespTypeName(reqName: string): string =
+    if reqName.endsWith("CtorReq"):
+      reqName[0 ..< reqName.len - 7] & "CtorResp"
+    elif reqName.endsWith("Req"):
+      reqName[0 ..< reqName.len - 3] & "Resp"
+    else:
+      reqName & "Resp"
+
+  let respTypeNameStr = derivedRespTypeName($reqTypeName)
+  let respTypeName = ident(respTypeNameStr)
+
+  # Parse the lambda's return type → user's logical T. For
+  # `Future[Result[T, string]]` we want T.
+  var userRetType: NimNode = nil
+  block:
+    var procNode2 = body
+    if procNode2.kind == nnkStmtList and procNode2.len == 1:
+      procNode2 = procNode2[0]
+    if procNode2.kind in {nnkLambda, nnkProcDef}:
+      let rt = procNode2[3][0]
+      if rt.kind == nnkBracketExpr and $rt[0] == "Future":
+        let inner = rt[1]
+        if inner.kind == nnkBracketExpr and $inner[0] == "Result":
+          userRetType = inner[1]
+
+  let isVoidReturn =
+    userRetType.isNil or (userRetType.kind == nnkIdent and $userRetType == "void")
+
+  let addNewReqToReg =
+    if isPureCMode() and not isVoidReturn:
+      addNewRequestToRegistry(reqTypeName, reqHandler, respTypeName)
+    else:
+      addNewRequestToRegistry(reqTypeName, reqHandler)
+
+  # Order matters when targeting C: `processProc` (and any `.async` body
+  # inside it) is sem-checked at macro-expansion time, so the wire type +
+  # cwire conversion procs must already exist in the AST being returned.
+  # The lay-out is:
+  #   1. cwire sections for nested {.ffi.} types this Req depends on
+  #   2. the user Req TypeSection
+  #   3. the per-proc Req wire TypeSection
+  #   4. per-proc Req cwire procs
+  #   5. ffiNewReqProc / processProc / addNewReqToReg
+  let stmts = newStmtList()
+
+  if isPureCMode():
+    var procNode = body
+    if procNode.kind == nnkStmtList and procNode.len == 1:
+      procNode = procNode[0]
+    let lambdaParams = procNode[3]
+    var paramNames: seq[string] = @[]
+    var paramTypes: seq[NimNode] = @[]
+    for p in lambdaParams[1 .. ^1]:
+      paramNames.add($p[0])
+      paramTypes.add(p[1])
+
+    # 1. Dependencies first (idempotent across calls).
+    var nestedDeps: seq[string] = @[]
+    collectNestedFFITypes(paramTypes, nestedDeps)
+    for dep in nestedDeps:
+      ensureCWireFor(dep, stmts)
+
+    # 2. User Req TypeSection.
+    stmts.add(typeDef)
+
+    # 3. Per-proc Req wire type in its own section so its references to
+    #    dep wire types (already-emitted above) resolve.
+    let wireSection = newNimNode(nnkTypeSection)
+    wireSection.add(buildCWireTypeDef($reqTypeName, paramNames, paramTypes))
+    stmts.add(wireSection)
+
+    # 4. Per-proc Req cwire procs.
+    for p in buildCWireProcs($reqTypeName, paramNames, paramTypes):
+      stmts.add(p)
+
+    # 5. Per-proc Resp envelope (Nim type with single `value` field) + its
+    #    cwire companion + procs. Skipped when the user returns void.
+    if not isVoidReturn:
+      # Any nested ffi-types reachable via the return value need their
+      # cwire emitted first (e.g. `value: EchoResponse` depends on
+      # EchoResponse_CWire).
+      var respNestedDeps: seq[string] = @[]
+      collectNestedFFITypes(@[userRetType], respNestedDeps)
+      for dep in respNestedDeps:
+        ensureCWireFor(dep, stmts)
+
+      # Resp Nim type: `type <ProcName>Resp = object\n  value: <T>`
+      let respUserSection = newNimNode(nnkTypeSection)
+      let respUserRecList =
+        newTree(nnkRecList, newIdentDefs(ident("value"), userRetType, newEmptyNode()))
+      respUserSection.add(
+        newTree(
+          nnkTypeDef,
+          postfix(respTypeName, "*"),
+          newEmptyNode(),
+          newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), respUserRecList),
+        )
+      )
+      stmts.add(respUserSection)
+
+      # Resp wire type + procs.
+      let respWireSection = newNimNode(nnkTypeSection)
+      respWireSection.add(
+        buildCWireTypeDef(respTypeNameStr, @["value"], @[userRetType])
+      )
+      stmts.add(respWireSection)
+      for p in buildCWireProcs(respTypeNameStr, @["value"], @[userRetType]):
+        stmts.add(p)
+  else:
+    stmts.add(typeDef)
+
+  stmts.add(ffiNewReqProc)
+  stmts.add(processProc)
+  stmts.add(addNewReqToReg)
 
   when defined(ffiDumpMacros):
     echo stmts.repr
@@ -752,9 +960,28 @@ macro ffi*(prc: untyped): untyped =
         `lambdaNode`
 
     # -------------------------------------------------------------------------
-    # C-exported wrapper: takes (ctx, callback, userData, reqCbor, reqCborLen)
+    # C-exported wrapper. Both shapes share the leading prefix
+    # `(ctx, callback, userData, …): cint` and differ only in the trailing
+    # request-payload params:
+    #
+    #   ffiMode=cbor (default):
+    #     proc <name>(ctx, callback, userData, reqCbor, reqCborLen): cint
+    #
+    #   ffiMode=raw:
+    #     proc <name>(ctx, callback, userData, req: ptr <ReqType>_CWire): cint
+    #     The shim deep-copies the incoming wire Req into shared memory and
+    #     dispatches via `initFromOwnedWirePtr` so the FFI thread can read
+    #     the same struct without CBOR serialisation.
     # -------------------------------------------------------------------------
-    let exportedParams = cExportedParams(ctxType)
+    let asyncPoolIdent = ident($libTypeName & "FFIPool")
+    let wireTypeName = ident(cwireTypeName($reqTypeName))
+    let thunkName = ident("cwireFreePtr_" & $reqTypeName)
+
+    let exportedParams =
+      if isPureCMode():
+        cTargetExportedParams(ctxType, wireTypeName)
+      else:
+        cExportedParams(ctxType)
 
     let ffiBody = newStmtList()
 
@@ -762,20 +989,40 @@ macro ffi*(prc: untyped): untyped =
       if callback.isNil:
         return RET_MISSING_CALLBACK
 
-    let asyncPoolIdent = ident($libTypeName & "FFIPool")
     ffiBody.add quote do:
       if not `asyncPoolIdent`.isValidCtx(cast[pointer](ctx)):
         let errStr = "ctx is not a valid FFI context"
         callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
         return RET_ERR
 
-    # Build the FFIThreadRequest payload directly from the incoming bytes.
     let reqPtrIdent = genSym(nskLet, "reqPtr")
-    ffiBody.add quote do:
-      let typeStr = $`reqTypeName`
-      let `reqPtrIdent` = FFIThreadRequest.initFromPtr(
-        callback, userData, typeStr.cstring, reqCbor, int(reqCborLen)
-      )
+
+    if isPureCMode():
+      let sharedReqIdent = genSym(nskLet, "sharedReq")
+      ffiBody.add quote do:
+        if req.isNil:
+          let errStr = "req pointer is nil"
+          callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
+          return RET_ERR
+        let `sharedReqIdent` =
+          cast[ptr `wireTypeName`](allocShared(sizeof(`wireTypeName`)))
+        zeroMem(`sharedReqIdent`, sizeof(`wireTypeName`))
+        cwirePack(`sharedReqIdent`[], cwireUnpack(req[]))
+        let typeStr = $`reqTypeName`
+        let `reqPtrIdent` = FFIThreadRequest.initFromOwnedWirePtr(
+          callback,
+          userData,
+          typeStr.cstring,
+          cast[pointer](`sharedReqIdent`),
+          sizeof(`wireTypeName`),
+          `thunkName`,
+        )
+    else:
+      ffiBody.add quote do:
+        let typeStr = $`reqTypeName`
+        let `reqPtrIdent` = FFIThreadRequest.initFromPtr(
+          callback, userData, typeStr.cstring, reqCbor, int(reqCborLen)
+        )
 
     let sendResIdent = genSym(nskLet, "sendRes")
     ffiBody.add quote do:
@@ -790,6 +1037,40 @@ macro ffi*(prc: untyped): untyped =
         return RET_ERR
       return RET_OK
 
+    # Build the FFI metadata first so we can compute the ABI hash before
+    # stamping the exportc name.
+    var ffiExtraParams: seq[FFIParamMeta] = @[]
+    for i in 0 ..< extraParamNames.len:
+      let ptype = extraParamTypes[i]
+      let isPointer = isPtr(ptype)
+      let tn =
+        if isPointer:
+          nimTypeNameRepr(ptype[0])
+        else:
+          nimTypeNameRepr(ptype)
+      ffiExtraParams.add(
+        FFIParamMeta(name: extraParamNames[i], typeName: tn, isPtr: isPointer)
+      )
+    let retTypeInner = resultInner[1]
+    let retIsPtr = isPtr(retTypeInner)
+    let retTn =
+      if retIsPtr:
+        nimTypeNameRepr(retTypeInner[0])
+      else:
+        nimTypeNameRepr(retTypeInner)
+
+    # Content-addressable symbol versioning for the raw ABI. Any change
+    # to the proc's canonical signature (param names/types, transitive
+    # {.ffi.} type fields, return type) changes the hash and therefore
+    # the exported symbol name — turning silent layout drift into a loud
+    # "undefined symbol" link error. CBOR mode keeps clean symbol names
+    # because its wire format already tolerates drift.
+    var procAbiHash = ""
+    var cSymbolName = cExportName
+    if isPureCMode():
+      procAbiHash = abiHashFor(cExportName, ffiExtraParams, retTn)
+      cSymbolName = cExportName & "_v" & procAbiHash
+
     let ffiProc = newProc(
       name = postfix(cExportProcName, "*"),
       params = exportedParams,
@@ -797,43 +1078,24 @@ macro ffi*(prc: untyped): untyped =
       pragmas = newTree(
         nnkPragma,
         ident("dynlib"),
-        newTree(nnkExprColonExpr, ident("exportc"), newStrLitNode(cExportName)),
+        newTree(nnkExprColonExpr, ident("exportc"), newStrLitNode(cSymbolName)),
         ident("cdecl"),
         newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
       ),
     )
 
-    block:
-      var ffiExtraParams: seq[FFIParamMeta] = @[]
-      for i in 0 ..< extraParamNames.len:
-        let ptype = extraParamTypes[i]
-        let isPointer = isPtr(ptype)
-        let tn =
-          if isPointer:
-            nimTypeNameRepr(ptype[0])
-          else:
-            nimTypeNameRepr(ptype)
-        ffiExtraParams.add(
-          FFIParamMeta(name: extraParamNames[i], typeName: tn, isPtr: isPointer)
-        )
-      let retTypeInner = resultInner[1]
-      let retIsPtr = isPtr(retTypeInner)
-      let retTn =
-        if retIsPtr:
-          nimTypeNameRepr(retTypeInner[0])
-        else:
-          nimTypeNameRepr(retTypeInner)
-      ffiProcRegistry.add(
-        FFIProcMeta(
-          procName: cExportName,
-          libName: currentLibName,
-          kind: FFIKind.FFI,
-          libTypeName: $libTypeName,
-          extraParams: ffiExtraParams,
-          returnTypeName: retTn,
-          returnIsPtr: retIsPtr,
-        )
+    ffiProcRegistry.add(
+      FFIProcMeta(
+        procName: cExportName,
+        libName: currentLibName,
+        kind: FFIKind.FFI,
+        libTypeName: $libTypeName,
+        extraParams: ffiExtraParams,
+        returnTypeName: retTn,
+        returnIsPtr: retIsPtr,
+        abiHash: procAbiHash,
       )
+    )
 
     return newStmtList(helperProc, registerReq, ffiProc)
 
@@ -968,14 +1230,20 @@ proc buildCtorProcessFFIRequestProc(
   let ctxIdent = ident("ctx")
   let decodedIdent = ident("decoded")
 
-  newBody.add quote do:
-    let `reqIdent` = cast[ptr FFIThreadRequest](request)
-    let `decodedIdent` = cborDecodePtr(
-      cast[ptr UncheckedArray[byte]](`reqIdent`[].data),
-      `reqIdent`[].dataLen,
-      `reqTypeName`,
-    ).valueOr:
-      return err("CBOR decode failed for " & $T & ": " & $error)
+  if isPureCMode():
+    let wireReqName = ident(cwireTypeName($reqTypeName))
+    newBody.add quote do:
+      let `reqIdent` = cast[ptr FFIThreadRequest](request)
+      let `decodedIdent` = cwireUnpack(cast[ptr `wireReqName`](`reqIdent`[].data)[])
+  else:
+    newBody.add quote do:
+      let `reqIdent` = cast[ptr FFIThreadRequest](request)
+      let `decodedIdent` = cborDecodePtr(
+        cast[ptr UncheckedArray[byte]](`reqIdent`[].data),
+        `reqIdent`[].dataLen,
+        `reqTypeName`,
+      ).valueOr:
+        return err("CBOR decode failed for " & $T & ": " & $error)
 
   for i in 0 ..< paramNames.len:
     newBody.add unpackReqField(ident(paramNames[i]), paramTypes[i], decodedIdent)
@@ -1011,8 +1279,13 @@ proc buildCtorProcessFFIRequestProc(
 
 proc addCtorRequestToRegistry(reqTypeName, libTypeName: NimNode): NimNode =
   ## Wraps the ctor processFFIRequest result in a seq[byte] dispatcher.
-  ## The ctor uniquely returns the ctx address as a decimal string; we wrap
-  ## it as raw UTF-8 bytes so the foreign side can read it back uniformly.
+  ##
+  ## CBOR target: encodes the ctx address (decimal string) as CBOR so the
+  ## foreign-side wrapper can recover it via cbor decoding.
+  ##
+  ## C target: returns an empty payload — the synchronous return value of
+  ## the exportc proc already conveys the ctx pointer, so the async
+  ## callback just signals completion.
 
   let ctxType =
     nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), libTypeName))
@@ -1034,13 +1307,22 @@ proc addCtorRequestToRegistry(reqTypeName, libTypeName: NimNode): NimNode =
 
   let resIdent = genSym(nskLet, "ctorRes")
   var newBody = newStmtList()
-  newBody.add quote do:
-    let `resIdent` = await `callExpr`
-    if `resIdent`.isErr:
-      return err(`resIdent`.error)
-    # The ctor returns the ctx address as a decimal string; encode it as CBOR text
-    # for uniform decoding on the foreign side.
-    return ok(cborEncode(`resIdent`.value))
+  if isPureCMode():
+    newBody.add quote do:
+      let `resIdent` = await `callExpr`
+      if `resIdent`.isErr:
+        return err(`resIdent`.error)
+      # Sync return already delivered the ctx; nothing useful to ship to
+      # the callback besides RET_OK.
+      return ok(newSeq[byte]())
+  else:
+    newBody.add quote do:
+      let `resIdent` = await `callExpr`
+      if `resIdent`.isErr:
+        return err(`resIdent`.error)
+      # The ctor returns the ctx address as a decimal string; encode it as CBOR text
+      # for uniform decoding on the foreign side.
+      return ok(cborEncode(`resIdent`.value))
 
   let asyncProc = newProc(
     name = newEmptyNode(),
@@ -1143,22 +1425,32 @@ macro ffiCtor*(prc: untyped): untyped =
   )
   let addToReg = addCtorRequestToRegistry(reqTypeName, libTypeName)
 
-  # C-exported proc: (reqCbor, reqCborLen, callback, userData) -> pointer
+  # C-exported proc. CBOR target keeps the existing signature
+  # (reqCbor, reqCborLen, callback, userData) → pointer. C target switches
+  # to (ptr <ReqType>_CWire, callback, userData) → pointer so the host can
+  # hand a flat C struct directly.
+  let ctxSym = genSym(nskLet, "ctx")
+  let poolIdent = ident($libTypeName & "FFIPool")
+  let wireReqTypeName = ident(cwireTypeName($reqTypeName))
+  let thunkName = ident("cwireFreePtr_" & $reqTypeName)
+
   var exportedParams = newSeq[NimNode]()
   exportedParams.add(ident("pointer"))
-  exportedParams.add(newIdentDefs(ident("reqCbor"), nnkPtrTy.newTree(ident("byte"))))
-  exportedParams.add(newIdentDefs(ident("reqCborLen"), ident("csize_t")))
-  exportedParams.add(newIdentDefs(ident("callback"), ident("FFICallBack")))
-  exportedParams.add(newIdentDefs(ident("userData"), ident("pointer")))
+  if isPureCMode():
+    exportedParams.add(newIdentDefs(ident("req"), nnkPtrTy.newTree(wireReqTypeName)))
+    exportedParams.add(newIdentDefs(ident("callback"), ident("FFICallBack")))
+    exportedParams.add(newIdentDefs(ident("userData"), ident("pointer")))
+  else:
+    exportedParams.add(newIdentDefs(ident("reqCbor"), nnkPtrTy.newTree(ident("byte"))))
+    exportedParams.add(newIdentDefs(ident("reqCborLen"), ident("csize_t")))
+    exportedParams.add(newIdentDefs(ident("callback"), ident("FFICallBack")))
+    exportedParams.add(newIdentDefs(ident("userData"), ident("pointer")))
 
   let ffiBody = newStmtList()
 
   ffiBody.add quote do:
     when declared(initializeLibrary):
       initializeLibrary()
-
-  let ctxSym = genSym(nskLet, "ctx")
-  let poolIdent = ident($libTypeName & "FFIPool")
 
   ffiBody.add quote do:
     let `ctxSym` = `poolIdent`.createFFIContext().valueOr:
@@ -1167,45 +1459,98 @@ macro ffiCtor*(prc: untyped): untyped =
         callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
       return nil
 
-  # Early validation: decode the CBOR payload to verify it parses cleanly.
-  ffiBody.add quote do:
-    block:
-      let validateRes = cborDecodePtr(
-        cast[ptr UncheckedArray[byte]](reqCbor), int(reqCborLen), `reqTypeName`
-      )
-      if validateRes.isErr():
+  if isPureCMode():
+    ffiBody.add quote do:
+      if req.isNil:
         if not callback.isNil:
-          let errStr = "ffiCtor: failed to decode request: " & $validateRes.error
+          let errStr = "ffiCtor: req pointer is nil"
+          callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
+        return nil
+    let sharedReqIdent = genSym(nskLet, "sharedReq")
+    let sendResIdent = genSym(nskLet, "sendRes")
+    ffiBody.add quote do:
+      let `sharedReqIdent` =
+        cast[ptr `wireReqTypeName`](allocShared(sizeof(`wireReqTypeName`)))
+      zeroMem(`sharedReqIdent`, sizeof(`wireReqTypeName`))
+      cwirePack(`sharedReqIdent`[], cwireUnpack(req[]))
+      let typeStr = $`reqTypeName`
+      let `sendResIdent` =
+        try:
+          `ctxSym`.sendRequestToFFIThread(
+            FFIThreadRequest.initFromOwnedWirePtr(
+              callback,
+              userData,
+              typeStr.cstring,
+              cast[pointer](`sharedReqIdent`),
+              sizeof(`wireReqTypeName`),
+              `thunkName`,
+            )
+          )
+        except Exception as exc:
+          Result[void, string].err("sendRequestToFFIThread exception: " & exc.msg)
+      if `sendResIdent`.isErr():
+        if not callback.isNil:
+          let errStr = "ffiCtor: failed to send request: " & $`sendResIdent`.error
+          callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
+        return nil
+  else:
+    # CBOR path (unchanged): validate the bytes parse, then dispatch.
+    ffiBody.add quote do:
+      block:
+        let validateRes = cborDecodePtr(
+          cast[ptr UncheckedArray[byte]](reqCbor), int(reqCborLen), `reqTypeName`
+        )
+        if validateRes.isErr():
+          if not callback.isNil:
+            let errStr = "ffiCtor: failed to decode request: " & $validateRes.error
+            callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
+          return nil
+    let newReqCall = newCall(
+      ident("ffiNewReq"),
+      reqTypeName,
+      ident("callback"),
+      ident("userData"),
+      ident("reqCbor"),
+      ident("reqCborLen"),
+    )
+    let sendCall =
+      newCall(newDotExpr(ctxSym, ident("sendRequestToFFIThread")), newReqCall)
+    let sendResIdent = genSym(nskLet, "sendRes")
+    ffiBody.add quote do:
+      let `sendResIdent` =
+        try:
+          `sendCall`
+        except Exception as exc:
+          Result[void, string].err("sendRequestToFFIThread exception: " & exc.msg)
+      if `sendResIdent`.isErr():
+        if not callback.isNil:
+          let errStr = "ffiCtor: failed to send request: " & $`sendResIdent`.error
           callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
         return nil
 
-  let newReqCall = newCall(
-    ident("ffiNewReq"),
-    reqTypeName,
-    ident("callback"),
-    ident("userData"),
-    ident("reqCbor"),
-    ident("reqCborLen"),
-  )
-
-  let sendCall =
-    newCall(newDotExpr(ctxSym, ident("sendRequestToFFIThread")), newReqCall)
-
-  let sendResIdent = genSym(nskLet, "sendRes")
-  ffiBody.add quote do:
-    let `sendResIdent` =
-      try:
-        `sendCall`
-      except Exception as exc:
-        Result[void, string].err("sendRequestToFFIThread exception: " & exc.msg)
-    if `sendResIdent`.isErr():
-      if not callback.isNil:
-        let errStr = "ffiCtor: failed to send request: " & $`sendResIdent`.error
-        callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
-      return nil
-
   ffiBody.add quote do:
     return cast[pointer](`ctxSym`)
+
+  # Build the ctor's metadata before stamping the exportc name so we can
+  # compute the ABI hash for `ffiMode=raw`.
+  var ctorExtraParams: seq[FFIParamMeta] = @[]
+  for i in 0 ..< paramNames.len:
+    let ptype = paramTypes[i]
+    let isPointer = isPtr(ptype)
+    let tn =
+      if isPointer:
+        nimTypeNameRepr(ptype[0])
+      else:
+        nimTypeNameRepr(ptype)
+    ctorExtraParams.add(
+      FFIParamMeta(name: paramNames[i], typeName: tn, isPtr: isPointer)
+    )
+
+  var ctorAbiHash = ""
+  var ctorCSymbol = cExportName
+  if isPureCMode():
+    ctorAbiHash = abiHashFor(cExportName, ctorExtraParams, $libTypeName)
+    ctorCSymbol = cExportName & "_v" & ctorAbiHash
 
   let ffiProc = newProc(
     name = postfix(cExportProcName, "*"),
@@ -1214,44 +1559,55 @@ macro ffiCtor*(prc: untyped): untyped =
     pragmas = newTree(
       nnkPragma,
       ident("dynlib"),
-      newTree(nnkExprColonExpr, ident("exportc"), newStrLitNode(cExportName)),
+      newTree(nnkExprColonExpr, ident("exportc"), newStrLitNode(ctorCSymbol)),
       ident("cdecl"),
       newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
     ),
   )
 
-  block:
-    var ctorExtraParams: seq[FFIParamMeta] = @[]
-    for i in 0 ..< paramNames.len:
-      let ptype = paramTypes[i]
-      let isPointer = isPtr(ptype)
-      let tn =
-        if isPointer:
-          nimTypeNameRepr(ptype[0])
-        else:
-          nimTypeNameRepr(ptype)
-      ctorExtraParams.add(
-        FFIParamMeta(name: paramNames[i], typeName: tn, isPtr: isPointer)
-      )
-    ffiProcRegistry.add(
-      FFIProcMeta(
-        procName: cExportName,
-        libName: currentLibName,
-        kind: FFIKind.CTOR,
-        libTypeName: $libTypeName,
-        extraParams: ctorExtraParams,
-        returnTypeName: $libTypeName,
-        returnIsPtr: false,
-      )
+  ffiProcRegistry.add(
+    FFIProcMeta(
+      procName: cExportName,
+      libName: currentLibName,
+      kind: FFIKind.CTOR,
+      libTypeName: $libTypeName,
+      extraParams: ctorExtraParams,
+      returnTypeName: $libTypeName,
+      returnIsPtr: false,
+      abiHash: ctorAbiHash,
     )
+  )
 
   let poolDecl = quote:
     when not declared(`poolIdent`):
       var `poolIdent`: FFIContextPool[`libTypeName`]
 
-  let stmts = newStmtList(
-    typeDef, ffiNewReqProc, helperProc, processProc, addToReg, poolDecl, ffiProc
-  )
+  let stmts = newStmtList()
+  if isPureCMode():
+    # Same ordering rationale as `registerReqFFI`: emit nested-type cwires
+    # first, then the user Req, then the per-Req wire type + procs, then
+    # the rest of the ctor machinery.
+    var nestedDeps: seq[string] = @[]
+    collectNestedFFITypes(paramTypes, nestedDeps)
+    for dep in nestedDeps:
+      ensureCWireFor(dep, stmts)
+
+    stmts.add(typeDef)
+
+    let wireSection = newNimNode(nnkTypeSection)
+    wireSection.add(buildCWireTypeDef($reqTypeName, paramNames, paramTypes))
+    stmts.add(wireSection)
+    for p in buildCWireProcs($reqTypeName, paramNames, paramTypes):
+      stmts.add(p)
+  else:
+    stmts.add(typeDef)
+
+  stmts.add(ffiNewReqProc)
+  stmts.add(helperProc)
+  stmts.add(processProc)
+  stmts.add(addToReg)
+  stmts.add(poolDecl)
+  stmts.add(ffiProc)
 
   when defined(ffiDumpMacros):
     echo stmts.repr
@@ -1317,8 +1673,11 @@ macro ffiDtor*(prc: untyped): untyped =
     if ctx.isNil or cast[ptr FFIContext[`libTypeName`]](ctx)[].myLib.isNil:
       return RET_ERR
 
+  # Bind the user's library param so a non-trivial dtor body can reference
+  # it. Tag `{.used.}` because dtors often leave the body as `discard` (or
+  # only doc-comments + discard), which would otherwise trip XDeclaredButNotUsed.
   ffiBody.add quote do:
-    let `libParamName` = cast[ptr FFIContext[`libTypeName`]](ctx)[].myLib[]
+    let `libParamName` {.used.} = cast[ptr FFIContext[`libTypeName`]](ctx)[].myLib[]
 
   let isNoop =
     bodyNode.kind == nnkEmpty or (
@@ -1360,6 +1719,7 @@ macro ffiDtor*(prc: untyped): untyped =
       extraParams: @[],
       returnTypeName: "",
       returnIsPtr: false,
+      abiHash: "", # dtor signature is structurally invariant — no hash needed
     )
   )
 
@@ -1377,11 +1737,43 @@ macro ffiDtor*(prc: untyped): untyped =
 # genBindings — codegen entry point
 # ---------------------------------------------------------------------------
 
+proc buildCWireExtrasForRegistry(): NimNode {.compileTime.} =
+  ## Catch-all cwire emission. Each {.ffi.} type's cwire companion is
+  ## normally produced lazily by the first `registerReqFFI` that references
+  ## it (see `ensureCWireFor`). This call cleans up any orphan types that
+  ## no proc happens to mention but that still appeared in user code, so
+  ## the binding regeneration is exhaustive.
+  result = newStmtList()
+  if ffiTypeRegistry.len == 0:
+    return result
+
+  for tm in ffiTypeRegistry:
+    ensureCWireFor(tm.name, result)
+
+macro emitCWireExtras*(): untyped =
+  ## Compile-time entry point: returns the AST of every `_CWire` type
+  ## companion + its conversion procs derived from the populated
+  ## `ffiTypeRegistry`. A no-op outside the C target so the macro is safe
+  ## to call unconditionally from `genBindings`.
+  if not isPureCMode():
+    return newEmptyNode()
+  return buildCWireExtrasForRegistry()
+
 macro genBindings*(
     outputDir: static[string] = ffiOutputDir, nimSrcRelPath: static[string] = ffiSrcPath
 ): untyped =
-  ## Emits C++ or Rust binding files from the compile-time FFI registries.
-  ## The foreign-side wrapper encodes one CBOR buffer per request.
+  ## Emits binding files from the compile-time FFI registries, selected
+  ## from the **2-axis target matrix**:
+  ##
+  ##   ffiMode  = c | cbor    (Nim-side ABI; default cbor)
+  ##   ffiLang  = cpp | rust  (consumer-side wrapper language; default cpp)
+  ##
+  ## Legal cells:
+  ##   (cbor, cpp)  — C++ wrapper using CBOR on the wire
+  ##   (cbor, rust) — Rust crate using CBOR on the wire
+  ##   (c,    cpp)  — C ABI header consumable by both C and C++ callers
+  ##   (c,    rust) — Rust over pure-C ABI (NOT YET IMPLEMENTED)
+  ##
   ##
   ## PLACEMENT REQUIREMENT: genBindings() must be called AFTER every {.ffi.},
   ## {.ffiCtor.} and {.ffiDtor.} annotation in the compilation unit. Each
@@ -1393,16 +1785,11 @@ macro genBindings*(
   ## In a multi-file library, import all sub-modules first and call
   ## genBindings() once at the bottom of the top-level compilation-root file.
   ##
-  ## Supported languages (-d:targetLang): "rust" (default), "cpp".
   ## Output path and nim source path default to -d:ffiOutputDir and
   ## -d:ffiSrcPath, or can be passed as explicit arguments.
-  ## This macro is a no-op unless -d:ffiGenBindings is set.
-  ##
-  ## Example (all via compile flags):
-  ##   genBindings()
-  ##   # nim c -d:ffiGenBindings -d:targetLang=rust \
-  ##   #        -d:ffiOutputDir=examples/timer/rust_bindings \
-  ##   #        -d:ffiSrcPath=../timer.nim mylib.nim
+  ## Header/CMake generation is gated by -d:ffiGenBindings; the cwire
+  ## companion types/procs (needed when ffiMode=raw) are emitted
+  ## unconditionally so the generated shim is always linkable.
 
   when defined(ffiGenBindings):
     if outputDir.len == 0:
@@ -1410,24 +1797,47 @@ macro genBindings*(
         "genBindings: output directory is empty." &
           " Pass it as an argument or set -d:ffiOutputDir=path/to/output"
       )
-    let lang = string_helpers.toLower(targetLang)
+    let mode = effectiveMode()
+    let lang = effectiveLang()
     let libName = deriveLibName(ffiProcRegistry)
-    case lang
-    of "rust":
-      generateRustCrate(
+    # `case` doesn't accept tuples; combine the two axes into a flat key.
+    let cell = mode & "/" & lang
+    case cell
+    of "cbor/cpp":
+      generateCppBindings(
         ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath
       )
-    of "cpp", "c++":
-      generateCppBindings(
+    of "cbor/rust":
+      generateRustCrate(
         ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath
       )
     of "cddl":
       generateCddlBindings(
         ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath
       )
+    of "raw/cpp":
+      # The flat C-ABI cell. The emitted `.h` is `extern "C"`-safe so
+      # it's directly consumable by both pure-C and C++ callers; the
+      # dedicated C++-sugar `.hpp` layer over this ABI is a planned
+      # follow-up (the cwire/runtime side is already in place).
+      generateCBindings(
+        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath
+      )
+    of "raw/rust":
+      error(
+        "genBindings: ffiMode=raw × ffiLang=rust is not yet implemented." &
+          " Use -d:ffiMode=cbor for now, or wait for the Rust-over-pure-C cell."
+      )
     else:
       error(
-        "genBindings: unknown targetLang '" & lang & "'. Use 'rust', 'cpp', or 'cddl'."
+        "genBindings: unknown (ffiMode, ffiLang) = ('" & mode & "', '" & lang &
+          "'). Valid ffiMode: raw|cbor. Valid ffiLang: cpp|rust."
       )
 
+  # The cwire emission is **independent** of `ffiGenBindings`: even when no
+  # header is produced, the runtime shim emitted by `.ffi.`/`.ffiCtor.`
+  # references `cwirePack`/`cwireUnpack`/`cwireFree` per type. Those must
+  # exist in the same compilation unit, so we splice them here.
+  if isPureCMode():
+    return buildCWireExtrasForRegistry()
   return newEmptyNode()
