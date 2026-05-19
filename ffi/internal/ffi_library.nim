@@ -60,14 +60,16 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
   )
   res.add(varStmt)
 
-  ## Android chronicles redirection
+  ## Android chronicles redirection. The `when defined(android)` guard means
+  ## the block is inert on every other platform; on android it routes
+  ## chronicles output through `echo` so logs reach logcat.
   let chroniclesBlock = quote:
     when defined(android) and compiles(defaultChroniclesStream.outputs[0].writer):
       defaultChroniclesStream.outputs[0].writer = proc(
           logLevel: LogLevel, msg: LogOutputStr
       ) {.raises: [].} =
         echo logLevel, msg
-      result.add(chroniclesBlock)
+  res.add(chroniclesBlock)
 
   let procName = ident("initializeLibrary")
   let nimMainName = ident("lib" & libraryName & "NimMain")

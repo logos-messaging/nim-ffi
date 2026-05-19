@@ -1,6 +1,25 @@
-## Carries one CBOR-encoded request blob between the main thread and the FFI
-## thread. The main thread allocates the request (in shared memory), the FFI
-## thread frees it after invoking the user callback.
+## Carries one request blob between the main thread and the FFI thread.
+## The main thread allocates the request (in shared memory), the FFI thread
+## frees it after invoking the user callback.
+##
+## Two payload formats coexist on this carrier:
+##   - **CBOR mode** (default; cpp / rust targets): `data` points to
+##     CBOR-encoded request bytes that the FFI thread's `processFFIRequest`
+##     decodes back into a Nim Req object.
+##   - **C-wire mode** (-d:ffiMode=raw): `data` points to a *typed* wire
+##     struct (a `Req_CWire` in shared memory) whose layout matches the C
+##     `Req` struct seen by the foreign caller. The FFI thread casts it back
+##     to the right `ptr Req_CWire` and unpacks fields without serialisation.
+##     The response, similarly, is a `Resp_CWire` ptr cleaned up after the
+##     callback fires.
+##
+## The C-wire mode bolts onto the existing carrier via two cleanup hooks:
+##   - `cleanupReqProc`  — invoked by `deleteRequest` so generated code can
+##     free cstrings/arrays owned by the wire Req struct.
+##   - `cleanupRespData` / `cleanupRespProc` — set by the FFI-thread handler
+##     before returning the response bytes; `handleRes` invokes the proc
+##     **after** firing the user callback so any shared-memory strings
+##     pointed to by the Resp survive at least until the callback returns.
 
 import results
 import chronos
@@ -11,12 +30,27 @@ const EmptyErrorMarker = "unknown error"
   ## the callback's msg ptr non-nil and gives the foreign side a recognizable
   ## fallback to log.
 
-type FFIThreadRequest* = object
-  callback*: FFICallBack
-  userData*: pointer
-  reqId*: cstring ## Per-proc Req type name used to look up the handler.
-  data*: ptr UncheckedArray[byte] ## Owned CBOR-encoded request payload.
-  dataLen*: int
+type
+  CleanupProc* = proc(p: pointer) {.nimcall, gcsafe, raises: [].}
+
+  FFIThreadRequest* = object
+    callback*: FFICallBack
+    userData*: pointer
+    reqId*: cstring ## Per-proc Req type name used to look up the handler.
+    data*: ptr UncheckedArray[byte] ## CBOR-encoded payload OR typed wire ptr.
+    dataLen*: int
+    cleanupReqProc*: CleanupProc
+      ## C-wire mode only. Called from `deleteRequest` on `data` to free any
+      ## shared-memory cstrings/arrays owned by the wire Req struct. The
+      ## proc receives the `data` pointer (which is the wire struct itself);
+      ## after it returns, `deleteRequest` deallocShared's the struct.
+      ## Nil for CBOR mode.
+    cleanupRespData*: pointer
+    cleanupRespProc*: CleanupProc
+      ## Set by the FFI-thread handler before returning the response. Runs
+      ## from `handleRes` *after* firing the user callback so shared-memory
+      ## strings inside the Resp remain valid throughout the call. Nil for
+      ## CBOR mode.
 
 proc allocBaseRequest(
     callback: FFICallBack, userData: pointer, reqId: cstring
@@ -30,6 +64,9 @@ proc allocBaseRequest(
   ret[].reqId = reqId.alloc()
   ret[].data = nil
   ret[].dataLen = 0
+  ret[].cleanupReqProc = nil
+  ret[].cleanupRespData = nil
+  ret[].cleanupRespProc = nil
   return ret
 
 proc copySharedPayload(req: ptr FFIThreadRequest, data: ptr byte, dataLen: int) =
@@ -103,8 +140,34 @@ proc initFromOwnedShared*(
   adoptOwnedSharedPayload(ret, data, dataLen)
   return ret
 
+proc initFromOwnedWirePtr*(
+    T: typedesc[FFIThreadRequest],
+    callback: FFICallBack,
+    userData: pointer,
+    reqId: cstring,
+    wirePtr: pointer,
+    wireSize: int,
+    cleanup: CleanupProc,
+): ptr type T =
+  ## C-wire mode constructor. `wirePtr` is the shared-memory wire Req struct
+  ## (allocated via `allocShared`); `cleanup` will be invoked from
+  ## `deleteRequest` on `wirePtr` before the struct itself is freed.
+  ##
+  ## A nil `wirePtr` is supported for procs that take no parameters: the
+  ## request travels without a payload and no cleanup is needed. `cleanup`
+  ## may be nil for POD wire types (no embedded cstrings/arrays).
+  var ret = allocBaseRequest(callback, userData, reqId)
+  ret[].data = cast[ptr UncheckedArray[byte]](wirePtr)
+  ret[].dataLen = wireSize
+  ret[].cleanupReqProc = cleanup
+  return ret
+
 proc deleteRequest*(request: ptr FFIThreadRequest) =
   if not request[].data.isNil:
+    if not request[].cleanupReqProc.isNil:
+      # C-wire mode: ask the generated proc to free any cstrings/arrays it
+      # owns before we release the struct itself.
+      request[].cleanupReqProc(cast[pointer](request[].data))
     deallocShared(request[].data)
   if not request[].reqId.isNil:
     deallocShared(request[].reqId)
@@ -112,8 +175,15 @@ proc deleteRequest*(request: ptr FFIThreadRequest) =
 
 proc handleRes*(res: Result[seq[byte], string], request: ptr FFIThreadRequest) =
   ## Fires the registered callback exactly once and frees the request.
-  ## Success payload is CBOR bytes; error payload is the raw UTF-8 error string.
+  ## On the CBOR path the OK payload is CBOR bytes; on the C-wire path it is
+  ## a struct snapshot whose pointers may reach into shared memory owned by
+  ## `cleanupRespData`. Either way the cleanup hook (when set) runs after the
+  ## callback returns so those pointers remain valid throughout.
   defer:
+    if not request[].cleanupRespProc.isNil:
+      request[].cleanupRespProc(request[].cleanupRespData)
+      if not request[].cleanupRespData.isNil:
+        deallocShared(request[].cleanupRespData)
     deleteRequest(request)
 
   if res.isErr():
