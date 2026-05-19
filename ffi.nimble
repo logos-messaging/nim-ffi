@@ -97,6 +97,13 @@ task test_sanitized, "Run all unit tests under a sanitizer (NIM_FFI_SAN) and mm 
     if mm == "orc": @[nimFlagsOrc]
     elif mm == "refc": @[nimFlagsRefc]
     else: @[nimFlagsOrc, nimFlagsRefc]
+  if san == "tsan":
+    let suppPath = thisDir() & "/tsan.supp"
+    let existing = getEnv("TSAN_OPTIONS")
+    if existing == "":
+      putEnv("TSAN_OPTIONS", "suppressions=" & suppPath)
+    elif "suppressions=" notin existing:
+      putEnv("TSAN_OPTIONS", existing & ":suppressions=" & suppPath)
   for flags in modes:
     for t in unitTests:
       exec "nim c -r " & flags & extra & " tests/unit/" & t & ".nim"
