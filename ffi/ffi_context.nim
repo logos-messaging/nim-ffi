@@ -218,12 +218,16 @@ proc processRequest[T](
     else:
       ctx[].registeredRequests[][reqIdCs](cast[pointer](request), ctx)
 
+  ## Catch every catchable exception (including CancelledError raised by
+  ## the shutdown drain in ffiRun) so handleRes — and its `deleteRequest`
+  ## defer — always runs. Otherwise an abandoned in-flight handler would
+  ## leak its request envelope, reqId copy, and CBOR payload.
   let res =
     try:
       await retFut
-    except AsyncError as exc:
+    except CatchableError as exc:
       Result[seq[byte], string].err(
-        "Async error in processRequest for " & reqId & ": " & exc.msg
+        "Error in processRequest for " & reqId & ": " & exc.msg
       )
 
   ## handleRes may raise (OOM, GC setup) even though it is rare. Catching here
@@ -254,7 +258,23 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
       ## Holds the main library object, i.e., in charge of handling the ffi requests.
       ## e.g., Waku, LibP2P, SDS, etc.
 
+    ## In-flight processRequest futures. Tracked so they can be drained on
+    ## shutdown — otherwise destroying the context while a handler is
+    ## awaiting (e.g. sleepAsync) abandons the future and leaks the
+    ## request's envelope/reqId/payload allocations.
+    var pending: seq[Future[void]] = @[]
+
+    proc reapCompleted() =
+      var i = 0
+      while i < pending.len:
+        if pending[i].finished():
+          pending.del(i)
+        else:
+          inc i
+
     while ctx.running.load():
+      reapCompleted()
+
       let gotSignal = await ctx.reqSignal.wait().withTimeout(100.milliseconds)
       if not gotSignal:
         continue
@@ -268,11 +288,23 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
         ctx.myLib = addr ffiReqHandler
 
       ## Handle the request
-      asyncSpawn processRequest(request, ctx)
+      pending.add processRequest(request, ctx)
 
       let fireRes = ctx.reqReceivedSignal.fireSync()
       if fireRes.isErr():
         error "could not fireSync back to requester thread", error = fireRes.error
+
+    ## Drain in-flight handlers so each request's `deleteRequest` runs
+    ## before we exit. Without this, abandoning a future mid-await would
+    ## leak the request allocations (visible to LSan; previously hidden
+    ## because Nim's pool allocator kept the chunks alive in the process).
+    reapCompleted()
+    if pending.len > 0:
+      try:
+        await allFutures(pending)
+      except CatchableError as exc:
+        error "draining pending FFI requests on shutdown raised",
+          error = exc.msg
 
   waitFor ffiRun(ctx)
 

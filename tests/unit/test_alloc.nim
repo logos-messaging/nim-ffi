@@ -7,33 +7,33 @@ suite "alloc(cstring)":
     let res = alloc(s)
     check res != nil
     check res[0] == '\0'
-    deallocShared(res)
+    dealloc(res)
 
   test "copies content":
     let res = alloc("hello world".cstring)
     check $res == "hello world"
-    deallocShared(res)
+    dealloc(res)
 
   test "empty cstring":
     let res = alloc("".cstring)
     check len(res) == 0
-    deallocShared(res)
+    dealloc(res)
 
 suite "alloc(string)":
   test "copies content":
     let res = alloc("test string")
     check $res == "test string"
-    deallocShared(res)
+    dealloc(res)
 
   test "empty string":
     let res = alloc("")
     check len(res) == 0
-    deallocShared(res)
+    dealloc(res)
 
   test "string with special characters":
     let res = alloc("abc\0xyz")
     check res[0] == 'a'
-    deallocShared(res)
+    dealloc(res)
 
 suite "allocSharedSeq / deallocSharedSeq / toSeq":
   test "roundtrip int seq":

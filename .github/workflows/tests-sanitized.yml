@@ -1,0 +1,92 @@
+name: tests-sanitized
+
+on:
+  workflow_call:
+    inputs:
+      sanitizer:
+        required: true
+        type: string
+      nim-versions:
+        required: true
+        type: string
+        description: JSON array of Nim versions to run the matrix against, e.g. '["2.2.4","stable"]'.
+      nimble-version:
+        required: true
+        type: string
+
+jobs:
+  run:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        nim-version: ${{ fromJSON(inputs.nim-versions) }}
+        # refc's GC conservatively scans the stack via setjmp+walk, which
+        # intentionally reads one word past the saved-registers buffer to
+        # transition into scanning the rest of the thread stack. ASan flags
+        # that as a stack-buffer-overflow (false positive — see its "custom
+        # stack unwind mechanism" hint). orc doesn't conservatively scan, so
+        # it's the only mm we sanitize under asan-ubsan. refc keeps coverage
+        # in the non-sanitized matrix (test.yml) and under tsan.
+        # (Can't express this via `exclude` or job-level `if:` — neither
+        # has access to `inputs.sanitizer` in a way that gates a matrix
+        # combination, so we filter at the dimension itself.)
+        mm: ${{ fromJSON(inputs.sanitizer == 'asan-ubsan' && '["orc"]' || '["orc","refc"]') }}
+
+    runs-on: ${{ matrix.os }}
+    name: ${{ inputs.sanitizer }} · ${{ matrix.os }} · Nim ${{ matrix.nim-version }} · ${{ matrix.mm }}
+
+    env:
+      NIM_FFI_MM:    ${{ matrix.mm }}
+      NIM_FFI_SAN:   ${{ inputs.sanitizer }}
+      # Per-sanitizer runtime options. Mirrors what tests/e2e/cpp/CMakeLists.txt
+      # injects via gtest_discover_tests so unit and e2e runs agree.
+      #
+      # `asan-ubsan` enables leak detection inside ASan (detect_leaks=1);
+      # LSAN_OPTIONS is honoured for suppressions when LSan runs under ASan.
+      ASAN_OPTIONS:  halt_on_error=1:abort_on_error=1:detect_leaks=1:strict_string_checks=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      LSAN_OPTIONS:  suppressions=${{ github.workspace }}/tests/e2e/cpp/lsan.supp:print_suppressions=0
+      TSAN_OPTIONS:  halt_on_error=1:second_deadlock_stack=1:history_size=7
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: ${{ matrix.nim-version }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Nimble ${{ inputs.nimble-version }}
+        run: |
+          cd /tmp && nimble install "nimble@${{ inputs.nimble-version }}" -y
+          echo "$HOME/.nimble/bin" >> $GITHUB_PATH
+
+      - name: Cache nimble deps
+        id: cache-nimbledeps
+        uses: actions/cache@v4
+        with:
+          path: |
+            nimbledeps/
+            nimble.paths
+          key: ${{ runner.os }}-${{ runner.arch }}-nimbledeps-${{ matrix.nim-version }}-${{ hashFiles('*.nimble') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-nimbledeps-${{ matrix.nim-version }}-
+            ${{ runner.os }}-${{ runner.arch }}-nimbledeps-
+
+      - name: Install nimble deps
+        if: steps.cache-nimbledeps.outputs.cache-hit != 'true'
+        run: nimble setup --localdeps -y
+
+      - name: Cache CMake FetchContent (GoogleTest)
+        uses: actions/cache@v4
+        with:
+          path: tests/e2e/cpp/build/_deps
+          key: ${{ runner.os }}-${{ runner.arch }}-cpp-e2e-deps-${{ inputs.sanitizer }}-${{ hashFiles('tests/e2e/cpp/CMakeLists.txt') }}
+
+      - name: Run unit tests (${{ inputs.sanitizer }})
+        run: nimble test_sanitized -y
+
+      - name: Run C++ e2e tests (${{ inputs.sanitizer }})
+        run: nimble test_cpp_e2e_sanitized -y
