@@ -79,7 +79,7 @@ jobs:
         if: steps.cache-nimbledeps.outputs.cache-hit != 'true'
         run: nimble setup --localdeps -y
 
-      - name: Cache CMake FetchContent (GoogleTest + nlohmann_json)
+      - name: Cache CMake FetchContent (GoogleTest)
         uses: actions/cache@v4
         with:
           path: tests/e2e/cpp/build/_deps

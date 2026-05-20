@@ -16,18 +16,22 @@ requires "cbor_serialization"
 const nimFlagsOrc = "--mm:orc -d:chronicles_log_level=WARN"
 const nimFlagsRefc = "--mm:refc -d:chronicles_log_level=WARN"
 
-const unitTests = @[
-  "test_alloc",
-  "test_ffi_context",
-  "test_gc_compat",
-  "test_serial",
-  "test_ctx_validation",
-  "test_nim_native_api",
-  "test_meta",
-  "test_string_helpers",
-  "test_wire_compat",
-  "test_cddl_codegen",
-]
+import std/[algorithm, os, strutils]
+
+proc discoverUnitTests(): seq[string] =
+  # `listFiles` returns both .nim sources and any compiled binaries left in
+  # the dir from prior local runs — filter to .nim so we don't run a test
+  # twice (and don't try to `nim c -r` a stale binary).
+  var names: seq[string] = @[]
+  for path in listFiles(thisDir() / "tests/unit"):
+    if path.endsWith(".nim"):
+      let name = path.extractFilename.changeFileExt("")
+      if name.startsWith("test_"):
+        names.add(name)
+  names.sort()
+  return names
+
+let unitTests = discoverUnitTests()
 
 proc sanFlags(san: string): string =
   # Each --passC / --passL adds one literal flag to the C compiler / linker
@@ -59,16 +63,8 @@ task buildffi, "Compile the library":
 
 task test, "Run all tests under --mm:orc and --mm:refc":
   for flags in [nimFlagsOrc, nimFlagsRefc]:
-    exec "nim c -r " & flags & " tests/unit/test_alloc.nim"
-    exec "nim c -r " & flags & " tests/unit/test_ffi_context.nim"
-    exec "nim c -r " & flags & " tests/unit/test_gc_compat.nim"
-    exec "nim c -r " & flags & " tests/unit/test_serial.nim"
-    exec "nim c -r " & flags & " tests/unit/test_ctx_validation.nim"
-    exec "nim c -r " & flags & " tests/unit/test_nim_native_api.nim"
-    exec "nim c -r " & flags & " tests/unit/test_meta.nim"
-    exec "nim c -r " & flags & " tests/unit/test_string_helpers.nim"
-    exec "nim c -r " & flags & " tests/unit/test_wire_compat.nim"
-    exec "nim c -r " & flags & " tests/unit/test_cddl_codegen.nim"
+    for t in unitTests:
+      exec "nim c -r " & flags & " tests/unit/" & t & ".nim"
 
 task test_alloc, "Run alloc unit tests under --mm:orc and --mm:refc":
   exec "nim c -r " & nimFlagsOrc & " tests/unit/test_alloc.nim"

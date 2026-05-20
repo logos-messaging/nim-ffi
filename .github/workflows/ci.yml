@@ -8,11 +8,11 @@ on:
 
 jobs:
   # Single source of truth for Nim / Nimble versions used by every job and
-  # every reusable workflow below. Values live in .github/versions.env so
-  # they're greppable and editable in one place. The job exposes them as
-  # outputs because the `with:` of a reusable-workflow call only accepts
-  # the `needs`, `inputs`, `vars`, and `github` contexts — `env` is not
-  # allowed there, which rules out plain workflow-level env vars.
+  # every reusable workflow below. Values live in versions.env at the repo
+  # root so they're greppable and editable in one place, next to ffi.nimble.
+  # The job exposes them as outputs because the `with:` of a reusable-workflow
+  # call only accepts the `needs`, `inputs`, `vars`, and `github` contexts —
+  # `env` is not allowed there, which rules out plain workflow-level env vars.
   versions:
     runs-on: ubuntu-latest
     outputs:
@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: load
-        run: cat .github/versions.env >> "$GITHUB_OUTPUT"
+        run: cat versions.env >> "$GITHUB_OUTPUT"
 
   alloc:
     name: Alloc
@@ -110,7 +110,7 @@ jobs:
         if: steps.cache-nimbledeps.outputs.cache-hit != 'true'
         run: nimble setup --localdeps -y
 
-      - name: Cache CMake FetchContent (GoogleTest + nlohmann_json)
+      - name: Cache CMake FetchContent (GoogleTest)
         uses: actions/cache@v4
         with:
           path: tests/e2e/cpp/build/_deps
