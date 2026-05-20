@@ -34,6 +34,14 @@ type ComplexResponse {.ffi.} = object
   itemCount: int
   hasNote: bool
 
+# Variable-size byte blob — added so the bench harness can measure round-trip
+# cost vs payload size. Sized to mirror real consumers' wire payloads:
+# Waku messages, codex blocks, libp2p pubsub frames. The echo handler is
+# trivial (no chronos sleep) so the measurement reflects codec + thread-
+# hop cost, not user code.
+type BytesPayload {.ffi.} = object
+  payload: seq[byte]
+
 # --- Constructor -----------------------------------------------------------
 # Called once from Rust. Creates the FFIContext + MyTimer.
 # Uses chronos (await sleepAsync) so the body is async.
@@ -55,6 +63,13 @@ proc myTimerEcho*(
 # without going through the request channel.
 proc myTimerVersion*(timer: MyTimer): Future[Result[string, string]] {.ffi.} =
   return ok("nim-timer v0.1.0")
+
+proc myTimerBytesEcho*(
+    timer: MyTimer, blob: BytesPayload
+): Future[Result[BytesPayload, string]] {.ffi.} =
+  ## Echoes the payload back unchanged. Sync (no `await`) so the benchmark
+  ## isolates codec + thread-hop cost from any artificial chronos delay.
+  return ok(blob)
 
 proc myTimerComplex*(
     timer: MyTimer, req: ComplexRequest

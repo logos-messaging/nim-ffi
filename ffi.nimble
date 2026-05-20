@@ -81,6 +81,26 @@ task genbindings_cddl, "Generate CDDL schema for the timer example":
     " -d:ffiSrcPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
 
+task genbindings_c, "Generate raw-mode C bindings for the timer example":
+  exec "nim c " & nimFlagsOrc &
+    " --app:lib --noMain --nimMainPrefix:libmy_timer" &
+    " -d:ffiGenBindings -d:targetLang=cpp -d:ffiMode=raw" &
+    " -d:ffiOutputDir=examples/timer/c_bindings" &
+    " -d:ffiSrcPath=../timer.nim" &
+    " -o:/dev/null examples/timer/timer.nim"
+
+task bench_codec, "Run the Nim-level codec microbench (CBOR vs cwire)":
+  # Must compile with -d:ffiMode=raw so the cwire companion procs are
+  # emitted alongside the CBOR path. Release flags so the inner loops
+  # aren't dominated by debug overhead.
+  exec "nim c -r --mm:orc -d:release -d:chronicles_log_level=WARN" &
+    " -d:ffiMode=raw" &
+    " --nimcache:nimcache/bench_codec" &
+    " tests/bench/bench_codec.nim"
+
+task bench_e2e, "Build and run the C/C++ e2e benchmarks (CBOR vs raw)":
+  exec "tests/bench/run_bench.sh"
+
 task genbindings_cpp, "Generate C++ bindings for the timer example":
   exec "nim c " & nimFlagsOrc &
     " --app:lib --noMain --nimMainPrefix:libmy_timer" &

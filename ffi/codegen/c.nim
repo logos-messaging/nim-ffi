@@ -58,7 +58,7 @@ proc nimTypeToC*(typeName: string): string =
   of "uint", "uint64": "uint64_t"
   of "uint32": "uint32_t"
   of "uint16": "uint16_t"
-  of "uint8": "uint8_t"
+  of "uint8", "byte": "uint8_t"
   of "bool": "bool"
   of "float", "float32": "float"
   of "float64": "double"

@@ -22,6 +22,13 @@ inline CborError encode_cbor(CborEncoder& e, const std::string& v) {
     return cbor_encode_text_string(&e, v.data(), v.size());
 }
 
+// `seq[byte]` on the Nim side is encoded as a CBOR byte string (major type 2),
+// not as a CBOR array. The dedicated overload below has to win over the
+// generic `std::vector<T>` template; we declare it first.
+inline CborError encode_cbor(CborEncoder& e, const std::vector<std::uint8_t>& v) {
+    return cbor_encode_byte_string(&e, v.data(), v.size());
+}
+
 template<typename T>
 inline CborError encode_cbor(CborEncoder& e, const std::vector<T>& v) {
     CborEncoder arr;
@@ -89,6 +96,20 @@ inline CborError decode_cbor(CborValue& it, std::string& out) {
     if (err) return err;
     out.resize(len);
     err = cbor_value_copy_text_string(&it, out.empty() ? nullptr : &out[0], &len, nullptr);
+    if (err) return err;
+    return cbor_value_advance(&it);
+}
+
+// Mirror of the byte-string encoder above — decodes CBOR major type 2 into
+// `std::vector<uint8_t>`. Declared before the generic template so it wins.
+inline CborError decode_cbor(CborValue& it, std::vector<std::uint8_t>& out) {
+    if (!cbor_value_is_byte_string(&it)) return CborErrorImproperValue;
+    size_t len = 0;
+    CborError err = cbor_value_get_string_length(&it, &len);
+    if (err) return err;
+    out.resize(len);
+    err = cbor_value_copy_byte_string(&it, out.empty() ? nullptr : out.data(),
+                                       &len, nullptr);
     if (err) return err;
     return cbor_value_advance(&it);
 }
