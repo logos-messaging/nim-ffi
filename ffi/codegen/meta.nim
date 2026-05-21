@@ -29,9 +29,21 @@ type
     name*: string
     fields*: seq[FFIFieldMeta]
 
+  FFIEventMeta* = object
+    ## Library-initiated event declared with `{.ffiEvent: "wire_name".}`.
+    ## `wireName` is the literal string the foreign side dispatches on
+    ## (it appears in the CBOR `eventType` field, verbatim — no case
+    ## conversion). `payloadTypeName` is the Nim type of the single
+    ## payload parameter.
+    wireName*: string
+    nimProcName*: string
+    libName*: string
+    payloadTypeName*: string
+
 # Compile-time registries populated by the macros
 var ffiProcRegistry* {.compileTime.}: seq[FFIProcMeta]
 var ffiTypeRegistry* {.compileTime.}: seq[FFITypeMeta]
+var ffiEventRegistry* {.compileTime.}: seq[FFIEventMeta]
 var currentLibName* {.compileTime.}: string
 
 # Target language for binding generation; override with -d:targetLang=cpp

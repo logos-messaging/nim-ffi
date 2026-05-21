@@ -1,7 +1,7 @@
 ## Rust binding generator for the nim-ffi framework.
 ## Generates a complete Rust crate that uses CBOR (ciborium) on the wire.
 
-import std/[os, strutils]
+import std/[os, strutils, sequtils]
 import ./meta, ./string_helpers
 
 ## Wire-format Rust type used for any Nim `ptr T` / `pointer`. Fixed 64-bit so
@@ -207,6 +207,13 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
       params.add("ctx: *mut c_void")
       lines.add("    pub fn $1($2) -> c_int;" % [p.procName, params.join(", ")])
 
+  # Event-callback setter — emitted on the Nim side by `declareLibrary`,
+  # always present in the dylib.
+  lines.add(
+    "    pub fn $1_set_event_callback(ctx: *mut c_void, callback: FFICallback, user_data: *mut c_void);" %
+      [linkLibName]
+  )
+
   lines.add("}")
   return lines.join("\n") & "\n"
 
@@ -256,7 +263,9 @@ proc generateTypesRs*(types: seq[FFITypeMeta], procs: seq[FFIProcMeta]): string 
 
   return lines.join("\n")
 
-proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
+proc generateApiRs*(
+    procs: seq[FFIProcMeta], libName: string, events: seq[FFIEventMeta] = @[]
+): string =
   ## Generates api.rs with both a blocking and a tokio-async high-level API.
   ##
   ## Blocking: ctx.echo(req)             — thread-blocks via Condvar
@@ -433,11 +442,87 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
   lines.add("}")
   lines.add("")
 
+  # ── Typed event handler struct + trampoline (only if events declared) ────
+  # The Events struct holds optional boxed closures, one per registered
+  # `{.ffiEvent.}`. The struct lives on the heap (Box::into_raw); its raw
+  # pointer is handed to the dylib as `user_data` for the event callback.
+  # The trampoline parses the CBOR `EventEnvelope`, picks the matching
+  # field on Events, decodes the payload as the registered type, and
+  # invokes the closure.
+  if events.len > 0:
+    lines.add("/// Typed event handlers for `$1`. Each field is `None` by" % [ctxTypeName])
+    lines.add("/// default; set the ones you care about and pass to")
+    lines.add("/// `$1::set_event_handlers`." % [ctxTypeName])
+    lines.add("#[allow(non_snake_case)]")
+    lines.add("pub struct Events {")
+    lines.add("    pub on_error: Option<Box<dyn Fn(&str) + Send + Sync>>,")
+    for ev in events:
+      lines.add(
+        "    pub $1: Option<Box<dyn Fn(&$2) + Send + Sync>>," %
+          [ev.nimProcName, ev.payloadTypeName]
+      )
+    lines.add("}")
+    lines.add("")
+    lines.add("impl Default for Events {")
+    lines.add("    fn default() -> Self {")
+    lines.add("        Self { on_error: None, " &
+      events.mapIt(it.nimProcName & ": None").join(", ") & " }")
+    lines.add("    }")
+    lines.add("}")
+    lines.add("")
+
+    # Trampoline — `extern "C"` free function. Deserialises the envelope
+    # twice: once for `eventType`, then with the typed payload via serde.
+    lines.add("unsafe extern \"C\" fn $1_event_trampoline(" % [libName])
+    lines.add("    ret: c_int, msg: *const c_char, len: usize, ud: *mut c_void,")
+    lines.add(") {")
+    lines.add("    if ud.is_null() { return; }")
+    lines.add("    let events = &*(ud as *const Events);")
+    lines.add("    if ret != 0 {")
+    lines.add("        if let Some(ref on_err) = events.on_error {")
+    lines.add("            let bytes = if !msg.is_null() && len > 0 {")
+    lines.add("                slice::from_raw_parts(msg as *const u8, len)")
+    lines.add("            } else { &[] };")
+    lines.add("            let s = String::from_utf8_lossy(bytes);")
+    lines.add("            on_err(&s);")
+    lines.add("        }")
+    lines.add("        return;")
+    lines.add("    }")
+    lines.add("    if msg.is_null() || len == 0 { return; }")
+    lines.add("    let bytes = slice::from_raw_parts(msg as *const u8, len);")
+    lines.add("    #[derive(serde::Deserialize)]")
+    lines.add("    struct EnvelopeMeta {")
+    lines.add("        #[serde(rename = \"eventType\")]")
+    lines.add("        event_type: String,")
+    lines.add("    }")
+    lines.add("    let meta: EnvelopeMeta = match ciborium::de::from_reader(bytes) {")
+    lines.add("        Ok(m) => m,")
+    lines.add("        Err(_) => return,")
+    lines.add("    };")
+    for ev in events:
+      lines.add("    if meta.event_type == \"$1\" {" % [ev.wireName])
+      lines.add("        #[derive(serde::Deserialize)]")
+      lines.add("        struct Envelope { payload: $1 }" % [ev.payloadTypeName])
+      lines.add(
+        "        if let Ok(env) = ciborium::de::from_reader::<Envelope, _>(bytes) {"
+      )
+      lines.add(
+        "            if let Some(ref h) = events.$1 { h(&env.payload); }" %
+          [ev.nimProcName]
+      )
+      lines.add("        }")
+      lines.add("        return;")
+      lines.add("    }")
+    lines.add("}")
+    lines.add("")
+
   # ── Context struct ─────────────────────────────────────────────────────────
   lines.add("/// High-level context for `$1`." % [libTypeName])
   lines.add("pub struct $1 {" % [ctxTypeName])
   lines.add("    ptr: *mut c_void,")
   lines.add("    timeout: Duration,")
+  if events.len > 0:
+    lines.add("    events: *mut Events,")
   lines.add("}")
   lines.add("")
   # SAFETY block applies to both impls below (PR #23 Rust review, item 7).
@@ -474,6 +559,13 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
     lines.add("            unsafe { ffi::$1(self.ptr); }" % [dtorProcName])
     lines.add("            self.ptr = std::ptr::null_mut();")
     lines.add("        }")
+    # Reclaim the Events box after the dylib's destroy has torn down the
+    # FFI thread (no more events will fire by this point).
+    if events.len > 0:
+      lines.add("        if !self.events.is_null() {")
+      lines.add("            unsafe { drop(Box::from_raw(self.events)); }")
+      lines.add("            self.events = std::ptr::null_mut();")
+      lines.add("        }")
     lines.add("    }")
     lines.add("}")
     lines.add("")
@@ -529,7 +621,10 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
     lines.add(
       "        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;"
     )
-    lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout })")
+    if events.len > 0:
+      lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout, events: std::ptr::null_mut() })")
+    else:
+      lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout })")
     lines.add("    }")
     lines.add("")
 
@@ -552,7 +647,32 @@ proc generateApiRs*(procs: seq[FFIProcMeta], libName: string): string =
     lines.add(
       "        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;"
     )
-    lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout })")
+    if events.len > 0:
+      lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout, events: std::ptr::null_mut() })")
+    else:
+      lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout })")
+    lines.add("    }")
+    lines.add("")
+
+  # ── Typed event registration ───────────────────────────────────────────
+  if events.len > 0:
+    lines.add("    /// Attach typed event handlers. Replacing handlers calls the")
+    lines.add("    /// dylib's set_event_callback with a fresh trampoline target.")
+    lines.add("    /// The previously-installed Events box (if any) is dropped here,")
+    lines.add("    /// so callbacks in flight on the FFI thread must already be done.")
+    lines.add("    pub fn set_event_handlers(&mut self, handlers: Events) {")
+    lines.add("        if !self.events.is_null() {")
+    lines.add("            unsafe { drop(Box::from_raw(self.events)); }")
+    lines.add("            self.events = std::ptr::null_mut();")
+    lines.add("        }")
+    lines.add("        let raw = Box::into_raw(Box::new(handlers));")
+    lines.add("        self.events = raw;")
+    lines.add("        unsafe {")
+    lines.add(
+      "            ffi::$1_set_event_callback(self.ptr, $1_event_trampoline, raw as *mut c_void);" %
+        [libName]
+    )
+    lines.add("        }")
     lines.add("    }")
     lines.add("")
 
@@ -635,6 +755,7 @@ proc generateRustCrate*(
     libName: string,
     outputDir: string,
     nimSrcRelPath: string,
+    events: seq[FFIEventMeta] = @[],
 ) =
   ## Generates a complete Rust crate in outputDir.
   createDir(outputDir)
@@ -645,4 +766,4 @@ proc generateRustCrate*(
   writeFile(outputDir / "src" / "lib.rs", generateLibRs())
   writeFile(outputDir / "src" / "ffi.rs", generateFFIRs(procs))
   writeFile(outputDir / "src" / "types.rs", generateTypesRs(types, procs))
-  writeFile(outputDir / "src" / "api.rs", generateApiRs(procs, libName))
+  writeFile(outputDir / "src" / "api.rs", generateApiRs(procs, libName, events))
