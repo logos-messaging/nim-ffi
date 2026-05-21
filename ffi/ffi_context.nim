@@ -47,6 +47,8 @@ var onFFIThread* {.threadvar.}: bool
 const git_version* {.strdefine.} = "n/a"
 
 template callEventCallback*(ctx: ptr FFIContext, eventName: string, body: untyped) =
+  ## `body` may evaluate to a `string` or a `seq[byte]` — the cast to
+  ## `ptr cchar` accepts both `ptr char` and `ptr byte` source pointers.
   if isNil(ctx[].callbackState.callback):
     chronicles.error eventName & " - eventCallback is nil"
     return
@@ -56,7 +58,7 @@ template callEventCallback*(ctx: ptr FFIContext, eventName: string, body: untype
       let event = body
       cast[FFICallBack](ctx[].callbackState.callback)(
         RET_OK,
-        unsafeAddr event[0],
+        cast[ptr cchar](unsafeAddr event[0]),
         cast[csize_t](len(event)),
         ctx[].callbackState.userData,
       )
@@ -66,7 +68,7 @@ template callEventCallback*(ctx: ptr FFIContext, eventName: string, body: untype
         getCurrentExceptionMsg()
       cast[FFICallBack](ctx[].callbackState.callback)(
         RET_ERR,
-        unsafeAddr msg[0],
+        cast[ptr cchar](unsafeAddr msg[0]),
         cast[csize_t](len(msg)),
         ctx[].callbackState.userData,
       )
@@ -74,6 +76,7 @@ template callEventCallback*(ctx: ptr FFIContext, eventName: string, body: untype
 template dispatchFFIEvent*(eventName: string, body: untyped) =
   ## Dispatches an FFI event to the callback registered via `{libName}_set_event_callback`.
   ## `body` is evaluated lazily — only when a callback is registered.
+  ## `body` may produce a `string` (legacy JSON style) or a `seq[byte]` (CBOR).
   ## Valid only on the FFI thread (i.e., inside {.ffi.} proc bodies and their async closures).
   let ffiState = ffiCurrentCallbackState
   if isNil(ffiState) or isNil(ffiState[].callback):
@@ -83,13 +86,42 @@ template dispatchFFIEvent*(eventName: string, body: untyped) =
     try:
       let event = body
       cast[FFICallBack](ffiState[].callback)(
-        RET_OK, unsafeAddr event[0], cast[csize_t](len(event)), ffiState[].userData
+        RET_OK,
+        cast[ptr cchar](unsafeAddr event[0]),
+        cast[csize_t](len(event)),
+        ffiState[].userData,
       )
     except Exception, CatchableError:
       let msg = "Exception dispatching " & eventName & ": " & getCurrentExceptionMsg()
       cast[FFICallBack](ffiState[].callback)(
-        RET_ERR, unsafeAddr msg[0], cast[csize_t](len(msg)), ffiState[].userData
+        RET_ERR,
+        cast[ptr cchar](unsafeAddr msg[0]),
+        cast[csize_t](len(msg)),
+        ffiState[].userData,
       )
+
+type EventEnvelope*[T] = object
+  ## Standard wire shape for CBOR-encoded FFI events:
+  ##   { eventType: tstr, payload: <T> }
+  ## Pair with `dispatchFFIEventCbor` (or call `cborEncode` directly).
+  eventType*: string
+  payload*: T
+
+template dispatchFFIEventCbor*(eventName: string, eventPayload: typed) =
+  ## Typed CBOR variant of `dispatchFFIEvent`. Wraps `eventPayload` in an
+  ## `EventEnvelope`, CBOR-encodes it, and dispatches. The payload type
+  ## should be a `{.ffi.}`-annotated object so the binding generator emits
+  ## a matching codec.
+  ##
+  ## NB: the template parameter is intentionally named `eventPayload`
+  ## rather than `payload` — Nim's template substitution would otherwise
+  ## also replace the `payload:` field name inside `EventEnvelope`.
+  dispatchFFIEvent(eventName):
+    cborEncode(
+      EventEnvelope[typeof(eventPayload)](
+        eventType: eventName, payload: eventPayload
+      )
+    )
 
 proc sendRequestToFFIThread*(
     ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, timeout = InfiniteDuration
