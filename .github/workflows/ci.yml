@@ -69,15 +69,25 @@ jobs:
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
   cpp-e2e:
-    name: C++ E2E
+    # Codegen output doesn't vary with mm, so we matrix over OS and Nim only.
+    # Windows runs MSVC by default and may surface codegen tweaks needed in
+    # the generated CMake (e.g. /EHsc, dllexport) — track follow-ups as bugs
+    # if they appear. `fail-fast: false` keeps Linux/macOS results visible.
     needs: versions
-    # Codegen output doesn't vary with mm and CMake/FetchContent is most
-    # reliable on Linux, so we don't matrix over OS or mm here — just Nim.
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-22.04, macos-15, windows-latest]
         nim-version: ${{ fromJSON(needs.versions.outputs.nim-versions) }}
-    runs-on: ubuntu-22.04
+        include:
+          - os: ubuntu-22.04
+            label: Linux
+          - os: macos-15
+            label: macOS
+          - os: windows-latest
+            label: Windows
+    runs-on: ${{ matrix.os }}
+    name: C++ E2E · ${{ matrix.label }} · Nim ${{ matrix.nim-version }}
     env:
       NIMBLE_VERSION: ${{ needs.versions.outputs.nimble }}
     steps:
@@ -90,7 +100,11 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Nimble ${{ env.NIMBLE_VERSION }}
+        shell: bash
         run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$PATH"
+          fi
           cd /tmp && nimble install "nimble@${{ env.NIMBLE_VERSION }}" -y
           echo "$HOME/.nimble/bin" >> $GITHUB_PATH
 
@@ -108,7 +122,12 @@ jobs:
 
       - name: Install nimble deps
         if: steps.cache-nimbledeps.outputs.cache-hit != 'true'
-        run: nimble setup --localdeps -y
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+          fi
+          nimble setup --localdeps -y
 
       - name: Cache CMake FetchContent (GoogleTest)
         uses: actions/cache@v4
@@ -117,7 +136,12 @@ jobs:
           key: ${{ runner.os }}-cpp-e2e-deps-${{ hashFiles('tests/e2e/cpp/CMakeLists.txt') }}
 
       - name: Run C++ e2e tests
-        run: nimble test_cpp_e2e -y
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+          fi
+          nimble test_cpp_e2e -y
 
   tests-asan-ubsan:
     name: Tests · ASan+UBSan+LSan
