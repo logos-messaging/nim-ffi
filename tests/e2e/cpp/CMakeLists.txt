@@ -36,12 +36,22 @@ endif()
 # The Nim-built shared library has install_name `@rpath/libmy_timer.dylib`
 # (set by `declareLibrary` on macOS for portability). The test binary must
 # therefore know where to find that dylib at load time — embed the build-tree
-# directory of the IMPORTED `my_timer` target as an rpath.
-get_target_property(_my_timer_loc my_timer IMPORTED_LOCATION)
-get_filename_component(_my_timer_dir "${_my_timer_loc}" DIRECTORY)
-set_target_properties(timer_e2e_tests PROPERTIES
-    BUILD_RPATH   "${_my_timer_dir}"
-    INSTALL_RPATH "${_my_timer_dir}")
+# directory of the IMPORTED `my_timer` target as an rpath. On Windows the
+# `my_timer` target is a plain INTERFACE library (no IMPORTED_LOCATION) and
+# we stage the DLL next to the exe via POST_BUILD instead.
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    get_target_property(_my_timer_loc my_timer IMPORTED_LOCATION)
+    get_filename_component(_my_timer_dir "${_my_timer_loc}" DIRECTORY)
+    set_target_properties(timer_e2e_tests PROPERTIES
+        BUILD_RPATH   "${_my_timer_dir}"
+        INSTALL_RPATH "${_my_timer_dir}")
+else()
+    add_custom_command(TARGET timer_e2e_tests POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${my_timer_RUNTIME_LIB}"
+            "$<TARGET_FILE_DIR:timer_e2e_tests>"
+        COMMENT "Staging my_timer.dll next to timer_e2e_tests.exe")
+endif()
 
 # Per-sanitizer runtime options: halt and exit non-zero on any report so
 # ctest fails the job. The matching ASAN_OPTIONS / UBSAN_OPTIONS /

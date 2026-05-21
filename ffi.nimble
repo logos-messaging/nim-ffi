@@ -33,6 +33,18 @@ proc discoverUnitTests(): seq[string] =
 
 let unitTests = discoverUnitTests()
 
+proc runOrQuit(cmd: string) =
+  # Workaround for newer nimble (shipping with Nim 2.2.10+) printing the
+  # OSError from a failed `exec` but exiting 0, which causes CI to report
+  # green on actual build/test failures. Echo the command first so the log
+  # makes clear which step failed.
+  try:
+    exec cmd
+  except OSError as e:
+    echo "command failed: ", cmd
+    echo "error: ", e.msg
+    quit(QuitFailure)
+
 proc sanFlags(san: string): string =
   # Each --passC / --passL adds one literal flag to the C compiler / linker
   # invocation — avoids any quoting ambiguity that arises from putting
@@ -80,10 +92,10 @@ task test_serial, "Run CBOR codec unit tests":
 
 task test_cpp_e2e, "Build and run the C++ end-to-end tests for the timer example":
   # Regenerate the C++ bindings so the suite always runs against fresh codegen.
-  exec "nimble genbindings_cpp"
-  exec "cmake -S tests/e2e/cpp -B tests/e2e/cpp/build"
-  exec "cmake --build tests/e2e/cpp/build"
-  exec "ctest --test-dir tests/e2e/cpp/build --output-on-failure"
+  runOrQuit "nimble genbindings_cpp"
+  runOrQuit "cmake -S tests/e2e/cpp -B tests/e2e/cpp/build"
+  runOrQuit "cmake --build tests/e2e/cpp/build"
+  runOrQuit "ctest --test-dir tests/e2e/cpp/build --output-on-failure"
 
 task test_sanitized, "Run all unit tests under a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
   let san = getEnv("NIM_FFI_SAN", "none")
@@ -107,12 +119,12 @@ task test_sanitized, "Run all unit tests under a sanitizer (NIM_FFI_SAN) and mm 
 task test_cpp_e2e_sanitized, "Build and run the C++ e2e tests with a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
   let mm  = getEnv("NIM_FFI_MM",  "orc")
   let san = getEnv("NIM_FFI_SAN", "none")
-  exec "nimble genbindings_cpp"
-  exec "cmake -S tests/e2e/cpp -B tests/e2e/cpp/build" &
+  runOrQuit "nimble genbindings_cpp"
+  runOrQuit "cmake -S tests/e2e/cpp -B tests/e2e/cpp/build" &
        " -DNIM_FFI_MM=" & mm &
        " -DNIM_FFI_SANITIZER=" & san
-  exec "cmake --build tests/e2e/cpp/build -j"
-  exec "ctest --test-dir tests/e2e/cpp/build --output-on-failure"
+  runOrQuit "cmake --build tests/e2e/cpp/build -j"
+  runOrQuit "ctest --test-dir tests/e2e/cpp/build --output-on-failure"
 
 task genbindings_example, "Generate Rust bindings for the timer example":
   exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libmy_timer -d:ffiGenBindings -o:/dev/null examples/timer/timer.nim"

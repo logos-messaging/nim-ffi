@@ -37,8 +37,8 @@ else()
 endif()
 
 # On Windows the default Nim toolchain (mingw gcc) doesn't emit an import
-# library unless told to. Without it, CMake puts `my_timer-NOTFOUND` into
-# the link line for any MSVC consumer of this target.
+# library unless told to. Without it, MSVC consumers can't resolve any
+# symbol exported by the DLL at link time.
 set(NIM_IMPLIB_PASSL "")
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     set(NIM_IMPLIB_PASSL "--passL:-Wl,--out-implib,${NIM_IMPLIB_FILE}")
@@ -63,27 +63,27 @@ add_custom_command(
 )
 add_custom_target(nim_lib ALL DEPENDS "${NIM_LIB_FILE}")
 
-add_library(my_timer SHARED IMPORTED GLOBAL)
-set_target_properties(my_timer PROPERTIES IMPORTED_LOCATION "${NIM_LIB_FILE}")
+# On Windows, an `IMPORTED SHARED` target needs IMPORTED_IMPLIB pointing at
+# the `.lib` import library so MSVC's `link.exe` can resolve symbols. The
+# Visual Studio multi-config generator did not pick up `IMPORTED_IMPLIB` —
+# nor per-config `IMPORTED_IMPLIB_<CONFIG>` variants — and emitted
+# `my_timer-NOTFOUND.obj` into every link line. Side-step the IMPORTED
+# machinery on Windows by exposing the import library through a plain
+# INTERFACE library that links the `.lib` by path.
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    # The Visual Studio generator is multi-config: at generation time CMake
-    # looks up IMPORTED_LOCATION_<CONFIG> / IMPORTED_IMPLIB_<CONFIG> for each
-    # consumer config and emits `<target>-NOTFOUND.obj` into the link line if
-    # missing. The Nim build produces a single .dll + .lib pair regardless of
-    # the consumer config, so point every standard VS config at the same pair.
-    set_target_properties(my_timer PROPERTIES
-        IMPORTED_CONFIGURATIONS "DEBUG;RELEASE;MINSIZEREL;RELWITHDEBINFO"
-        IMPORTED_IMPLIB "${NIM_IMPLIB_FILE}"
-        IMPORTED_LOCATION_DEBUG "${NIM_LIB_FILE}"
-        IMPORTED_LOCATION_RELEASE "${NIM_LIB_FILE}"
-        IMPORTED_LOCATION_MINSIZEREL "${NIM_LIB_FILE}"
-        IMPORTED_LOCATION_RELWITHDEBINFO "${NIM_LIB_FILE}"
-        IMPORTED_IMPLIB_DEBUG "${NIM_IMPLIB_FILE}"
-        IMPORTED_IMPLIB_RELEASE "${NIM_IMPLIB_FILE}"
-        IMPORTED_IMPLIB_MINSIZEREL "${NIM_IMPLIB_FILE}"
-        IMPORTED_IMPLIB_RELWITHDEBINFO "${NIM_IMPLIB_FILE}")
+    add_library(my_timer INTERFACE)
+    target_link_libraries(my_timer INTERFACE "${NIM_IMPLIB_FILE}")
+else()
+    add_library(my_timer SHARED IMPORTED GLOBAL)
+    set_target_properties(my_timer PROPERTIES IMPORTED_LOCATION "${NIM_LIB_FILE}")
 endif()
 add_dependencies(my_timer nim_lib)
+
+# Absolute path to the runtime library (DLL/dylib/so). Exposed via the cache
+# so consumers in other directories (e.g. tests/e2e/cpp) can stage the DLL
+# next to their executable on Windows.
+set(my_timer_RUNTIME_LIB "${NIM_LIB_FILE}" CACHE INTERNAL
+    "Absolute path to the my_timer runtime library")
 
 # ── TinyCBOR (vendored at ffi/codegen/templates/cpp/vendor/tinycbor) ─────────
 set(TINYCBOR_SRC_DIR "${REPO_ROOT}/ffi/codegen/templates/cpp/vendor")
@@ -109,4 +109,11 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp")
     add_executable(example main.cpp)
     target_link_libraries(example PRIVATE my_timer_headers)
     add_dependencies(example nim_lib)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+        add_custom_command(TARGET example POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${my_timer_RUNTIME_LIB}"
+                "$<TARGET_FILE_DIR:example>"
+            COMMENT "Staging my_timer.dll next to example.exe")
+    endif()
 endif()
