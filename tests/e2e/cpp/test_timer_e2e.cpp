@@ -11,6 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -19,7 +20,7 @@
 
 namespace {
 
-MyTimerCtx makeCtx(const std::string& name = "e2e") {
+std::unique_ptr<MyTimerCtx> makeCtx(const std::string& name = "e2e") {
     return MyTimerCtx::create(TimerConfig{name});
 }
 
@@ -34,19 +35,19 @@ TEST(TimerE2E, CreateAndDestroy) {
 
 TEST(TimerE2E, VersionSync) {
     auto ctx = makeCtx("version-sync");
-    const auto v = ctx.version();
+    const auto v = ctx->version();
     EXPECT_EQ(v, "nim-timer v0.1.0");
 }
 
 TEST(TimerE2E, VersionAsync) {
     auto ctx = makeCtx("version-async");
-    auto fut = ctx.versionAsync();
+    auto fut = ctx->versionAsync();
     EXPECT_EQ(fut.get(), "nim-timer v0.1.0");
 }
 
 TEST(TimerE2E, EchoRoundTripsMessageAndTimerName) {
     auto ctx = makeCtx("echo-ctx");
-    const auto resp = ctx.echo(EchoRequest{"hello", 10});
+    const auto resp = ctx->echo(EchoRequest{"hello", 10});
     EXPECT_EQ(resp.echoed, "hello");
     EXPECT_EQ(resp.timerName, "echo-ctx");
 }
@@ -56,7 +57,7 @@ TEST(TimerE2E, EchoHonoursDelay) {
     constexpr int delayMs = 150;
 
     const auto start = std::chrono::steady_clock::now();
-    const auto resp = ctx.echo(EchoRequest{"waited", delayMs});
+    const auto resp = ctx->echo(EchoRequest{"waited", delayMs});
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start).count();
 
@@ -68,9 +69,9 @@ TEST(TimerE2E, EchoHonoursDelay) {
 TEST(TimerE2E, ConcurrentAsyncCallsAreIndependent) {
     auto ctx = makeCtx("concurrent");
 
-    auto f1 = ctx.echoAsync(EchoRequest{"one", 80});
-    auto f2 = ctx.echoAsync(EchoRequest{"two", 40});
-    auto f3 = ctx.echoAsync(EchoRequest{"three", 20});
+    auto f1 = ctx->echoAsync(EchoRequest{"one", 80});
+    auto f2 = ctx->echoAsync(EchoRequest{"two", 40});
+    auto f3 = ctx->echoAsync(EchoRequest{"three", 20});
 
     const auto r3 = f3.get();
     const auto r2 = f2.get();
@@ -93,7 +94,7 @@ TEST(TimerE2E, ComplexWithOptionalNotePresent) {
         std::optional<int64_t>(2),
     };
 
-    const auto resp = ctx.complex(req);
+    const auto resp = ctx->complex(req);
     EXPECT_EQ(resp.itemCount, 2);
     EXPECT_TRUE(resp.hasNote);
     EXPECT_NE(resp.summary.find("note=a note"), std::string::npos)
@@ -111,7 +112,7 @@ TEST(TimerE2E, ComplexWithOptionalNoteAbsent) {
         std::nullopt,
     };
 
-    const auto resp = ctx.complex(req);
+    const auto resp = ctx->complex(req);
     EXPECT_EQ(resp.itemCount, 0);
     EXPECT_FALSE(resp.hasNote);
     EXPECT_NE(resp.summary.find("note=<none>"), std::string::npos)
@@ -124,8 +125,8 @@ TEST(TimerE2E, IndependentContextsKeepTheirOwnState) {
     auto ctxA = makeCtx("alpha");
     auto ctxB = makeCtx("beta");
 
-    const auto rA = ctxA.echo(EchoRequest{"x", 5});
-    const auto rB = ctxB.echo(EchoRequest{"x", 5});
+    const auto rA = ctxA->echo(EchoRequest{"x", 5});
+    const auto rB = ctxB->echo(EchoRequest{"x", 5});
 
     EXPECT_EQ(rA.timerName, "alpha");
     EXPECT_EQ(rB.timerName, "beta");
