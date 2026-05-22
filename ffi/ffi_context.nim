@@ -109,19 +109,38 @@ type EventEnvelope*[T] = object
 
 template dispatchFFIEventCbor*(eventName: string, eventPayload: typed) =
   ## Typed CBOR variant of `dispatchFFIEvent`. Wraps `eventPayload` in an
-  ## `EventEnvelope`, CBOR-encodes it, and dispatches. The payload type
-  ## should be a `{.ffi.}`-annotated object so the binding generator emits
-  ## a matching codec.
+  ## `EventEnvelope`, CBOR-encodes it into a `c_malloc` buffer, dispatches
+  ## the callback, then frees the buffer. The payload type should be a
+  ## `{.ffi.}`-annotated object so the binding generator emits a matching
+  ## codec.
+  ##
+  ## The buffer is `c_malloc`-backed (not Nim GC-owned) so the pointer
+  ## handed to the callback does not depend on the FFI thread's GC heap
+  ## remaining valid — matches the ownership story used by request payloads
+  ## (see `ffi_thread_request.nim`).
   ##
   ## NB: the template parameter is intentionally named `eventPayload`
   ## rather than `payload` — Nim's template substitution would otherwise
   ## also replace the `payload:` field name inside `EventEnvelope`.
-  dispatchFFIEvent(eventName):
-    cborEncode(
-      EventEnvelope[typeof(eventPayload)](
-        eventType: eventName, payload: eventPayload
+  let ffiState = ffiCurrentCallbackState
+  if ffiState.isNil() or ffiState[].callback.isNil():
+    chronicles.error eventName & " - event callback not set"
+    return
+  foreignThreadGc:
+    let cb = cast[FFICallBack](ffiState[].callback)
+    try:
+      var (data, dataLen) = cborEncodeShared(
+        EventEnvelope[typeof(eventPayload)](eventType: eventName, payload: eventPayload)
       )
-    )
+      defer:
+        cborFreeShared(data)
+      cb(RET_OK, cast[ptr cchar](data), cast[csize_t](dataLen), ffiState[].userData)
+    except Exception, CatchableError:
+      let msg = "Exception dispatching " & eventName & ": " & getCurrentExceptionMsg()
+      cb(
+        RET_ERR, cast[ptr cchar](unsafeAddr msg[0]), cast[csize_t](len(msg)),
+        ffiState[].userData,
+      )
 
 proc sendRequestToFFIThread*(
     ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, timeout = InfiniteDuration
