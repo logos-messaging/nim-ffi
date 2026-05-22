@@ -152,10 +152,10 @@ TEST(TimerE2E, ThreadedHammer) {
             auto own = makeCtx("hammer-t" + std::to_string(t));
             for (int i = 0; i < kIters; ++i) {
                 if ((i & 1) == 0) {
-                    const auto r = shared.echo(EchoRequest{"s", 0});
+                    const auto r = shared->echo(EchoRequest{"s", 0});
                     if (r.echoed != "s") ++errors;
                 } else {
-                    auto f = own.echoAsync(EchoRequest{"a", 1});
+                    auto f = own->echoAsync(EchoRequest{"a", 1});
                     if (f.get().echoed != "a") ++errors;
                 }
             }

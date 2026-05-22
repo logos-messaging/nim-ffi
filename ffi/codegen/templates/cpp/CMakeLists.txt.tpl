@@ -28,8 +28,20 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     set(NIM_LIB_FILE "${REPO_ROOT}/lib{{LIB}}.dylib")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     set(NIM_LIB_FILE "${REPO_ROOT}/{{LIB}}.dll")
+    # MSVC consumers link against the `.lib` import library, not the DLL.
+    # MinGW's ld emits one when asked via `--out-implib`; the resulting COFF
+    # archive is readable by MSVC's link.exe.
+    set(NIM_IMPLIB_FILE "${REPO_ROOT}/{{LIB}}.lib")
 else()
     set(NIM_LIB_FILE "${REPO_ROOT}/lib{{LIB}}.so")
+endif()
+
+# On Windows the default Nim toolchain (mingw gcc) doesn't emit an import
+# library unless told to. Without it, MSVC consumers can't resolve any
+# symbol exported by the DLL at link time.
+set(NIM_IMPLIB_PASSL "")
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    set(NIM_IMPLIB_PASSL "--passL:-Wl,--out-implib,${NIM_IMPLIB_FILE}")
 endif()
 
 add_custom_command(
@@ -40,18 +52,38 @@ add_custom_command(
                 --app:lib
                 --noMain
                 "--nimMainPrefix:lib{{LIB}}"
+                ${NIM_IMPLIB_PASSL}
                 "-o:${NIM_LIB_FILE}"
                 "${NIM_SRC}"
     WORKING_DIRECTORY "${REPO_ROOT}"
     DEPENDS "${NIM_SRC}"
+    BYPRODUCTS "${NIM_IMPLIB_FILE}"
     COMMENT "Compiling Nim library lib{{LIB}}"
     VERBATIM
 )
 add_custom_target(nim_lib ALL DEPENDS "${NIM_LIB_FILE}")
 
-add_library({{LIB}} SHARED IMPORTED GLOBAL)
-set_target_properties({{LIB}} PROPERTIES IMPORTED_LOCATION "${NIM_LIB_FILE}")
+# On Windows, an `IMPORTED SHARED` target needs IMPORTED_IMPLIB pointing at
+# the `.lib` import library so MSVC's `link.exe` can resolve symbols. The
+# Visual Studio multi-config generator did not pick up `IMPORTED_IMPLIB` —
+# nor per-config `IMPORTED_IMPLIB_<CONFIG>` variants — and emitted
+# `{{LIB}}-NOTFOUND.obj` into every link line. Side-step the IMPORTED
+# machinery on Windows by exposing the import library through a plain
+# INTERFACE library that links the `.lib` by path.
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    add_library({{LIB}} INTERFACE)
+    target_link_libraries({{LIB}} INTERFACE "${NIM_IMPLIB_FILE}")
+else()
+    add_library({{LIB}} SHARED IMPORTED GLOBAL)
+    set_target_properties({{LIB}} PROPERTIES IMPORTED_LOCATION "${NIM_LIB_FILE}")
+endif()
 add_dependencies({{LIB}} nim_lib)
+
+# Absolute path to the runtime library (DLL/dylib/so). Exposed via the cache
+# so consumers in other directories (e.g. tests/e2e/cpp) can stage the DLL
+# next to their executable on Windows.
+set({{LIB}}_RUNTIME_LIB "${NIM_LIB_FILE}" CACHE INTERNAL
+    "Absolute path to the {{LIB}} runtime library")
 
 # ── TinyCBOR (vendored at ffi/codegen/templates/cpp/vendor/tinycbor) ─────────
 set(TINYCBOR_SRC_DIR "${REPO_ROOT}/ffi/codegen/templates/cpp/vendor")
@@ -77,4 +109,11 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp")
     add_executable(example main.cpp)
     target_link_libraries(example PRIVATE {{LIB}}_headers)
     add_dependencies(example nim_lib)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+        add_custom_command(TARGET example POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${{{LIB}}_RUNTIME_LIB}"
+                "$<TARGET_FILE_DIR:example>"
+            COMMENT "Staging {{LIB}}.dll next to example.exe")
+    endif()
 endif()
