@@ -99,10 +99,9 @@ suite "dispatchFFIEventCbor":
     defer:
       deinitCallbackData(evt)
 
-    # Register the event callback by writing the state directly — the
-    # codegen-emitted `{libname}_set_event_callback` does the same.
-    ctx[].callbackState.callback = cast[pointer](captureCb)
-    ctx[].callbackState.userData = addr evt
+    # Register the event callback via the same locked helper that the
+    # codegen-emitted `{libname}_set_event_callback` uses.
+    setCallback(ctx[].callbackState, cast[pointer](captureCb), addr evt)
 
     # Trigger the dispatch from the FFI thread; the response callback is
     # ignored (we only care that the request completed so we know the event
@@ -140,8 +139,7 @@ suite "dispatchFFIEvent with seq[byte]":
     defer:
       deinitCallbackData(evt)
 
-    ctx[].callbackState.callback = cast[pointer](captureCb)
-    ctx[].callbackState.userData = addr evt
+    setCallback(ctx[].callbackState, cast[pointer](captureCb), addr evt)
 
     var rsp: CallbackData
     initCallbackData(rsp)
