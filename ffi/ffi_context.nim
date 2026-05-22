@@ -156,6 +156,10 @@ template dispatchFFIEventCbor*(eventName: string, eventPayload: typed) =
         cborFreeShared(data)
       cb(RET_OK, cast[ptr cchar](data), cast[csize_t](dataLen), ud)
     except Exception, CatchableError:
+      # Catching `Exception` also catches Defects (OOM, overflow, ...) so
+      # the C caller always gets RET_OK/RET_ERR. Requires `--panics:off`
+      # (Nim's default; don't enable `--panics:on` for this lib).
+
       let msg = "Exception dispatching " & eventName & ": " & getCurrentExceptionMsg()
       cb(
         RET_ERR, cast[ptr cchar](unsafeAddr msg[0]), cast[csize_t](len(msg)), ud
