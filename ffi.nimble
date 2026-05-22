@@ -153,3 +153,20 @@ task genbindings_cpp, "Generate C++ bindings for the timer example":
     " -d:ffiOutputDir=examples/timer/cpp_bindings" &
     " -d:ffiSrcPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
+
+task check_bindings_rust, "Verify checked-in Rust bindings match Nim source":
+  exec "nimble genbindings_rust"
+  exec "git diff --exit-code --" &
+    " examples/timer/rust_bindings/Cargo.toml" &
+    " examples/timer/rust_bindings/build.rs" &
+    " examples/timer/rust_bindings/src"
+
+task check_bindings_cpp, "Verify checked-in C++ bindings match Nim source":
+  exec "nimble genbindings_cpp"
+  exec "git diff --exit-code --" &
+    " examples/timer/cpp_bindings/my_timer.hpp" &
+    " examples/timer/cpp_bindings/CMakeLists.txt"
+
+task check_bindings, "Verify all checked-in example bindings match Nim source":
+  exec "nimble check_bindings_rust"
+  exec "nimble check_bindings_cpp"

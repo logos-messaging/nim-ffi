@@ -37,6 +37,13 @@ pub struct ComplexResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EchoEvent {
+    pub message: String,
+    #[serde(rename = "echoCount")]
+    pub echo_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobSpec {
     pub name: String,
     pub payload: Vec<String>,

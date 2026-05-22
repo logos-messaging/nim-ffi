@@ -119,6 +119,53 @@ jobs:
       - name: Run C++ e2e tests
         run: nimble test_cpp_e2e -y
 
+  check-bindings:
+    name: Check generated bindings
+    needs: versions
+    # Codegen output is platform-independent — single OS is enough. Matrix
+    # over Nim versions to catch any version-sensitive output. Catches the
+    # class of drift surfaced in PR #39 (C++ regen committed, Rust
+    # overlooked); see `nimble check_bindings` in ffi.nimble.
+    strategy:
+      fail-fast: false
+      matrix:
+        nim-version: ${{ fromJSON(needs.versions.outputs.nim-versions) }}
+    runs-on: ubuntu-22.04
+    env:
+      NIMBLE_VERSION: ${{ needs.versions.outputs.nimble }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: ${{ matrix.nim-version }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Nimble ${{ env.NIMBLE_VERSION }}
+        run: |
+          cd /tmp && nimble install "nimble@${{ env.NIMBLE_VERSION }}" -y
+          echo "$HOME/.nimble/bin" >> $GITHUB_PATH
+
+      - name: Cache nimble deps
+        id: cache-nimbledeps
+        uses: actions/cache@v4
+        with:
+          path: |
+            nimbledeps/
+            nimble.paths
+          key: ${{ runner.os }}-nimbledeps-${{ matrix.nim-version }}-${{ hashFiles('*.nimble') }}
+          restore-keys: |
+            ${{ runner.os }}-nimbledeps-${{ matrix.nim-version }}-
+            ${{ runner.os }}-nimbledeps-
+
+      - name: Install nimble deps
+        if: steps.cache-nimbledeps.outputs.cache-hit != 'true'
+        run: nimble setup --localdeps -y
+
+      - name: Verify checked-in bindings match generator output
+        run: nimble check_bindings -y
+
   tests-asan-ubsan:
     name: Tests · ASan+UBSan+LSan
     needs: versions

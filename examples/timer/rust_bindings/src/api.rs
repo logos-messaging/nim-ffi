@@ -98,10 +98,62 @@ where
     }
 }
 
+/// Typed event handlers for `MyTimerCtx`. Each field is `None` by
+/// default; set the ones you care about and pass to
+/// `MyTimerCtx::set_event_handlers`.
+#[allow(non_snake_case)]
+pub struct Events {
+    pub on_error: Option<Box<dyn Fn(&str) + Send + Sync>>,
+    pub onEchoFired: Option<Box<dyn Fn(&EchoEvent) + Send + Sync>>,
+}
+
+impl Default for Events {
+    fn default() -> Self {
+        Self { on_error: None, onEchoFired: None }
+    }
+}
+
+unsafe extern "C" fn my_timer_event_trampoline(
+    ret: c_int, msg: *const c_char, len: usize, ud: *mut c_void,
+) {
+    if ud.is_null() { return; }
+    let events = &*(ud as *const Events);
+    if ret != 0 {
+        if let Some(ref on_err) = events.on_error {
+            let bytes = if !msg.is_null() && len > 0 {
+                slice::from_raw_parts(msg as *const u8, len)
+            } else { &[] };
+            let s = String::from_utf8_lossy(bytes);
+            on_err(&s);
+        }
+        return;
+    }
+    if msg.is_null() || len == 0 { return; }
+    let bytes = slice::from_raw_parts(msg as *const u8, len);
+    #[derive(serde::Deserialize)]
+    struct EnvelopeMeta {
+        #[serde(rename = "eventType")]
+        event_type: String,
+    }
+    let meta: EnvelopeMeta = match ciborium::de::from_reader(bytes) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    if meta.event_type == "on_echo_fired" {
+        #[derive(serde::Deserialize)]
+        struct Envelope { payload: EchoEvent }
+        if let Ok(env) = ciborium::de::from_reader::<Envelope, _>(bytes) {
+            if let Some(ref h) = events.onEchoFired { h(&env.payload); }
+        }
+        return;
+    }
+}
+
 /// High-level context for `MyTimer`.
 pub struct MyTimerCtx {
     ptr: *mut c_void,
     timeout: Duration,
+    events: *mut Events,
 }
 
 // SAFETY: The `ptr` field points to an FFIContext owned by the Nim runtime.
@@ -121,6 +173,10 @@ impl Drop for MyTimerCtx {
             unsafe { ffi::my_timer_destroy(self.ptr); }
             self.ptr = std::ptr::null_mut();
         }
+        if !self.events.is_null() {
+            unsafe { drop(Box::from_raw(self.events)); }
+            self.events = std::ptr::null_mut();
+        }
     }
 }
 
@@ -134,7 +190,7 @@ impl MyTimerCtx {
         })?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
         let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
-        Ok(Self { ptr: addr as *mut c_void, timeout })
+        Ok(Self { ptr: addr as *mut c_void, timeout, events: std::ptr::null_mut() })
     }
 
     pub async fn new_async(config: TimerConfig, timeout: Duration) -> Result<Self, String> {
@@ -146,7 +202,23 @@ impl MyTimerCtx {
         }).await?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
         let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
-        Ok(Self { ptr: addr as *mut c_void, timeout })
+        Ok(Self { ptr: addr as *mut c_void, timeout, events: std::ptr::null_mut() })
+    }
+
+    /// Attach typed event handlers. Replacing handlers calls the
+    /// dylib's set_event_callback with a fresh trampoline target.
+    /// The previously-installed Events box (if any) is dropped here,
+    /// so callbacks in flight on the FFI thread must already be done.
+    pub fn set_event_handlers(&mut self, handlers: Events) {
+        if !self.events.is_null() {
+            unsafe { drop(Box::from_raw(self.events)); }
+            self.events = std::ptr::null_mut();
+        }
+        let raw = Box::into_raw(Box::new(handlers));
+        self.events = raw;
+        unsafe {
+            ffi::my_timer_set_event_callback(self.ptr, my_timer_event_trampoline, raw as *mut c_void);
+        }
     }
 
     pub fn echo(&self, req: EchoRequest) -> Result<EchoResponse, String> {
