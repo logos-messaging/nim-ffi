@@ -1,7 +1,11 @@
 cmake_minimum_required(VERSION 3.14)
 project(nim_ffi_cpp_e2e CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+# Test harness compiles at C++20 so we can use designated initializers
+# (`.field = …`) in test bodies; MSVC rejects them under /std:c++17.
+# The generated example bindings and the CMake template they ship with
+# stay at C++17, so library consumers aren't forced onto a newer std.
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ── Reuse the timer cpp_bindings (compiles libmy_timer + exposes the
