@@ -8,12 +8,21 @@ project(nim_ffi_cpp_e2e CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# ── Reuse the timer cpp_bindings (compiles libmy_timer + exposes the
-#    my_timer_headers INTERFACE target) ──
-get_filename_component(_cpp_bindings_dir
+# ── Reuse the timer + echo cpp_bindings ────────────────────────────────────
+# The timer subdir exposes `my_timer_headers` (and builds libmy_timer); the
+# echo subdir exposes `echo_headers` (and builds libecho). Loading both into
+# the same e2e binary is what the CrossLibrary test verifies — that two
+# nim-ffi libraries can coexist in a single process without symbol clash or
+# shared global state.
+get_filename_component(_timer_cpp_bindings_dir
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../examples/timer/cpp_bindings"
     ABSOLUTE)
-add_subdirectory("${_cpp_bindings_dir}" cpp_bindings_build)
+add_subdirectory("${_timer_cpp_bindings_dir}" timer_cpp_bindings_build)
+
+get_filename_component(_echo_cpp_bindings_dir
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../examples/echo/cpp_bindings"
+    ABSOLUTE)
+add_subdirectory("${_echo_cpp_bindings_dir}" echo_cpp_bindings_build)
 
 # ── GoogleTest via FetchContent ───────────────────────────────────────────────
 include(FetchContent)
@@ -29,32 +38,40 @@ FetchContent_MakeAvailable(googletest)
 enable_testing()
 
 add_executable(timer_e2e_tests test_timer_e2e.cpp)
-target_link_libraries(timer_e2e_tests PRIVATE my_timer_headers GTest::gtest_main)
-add_dependencies(timer_e2e_tests nim_lib)
+target_link_libraries(timer_e2e_tests PRIVATE my_timer_headers echo_headers GTest::gtest_main)
+add_dependencies(timer_e2e_tests my_timer_nim_lib echo_nim_lib)
 
 if(NIM_FFI_SAN_CFLAGS)
     target_compile_options(timer_e2e_tests PRIVATE ${NIM_FFI_SAN_CFLAGS})
     target_link_options(timer_e2e_tests PRIVATE ${NIM_FFI_SAN_LFLAGS})
 endif()
 
-# The Nim-built shared library has install_name `@rpath/libmy_timer.dylib`
-# (set by `declareLibrary` on macOS for portability). The test binary must
-# therefore know where to find that dylib at load time — embed the build-tree
-# directory of the IMPORTED `my_timer` target as an rpath. On Windows the
-# `my_timer` target is a plain INTERFACE library (no IMPORTED_LOCATION) and
-# we stage the DLL next to the exe via POST_BUILD instead.
+# The Nim-built shared libraries have install_names like
+# `@rpath/libmy_timer.dylib` / `@rpath/libecho.dylib` (set by
+# `declareLibrary` on macOS for portability). The test binary must therefore
+# know where to find both dylibs at load time — embed the build-tree
+# directories of the IMPORTED targets as rpaths. Both libraries are emitted
+# into the repo root by their cpp_bindings, so the two rpaths are usually
+# the same directory; passing both is harmless if so. On Windows the targets
+# are plain INTERFACE libraries (no IMPORTED_LOCATION) and we stage the DLLs
+# next to the exe via POST_BUILD instead.
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
     get_target_property(_my_timer_loc my_timer IMPORTED_LOCATION)
     get_filename_component(_my_timer_dir "${_my_timer_loc}" DIRECTORY)
+    get_target_property(_echo_loc echo IMPORTED_LOCATION)
+    get_filename_component(_echo_dir "${_echo_loc}" DIRECTORY)
     set_target_properties(timer_e2e_tests PROPERTIES
-        BUILD_RPATH   "${_my_timer_dir}"
-        INSTALL_RPATH "${_my_timer_dir}")
+        BUILD_RPATH   "${_my_timer_dir};${_echo_dir}"
+        INSTALL_RPATH "${_my_timer_dir};${_echo_dir}")
 else()
     add_custom_command(TARGET timer_e2e_tests POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${my_timer_RUNTIME_LIB}"
             "$<TARGET_FILE_DIR:timer_e2e_tests>"
-        COMMENT "Staging my_timer.dll next to timer_e2e_tests.exe")
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${echo_RUNTIME_LIB}"
+            "$<TARGET_FILE_DIR:timer_e2e_tests>"
+        COMMENT "Staging my_timer.dll + echo.dll next to timer_e2e_tests.exe")
 endif()
 
 # Per-sanitizer runtime options: halt and exit non-zero on any report so

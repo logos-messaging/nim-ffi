@@ -20,6 +20,13 @@ extern "C" {
 // Per-struct encode_cbor / decode_cbor are emitted by cpp.nim next to each
 // generated struct. These helpers cover the leaf types and container shapes
 // the struct emitters defer into.
+//
+// Guarded so two nim-ffi headers (e.g. my_timer.hpp + echo.hpp) can be
+// included in the same translation unit — otherwise the second include
+// would redefine these inline overloads. The block ends with the public
+// entry points (encodeCborFFI / decodeCborFFI) before #endif.
+#ifndef NIM_FFI_CBOR_HELPERS_HPP_INCLUDED
+#define NIM_FFI_CBOR_HELPERS_HPP_INCLUDED
 
 inline CborError encode_cbor(CborEncoder& e, bool v) {
     return cbor_encode_boolean(&e, v);
@@ -184,6 +191,8 @@ inline T decodeCborFFI(const std::vector<std::uint8_t>& bytes) {
     }
     return out;
 }
+
+#endif // NIM_FFI_CBOR_HELPERS_HPP_INCLUDED
 
 // ============================================================
 // User-declared FFI types
@@ -633,6 +642,11 @@ void my_timer_set_event_callback(void* ctx, FFICallback callback, void* user_dat
 // ============================================================
 // Synchronous call helper
 // ============================================================
+//
+// Guarded so two nim-ffi headers can be included in the same translation
+// unit without redefining ffi_cb_ / ffi_call_ in the unnamed namespace.
+#ifndef NIM_FFI_SYNC_CALL_HELPER_HPP_INCLUDED
+#define NIM_FFI_SYNC_CALL_HELPER_HPP_INCLUDED
 
 namespace {
 
@@ -682,6 +696,8 @@ inline std::vector<std::uint8_t> ffi_call_(std::function<int(FFICallback, void*)
 }
 
 } // anonymous namespace
+
+#endif // NIM_FFI_SYNC_CALL_HELPER_HPP_INCLUDED
 
 // ============================================================
 // High-level C++ context class
