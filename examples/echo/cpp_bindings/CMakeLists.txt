@@ -86,10 +86,8 @@ set(echo_RUNTIME_LIB "${NIM_LIB_FILE}" CACHE INTERNAL
     "Absolute path to the echo runtime library")
 
 # ── TinyCBOR (vendored at ffi/codegen/templates/cpp/vendor/tinycbor) ─────────
-# Guarded so a parent project can `add_subdirectory` two sibling cpp_bindings
-# directories (e.g. the e2e suite loading libecho + libmy_timer together):
-# both reach for the same vendored copy, so the second include would otherwise
-# collide on the `tinycbor` target name.
+# Guarded so two sibling cpp_bindings dirs in one parent project don't redefine
+# the `tinycbor` target.
 set(TINYCBOR_SRC_DIR "${REPO_ROOT}/ffi/codegen/templates/cpp/vendor")
 if(NOT TARGET tinycbor)
     add_library(tinycbor STATIC

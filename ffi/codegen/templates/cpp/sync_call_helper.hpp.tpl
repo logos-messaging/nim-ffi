@@ -1,9 +1,7 @@
 // ============================================================
 // Synchronous call helper
 // ============================================================
-//
-// Guarded so two nim-ffi headers can be included in the same translation
-// unit without redefining ffi_cb_ / ffi_call_ in the unnamed namespace.
+// Guarded so two nim-ffi headers can share a translation unit.
 #ifndef NIM_FFI_SYNC_CALL_HELPER_HPP_INCLUDED
 #define NIM_FFI_SYNC_CALL_HELPER_HPP_INCLUDED
 

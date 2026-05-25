@@ -1,9 +1,7 @@
-## Minimal second example library used by the C++ CrossLibrary e2e test.
-## Exists alongside `examples/timer` so a single test binary can load
-## libecho + libmy_timer at the same time and prove no symbol clash and
-## no shared global state between two independent nim-ffi libraries.
+## Second nim-ffi example library — loaded alongside examples/timer in the
+## C++ CrossLibrary e2e test to prove two libs coexist in one process.
 
-import ffi, chronos
+import ffi, chronos, strutils
 
 type Echo = object
   prefix: string
@@ -28,9 +26,7 @@ proc echoShout*(
     e: Echo, req: ShoutRequest
 ): Future[Result[ShoutResponse, string]] {.ffi.} =
   await sleepAsync(1.milliseconds)
-  var upper = newStringOfCap(req.text.len)
-  for c in req.text:
-    upper.add(if c in {'a' .. 'z'}: chr(ord(c) - 32) else: c)
+  let upper = req.text.toUpperAscii
   return ok(ShoutResponse(shouted: e.prefix & ": " & upper, prefix: e.prefix))
 
 proc echoVersion*(e: Echo): Future[Result[string, string]] {.ffi.} =

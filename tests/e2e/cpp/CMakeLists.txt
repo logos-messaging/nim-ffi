@@ -8,12 +8,7 @@ project(nim_ffi_cpp_e2e CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# ── Reuse the timer + echo cpp_bindings ────────────────────────────────────
-# The timer subdir exposes `my_timer_headers` (and builds libmy_timer); the
-# echo subdir exposes `echo_headers` (and builds libecho). Loading both into
-# the same e2e binary is what the CrossLibrary test verifies — that two
-# nim-ffi libraries can coexist in a single process without symbol clash or
-# shared global state.
+# ── Reuse the timer + echo cpp_bindings (exposing my_timer_headers / echo_headers) ──
 get_filename_component(_timer_cpp_bindings_dir
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../examples/timer/cpp_bindings"
     ABSOLUTE)
@@ -46,15 +41,9 @@ if(NIM_FFI_SAN_CFLAGS)
     target_link_options(timer_e2e_tests PRIVATE ${NIM_FFI_SAN_LFLAGS})
 endif()
 
-# The Nim-built shared libraries have install_names like
-# `@rpath/libmy_timer.dylib` / `@rpath/libecho.dylib` (set by
-# `declareLibrary` on macOS for portability). The test binary must therefore
-# know where to find both dylibs at load time — embed the build-tree
-# directories of the IMPORTED targets as rpaths. Both libraries are emitted
-# into the repo root by their cpp_bindings, so the two rpaths are usually
-# the same directory; passing both is harmless if so. On Windows the targets
-# are plain INTERFACE libraries (no IMPORTED_LOCATION) and we stage the DLLs
-# next to the exe via POST_BUILD instead.
+# Nim-built dylibs use `@rpath/lib*.dylib` install_names on macOS, so embed
+# each IMPORTED target's build-tree dir as an rpath. Windows has no rpath —
+# stage the DLLs next to the exe in the POST_BUILD branch below instead.
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
     get_target_property(_my_timer_loc my_timer IMPORTED_LOCATION)
     get_filename_component(_my_timer_dir "${_my_timer_loc}" DIRECTORY)

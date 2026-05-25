@@ -5,10 +5,8 @@
 // the full FFI round-trip — CBOR encode -> Nim FFI thread -> chronos -> CBOR
 // decode -> C++ — to validate that a binding produced by `nimble
 // genbindings_cpp` is callable end-to-end from C++.
-//
-// The CrossLibrary test additionally loads `examples/echo/cpp_bindings`
-// alongside the timer to prove that two independent nim-ffi libraries can
-// coexist in one process with no symbol clash and no shared global state.
+// The CrossLibrary test also loads `examples/echo/cpp_bindings` to prove
+// two nim-ffi libraries can coexist in one process.
 
 #include "my_timer.hpp"
 #include "echo.hpp"
@@ -137,12 +135,10 @@ TEST(TimerE2E, IndependentContextsKeepTheirOwnState) {
     EXPECT_EQ(rB.timerName, "beta");
 }
 
-// MultiContextIsolation — N independent contexts each carry their own
-// `timer.name` state, and an error returned by one context's call does not
-// affect a sibling context. Drives the schedule() proc, which returns
-// `err("job name must not be empty")` when JobSpec.name is empty: the
-// generated bindings translate that into a thrown std::runtime_error
-// carrying the exact error string, so we can pin the propagation.
+// N contexts keep independent state; an error on one must not poison siblings.
+// Empty JobSpec.name is the chosen error trigger: schedule() returns
+// err("job name must not be empty"), which the bindings rethrow as
+// std::runtime_error carrying the exact string.
 TEST(TimerE2E, MultiContextIsolation) {
     constexpr int kCtxCount = 5;
     std::vector<std::unique_ptr<MyTimerCtx>> ctxs;
@@ -151,17 +147,12 @@ TEST(TimerE2E, MultiContextIsolation) {
         ctxs.push_back(makeCtx("iso-" + std::to_string(i)));
     }
 
-    // Each context returns its own configured name — proves per-context
-    // state isn't shared across the pool.
     for (int i = 0; i < kCtxCount; ++i) {
         const auto resp = ctxs[i]->echo(EchoRequest{"ping", 0});
         EXPECT_EQ(resp.echoed, "ping");
         EXPECT_EQ(resp.timerName, "iso-" + std::to_string(i));
     }
 
-    // Trigger a Result-side error on ctx[2] and assert it propagates as
-    // an exception carrying the Nim-side message. The other contexts must
-    // remain fully usable afterwards (no poisoning of the pool).
     const auto bad = JobSpec{/*name*/ "", /*payload*/ {}, /*priority*/ 0};
     const auto retry = RetryPolicy{1, 10, {}};
     const auto sched = ScheduleConfig{0, 0, std::nullopt};
@@ -172,12 +163,10 @@ TEST(TimerE2E, MultiContextIsolation) {
         EXPECT_STREQ(ex.what(), "job name must not be empty");
     }
 
-    // Same context still works on a subsequent valid call.
     const auto recovered = ctxs[2]->echo(EchoRequest{"after-err", 0});
     EXPECT_EQ(recovered.echoed, "after-err");
     EXPECT_EQ(recovered.timerName, "iso-2");
 
-    // Every other context still works and still reports its own name.
     for (int i = 0; i < kCtxCount; ++i) {
         if (i == 2) continue;
         const auto resp = ctxs[i]->echo(EchoRequest{"still-here", 0});
@@ -186,11 +175,7 @@ TEST(TimerE2E, MultiContextIsolation) {
     }
 }
 
-// CrossLibrary — load libmy_timer + libecho in one process, exercise both,
-// and prove they do not share state. The two libraries declare distinct
-// symbols (my_timer_* vs echo_*) and own independent FFIContext pools, so a
-// timer context's `name` must not bleed into an echo context's `prefix`
-// (or vice versa) at any point.
+// Two nim-ffi libraries in one process must not share state or symbols.
 TEST(TimerE2E, CrossLibrary) {
     auto timerCtx = MyTimerCtx::create(TimerConfig{"x-timer"});
     auto echoCtx  = EchoCtx::create(EchoConfig{"X-ECHO"});
@@ -206,8 +191,6 @@ TEST(TimerE2E, CrossLibrary) {
     EXPECT_EQ(echoResp.shouted, "X-ECHO: HELLO");
     EXPECT_EQ(echoResp.prefix,  "X-ECHO");
 
-    // Interleave calls — if either library held shared global state behind
-    // the other's back, repeated round-trips would surface it.
     for (int i = 0; i < 4; ++i) {
         const auto t = timerCtx->echo(EchoRequest{"t" + std::to_string(i), 0});
         const auto e = echoCtx->shout(ShoutRequest{"e" + std::to_string(i)});
@@ -215,9 +198,6 @@ TEST(TimerE2E, CrossLibrary) {
         EXPECT_EQ(e.prefix,    "X-ECHO");
     }
 
-    // Cross-fire async calls on both libraries at once. Each library has
-    // its own dispatch path; getting any value here would mean one
-    // library's queue stalled the other's.
     auto tFut = timerCtx->echoAsync(EchoRequest{"async-t", 30});
     auto eFut = echoCtx->shoutAsync(ShoutRequest{"async-e"});
     const auto t = tFut.get();
@@ -227,10 +207,7 @@ TEST(TimerE2E, CrossLibrary) {
     EXPECT_EQ(e.shouted, "X-ECHO: ASYNC-E");
 }
 
-// TriplePipeline — chain three async calls A -> B -> C, feeding each call's
-// payload into the next. Asserts ordering (the .get() on C only resolves
-// after A and B have both completed) and payload integrity (the chained
-// echoes carry the expected concatenated string).
+// Chained async calls A->B->C must preserve ordering and payload across hops.
 TEST(TimerE2E, TriplePipeline) {
     auto ctx = makeCtx("pipeline");
 
@@ -246,10 +223,7 @@ TEST(TimerE2E, TriplePipeline) {
     EXPECT_EQ(final.timerName, "pipeline");
 }
 
-// StressShortLivedPerThreadContext — many threads, each creating its OWN
-// context, firing one request, then joining. Stresses the FFI context pool
-// allocation/teardown path. With the pool capped at a fixed size, threads
-// will see slots get reused as earlier threads' destructors return them.
+// Per-thread context create -> one call -> destroy churns the FFI context pool.
 TEST(TimerE2E, StressShortLivedPerThreadContext) {
     constexpr int kThreads = 16;
 
@@ -264,8 +238,6 @@ TEST(TimerE2E, StressShortLivedPerThreadContext) {
                 const auto resp = ctx->echo(EchoRequest{"hi", 0});
                 if (resp.echoed != "hi") ++errors;
                 if (resp.timerName != "short-" + std::to_string(t)) ++errors;
-                // ctx destructor runs here, releasing the pool slot before
-                // .join() unblocks the main thread.
             } catch (const std::exception&) {
                 ++errors;
             }
@@ -275,11 +247,8 @@ TEST(TimerE2E, StressShortLivedPerThreadContext) {
     EXPECT_EQ(errors.load(), 0);
 }
 
-// StressShortLivedSharedContext — many threads sharing ONE context, each
-// firing one request and joining. Exercises the multi-producer path into
-// a single SPSC request queue (where TSan would surface producer-side
-// races). Distinct from ThreadedHammer in that each thread issues exactly
-// one request and exits — a churnier thread lifecycle.
+// Many short-lived threads, one shared context: exercises the multi-producer
+// SPSC request-queue path (where TSan would catch producer-side races).
 TEST(TimerE2E, StressShortLivedSharedContext) {
     constexpr int kThreads = 32;
     auto shared = makeCtx("shared-short");

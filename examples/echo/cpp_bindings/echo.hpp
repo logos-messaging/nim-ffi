@@ -18,13 +18,8 @@ extern "C" {
 
 // ── encode_cbor overloads (primitives + containers) ─────────────────────
 // Per-struct encode_cbor / decode_cbor are emitted by cpp.nim next to each
-// generated struct. These helpers cover the leaf types and container shapes
-// the struct emitters defer into.
-//
-// Guarded so two nim-ffi headers (e.g. my_timer.hpp + echo.hpp) can be
-// included in the same translation unit — otherwise the second include
-// would redefine these inline overloads. The block ends with the public
-// entry points (encodeCborFFI / decodeCborFFI) before #endif.
+// generated struct; these helpers cover the leaf types they defer into.
+// Guarded so two nim-ffi headers can share a translation unit.
 #ifndef NIM_FFI_CBOR_HELPERS_HPP_INCLUDED
 #define NIM_FFI_CBOR_HELPERS_HPP_INCLUDED
 
@@ -337,14 +332,13 @@ void* echo_create(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback call
 int echo_shout(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int echo_version(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int echo_destroy(void* ctx);
+void echo_set_event_callback(void* ctx, FFICallback callback, void* user_data);
 } // extern "C"
 
 // ============================================================
 // Synchronous call helper
 // ============================================================
-//
-// Guarded so two nim-ffi headers can be included in the same translation
-// unit without redefining ffi_cb_ / ffi_call_ in the unnamed namespace.
+// Guarded so two nim-ffi headers can share a translation unit.
 #ifndef NIM_FFI_SYNC_CALL_HELPER_HPP_INCLUDED
 #define NIM_FFI_SYNC_CALL_HELPER_HPP_INCLUDED
 
