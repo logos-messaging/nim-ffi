@@ -34,6 +34,17 @@ type ComplexResponse {.ffi.} = object
   itemCount: int
   hasNote: bool
 
+# --- Library-initiated event ----------------------------------------------
+# Demonstrates the {.ffiEvent.} macro: a typed event the library can fire
+# from any {.ffi.} handler, dispatched to the foreign side's registered
+# callback as CBOR. Per-target codegens emit a typed handler-struct +
+# dispatcher so the foreign caller decodes nothing by hand.
+type EchoEvent {.ffi.} = object
+  message: string
+  echoCount: int
+
+proc onEchoFired*(evt: EchoEvent) {.ffiEvent: "on_echo_fired".}
+
 # --- Constructor -----------------------------------------------------------
 # Called once from Rust. Creates the FFIContext + MyTimer.
 # Uses chronos (await sleepAsync) so the body is async.
@@ -48,6 +59,7 @@ proc myTimerEcho*(
     timer: MyTimer, req: EchoRequest
 ): Future[Result[EchoResponse, string]] {.ffi.} =
   await sleepAsync(req.delayMs.milliseconds)
+  onEchoFired(EchoEvent(message: req.message, echoCount: 1))
   return ok(EchoResponse(echoed: req.message, timerName: timer.name))
 
 # --- Sync method -----------------------------------------------------------

@@ -164,3 +164,31 @@ TEST(TimerE2E, ThreadedHammer) {
     for (auto& w : workers) w.join();
     EXPECT_EQ(errors.load(), 0);
 }
+
+// Library-initiated events flow through the typed `MyTimerCtx::Events`
+// dispatcher: setting `onEchoFired` registers a CBOR-decoding trampoline
+// inside the context, and every successful `echo()` triggers it. The
+// promise here is fulfilled from the FFI thread; we wait synchronously
+// for it before destroying the context (the dtor tears down the FFI
+// thread and any further events).
+TEST(TimerE2E, TypedEventFiresAfterEcho) {
+    auto ctx = makeCtx("events");
+
+    std::promise<EchoEvent> evtPromise;
+    auto evtFuture = evtPromise.get_future();
+
+    ctx->setEventHandlers({
+        .on_error = nullptr,
+        .onEchoFired = [&](const EchoEvent& evt) { evtPromise.set_value(evt); },
+    });
+
+    const auto resp = ctx->echo(EchoRequest{"event-msg", 1});
+    EXPECT_EQ(resp.echoed, "event-msg");
+
+    const auto status = evtFuture.wait_for(std::chrono::seconds(2));
+    ASSERT_EQ(status, std::future_status::ready) << "event never arrived";
+
+    const auto evt = evtFuture.get();
+    EXPECT_EQ(evt.message, "event-msg");
+    EXPECT_EQ(evt.echoCount, 1);
+}

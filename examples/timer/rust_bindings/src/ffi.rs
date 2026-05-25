@@ -15,4 +15,5 @@ extern "C" {
     pub fn my_timer_complex(ctx: *mut c_void, callback: FFICallback, user_data: *mut c_void, req_cbor: *const u8, req_cbor_len: usize) -> c_int;
     pub fn my_timer_schedule(ctx: *mut c_void, callback: FFICallback, user_data: *mut c_void, req_cbor: *const u8, req_cbor_len: usize) -> c_int;
     pub fn my_timer_destroy(ctx: *mut c_void) -> c_int;
+    pub fn my_timer_set_event_callback(ctx: *mut c_void, callback: FFICallback, user_data: *mut c_void);
 }

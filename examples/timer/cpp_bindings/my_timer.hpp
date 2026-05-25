@@ -336,6 +336,33 @@ inline CborError decode_cbor(CborValue& it, ComplexResponse& v) {
     return cbor_value_advance(&it);
 }
 
+struct EchoEvent {
+    std::string message;
+    int64_t echoCount;
+};
+inline CborError encode_cbor(CborEncoder& e, const EchoEvent& v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(&e, &m, 2);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "message"); if (err) return err;
+    err = encode_cbor(m, v.message);              if (err) return err;
+    err = cbor_encode_text_stringz(&m, "echoCount"); if (err) return err;
+    err = encode_cbor(m, v.echoCount);              if (err) return err;
+    return cbor_encoder_close_container(&e, &m);
+}
+inline CborError decode_cbor(CborValue& it, EchoEvent& v) {
+    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(&it, "message", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.message); if (err) return err;
+    err = cbor_value_map_find_value(&it, "echoCount", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.echoCount); if (err) return err;
+    return cbor_value_advance(&it);
+}
+
 struct JobSpec {
     std::string name;
     std::vector<std::string> payload;
@@ -600,6 +627,7 @@ int my_timer_version(void* ctx, FFICallback callback, void* user_data, const uin
 int my_timer_complex(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int my_timer_schedule(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int my_timer_destroy(void* ctx);
+void my_timer_set_event_callback(void* ctx, FFICallback callback, void* user_data);
 } // extern "C"
 
 // ============================================================
@@ -702,6 +730,17 @@ public:
     MyTimerCtx(MyTimerCtx&&) = delete;
     MyTimerCtx& operator=(MyTimerCtx&&) = delete;
 
+    // ── Typed event handlers ────────────────────────────────
+    struct Events {
+        std::function<void(const std::string&)> on_error;
+        std::function<void(const EchoEvent&)> onEchoFired;
+    };
+
+    void setEventHandlers(Events handlers) {
+        events_ = std::make_unique<Events>(std::move(handlers));
+        my_timer_set_event_callback(ptr_, &MyTimerCtx::eventTrampoline, events_.get());
+    }
+
     EchoResponse echo(const EchoRequest& req) const {
         const auto ffi_req_ = MyTimerEchoReq{req};
         const auto ffi_req_bytes_ = encodeCborFFI(ffi_req_);
@@ -757,5 +796,35 @@ public:
 private:
     void* ptr_;
     std::chrono::milliseconds timeout_;
+    std::unique_ptr<Events> events_;
     explicit MyTimerCtx(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}
+    static void eventTrampoline(int ret, const char* msg, std::size_t len, void* ud) {
+        if (!ud) return;
+        auto* events = static_cast<Events*>(ud);
+        if (ret != 0) {
+            if (events->on_error) {
+                std::string err(msg ? msg : "", len);
+                events->on_error(err);
+            }
+            return;
+        }
+        if (!msg || len == 0) return;
+        std::vector<std::uint8_t> bytes(reinterpret_cast<const std::uint8_t*>(msg),
+                                        reinterpret_cast<const std::uint8_t*>(msg) + len);
+        CborParser parser; CborValue it;
+        if (cbor_parser_init(bytes.data(), bytes.size(), 0, &parser, &it) != CborNoError) return;
+        if (!cbor_value_is_map(&it)) return;
+        CborValue evtField;
+        if (cbor_value_map_find_value(&it, "eventType", &evtField) != CborNoError) return;
+        if (!cbor_value_is_text_string(&evtField)) return;
+        std::string evtName; if (decode_cbor(evtField, evtName) != CborNoError) return;
+        CborValue payloadField;
+        if (cbor_value_map_find_value(&it, "payload", &payloadField) != CborNoError) return;
+        if (evtName == "on_echo_fired") {
+            if (events->onEchoFired) {
+                EchoEvent payload{}; if (decode_cbor(payloadField, payload) == CborNoError) events->onEchoFired(payload);
+            }
+        }
+    }
+
 };

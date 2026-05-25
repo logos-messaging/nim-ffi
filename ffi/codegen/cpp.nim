@@ -135,8 +135,91 @@ proc cppBracedInit(structName: string, fieldNames: seq[string]): string =
   ## returns "", so the result is the well-formed empty-init `Name{}`.
   return structName & "{" & fieldNames.join(", ") & "}"
 
+proc emitEventDispatcher(
+    lines: var seq[string], ctxTypeName, libName: string, events: seq[FFIEventMeta]
+) =
+  ## Emit the typed-event support inside the C++ context class body:
+  ## a nested `Events` struct of std::function handlers, plus a
+  ## `setEventHandlers` method that owns the handlers on the heap and
+  ## hands the raw pointer to the dylib as `user_data` for the trampoline.
+  ##
+  ## Storage strategy: `Events` lives on the heap (unique_ptr) so the raw
+  ## pointer we hand to the C ABI as `user_data` survives the (non-)
+  ## lifetime of the surrounding context object. The context itself is
+  ## owned via `std::unique_ptr<MyTimerCtx>` returned from `create`, so
+  ## it's never moved out from under the trampoline.
+  if events.len == 0:
+    return
+  lines.add("    // ── Typed event handlers ────────────────────────────────")
+  lines.add("    struct Events {")
+  lines.add("        std::function<void(const std::string&)> on_error;")
+  for ev in events:
+    lines.add(
+      "        std::function<void(const $1&)> $2;" %
+        [ev.payloadTypeName, ev.nimProcName]
+    )
+  lines.add("    };")
+  lines.add("")
+  lines.add("    void setEventHandlers(Events handlers) {")
+  lines.add("        events_ = std::make_unique<Events>(std::move(handlers));")
+  lines.add(
+    "        $1_set_event_callback(ptr_, &$2::eventTrampoline, events_.get());" %
+      [libName, ctxTypeName]
+  )
+  lines.add("    }")
+  lines.add("")
+
+proc emitEventTrampoline(
+    lines: var seq[string], events: seq[FFIEventMeta]
+) =
+  ## Emit the private static trampoline that backs `setEventHandlers`. The
+  ## generated function parses the CBOR `EventEnvelope`, picks the matching
+  ## std::function from the Events struct, decodes the payload as the
+  ## registered type, and fires the handler.
+  if events.len == 0:
+    return
+  lines.add("    static void eventTrampoline(int ret, const char* msg, std::size_t len, void* ud) {")
+  lines.add("        if (!ud) return;")
+  lines.add("        auto* events = static_cast<Events*>(ud);")
+  lines.add("        if (ret != 0) {")
+  lines.add("            if (events->on_error) {")
+  lines.add("                std::string err(msg ? msg : \"\", len);")
+  lines.add("                events->on_error(err);")
+  lines.add("            }")
+  lines.add("            return;")
+  lines.add("        }")
+  lines.add("        if (!msg || len == 0) return;")
+  lines.add("        std::vector<std::uint8_t> bytes(reinterpret_cast<const std::uint8_t*>(msg),")
+  lines.add("                                        reinterpret_cast<const std::uint8_t*>(msg) + len);")
+  lines.add("        CborParser parser; CborValue it;")
+  lines.add("        if (cbor_parser_init(bytes.data(), bytes.size(), 0, &parser, &it) != CborNoError) return;")
+  lines.add("        if (!cbor_value_is_map(&it)) return;")
+  lines.add("        CborValue evtField;")
+  lines.add("        if (cbor_value_map_find_value(&it, \"eventType\", &evtField) != CborNoError) return;")
+  lines.add("        if (!cbor_value_is_text_string(&evtField)) return;")
+  lines.add("        std::string evtName; if (decode_cbor(evtField, evtName) != CborNoError) return;")
+  lines.add("        CborValue payloadField;")
+  lines.add("        if (cbor_value_map_find_value(&it, \"payload\", &payloadField) != CborNoError) return;")
+  var first = true
+  for ev in events:
+    let branchKw = if first: "if" else: "else if"
+    lines.add("        $1 (evtName == \"$2\") {" % [branchKw, ev.wireName])
+    lines.add("            if (events->$1) {" % [ev.nimProcName])
+    lines.add(
+      "                $1 payload{}; if (decode_cbor(payloadField, payload) == CborNoError) events->$2(payload);" %
+        [ev.payloadTypeName, ev.nimProcName]
+    )
+    lines.add("            }")
+    lines.add("        }")
+    first = false
+  lines.add("    }")
+  lines.add("")
+
 proc generateCppHeader*(
-    procs: seq[FFIProcMeta], types: seq[FFITypeMeta], libName: string
+    procs: seq[FFIProcMeta],
+    types: seq[FFITypeMeta],
+    libName: string,
+    events: seq[FFIEventMeta] = @[],
 ): string =
   var lines: seq[string] = @[]
 
@@ -220,6 +303,13 @@ proc generateCppHeader*(
       )
     of FFIKind.DTOR:
       lines.add("int $1(void* ctx);" % [p.procName])
+  # The event-callback setter is always exported by the dylib (via
+  # declareLibrary). Declare it here so the typed event-handler wiring
+  # below can call into it.
+  lines.add(
+    "void $1_set_event_callback(void* ctx, FFICallback callback, void* user_data);" %
+      [libName]
+  )
   lines.add("} // extern \"C\"")
   lines.add("")
 
@@ -341,6 +431,9 @@ proc generateCppHeader*(
     ContextRuleOf5Tpl.multiReplace(("{{CTX}}", ctxTypeName), ("{{LIB}}", libName))
   )
 
+  # ── Typed event handlers (public section) ───────────────────────────────
+  emitEventDispatcher(lines, ctxTypeName, libName, events)
+
   # ── Instance methods ────────────────────────────────────────────────────
   for m in methods:
     let methodName = stripLibPrefixCpp(m.procName, libName)
@@ -406,10 +499,14 @@ proc generateCppHeader*(
   lines.add("private:")
   lines.add("    void* ptr_;")
   lines.add("    std::chrono::milliseconds timeout_;")
+  if events.len > 0:
+    lines.add("    std::unique_ptr<Events> events_;")
   lines.add(
     "    explicit $1(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}" %
       [ctxTypeName]
   )
+  # Static trampoline stays private; user only sees Events + setEventHandlers.
+  emitEventTrampoline(lines, events)
   lines.add("};")
   lines.add("")
 
@@ -425,7 +522,11 @@ proc generateCppBindings*(
     libName: string,
     outputDir: string,
     nimSrcRelPath: string,
+    events: seq[FFIEventMeta] = @[],
 ) =
   createDir(outputDir)
-  writeFile(outputDir / (libName & ".hpp"), generateCppHeader(procs, types, libName))
+  writeFile(
+    outputDir / (libName & ".hpp"),
+    generateCppHeader(procs, types, libName, events),
+  )
   writeFile(outputDir / "CMakeLists.txt", generateCppCMakeLists(libName, nimSrcRelPath))

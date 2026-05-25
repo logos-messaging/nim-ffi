@@ -48,14 +48,23 @@ proc cborEncodeShared*[T](x: T): tuple[data: ptr UncheckedArray[byte], len: int]
   ## Encodes `x` into a `c_malloc` buffer.
   ##
   ## The returned `data` is owned by the caller and must be freed exactly
-  ## once via `c_free` (the FFIThreadRequest `deleteRequest` path does this
-  ## automatically). Empty payloads return `(nil, 0)` without allocating.
+  ## once via `cborFreeShared`. The
+  ## `FFIThreadRequest deleteRequest` path frees adopted buffers
+  ## automatically. Empty payloads return `(nil, 0)` without allocating.
   let bytes = Cbor.encode(x)
   if bytes.len == 0:
     return (nil, 0)
   let buf = cast[ptr UncheckedArray[byte]](c_malloc(csize_t(bytes.len)))
   copyMem(buf, unsafeAddr bytes[0], bytes.len)
   return (buf, bytes.len)
+
+proc cborFreeShared*(data: var ptr UncheckedArray[byte]) =
+  ## Releases a buffer previously returned by `cborEncodeShared` and nils
+  ## the caller's pointer so a stale reference can't be reused after free.
+  ## Safe to call with `nil` (the `(nil, 0)` empty-payload contract).
+  if not data.isNil():
+    c_free(data)
+    data = nil
 
 proc cborDecode*[T](data: openArray[byte], _: typedesc[T]): Result[T, string] =
   ## Decode `data` into a `T`, converting any cbor_serialization exception

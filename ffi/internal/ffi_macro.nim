@@ -1374,6 +1374,100 @@ macro ffiDtor*(prc: untyped): untyped =
   return stmts
 
 # ---------------------------------------------------------------------------
+# ffiEvent — library-initiated typed event
+# ---------------------------------------------------------------------------
+
+macro ffiEvent*(wireName: static[string], prc: untyped): untyped =
+  ## Declares a library-initiated event. The annotated proc has an empty
+  ## body — the macro fills it with a `dispatchFFIEventCbor` call so the
+  ## Nim author dispatches the event by calling the proc with a typed
+  ## payload, and the per-target codegens emit a typed handler dispatcher
+  ## on the foreign side.
+  ##
+  ## The pragma takes the wire-format event name verbatim (no case
+  ## conversion). That string appears in the CBOR `eventType` field and is
+  ## the single source of truth across Nim / C++ / Rust bindings.
+  ##
+  ## Example:
+  ##   type PeerInfo {.ffi.} = object
+  ##     id: string
+  ##     address: string
+  ##
+  ##   proc onPeerConnected*(peer: PeerInfo) {.ffiEvent: "on_peer_connected".}
+  ##
+  ##   # ... then from inside any {.ffi.} handler:
+  ##   onPeerConnected(PeerInfo(id: "p-1", address: "127.0.0.1"))
+  ##
+  ## Restriction (first pass): exactly one parameter. Multi-param events
+  ## need a synthesised envelope struct; planned for a follow-up.
+
+  if prc.kind notin {nnkProcDef, nnkFuncDef}:
+    error("ffiEvent must be applied to a proc declaration")
+
+  let procName = prc[0]
+  let formalParams = prc[3]
+
+  if formalParams.len != 2:
+    error(
+      "ffiEvent (first pass) supports exactly one parameter; got " &
+        $(formalParams.len - 1)
+    )
+
+  let paramDef = formalParams[1]
+  let payloadParamName = paramDef[0]
+  let payloadTypeNode = paramDef[1]
+
+  let payloadTypeNameStr =
+    case payloadTypeNode.kind
+    of nnkIdent: $payloadTypeNode
+    else: payloadTypeNode.repr
+
+  var userProcName = procName
+  if procName.kind == nnkPostfix:
+    userProcName = procName[1]
+
+  # The generated body: dispatchFFIEventCbor("wire_name", payload).
+  let wireNameLit = newStrLitNode(wireName)
+  let dispatchBody = newStmtList(
+    newCall(
+      ident("dispatchFFIEventCbor"),
+      wireNameLit,
+      payloadParamName,
+    )
+  )
+
+  var newParams = newSeq[NimNode]()
+  newParams.add(formalParams[0]) # return type (typically empty/void)
+  newParams.add(paramDef)
+
+  let pragmas =
+    if prc.len >= 5 and prc[4].kind != nnkEmpty:
+      prc[4]
+    else:
+      newEmptyNode()
+
+  let generated = newProc(
+    name = procName,
+    params = newParams,
+    body = dispatchBody,
+    procType = prc.kind,
+    pragmas = pragmas,
+  )
+
+  ffiEventRegistry.add(
+    FFIEventMeta(
+      wireName: wireName,
+      nimProcName: $userProcName,
+      libName: currentLibName,
+      payloadTypeName: payloadTypeNameStr,
+    )
+  )
+
+  when defined(ffiDumpMacros):
+    echo generated.repr
+  return generated
+
+# ---------------------------------------------------------------------------
 # genBindings — codegen entry point
 # ---------------------------------------------------------------------------
 
@@ -1415,11 +1509,13 @@ macro genBindings*(
     case lang
     of "rust":
       generateRustCrate(
-        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath
+        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
+        ffiEventRegistry,
       )
     of "cpp", "c++":
       generateCppBindings(
-        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath
+        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
+        ffiEventRegistry,
       )
     of "cddl":
       generateCddlBindings(
