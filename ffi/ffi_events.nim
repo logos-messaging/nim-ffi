@@ -96,7 +96,9 @@ proc removeEventListener*(reg: var FFIEventRegistry, id: uint64): bool {.raises:
         removed = true
         break
     if not removed:
-      for listeners in reg.byEvent.mvalues:
+      var emptyKey = ""
+      var prune = false
+      for key, listeners in reg.byEvent.mpairs:
         var idx = -1
         for i in 0 ..< listeners.len:
           if listeners[i].id == id:
@@ -105,7 +107,12 @@ proc removeEventListener*(reg: var FFIEventRegistry, id: uint64): bool {.raises:
         if idx >= 0:
           listeners.delete(idx)
           removed = true
+          if listeners.len == 0:
+            emptyKey = key
+            prune = true
           break
+      if prune:
+        reg.byEvent.del(emptyKey)
   return removed
 
 proc removeAllEventListeners*(reg: var FFIEventRegistry) {.raises: [].} =
