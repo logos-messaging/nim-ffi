@@ -7,6 +7,11 @@
 // genbindings_cpp` is callable end-to-end from C++.
 // The CrossLibrary test also loads `examples/echo/cpp_bindings` to prove
 // two nim-ffi libraries can coexist in one process.
+//
+// The generated bindings never throw: every call returns a Result<T>. The
+// `mustOk` helper below unwraps a Result and fails the test (without
+// aborting) when it carries an error, so single-threaded tests read as if
+// the value came back directly.
 
 #include "my_timer.hpp"
 #include "echo.hpp"
@@ -23,8 +28,20 @@
 
 namespace {
 
+// Unwrap a Result<T> in a single-threaded test context. On error it records a
+// non-fatal gtest failure and returns a default-constructed T so the caller
+// can keep going (subsequent expectations will fail loudly).
+template <typename T>
+T mustOk(Result<T> r) {
+    if (r.isErr()) {
+        ADD_FAILURE() << "unexpected FFI error: " << r.error();
+        return T{};
+    }
+    return r.take();
+}
+
 std::unique_ptr<MyTimerCtx> makeCtx(const std::string& name = "e2e") {
-    return MyTimerCtx::create(TimerConfig{name});
+    return mustOk(MyTimerCtx::create(TimerConfig{name}));
 }
 
 } // namespace
@@ -38,19 +55,19 @@ TEST(TimerE2E, CreateAndDestroy) {
 
 TEST(TimerE2E, VersionSync) {
     auto ctx = makeCtx("version-sync");
-    const auto v = ctx->version();
+    const auto v = mustOk(ctx->version());
     EXPECT_EQ(v, "nim-timer v0.1.0");
 }
 
 TEST(TimerE2E, VersionAsync) {
     auto ctx = makeCtx("version-async");
     auto fut = ctx->versionAsync();
-    EXPECT_EQ(fut.get(), "nim-timer v0.1.0");
+    EXPECT_EQ(mustOk(fut.get()), "nim-timer v0.1.0");
 }
 
 TEST(TimerE2E, EchoRoundTripsMessageAndTimerName) {
     auto ctx = makeCtx("echo-ctx");
-    const auto resp = ctx->echo(EchoRequest{"hello", 10});
+    const auto resp = mustOk(ctx->echo(EchoRequest{"hello", 10}));
     EXPECT_EQ(resp.echoed, "hello");
     EXPECT_EQ(resp.timerName, "echo-ctx");
 }
@@ -60,7 +77,7 @@ TEST(TimerE2E, EchoHonoursDelay) {
     constexpr int delayMs = 150;
 
     const auto start = std::chrono::steady_clock::now();
-    const auto resp = ctx->echo(EchoRequest{"waited", delayMs});
+    const auto resp = mustOk(ctx->echo(EchoRequest{"waited", delayMs}));
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start).count();
 
@@ -76,9 +93,9 @@ TEST(TimerE2E, ConcurrentAsyncCallsAreIndependent) {
     auto f2 = ctx->echoAsync(EchoRequest{"two", 40});
     auto f3 = ctx->echoAsync(EchoRequest{"three", 20});
 
-    const auto r3 = f3.get();
-    const auto r2 = f2.get();
-    const auto r1 = f1.get();
+    const auto r3 = mustOk(f3.get());
+    const auto r2 = mustOk(f2.get());
+    const auto r1 = mustOk(f1.get());
 
     EXPECT_EQ(r1.echoed, "one");
     EXPECT_EQ(r2.echoed, "two");
@@ -97,7 +114,7 @@ TEST(TimerE2E, ComplexWithOptionalNotePresent) {
         std::optional<int64_t>(2),
     };
 
-    const auto resp = ctx->complex(req);
+    const auto resp = mustOk(ctx->complex(req));
     EXPECT_EQ(resp.itemCount, 2);
     EXPECT_TRUE(resp.hasNote);
     EXPECT_NE(resp.summary.find("note=a note"), std::string::npos)
@@ -115,7 +132,7 @@ TEST(TimerE2E, ComplexWithOptionalNoteAbsent) {
         std::nullopt,
     };
 
-    const auto resp = ctx->complex(req);
+    const auto resp = mustOk(ctx->complex(req));
     EXPECT_EQ(resp.itemCount, 0);
     EXPECT_FALSE(resp.hasNote);
     EXPECT_NE(resp.summary.find("note=<none>"), std::string::npos)
@@ -128,8 +145,8 @@ TEST(TimerE2E, IndependentContextsKeepTheirOwnState) {
     auto ctxA = makeCtx("alpha");
     auto ctxB = makeCtx("beta");
 
-    const auto rA = ctxA->echo(EchoRequest{"x", 5});
-    const auto rB = ctxB->echo(EchoRequest{"x", 5});
+    const auto rA = mustOk(ctxA->echo(EchoRequest{"x", 5}));
+    const auto rB = mustOk(ctxB->echo(EchoRequest{"x", 5}));
 
     EXPECT_EQ(rA.timerName, "alpha");
     EXPECT_EQ(rB.timerName, "beta");
@@ -137,8 +154,8 @@ TEST(TimerE2E, IndependentContextsKeepTheirOwnState) {
 
 // N contexts keep independent state; an error on one must not poison siblings.
 // Empty JobSpec.name is the chosen error trigger: schedule() returns
-// err("job name must not be empty"), which the bindings rethrow as
-// std::runtime_error carrying the exact string.
+// err("job name must not be empty"), which the bindings surface as an
+// err() Result carrying the exact string.
 TEST(TimerE2E, MultiContextIsolation) {
     constexpr int kCtxCount = 5;
     std::vector<std::unique_ptr<MyTimerCtx>> ctxs;
@@ -148,7 +165,7 @@ TEST(TimerE2E, MultiContextIsolation) {
     }
 
     for (int i = 0; i < kCtxCount; ++i) {
-        const auto resp = ctxs[i]->echo(EchoRequest{"ping", 0});
+        const auto resp = mustOk(ctxs[i]->echo(EchoRequest{"ping", 0}));
         EXPECT_EQ(resp.echoed, "ping");
         EXPECT_EQ(resp.timerName, "iso-" + std::to_string(i));
     }
@@ -156,20 +173,17 @@ TEST(TimerE2E, MultiContextIsolation) {
     const auto bad = JobSpec{/*name*/ "", /*payload*/ {}, /*priority*/ 0};
     const auto retry = RetryPolicy{1, 10, {}};
     const auto sched = ScheduleConfig{0, 0, std::nullopt};
-    try {
-        (void)ctxs[2]->schedule(bad, retry, sched);
-        FAIL() << "expected schedule() to throw on empty job name";
-    } catch (const std::runtime_error& ex) {
-        EXPECT_STREQ(ex.what(), "job name must not be empty");
-    }
+    const auto scheduleRes = ctxs[2]->schedule(bad, retry, sched);
+    ASSERT_TRUE(scheduleRes.isErr()) << "expected schedule() to fail on empty job name";
+    EXPECT_EQ(scheduleRes.error(), "job name must not be empty");
 
-    const auto recovered = ctxs[2]->echo(EchoRequest{"after-err", 0});
+    const auto recovered = mustOk(ctxs[2]->echo(EchoRequest{"after-err", 0}));
     EXPECT_EQ(recovered.echoed, "after-err");
     EXPECT_EQ(recovered.timerName, "iso-2");
 
     for (int i = 0; i < kCtxCount; ++i) {
         if (i == 2) continue;
-        const auto resp = ctxs[i]->echo(EchoRequest{"still-here", 0});
+        const auto resp = mustOk(ctxs[i]->echo(EchoRequest{"still-here", 0}));
         EXPECT_EQ(resp.echoed, "still-here");
         EXPECT_EQ(resp.timerName, "iso-" + std::to_string(i));
     }
@@ -177,31 +191,31 @@ TEST(TimerE2E, MultiContextIsolation) {
 
 // Two nim-ffi libraries in one process must not share state or symbols.
 TEST(TimerE2E, CrossLibrary) {
-    auto timerCtx = MyTimerCtx::create(TimerConfig{"x-timer"});
-    auto echoCtx  = EchoCtx::create(EchoConfig{"X-ECHO"});
+    auto timerCtx = mustOk(MyTimerCtx::create(TimerConfig{"x-timer"}));
+    auto echoCtx  = mustOk(EchoCtx::create(EchoConfig{"X-ECHO"}));
 
-    EXPECT_EQ(timerCtx->version(), "nim-timer v0.1.0");
-    EXPECT_EQ(echoCtx->version(),  "nim-echo v0.1.0");
+    EXPECT_EQ(mustOk(timerCtx->version()), "nim-timer v0.1.0");
+    EXPECT_EQ(mustOk(echoCtx->version()),  "nim-echo v0.1.0");
 
-    const auto timerResp = timerCtx->echo(EchoRequest{"hello", 0});
+    const auto timerResp = mustOk(timerCtx->echo(EchoRequest{"hello", 0}));
     EXPECT_EQ(timerResp.echoed, "hello");
     EXPECT_EQ(timerResp.timerName, "x-timer");
 
-    const auto echoResp = echoCtx->shout(ShoutRequest{"hello"});
+    const auto echoResp = mustOk(echoCtx->shout(ShoutRequest{"hello"}));
     EXPECT_EQ(echoResp.shouted, "X-ECHO: HELLO");
     EXPECT_EQ(echoResp.prefix,  "X-ECHO");
 
     for (int i = 0; i < 4; ++i) {
-        const auto t = timerCtx->echo(EchoRequest{"t" + std::to_string(i), 0});
-        const auto e = echoCtx->shout(ShoutRequest{"e" + std::to_string(i)});
+        const auto t = mustOk(timerCtx->echo(EchoRequest{"t" + std::to_string(i), 0}));
+        const auto e = mustOk(echoCtx->shout(ShoutRequest{"e" + std::to_string(i)}));
         EXPECT_EQ(t.timerName, "x-timer");
         EXPECT_EQ(e.prefix,    "X-ECHO");
     }
 
     auto tFut = timerCtx->echoAsync(EchoRequest{"async-t", 30});
     auto eFut = echoCtx->shoutAsync(ShoutRequest{"async-e"});
-    const auto t = tFut.get();
-    const auto e = eFut.get();
+    const auto t = mustOk(tFut.get());
+    const auto e = mustOk(eFut.get());
     EXPECT_EQ(t.echoed, "async-t");
     EXPECT_EQ(t.timerName, "x-timer");
     EXPECT_EQ(e.shouted, "X-ECHO: ASYNC-E");
@@ -212,9 +226,9 @@ TEST(TimerE2E, TriplePipeline) {
     auto ctx = makeCtx("pipeline");
 
     auto pipeline = std::async(std::launch::async, [&ctx]() {
-        auto a = ctx->echoAsync(EchoRequest{"A", 20}).get();
-        auto b = ctx->echoAsync(EchoRequest{a.echoed + "->B", 10}).get();
-        auto c = ctx->echoAsync(EchoRequest{b.echoed + "->C", 5}).get();
+        auto a = mustOk(ctx->echoAsync(EchoRequest{"A", 20}).get());
+        auto b = mustOk(ctx->echoAsync(EchoRequest{a.echoed + "->B", 10}).get());
+        auto c = mustOk(ctx->echoAsync(EchoRequest{b.echoed + "->C", 5}).get());
         return c;
     });
 
@@ -224,6 +238,8 @@ TEST(TimerE2E, TriplePipeline) {
 }
 
 // Per-thread context create -> one call -> destroy churns the FFI context pool.
+// Worker threads avoid gtest assertion macros (not thread-safe) and report via
+// the atomic `errors` counter instead.
 TEST(TimerE2E, StressShortLivedPerThreadContext) {
     constexpr int kThreads = 16;
 
@@ -233,14 +249,13 @@ TEST(TimerE2E, StressShortLivedPerThreadContext) {
 
     for (int t = 0; t < kThreads; ++t) {
         workers.emplace_back([&, t] {
-            try {
-                auto ctx = makeCtx("short-" + std::to_string(t));
-                const auto resp = ctx->echo(EchoRequest{"hi", 0});
-                if (resp.echoed != "hi") ++errors;
-                if (resp.timerName != "short-" + std::to_string(t)) ++errors;
-            } catch (const std::exception&) {
-                ++errors;
-            }
+            auto ctxRes = MyTimerCtx::create(TimerConfig{"short-" + std::to_string(t)});
+            if (ctxRes.isErr()) { ++errors; return; }
+            auto ctx = std::move(ctxRes.value());
+            const auto resp = ctx->echo(EchoRequest{"hi", 0});
+            if (resp.isErr()) { ++errors; return; }
+            if (resp->echoed != "hi") ++errors;
+            if (resp->timerName != "short-" + std::to_string(t)) ++errors;
         });
     }
     for (auto& w : workers) w.join();
@@ -259,13 +274,10 @@ TEST(TimerE2E, StressShortLivedSharedContext) {
 
     for (int t = 0; t < kThreads; ++t) {
         workers.emplace_back([&, t] {
-            try {
-                const auto resp = shared->echo(EchoRequest{"x" + std::to_string(t), 0});
-                if (resp.echoed != "x" + std::to_string(t)) ++errors;
-                if (resp.timerName != "shared-short") ++errors;
-            } catch (const std::exception&) {
-                ++errors;
-            }
+            const auto resp = shared->echo(EchoRequest{"x" + std::to_string(t), 0});
+            if (resp.isErr()) { ++errors; return; }
+            if (resp->echoed != "x" + std::to_string(t)) ++errors;
+            if (resp->timerName != "shared-short") ++errors;
         });
     }
     for (auto& w : workers) w.join();
@@ -289,14 +301,17 @@ TEST(TimerE2E, ThreadedHammer) {
 
     for (int t = 0; t < kThreads; ++t) {
         workers.emplace_back([&, t] {
-            auto own = makeCtx("hammer-t" + std::to_string(t));
+            auto ownRes = MyTimerCtx::create(TimerConfig{"hammer-t" + std::to_string(t)});
+            if (ownRes.isErr()) { ++errors; return; }
+            auto own = std::move(ownRes.value());
             for (int i = 0; i < kIters; ++i) {
                 if ((i & 1) == 0) {
                     const auto r = shared->echo(EchoRequest{"s", 0});
-                    if (r.echoed != "s") ++errors;
+                    if (r.isErr() || r->echoed != "s") ++errors;
                 } else {
                     auto f = own->echoAsync(EchoRequest{"a", 1});
-                    if (f.get().echoed != "a") ++errors;
+                    const auto r = f.get();
+                    if (r.isErr() || r->echoed != "a") ++errors;
                 }
             }
         });
@@ -322,7 +337,7 @@ TEST(TimerE2E, TypedEventFiresAfterEcho) {
         .onEchoFired = [&](const EchoEvent& evt) { evtPromise.set_value(evt); },
     });
 
-    const auto resp = ctx->echo(EchoRequest{"event-msg", 1});
+    const auto resp = mustOk(ctx->echo(EchoRequest{"event-msg", 1}));
     EXPECT_EQ(resp.echoed, "event-msg");
 
     const auto status = evtFuture.wait_for(std::chrono::seconds(2));

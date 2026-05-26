@@ -2,7 +2,7 @@
 #include <string>
 #include <cstdint>
 #include <chrono>
-#include <stdexcept>
+#include <charconv>
 #include <mutex>
 #include <condition_variable>
 #include <memory>
