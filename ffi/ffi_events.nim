@@ -1,19 +1,36 @@
-## Multi-listener registry primitive for FFI library-initiated events.
+## Event registry and dispatch primitives for FFI library-initiated events.
 ##
-## Each event name maps to a `seq` of listeners; the empty event name `""`
-## is the wildcard channel and receives every dispatched event in addition
-## to its own per-name subscribers.
+## This module owns two concerns so they can evolve together without dragging
+## in the rest of `FFIContext`:
 ##
-## This module ships the data structure only. Dispatch templates that
-## consume the registry, plus the FFIContext wiring that exposes the
-## registry to {.ffi.}-generated code, land in follow-up PRs. The
-## registry is thread-safe via an embedded `Lock`; the future dispatch
-## path acquires the lock only long enough to copy out the listener
-## slice for the event being dispatched, so re-entrant add/remove from
-## within a handler is deadlock-free by construction.
+## 1. A multi-listener registry. Each event name maps to a `seq` of listeners;
+##    the empty event name `""` is the wildcard channel and receives every
+##    dispatched event in addition to its own per-name subscribers.
+## 2. The dispatch templates (`dispatchFFIEvent`, `dispatchFFIEventCbor`) used
+##    by `{.ffiEvent.}`-generated procs. They snapshot the registry under its
+##    lock, then invoke each listener *outside* the lock so re-entrant
+##    add/remove from within a handler cannot self-deadlock.
+##
+## Phase 1 keeps dispatch synchronous on the FFI thread. A later phase will
+## route events through a bounded queue to a dedicated event thread; the
+## registry API does not change.
+
+{.pragma: callback, cdecl, raises: [], gcsafe.}
 
 import std/[locks, tables]
-import ./ffi_types
+import chronicles
+import ./ffi_types, ./cbor_serial
+
+# ---------------------------------------------------------------------------
+# Wire envelope
+# ---------------------------------------------------------------------------
+
+type EventEnvelope*[T] = object
+  ## Standard wire shape for CBOR-encoded FFI events:
+  ##   { eventType: tstr, payload: <T> }
+  ## Pair with `dispatchFFIEventCbor` (or call `cborEncode` directly).
+  eventType*: string
+  payload*: T
 
 # ---------------------------------------------------------------------------
 # Registry types
@@ -43,21 +60,12 @@ const WildcardEventName* = ""
 # ---------------------------------------------------------------------------
 
 proc initEventRegistry*(reg: var FFIEventRegistry) =
-  ## Must be called exactly once on the owning thread before the registry
-  ## is shared. The embedded `Lock` wraps a platform primitive that cannot
-  ## be safely double-initialised, so concurrent callers would hit UB at
-  ## the OS layer — the lock itself can't defend against its own init.
   reg.lock.initLock()
   reg.nextId = 0'u64
   reg.byEvent = initTable[string, seq[FFIEventListener]]()
   reg.wildcard.setLen(0)
 
 proc deinitEventRegistry*(reg: var FFIEventRegistry) =
-  ## Mirror of `initEventRegistry`: must be called exactly once, by the
-  ## same thread that owns the registry, after all other threads have
-  ## stopped using it. `deinitLock` on a platform primitive that any
-  ## thread might still be holding or about to acquire is UB at the OS
-  ## layer.
   reg.lock.deinitLock()
   reg.byEvent.clear()
   reg.wildcard.setLen(0)
@@ -72,19 +80,20 @@ proc addEventListener*(
   ## id (always non-zero on success). `eventName == ""` registers a wildcard
   ## listener that receives every dispatched event. Returns 0 if `callback`
   ## is nil — the only documented failure mode.
-  if callback.isNil():
-    return 0
-
   var assigned: uint64 = 0
+  if callback.isNil():
+    return assigned
 
   withLock reg.lock:
-    reg.nextId.inc()
+    reg.nextId += 1
     assigned = reg.nextId
     let listener =
       FFIEventListener(id: assigned, callback: callback, userData: userData)
     if eventName.len == 0:
       reg.wildcard.add(listener)
     else:
+      # `mgetOrPut` lets us avoid a `[]` lookup that the effect tracker
+      # would otherwise see as raising `KeyError`.
       reg.byEvent.mgetOrPut(eventName, @[]).add(listener)
   return assigned
 
@@ -93,10 +102,9 @@ proc removeEventListener*(reg: var FFIEventRegistry, id: uint64): bool {.raises:
   ## listener with that id exists. Safe to call from inside a dispatch:
   ## the in-flight snapshot still delivers exactly once to the listener
   ## being removed.
-  if id == 0'u64:
-    return false
-
   var removed = false
+  if id == 0'u64:
+    return removed
 
   withLock reg.lock:
     for i in 0 ..< reg.wildcard.len:
@@ -105,9 +113,7 @@ proc removeEventListener*(reg: var FFIEventRegistry, id: uint64): bool {.raises:
         removed = true
         break
     if not removed:
-      var emptyKey = ""
-      var prune = false
-      for key, listeners in reg.byEvent.mpairs:
+      for listeners in reg.byEvent.mvalues:
         var idx = -1
         for i in 0 ..< listeners.len:
           if listeners[i].id == id:
@@ -116,12 +122,7 @@ proc removeEventListener*(reg: var FFIEventRegistry, id: uint64): bool {.raises:
         if idx >= 0:
           listeners.delete(idx)
           removed = true
-          if listeners.len == 0:
-            emptyKey = key
-            prune = true
           break
-      if prune:
-        reg.byEvent.del(emptyKey)
   return removed
 
 proc removeAllEventListeners*(reg: var FFIEventRegistry) {.raises: [].} =
@@ -149,3 +150,110 @@ proc snapshotListeners*(
     for l in reg.wildcard:
       snap.add(l)
   return snap
+
+# ---------------------------------------------------------------------------
+# Dispatch templates (used by {.ffiEvent.}-generated procs)
+# ---------------------------------------------------------------------------
+
+var ffiCurrentEventRegistry* {.threadvar.}: ptr FFIEventRegistry
+  ## Set by the FFI thread at startup so dispatchFFIEvent / dispatchFFIEventCbor
+  ## can find their registry without taking a context pointer per call site.
+
+template dispatchFFIEvent*(eventName: string, body: untyped) =
+  ## Dispatches an FFI event to every listener for `eventName` plus every
+  ## wildcard listener. `body` may produce a `string` or a `seq[byte]`.
+  ##
+  ## Valid only on the FFI thread (where `ffiCurrentEventRegistry` is
+  ## set). Holds `reg.lock` for the entire snapshot + invocation so a
+  ## concurrent `removeEventListener` from a foreign thread blocks until
+  ## dispatch returns — closes the UAF window in #40 / PR #39 review
+  ## #4356915554. Handlers must not call addEventListener /
+  ## removeEventListener on the same registry (would self-deadlock).
+  let regPtr = ffiCurrentEventRegistry
+  if regPtr.isNil():
+    chronicles.error eventName & " - event registry not set on this thread"
+  else:
+    withLock regPtr[].lock:
+      var snap: seq[FFIEventListener] = @[]
+      if eventName.len > 0:
+        for l in regPtr[].byEvent.getOrDefault(eventName):
+          snap.add(l)
+      for l in regPtr[].wildcard:
+        snap.add(l)
+      if snap.len == 0:
+        chronicles.debug eventName & " - no listener registered"
+      else:
+        foreignThreadGc:
+          try:
+            let event = body
+            for listener in snap:
+              listener.callback(
+                RET_OK,
+                cast[ptr cchar](unsafeAddr event[0]),
+                cast[csize_t](len(event)),
+                listener.userData,
+              )
+          except Exception, CatchableError:
+            let msg =
+              "Exception dispatching " & eventName & ": " &
+              getCurrentExceptionMsg()
+            for listener in snap:
+              listener.callback(
+                RET_ERR,
+                cast[ptr cchar](unsafeAddr msg[0]),
+                cast[csize_t](len(msg)),
+                listener.userData,
+              )
+
+template dispatchFFIEventCbor*(eventName: string, eventPayload: typed) =
+  ## Typed CBOR variant of `dispatchFFIEvent`. Wraps `eventPayload` in an
+  ## `EventEnvelope`, CBOR-encodes it into a `c_malloc` buffer once, and
+  ## fans the same buffer out to every registered listener.
+  ##
+  ## NB: the template parameter is intentionally named `eventPayload`
+  ## rather than `payload` — Nim's template substitution would otherwise
+  ## also replace the `payload:` field name inside `EventEnvelope`.
+  ## Lock-during-invocation contract: see `dispatchFFIEvent`.
+  let regPtr = ffiCurrentEventRegistry
+  if regPtr.isNil():
+    chronicles.error eventName & " - event registry not set on this thread"
+  else:
+    withLock regPtr[].lock:
+      var snap: seq[FFIEventListener] = @[]
+      if eventName.len > 0:
+        for l in regPtr[].byEvent.getOrDefault(eventName):
+          snap.add(l)
+      for l in regPtr[].wildcard:
+        snap.add(l)
+      if snap.len == 0:
+        chronicles.debug eventName & " - no listener registered"
+      else:
+        foreignThreadGc:
+          try:
+            var (data, dataLen) = cborEncodeShared(
+              EventEnvelope[typeof(eventPayload)](
+                eventType: eventName, payload: eventPayload
+              )
+            )
+            defer:
+              cborFreeShared(data)
+            for listener in snap:
+              listener.callback(
+                RET_OK,
+                cast[ptr cchar](data),
+                cast[csize_t](dataLen),
+                listener.userData,
+              )
+          except Exception, CatchableError:
+            # Catching `Exception` also catches Defects (OOM, overflow, ...) so
+            # the C caller always gets RET_OK / RET_ERR. Requires `--panics:off`.
+            let msg =
+              "Exception dispatching " & eventName & ": " &
+              getCurrentExceptionMsg()
+            for listener in snap:
+              listener.callback(
+                RET_ERR,
+                cast[ptr cchar](unsafeAddr msg[0]),
+                cast[csize_t](len(msg)),
+                listener.userData,
+              )
