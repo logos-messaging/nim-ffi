@@ -59,12 +59,21 @@ const WildcardEventName* = ""
 # ---------------------------------------------------------------------------
 
 proc initEventRegistry*(reg: var FFIEventRegistry) =
+  ## Must be called exactly once on the owning thread before the registry
+  ## is shared. The embedded `Lock` wraps a platform primitive that cannot
+  ## be safely double-initialised, so concurrent callers would hit UB at
+  ## the OS layer — the lock itself can't defend against its own init.
   reg.lock.initLock()
   reg.nextId = 0'u64
   reg.byEvent = initTable[string, seq[FFIEventListener]]()
   reg.wildcard.setLen(0)
 
 proc deinitEventRegistry*(reg: var FFIEventRegistry) =
+  ## Mirror of `initEventRegistry`: must be called exactly once, by the
+  ## same thread that owns the registry, after all other threads have
+  ## stopped using it. `deinitLock` on a platform primitive that any
+  ## thread might still be holding or about to acquire is UB at the OS
+  ## layer.
   reg.lock.deinitLock()
   reg.byEvent = default(Table[string, seq[FFIEventListener]])
   reg.wildcard = @[]
@@ -80,12 +89,13 @@ proc addEventListener*(
   ## id (always non-zero on success). `eventName == ""` registers a wildcard
   ## listener that receives every dispatched event. Returns 0 if `callback`
   ## is nil — the only documented failure mode.
-  var assigned: uint64 = 0
   if callback.isNil():
-    return assigned
+    return 0
+
+  var assigned: uint64 = 0
 
   withLock reg.lock:
-    reg.nextId += 1
+    reg.nextId.inc()
     assigned = reg.nextId
     let listener =
       FFIEventListener(id: assigned, callback: callback, userData: userData)
@@ -102,9 +112,10 @@ proc removeEventListener*(reg: var FFIEventRegistry, id: uint64): bool {.raises:
   ## listener with that id exists. Safe to call from inside a dispatch:
   ## the in-flight snapshot still delivers exactly once to the listener
   ## being removed.
-  var removed = false
   if id == 0'u64:
-    return removed
+    return false
+
+  var removed = false
 
   withLock reg.lock:
     for i in 0 ..< reg.wildcard.len:
@@ -113,7 +124,9 @@ proc removeEventListener*(reg: var FFIEventRegistry, id: uint64): bool {.raises:
         removed = true
         break
     if not removed:
-      for listeners in reg.byEvent.mvalues:
+      var emptyKey = ""
+      var prune = false
+      for key, listeners in reg.byEvent.mpairs:
         var idx = -1
         for i in 0 ..< listeners.len:
           if listeners[i].id == id:
@@ -122,7 +135,12 @@ proc removeEventListener*(reg: var FFIEventRegistry, id: uint64): bool {.raises:
         if idx >= 0:
           listeners.delete(idx)
           removed = true
+          if listeners.len == 0:
+            emptyKey = key
+            prune = true
           break
+      if prune:
+        reg.byEvent.del(emptyKey)
   return removed
 
 proc removeAllEventListeners*(reg: var FFIEventRegistry) {.raises: [].} =
