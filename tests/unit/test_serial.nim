@@ -338,7 +338,7 @@ suite "CBOR boundaries":
     let back = cborDecode(bytes, float64)
     check back.isOk
     check back.value == v
-    check back.value.classify == fcSubnormal
+    check back.value.classify == math.fcSubnormal
 
   test "float32 subnormal (compared by bit pattern)":
     # The smallest positive float32 subnormal has bit pattern 0x00000001.
