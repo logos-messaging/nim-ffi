@@ -305,22 +305,22 @@ TEST(TimerE2E, ThreadedHammer) {
     EXPECT_EQ(errors.load(), 0);
 }
 
-// Library-initiated events flow through the typed `MyTimerCtx::Events`
-// dispatcher: setting `onEchoFired` registers a CBOR-decoding trampoline
-// inside the context, and every successful `echo()` triggers it. The
-// promise here is fulfilled from the FFI thread; we wait synchronously
-// for it before destroying the context (the dtor tears down the FFI
-// thread and any further events).
+
+// Library-initiated events flow through `MyTimerCtx::addOnEchoFiredListener`:
+// the listener registers a CBOR-decoding trampoline inside the lib's
+// registry, and every successful `echo()` triggers it. The promise here
+// is fulfilled from the FFI thread; we wait synchronously for it before
+// destroying the context (the dtor tears down the FFI thread and any
+// further events).
 TEST(TimerE2E, TypedEventFiresAfterEcho) {
     auto ctx = makeCtx("events");
 
     std::promise<EchoEvent> evtPromise;
     auto evtFuture = evtPromise.get_future();
 
-    ctx->setEventHandlers({
-        .on_error = nullptr,
-        .onEchoFired = [&](const EchoEvent& evt) { evtPromise.set_value(evt); },
-    });
+    const auto handle = ctx->addOnEchoFiredListener(
+        [&](const EchoEvent& evt) { evtPromise.set_value(evt); });
+    ASSERT_NE(handle.id, 0u) << "addOnEchoFiredListener returned zero id";
 
     const auto resp = ctx->echo(EchoRequest{"event-msg", 1});
     EXPECT_EQ(resp.echoed, "event-msg");
@@ -331,4 +331,111 @@ TEST(TimerE2E, TypedEventFiresAfterEcho) {
     const auto evt = evtFuture.get();
     EXPECT_EQ(evt.message, "event-msg");
     EXPECT_EQ(evt.echoCount, 1);
+}
+
+// Multiple listeners on the same event each fire exactly once per emit.
+TEST(TimerE2E, MultipleTypedListenersAllFire) {
+    auto ctx = makeCtx("multi-listeners");
+
+    std::promise<EchoEvent> firstPromise;
+    std::promise<EchoEvent> secondPromise;
+    auto firstFuture = firstPromise.get_future();
+    auto secondFuture = secondPromise.get_future();
+
+    ctx->addOnEchoFiredListener(
+        [&](const EchoEvent& evt) { firstPromise.set_value(evt); });
+    ctx->addOnEchoFiredListener(
+        [&](const EchoEvent& evt) { secondPromise.set_value(evt); });
+
+    ctx->echo(EchoRequest{"fan-out", 1});
+
+    ASSERT_EQ(firstFuture.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_EQ(secondFuture.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_EQ(firstFuture.get().message, "fan-out");
+    EXPECT_EQ(secondFuture.get().message, "fan-out");
+}
+
+// Removing a listener stops it from firing on subsequent events while the
+// other listener keeps receiving them.
+TEST(TimerE2E, RemoveEventListenerStopsDelivery) {
+    auto ctx = makeCtx("remove-listener");
+
+    std::atomic<int> removedHits{0};
+    std::atomic<int> keptHits{0};
+
+    const auto removedHandle = ctx->addOnEchoFiredListener(
+        [&](const EchoEvent&) { removedHits.fetch_add(1); });
+    ctx->addOnEchoFiredListener(
+        [&](const EchoEvent&) { keptHits.fetch_add(1); });
+
+    ctx->echo(EchoRequest{"before-remove", 1});
+
+    // Give the FFI thread a beat to deliver the first event to both
+    // listeners before we yank one of them out.
+    for (int i = 0; i < 200 && (removedHits.load() == 0 || keptHits.load() == 0); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ASSERT_EQ(removedHits.load(), 1);
+    ASSERT_EQ(keptHits.load(), 1);
+
+    EXPECT_TRUE(ctx->removeEventListener(removedHandle));
+    EXPECT_FALSE(ctx->removeEventListener(removedHandle)) << "double remove must report false";
+
+    ctx->echo(EchoRequest{"after-remove", 1});
+
+    for (int i = 0; i < 200 && keptHits.load() < 2; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    EXPECT_EQ(keptHits.load(), 2);
+    EXPECT_EQ(removedHits.load(), 1) << "removed listener fired after removeEventListener";
+}
+
+// The wildcard `addEventListener` overload receives every event with the
+// wire `eventId` pre-extracted plus the raw envelope bytes. The helper
+// `decodeEventPayload<T>` lifts the payload into a typed value.
+TEST(TimerE2E, WildcardListenerReceivesEventIdAndDecodesPayload) {
+    auto ctx = makeCtx("wildcard");
+
+    struct Capture {
+        int retCode;
+        std::string eventId;
+        std::size_t envelopeBytes;
+        std::optional<EchoEvent> decoded;
+    };
+
+    std::mutex mu;
+    std::vector<Capture> captured;
+    auto handle = ctx->addEventListener(
+        [&](int retCode, const std::string& eventId,
+            const std::vector<std::uint8_t>& envelope) {
+            Capture c{retCode, eventId, envelope.size(), std::nullopt};
+            if (retCode == 0 && eventId == "on_echo_fired") {
+                EchoEvent evt{};
+                if (decodeEventPayload(envelope, evt)) {
+                    c.decoded = evt;
+                }
+            }
+            std::lock_guard<std::mutex> lock(mu);
+            captured.push_back(std::move(c));
+        });
+    ASSERT_NE(handle.id, 0u);
+
+    ctx->echo(EchoRequest{"hello", 1});
+
+    for (int i = 0; i < 200; ++i) {
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            if (!captured.empty()) break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    std::lock_guard<std::mutex> lock(mu);
+    ASSERT_GE(captured.size(), 1u);
+    EXPECT_EQ(captured.front().retCode, 0);
+    EXPECT_EQ(captured.front().eventId, "on_echo_fired");
+    EXPECT_GT(captured.front().envelopeBytes, 0u);
+    ASSERT_TRUE(captured.front().decoded.has_value());
+    EXPECT_EQ(captured.front().decoded->message, "hello");
+    EXPECT_EQ(captured.front().decoded->echoCount, 1);
 }
