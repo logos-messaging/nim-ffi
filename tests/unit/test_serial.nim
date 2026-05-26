@@ -275,7 +275,7 @@ suite "CBOR boundaries":
       let bytes = cborEncode(v)
       check cborDecode(bytes, int32).value == v
 
-  test "int64 (INT64_MIN / INT64_MAX)":
+  test "int64":
     for v in [low(int64), int64(-1), int64(0), int64(1), high(int64)]:
       let bytes = cborEncode(v)
       check cborDecode(bytes, int64).value == v
