@@ -53,6 +53,11 @@ proc initEventRegistry*(reg: var FFIEventRegistry) =
   reg.wildcard.setLen(0)
 
 proc deinitEventRegistry*(reg: var FFIEventRegistry) =
+  ## Mirror of `initEventRegistry`: must be called exactly once, by the
+  ## same thread that owns the registry, after all other threads have
+  ## stopped using it. `deinitLock` on a platform primitive that any
+  ## thread might still be holding or about to acquire is UB at the OS
+  ## layer.
   reg.lock.deinitLock()
   reg.byEvent.clear()
   reg.wildcard.setLen(0)
