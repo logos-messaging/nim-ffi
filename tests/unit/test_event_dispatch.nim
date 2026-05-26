@@ -7,7 +7,7 @@
 ## sendRequestToFFIThread) so we exercise the threadvar-backed
 ## ffiCurrentCallbackState wiring, not just the templates in isolation.
 
-import std/[locks]
+import std/[locks, os]
 import unittest2
 import results
 import ffi
@@ -238,3 +238,77 @@ suite "FFICallbackState concurrent access":
     # `evt` got hit by every dispatch above; just confirm at least one
     # actually landed so a silently-broken dispatch loop is caught.
     check evt.called
+
+# ---------------------------------------------------------------------------
+# Lock-during-invocation regression (issue #40 second concern)
+# ---------------------------------------------------------------------------
+
+## A foreign-thread `setCallback` must not be able to swap the callback +
+## userData pair while an in-flight dispatch is mid-invocation on the
+## previous pair. The dispatch templates now hold `callbackState.lock`
+## for the entire snapshot + invocation, so `setCallback` blocks until
+## dispatch returns.
+##
+## We don't use the FFI thread's request channel here because the request
+## handler runs synchronously on the FFI thread before
+## `reqReceivedSignal` fires — there'd be no way for the main thread to
+## observe the in-flight state. Instead, a worker thread directly drives
+## `dispatchFFIEvent` against a registry-of-one.
+
+type SlowState = object
+  entered: Atomic[bool]
+  exited: Atomic[bool]
+
+proc slowEventCb(
+    retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
+) {.cdecl, gcsafe, raises: [].} =
+  ## Signal entry, sleep briefly (the window during which the main
+  ## thread must call setCallback and block), signal exit.
+  let st = cast[ptr SlowState](userData)
+  st[].entered.store(true)
+  os.sleep(15)
+  st[].exited.store(true)
+
+type DispatcherArgs = tuple
+  state: ptr FFICallbackState
+  done: ptr Atomic[bool]
+
+proc dispatcherBody(args: DispatcherArgs) {.thread.} =
+  ffiCurrentCallbackState = args.state
+  dispatchFFIEvent("evt"):
+    "payload"
+  args.done[].store(true)
+
+suite "callbackState lock held during invocation":
+  test "setCallback blocks until in-flight dispatch finishes":
+    var state: FFICallbackState
+    initCallbackState(state)
+    defer:
+      deinitCallbackState(state)
+
+    var st: SlowState
+    st.entered.store(false)
+    st.exited.store(false)
+
+    setCallback(state, cast[pointer](slowEventCb), addr st)
+
+    var done: Atomic[bool]
+    done.store(false)
+    var thr: Thread[DispatcherArgs]
+    createThread(thr, dispatcherBody, (addr state, addr done))
+
+    # Wait until the worker thread is inside slowEventCb.
+    for _ in 0 ..< 200:
+      if st.entered.load():
+        break
+      os.sleep(1)
+    check st.entered.load()
+    check not st.exited.load()
+
+    # Lock-during-invocation contract: setCallback blocks until the
+    # dispatch's lock is released, i.e. until slowEventCb has finished.
+    var other = SlowState() # dummy target; never invoked
+    setCallback(state, cast[pointer](slowEventCb), addr other)
+    check st.exited.load()
+    joinThread(thr)
+    check done.load()

@@ -78,43 +78,54 @@ const git_version* {.strdefine.} = "n/a"
 template callEventCallback*(ctx: ptr FFIContext, eventName: string, body: untyped) =
   ## `body` may evaluate to a `string` or a `seq[byte]` — the cast to
   ## `ptr cchar` accepts both `ptr char` and `ptr byte` source pointers.
-  let (cbPtr, ud) = snapshotCallback(ctx[].callbackState)
-  if isNil(cbPtr):
-    chronicles.error eventName & " - eventCallback is nil"
-    return
-
-  foreignThreadGc:
-    let cb = cast[FFICallBack](cbPtr)
-    try:
-      let event = body
-      cb(RET_OK, cast[ptr cchar](unsafeAddr event[0]), cast[csize_t](len(event)), ud)
-    except Exception, CatchableError:
-      let msg =
-        "Exception " & eventName & " when calling 'eventCallBack': " &
-        getCurrentExceptionMsg()
-      cb(RET_ERR, cast[ptr cchar](unsafeAddr msg[0]), cast[csize_t](len(msg)), ud)
+  ##
+  ## Holds `callbackState.lock` for the snapshot + invocation so that a
+  ## concurrent `setCallback` from a foreign thread blocks until the
+  ## in-flight callback returns. Without this, the foreign-side binding
+  ## could free the object `userData` points at between the snapshot and
+  ## the invocation, causing a use-after-free.
+  withLock ctx[].callbackState.lock:
+    let cbPtr = ctx[].callbackState.callback
+    let ud = ctx[].callbackState.userData
+    if isNil(cbPtr):
+      chronicles.error eventName & " - eventCallback is nil"
+      return
+    foreignThreadGc:
+      let cb = cast[FFICallBack](cbPtr)
+      try:
+        let event = body
+        cb(RET_OK, cast[ptr cchar](unsafeAddr event[0]), cast[csize_t](len(event)), ud)
+      except Exception, CatchableError:
+        let msg =
+          "Exception " & eventName & " when calling 'eventCallBack': " &
+          getCurrentExceptionMsg()
+        cb(RET_ERR, cast[ptr cchar](unsafeAddr msg[0]), cast[csize_t](len(msg)), ud)
 
 template dispatchFFIEvent*(eventName: string, body: untyped) =
   ## Dispatches an FFI event to the callback registered via `{libName}_set_event_callback`.
   ## `body` is evaluated lazily — only when a callback is registered.
   ## `body` may produce a `string` (legacy JSON style) or a `seq[byte]` (CBOR).
   ## Valid only on the FFI thread (i.e., inside {.ffi.} proc bodies and their async closures).
+  ##
+  ## Lock-during-invocation contract: see `callEventCallback`.
   let ffiState = ffiCurrentCallbackState
   if isNil(ffiState):
     chronicles.error eventName & " - event callback not set"
     return
-  let (cbPtr, ud) = snapshotCallback(ffiState[])
-  if isNil(cbPtr):
-    chronicles.error eventName & " - event callback not set"
-    return
-  foreignThreadGc:
-    let cb = cast[FFICallBack](cbPtr)
-    try:
-      let event = body
-      cb(RET_OK, cast[ptr cchar](unsafeAddr event[0]), cast[csize_t](len(event)), ud)
-    except Exception, CatchableError:
-      let msg = "Exception dispatching " & eventName & ": " & getCurrentExceptionMsg()
-      cb(RET_ERR, cast[ptr cchar](unsafeAddr msg[0]), cast[csize_t](len(msg)), ud)
+  withLock ffiState[].lock:
+    let cbPtr = ffiState[].callback
+    let ud = ffiState[].userData
+    if isNil(cbPtr):
+      chronicles.error eventName & " - event callback not set"
+      return
+    foreignThreadGc:
+      let cb = cast[FFICallBack](cbPtr)
+      try:
+        let event = body
+        cb(RET_OK, cast[ptr cchar](unsafeAddr event[0]), cast[csize_t](len(event)), ud)
+      except Exception, CatchableError:
+        let msg = "Exception dispatching " & eventName & ": " & getCurrentExceptionMsg()
+        cb(RET_ERR, cast[ptr cchar](unsafeAddr msg[0]), cast[csize_t](len(msg)), ud)
 
 type EventEnvelope*[T] = object
   ## Standard wire shape for CBOR-encoded FFI events:
@@ -138,32 +149,36 @@ template dispatchFFIEventCbor*(eventName: string, eventPayload: typed) =
   ## NB: the template parameter is intentionally named `eventPayload`
   ## rather than `payload` — Nim's template substitution would otherwise
   ## also replace the `payload:` field name inside `EventEnvelope`.
+  ##
+  ## Lock-during-invocation contract: see `callEventCallback`.
   let ffiState = ffiCurrentCallbackState
   if ffiState.isNil():
     chronicles.error eventName & " - event callback not set"
     return
-  let (cbPtr, ud) = snapshotCallback(ffiState[])
-  if cbPtr.isNil():
-    chronicles.error eventName & " - event callback not set"
-    return
-  foreignThreadGc:
-    let cb = cast[FFICallBack](cbPtr)
-    try:
-      var (data, dataLen) = cborEncodeShared(
-        EventEnvelope[typeof(eventPayload)](eventType: eventName, payload: eventPayload)
-      )
-      defer:
-        cborFreeShared(data)
-      cb(RET_OK, cast[ptr cchar](data), cast[csize_t](dataLen), ud)
-    except Exception, CatchableError:
-      # Catching `Exception` also catches Defects (OOM, overflow, ...) so
-      # the C caller always gets RET_OK/RET_ERR. Requires `--panics:off`
-      # (Nim's default; don't enable `--panics:on` for this lib).
+  withLock ffiState[].lock:
+    let cbPtr = ffiState[].callback
+    let ud = ffiState[].userData
+    if cbPtr.isNil():
+      chronicles.error eventName & " - event callback not set"
+      return
+    foreignThreadGc:
+      let cb = cast[FFICallBack](cbPtr)
+      try:
+        var (data, dataLen) = cborEncodeShared(
+          EventEnvelope[typeof(eventPayload)](eventType: eventName, payload: eventPayload)
+        )
+        defer:
+          cborFreeShared(data)
+        cb(RET_OK, cast[ptr cchar](data), cast[csize_t](dataLen), ud)
+      except Exception, CatchableError:
+        # Catching `Exception` also catches Defects (OOM, overflow, ...) so
+        # the C caller always gets RET_OK/RET_ERR. Requires `--panics:off`
+        # (Nim's default; don't enable `--panics:on` for this lib).
 
-      let msg = "Exception dispatching " & eventName & ": " & getCurrentExceptionMsg()
-      cb(
-        RET_ERR, cast[ptr cchar](unsafeAddr msg[0]), cast[csize_t](len(msg)), ud
-      )
+        let msg = "Exception dispatching " & eventName & ": " & getCurrentExceptionMsg()
+        cb(
+          RET_ERR, cast[ptr cchar](unsafeAddr msg[0]), cast[csize_t](len(msg)), ud
+        )
 
 proc sendRequestToFFIThread*(
     ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, timeout = InfiniteDuration
