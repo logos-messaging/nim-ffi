@@ -5,7 +5,7 @@
 ##
 ## Tests run end-to-end against a real FFI thread (via FFIContextPool +
 ## sendRequestToFFIThread) so we exercise the threadvar-backed
-## ffiCurrentCallbackState wiring, not just the templates in isolation.
+## ffiCurrentEventRegistry wiring, not just the templates in isolation.
 
 import std/[locks]
 import unittest2
@@ -85,10 +85,11 @@ registerReqFFI(EmitRawBytesEventRequest, lib: ptr TestEvtLib):
       @[byte 0x01, 0x02, 0x03]
     return ok("emitted")
 
-## Setter-thread worker for the FFICallbackState race regression test.
-## Hammers `setCallback` so a TSan-instrumented build can confirm
-## `FFICallbackState.lock` actually serialises the cross-thread mutation
-## against `snapshotCallback` reads from the FFI thread.
+## Setter-thread worker for the registry race regression test.
+## Each iteration adds then immediately removes a wildcard listener so a
+## TSan-instrumented build can confirm `FFIEventRegistry.lock` serialises
+## the cross-thread mutation against dispatch-time `snapshotListeners`
+## reads from the FFI thread.
 type SetterArgs = tuple
   ctx: ptr FFIContext[TestEvtLib]
   stop: ptr Atomic[bool]
@@ -96,7 +97,10 @@ type SetterArgs = tuple
 
 proc setterThreadBody(args: SetterArgs) {.thread.} =
   while not args.stop[].load():
-    setCallback(args.ctx[].callbackState, cast[pointer](captureCb), args.target)
+    let id = addEventListener(
+      args.ctx[].eventRegistry, WildcardEventName, captureCb, args.target
+    )
+    discard removeEventListener(args.ctx[].eventRegistry, id)
 
 suite "dispatchFFIEventCbor":
   test "delivers EventEnvelope-shaped CBOR payload to event callback":
@@ -112,9 +116,10 @@ suite "dispatchFFIEventCbor":
     defer:
       deinitCallbackData(evt)
 
-    # Register the event callback via the same locked helper that the
-    # codegen-emitted `{libname}_set_event_callback` uses.
-    setCallback(ctx[].callbackState, cast[pointer](captureCb), addr evt)
+    # Register the event callback through the multi-listener registry.
+    discard addEventListener(
+      ctx[].eventRegistry, WildcardEventName, captureCb, addr evt
+    )
 
     # Trigger the dispatch from the FFI thread; the response callback is
     # ignored (we only care that the request completed so we know the event
@@ -152,7 +157,9 @@ suite "dispatchFFIEvent with seq[byte]":
     defer:
       deinitCallbackData(evt)
 
-    setCallback(ctx[].callbackState, cast[pointer](captureCb), addr evt)
+    discard addEventListener(
+      ctx[].eventRegistry, WildcardEventName, captureCb, addr evt
+    )
 
     var rsp: CallbackData
     initCallbackData(rsp)
@@ -169,72 +176,85 @@ suite "dispatchFFIEvent with seq[byte]":
     check evt.retCode == RET_OK
     check callbackBytes(evt) == @[byte 0x01, 0x02, 0x03]
 
-suite "FFICallbackState concurrent access":
-  ## Regression test for PR #39 review comment r3288220895 / r3289285387:
-  ## `{lib}_set_event_callback` writes `callbackState.callback / .userData`
-  ## from foreign caller threads while the FFI thread reads them on every
-  ## dispatch. Without `FFICallbackState.lock` this is a data race.
-  ##
-  ## IMPORTANT: run this under ThreadSanitizer to actually validate the
-  ## fix:
-  ##
-  ##   NIM_FFI_SAN=tsan NIM_FFI_MM=orc nimble test_sanitized
-  ##
-  ## A regular build will silently pass either way — the racing reads and
-  ## writes are pointer-aligned, so on x86/arm64 they don't tear visibly
-  ## and the loop completes. Only tsan inspects the memory model and
-  ## flags the missing happens-before edge if the lock is removed.
-  ## Treat a clean tsan run on this test as the load-bearing signal.
-  test "concurrent setCallback writers vs dispatch reads stay race-free":
-    var pool: FFIContextPool[TestEvtLib]
-    let ctx = pool.createFFIContext().valueOr:
-      check false
-      return
-    defer:
-      discard pool.destroyFFIContext(ctx)
+when not defined(gcRefc):
+  ## Skipped under `--mm:refc`: each setter thread grows / shrinks
+  ## `reg.wildcard` (a `seq[FFIEventListener]`) via `addEventListener`,
+  ## and refc's per-thread GC heap ownership makes cross-thread seq
+  ## buffer reallocation unsafe even when the surrounding lock is held —
+  ## a buffer allocated by one thread can end up freed by another. ORC
+  ## (and the FFI thread + tsan combo this test was written for) does
+  ## not have that limitation. Production foreign-side code typically
+  ## registers listeners from a single thread, which is safe under both
+  ## memory managers; this test is the stress case that isn't.
+  suite "FFIEventRegistry concurrent access":
+    ## Regression test for PR #39 review comment r3288220895 / r3289285387:
+    ## foreign caller threads mutate the registry's wildcard list while
+    ## the FFI thread reads it on every dispatch. Without
+    ## `FFIEventRegistry.lock` this is a data race.
+    ##
+    ## IMPORTANT: run this under ThreadSanitizer to actually validate the
+    ## fix:
+    ##
+    ##   NIM_FFI_SAN=tsan NIM_FFI_MM=orc nimble test_sanitized
+    ##
+    ## A regular build will silently pass either way — the racing reads
+    ## and writes are pointer-aligned, so on x86/arm64 they don't tear
+    ## visibly and the loop completes. Only tsan inspects the memory
+    ## model and flags the missing happens-before edge if the lock is
+    ## removed. Treat a clean tsan run on this test as the load-bearing
+    ## signal.
+    test "concurrent add/remove writers vs dispatch reads stay race-free":
+      var pool: FFIContextPool[TestEvtLib]
+      let ctx = pool.createFFIContext().valueOr:
+        check false
+        return
+      defer:
+        discard pool.destroyFFIContext(ctx)
 
-    var evt: CallbackData
-    initCallbackData(evt)
-    defer:
-      deinitCallbackData(evt)
+      var evt: CallbackData
+      initCallbackData(evt)
+      defer:
+        deinitCallbackData(evt)
 
-    # Seed an initial callback so the FFI thread's first dispatch has a
-    # target. The setter threads will then repeatedly re-install the same
-    # (callback, userData) pair — what matters is the cross-thread write
-    # racing the FFI thread's read, not which pair "wins".
-    setCallback(ctx[].callbackState, cast[pointer](captureCb), addr evt)
-
-    const NumSetterThreads = 4
-    const NumDispatchIters = 200
-
-    var stop: Atomic[bool]
-    stop.store(false)
-    var setters: array[NumSetterThreads, Thread[SetterArgs]]
-    for i in 0 ..< NumSetterThreads:
-      createThread(setters[i], setterThreadBody, (ctx, addr stop, addr evt))
-
-    var rsp: CallbackData
-    initCallbackData(rsp)
-    defer:
-      deinitCallbackData(rsp)
-
-    for _ in 0 ..< NumDispatchIters:
-      # Reset rsp so each iteration's `waitCallback` blocks until the
-      # FFI thread fires the response — keeps the loop synchronous.
-      acquire(rsp.lock)
-      rsp.called = false
-      release(rsp.lock)
-
-      check sendRequestToFFIThread(
-        ctx, EmitCborEventRequest.ffiNewReq(captureCb, addr rsp)
+      # Seed an initial listener so the FFI thread's first dispatch has a
+      # target. The setter threads will then repeatedly add/remove their
+      # own listeners — what matters is the cross-thread mutation racing
+      # the FFI thread's read.
+      discard addEventListener(
+        ctx[].eventRegistry, WildcardEventName, captureCb, addr evt
       )
-        .isOk()
-      waitCallback(rsp)
 
-    stop.store(true)
-    for i in 0 ..< NumSetterThreads:
-      joinThread(setters[i])
+      const NumSetterThreads = 4
+      const NumDispatchIters = 200
 
-    # `evt` got hit by every dispatch above; just confirm at least one
-    # actually landed so a silently-broken dispatch loop is caught.
-    check evt.called
+      var stop: Atomic[bool]
+      stop.store(false)
+      var setters: array[NumSetterThreads, Thread[SetterArgs]]
+      for i in 0 ..< NumSetterThreads:
+        createThread(setters[i], setterThreadBody, (ctx, addr stop, addr evt))
+
+      var rsp: CallbackData
+      initCallbackData(rsp)
+      defer:
+        deinitCallbackData(rsp)
+
+      for _ in 0 ..< NumDispatchIters:
+        # Reset rsp so each iteration's `waitCallback` blocks until the
+        # FFI thread fires the response — keeps the loop synchronous.
+        acquire(rsp.lock)
+        rsp.called = false
+        release(rsp.lock)
+
+        check sendRequestToFFIThread(
+          ctx, EmitCborEventRequest.ffiNewReq(captureCb, addr rsp)
+        )
+          .isOk()
+        waitCallback(rsp)
+
+      stop.store(true)
+      for i in 0 ..< NumSetterThreads:
+        joinThread(setters[i])
+
+      # `evt` got hit by every dispatch above; just confirm at least one
+      # actually landed so a silently-broken dispatch loop is caught.
+      check evt.called

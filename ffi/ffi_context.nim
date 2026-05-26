@@ -1,45 +1,12 @@
-{.pragma: exported, exportc, cdecl, raises: [].}
-{.pragma: callback, cdecl, raises: [], gcsafe.}
 {.passc: "-fPIC".}
 
 import std/[atomics, locks, json, tables]
 import chronicles, chronos, chronos/threadsync, taskpools/channels_spsc_single, results
-import ./ffi_types, ./ffi_thread_request, ./internal/ffi_macro, ./logging, ./cbor_serial
+import
+  ./ffi_types, ./ffi_events, ./ffi_thread_request, ./internal/ffi_macro, ./logging,
+  ./cbor_serial
 
-type FFICallbackState* = object
-  ## Holds the C event callback and its associated user-data pointer.
-  ## Embedded in FFIContext and referenced from the FFI thread via a
-  ## thread-local. `callback` / `userData` are written by
-  ## `{libName}_set_event_callback` from arbitrary caller threads and read
-  ## by every event dispatch on the FFI thread — `lock` exists so the
-  ## reader observes the pair atomically (and so the writes are visible
-  ## across threads at all under Nim's memory model).
-  callback*: pointer
-  userData*: pointer
-  lock*: Lock
-
-proc initCallbackState*(state: var FFICallbackState) =
-  state.lock.initLock()
-
-proc deinitCallbackState*(state: var FFICallbackState) =
-  state.lock.deinitLock()
-
-proc setCallback*(
-    state: var FFICallbackState, callback: pointer, userData: pointer
-) =
-  ## Locked writer used by the generated `_set_event_callback` proc.
-  withLock state.lock:
-    state.callback = callback
-    state.userData = userData
-
-proc snapshotCallback*(
-    state: var FFICallbackState
-): tuple[callback, userData: pointer] =
-  ## Locked reader: copies the (callback, userData) pair out as a single
-  ## consistent snapshot so dispatch code can invoke the callback without
-  ## holding the lock across user code.
-  withLock state.lock:
-    return (state.callback, state.userData)
+export ffi_events
 
 type FFIContext*[T] = object
   myLib*: ptr T
@@ -60,13 +27,10 @@ type FFIContext*[T] = object
     # this with a bounded timeout instead of joining unconditionally, so a
     # blocked event loop cannot hang the caller forever
   userData*: pointer
-  callbackState*: FFICallbackState
+  eventRegistry*: FFIEventRegistry
   running: Atomic[bool] # To control when the threads are running
   registeredRequests: ptr Table[cstring, FFIRequestProc]
     # Pointer to with the registered requests at compile time
-
-var ffiCurrentCallbackState* {.threadvar.}: ptr FFICallbackState
-  ## Set by ffiThreadBody at thread startup; read by dispatchFFIEvent.
 
 var onFFIThread* {.threadvar.}: bool
   ## True while executing inside `ffiThreadBody`. Used by
@@ -74,96 +38,6 @@ var onFFIThread* {.threadvar.}: bool
   ## (which would self-deadlock on `reqReceivedSignal`).
 
 const git_version* {.strdefine.} = "n/a"
-
-template callEventCallback*(ctx: ptr FFIContext, eventName: string, body: untyped) =
-  ## `body` may evaluate to a `string` or a `seq[byte]` — the cast to
-  ## `ptr cchar` accepts both `ptr char` and `ptr byte` source pointers.
-  let (cbPtr, ud) = snapshotCallback(ctx[].callbackState)
-  if isNil(cbPtr):
-    chronicles.error eventName & " - eventCallback is nil"
-    return
-
-  foreignThreadGc:
-    let cb = cast[FFICallBack](cbPtr)
-    try:
-      let event = body
-      cb(RET_OK, cast[ptr cchar](unsafeAddr event[0]), cast[csize_t](len(event)), ud)
-    except Exception, CatchableError:
-      let msg =
-        "Exception " & eventName & " when calling 'eventCallBack': " &
-        getCurrentExceptionMsg()
-      cb(RET_ERR, cast[ptr cchar](unsafeAddr msg[0]), cast[csize_t](len(msg)), ud)
-
-template dispatchFFIEvent*(eventName: string, body: untyped) =
-  ## Dispatches an FFI event to the callback registered via `{libName}_set_event_callback`.
-  ## `body` is evaluated lazily — only when a callback is registered.
-  ## `body` may produce a `string` (legacy JSON style) or a `seq[byte]` (CBOR).
-  ## Valid only on the FFI thread (i.e., inside {.ffi.} proc bodies and their async closures).
-  let ffiState = ffiCurrentCallbackState
-  if isNil(ffiState):
-    chronicles.error eventName & " - event callback not set"
-    return
-  let (cbPtr, ud) = snapshotCallback(ffiState[])
-  if isNil(cbPtr):
-    chronicles.error eventName & " - event callback not set"
-    return
-  foreignThreadGc:
-    let cb = cast[FFICallBack](cbPtr)
-    try:
-      let event = body
-      cb(RET_OK, cast[ptr cchar](unsafeAddr event[0]), cast[csize_t](len(event)), ud)
-    except Exception, CatchableError:
-      let msg = "Exception dispatching " & eventName & ": " & getCurrentExceptionMsg()
-      cb(RET_ERR, cast[ptr cchar](unsafeAddr msg[0]), cast[csize_t](len(msg)), ud)
-
-type EventEnvelope*[T] = object
-  ## Standard wire shape for CBOR-encoded FFI events:
-  ##   { eventType: tstr, payload: <T> }
-  ## Pair with `dispatchFFIEventCbor` (or call `cborEncode` directly).
-  eventType*: string
-  payload*: T
-
-template dispatchFFIEventCbor*(eventName: string, eventPayload: typed) =
-  ## Typed CBOR variant of `dispatchFFIEvent`. Wraps `eventPayload` in an
-  ## `EventEnvelope`, CBOR-encodes it into a `c_malloc` buffer, dispatches
-  ## the callback, then frees the buffer. The payload type should be a
-  ## `{.ffi.}`-annotated object so the binding generator emits a matching
-  ## codec.
-  ##
-  ## The buffer is `c_malloc`-backed (not Nim GC-owned) so the pointer
-  ## handed to the callback does not depend on the FFI thread's GC heap
-  ## remaining valid — matches the ownership story used by request payloads
-  ## (see `ffi_thread_request.nim`).
-  ##
-  ## NB: the template parameter is intentionally named `eventPayload`
-  ## rather than `payload` — Nim's template substitution would otherwise
-  ## also replace the `payload:` field name inside `EventEnvelope`.
-  let ffiState = ffiCurrentCallbackState
-  if ffiState.isNil():
-    chronicles.error eventName & " - event callback not set"
-    return
-  let (cbPtr, ud) = snapshotCallback(ffiState[])
-  if cbPtr.isNil():
-    chronicles.error eventName & " - event callback not set"
-    return
-  foreignThreadGc:
-    let cb = cast[FFICallBack](cbPtr)
-    try:
-      var (data, dataLen) = cborEncodeShared(
-        EventEnvelope[typeof(eventPayload)](eventType: eventName, payload: eventPayload)
-      )
-      defer:
-        cborFreeShared(data)
-      cb(RET_OK, cast[ptr cchar](data), cast[csize_t](dataLen), ud)
-    except Exception, CatchableError:
-      # Catching `Exception` also catches Defects (OOM, overflow, ...) so
-      # the C caller always gets RET_OK/RET_ERR. Requires `--panics:off`
-      # (Nim's default; don't enable `--panics:on` for this lib).
-
-      let msg = "Exception dispatching " & eventName & ": " & getCurrentExceptionMsg()
-      cb(
-        RET_ERR, cast[ptr cchar](unsafeAddr msg[0]), cast[csize_t](len(msg)), ud
-      )
 
 proc sendRequestToFFIThread*(
     ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, timeout = InfiniteDuration
@@ -227,8 +101,23 @@ proc `$`(event: JsonNotRespondingEvent): string =
   $(%*event)
 
 proc onNotResponding*(ctx: ptr FFIContext) =
-  callEventCallback(ctx, "onNotResponding"):
-    $JsonNotRespondingEvent.init()
+  ## Phase-1 shim: still emits the legacy JSON payload through the registry.
+  ## Phase 3 replaces this with a CBOR `NotRespondingEvent` dispatched
+  ## through the same registry under the reserved `__not_responding__`
+  ## wire name.
+  let snap = snapshotListeners(ctx[].eventRegistry, "onNotResponding")
+  if snap.len == 0:
+    chronicles.error "onNotResponding - no listener registered"
+    return
+  foreignThreadGc:
+    let event = $JsonNotRespondingEvent.init()
+    for listener in snap:
+      listener.callback(
+        RET_OK,
+        cast[ptr cchar](unsafeAddr event[0]),
+        cast[csize_t](len(event)),
+        listener.userData,
+      )
 
 proc watchdogThreadBody(ctx: ptr FFIContext) {.thread.} =
   ## Watchdog thread that monitors the FFI thread and notifies the library user if it hangs.
@@ -314,7 +203,7 @@ proc processRequest[T](
 
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ## FFI thread body that attends library user API requests
-  ffiCurrentCallbackState = addr ctx[].callbackState
+  ffiCurrentEventRegistry = addr ctx[].eventRegistry
   onFFIThread = true
 
   logging.setupLog(logging.LogLevel.DEBUG, logging.LogFormat.TEXT)
@@ -387,7 +276,7 @@ proc cleanUpResources[T](ctx: ptr FFIContext[T]): Result[void, string] =
   defer:
     freeShared(ctx)
   ctx.lock.deinitLock()
-  deinitCallbackState(ctx[].callbackState)
+  deinitEventRegistry(ctx[].eventRegistry)
   when defined(gcRefc):
     ## ThreadSignalPtr.close() is intentionally skipped under --mm:refc.
     ##
@@ -425,7 +314,7 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## On failure every partially-initialised resource is closed; the caller
   ## is responsible for releasing the slot (freeShared or pool.releaseSlot).
   ctx.lock.initLock()
-  initCallbackState(ctx[].callbackState)
+  initEventRegistry(ctx[].eventRegistry)
 
   var success = false
   defer:
