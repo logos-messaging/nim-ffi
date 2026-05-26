@@ -61,7 +61,7 @@ add_custom_command(
     COMMENT "Compiling Nim library lib{{LIB}}"
     VERBATIM
 )
-add_custom_target(nim_lib ALL DEPENDS "${NIM_LIB_FILE}")
+add_custom_target({{LIB}}_nim_lib ALL DEPENDS "${NIM_LIB_FILE}")
 
 # On Windows, an `IMPORTED SHARED` target needs IMPORTED_IMPLIB pointing at
 # the `.lib` import library so MSVC's `link.exe` can resolve symbols. The
@@ -77,7 +77,7 @@ else()
     add_library({{LIB}} SHARED IMPORTED GLOBAL)
     set_target_properties({{LIB}} PROPERTIES IMPORTED_LOCATION "${NIM_LIB_FILE}")
 endif()
-add_dependencies({{LIB}} nim_lib)
+add_dependencies({{LIB}} {{LIB}}_nim_lib)
 
 # Absolute path to the runtime library (DLL/dylib/so). Exposed via the cache
 # so consumers in other directories (e.g. tests/e2e/cpp) can stage the DLL
@@ -86,34 +86,38 @@ set({{LIB}}_RUNTIME_LIB "${NIM_LIB_FILE}" CACHE INTERNAL
     "Absolute path to the {{LIB}} runtime library")
 
 # ── TinyCBOR (vendored at ffi/codegen/templates/cpp/vendor/tinycbor) ─────────
+# Guarded so two sibling cpp_bindings dirs in one parent project don't redefine
+# the `tinycbor` target.
 set(TINYCBOR_SRC_DIR "${REPO_ROOT}/ffi/codegen/templates/cpp/vendor")
-add_library(tinycbor STATIC
-    "${TINYCBOR_SRC_DIR}/tinycbor/cborencoder.c"
-    "${TINYCBOR_SRC_DIR}/tinycbor/cborencoder_close_container_checked.c"
-    "${TINYCBOR_SRC_DIR}/tinycbor/cborparser.c"
-    "${TINYCBOR_SRC_DIR}/tinycbor/cborparser_dup_string.c"
-    "${TINYCBOR_SRC_DIR}/tinycbor/cborerrorstrings.c"
-)
-target_include_directories(tinycbor PUBLIC
-    "${TINYCBOR_SRC_DIR}"            # consumer uses #include <tinycbor/cbor.h>
-    "${TINYCBOR_SRC_DIR}/tinycbor"   # internal _p.h includes resolve here
-)
-set_property(TARGET tinycbor PROPERTY C_STANDARD 99)
-set_property(TARGET tinycbor PROPERTY POSITION_INDEPENDENT_CODE ON)
+if(NOT TARGET tinycbor)
+    add_library(tinycbor STATIC
+        "${TINYCBOR_SRC_DIR}/tinycbor/cborencoder.c"
+        "${TINYCBOR_SRC_DIR}/tinycbor/cborencoder_close_container_checked.c"
+        "${TINYCBOR_SRC_DIR}/tinycbor/cborparser.c"
+        "${TINYCBOR_SRC_DIR}/tinycbor/cborparser_dup_string.c"
+        "${TINYCBOR_SRC_DIR}/tinycbor/cborerrorstrings.c"
+    )
+    target_include_directories(tinycbor PUBLIC
+        "${TINYCBOR_SRC_DIR}"            # consumer uses #include <tinycbor/cbor.h>
+        "${TINYCBOR_SRC_DIR}/tinycbor"   # internal _p.h includes resolve here
+    )
+    set_property(TARGET tinycbor PROPERTY C_STANDARD 99)
+    set_property(TARGET tinycbor PROPERTY POSITION_INDEPENDENT_CODE ON)
+endif()
 
 add_library({{LIB}}_headers INTERFACE)
 target_include_directories({{LIB}}_headers INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries({{LIB}}_headers INTERFACE {{LIB}} tinycbor)
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp")
-    add_executable(example main.cpp)
-    target_link_libraries(example PRIVATE {{LIB}}_headers)
-    add_dependencies(example nim_lib)
+    add_executable({{LIB}}_example main.cpp)
+    target_link_libraries({{LIB}}_example PRIVATE {{LIB}}_headers)
+    add_dependencies({{LIB}}_example {{LIB}}_nim_lib)
     if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-        add_custom_command(TARGET example POST_BUILD
+        add_custom_command(TARGET {{LIB}}_example POST_BUILD
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                 "${{{LIB}}_RUNTIME_LIB}"
-                "$<TARGET_FILE_DIR:example>"
-            COMMENT "Staging {{LIB}}.dll next to example.exe")
+                "$<TARGET_FILE_DIR:{{LIB}}_example>"
+            COMMENT "Staging {{LIB}}.dll next to {{LIB}}_example.exe")
     endif()
 endif()

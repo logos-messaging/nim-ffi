@@ -1,7 +1,9 @@
 // ── encode_cbor overloads (primitives + containers) ─────────────────────
 // Per-struct encode_cbor / decode_cbor are emitted by cpp.nim next to each
-// generated struct. These helpers cover the leaf types and container shapes
-// the struct emitters defer into.
+// generated struct; these helpers cover the leaf types they defer into.
+// Guarded so two nim-ffi headers can share a translation unit.
+#ifndef NIM_FFI_CBOR_HELPERS_HPP_INCLUDED
+#define NIM_FFI_CBOR_HELPERS_HPP_INCLUDED
 
 inline CborError encode_cbor(CborEncoder& e, bool v) {
     return cbor_encode_boolean(&e, v);
@@ -166,3 +168,5 @@ inline T decodeCborFFI(const std::vector<std::uint8_t>& bytes) {
     }
     return out;
 }
+
+#endif // NIM_FFI_CBOR_HELPERS_HPP_INCLUDED

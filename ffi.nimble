@@ -93,6 +93,7 @@ task test_serial, "Run CBOR codec unit tests":
 task test_cpp_e2e, "Build and run the C++ end-to-end tests for the timer example":
   # Regenerate the C++ bindings so the suite always runs against fresh codegen.
   runOrQuit "nimble genbindings_cpp"
+  runOrQuit "nimble genbindings_cpp_echo"
   runOrQuit "cmake -S tests/e2e/cpp -B tests/e2e/cpp/build"
   runOrQuit "cmake --build tests/e2e/cpp/build"
   runOrQuit "ctest --test-dir tests/e2e/cpp/build --output-on-failure"
@@ -120,6 +121,7 @@ task test_cpp_e2e_sanitized, "Build and run the C++ e2e tests with a sanitizer (
   let mm  = getEnv("NIM_FFI_MM",  "orc")
   let san = getEnv("NIM_FFI_SAN", "none")
   runOrQuit "nimble genbindings_cpp"
+  runOrQuit "nimble genbindings_cpp_echo"
   runOrQuit "cmake -S tests/e2e/cpp -B tests/e2e/cpp/build" &
        " -DNIM_FFI_MM=" & mm &
        " -DNIM_FFI_SANITIZER=" & san
@@ -165,6 +167,20 @@ task genbindings_cpp, "Generate C++ bindings for the timer example":
     " -d:ffiOutputDir=examples/timer/cpp_bindings" &
     " -d:ffiSrcPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
+
+task genbindings_cpp_echo, "Generate C++ bindings for the echo example":
+  exec "nim c " & nimFlagsOrc &
+    " --app:lib --noMain --nimMainPrefix:libecho" &
+    " -d:ffiGenBindings -d:targetLang=cpp" &
+    " -d:ffiOutputDir=examples/echo/cpp_bindings" &
+    " -d:ffiSrcPath=../echo.nim" &
+    " -o:/dev/null examples/echo/echo.nim"
+  exec "nim c " & nimFlagsRefc &
+    " --app:lib --noMain --nimMainPrefix:libecho" &
+    " -d:ffiGenBindings -d:targetLang=cpp" &
+    " -d:ffiOutputDir=examples/echo/cpp_bindings" &
+    " -d:ffiSrcPath=../echo.nim" &
+    " -o:/dev/null examples/echo/echo.nim"
 
 task check_bindings_rust, "Verify checked-in Rust bindings match Nim source":
   exec "nimble genbindings_rust"

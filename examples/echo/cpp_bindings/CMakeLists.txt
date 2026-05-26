@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(my_timer_cpp_bindings CXX C)
+project(echo_cpp_bindings CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,21 +19,21 @@ if("${REPO_ROOT}" STREQUAL "")
 endif()
 
 get_filename_component(NIM_SRC
-    "${CMAKE_CURRENT_SOURCE_DIR}/../timer.nim"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../echo.nim"
     ABSOLUTE)
 
 find_program(NIM_EXECUTABLE nim REQUIRED)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    set(NIM_LIB_FILE "${REPO_ROOT}/libmy_timer.dylib")
+    set(NIM_LIB_FILE "${REPO_ROOT}/libecho.dylib")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    set(NIM_LIB_FILE "${REPO_ROOT}/my_timer.dll")
+    set(NIM_LIB_FILE "${REPO_ROOT}/echo.dll")
     # MSVC consumers link against the `.lib` import library, not the DLL.
     # MinGW's ld emits one when asked via `--out-implib`; the resulting COFF
     # archive is readable by MSVC's link.exe.
-    set(NIM_IMPLIB_FILE "${REPO_ROOT}/my_timer.lib")
+    set(NIM_IMPLIB_FILE "${REPO_ROOT}/echo.lib")
 else()
-    set(NIM_LIB_FILE "${REPO_ROOT}/libmy_timer.so")
+    set(NIM_LIB_FILE "${REPO_ROOT}/libecho.so")
 endif()
 
 # On Windows the default Nim toolchain (mingw gcc) doesn't emit an import
@@ -51,39 +51,39 @@ add_custom_command(
                 -d:chronicles_log_level=WARN
                 --app:lib
                 --noMain
-                "--nimMainPrefix:libmy_timer"
+                "--nimMainPrefix:libecho"
                 ${NIM_IMPLIB_PASSL}
                 "-o:${NIM_LIB_FILE}"
                 "${NIM_SRC}"
     WORKING_DIRECTORY "${REPO_ROOT}"
     DEPENDS "${NIM_SRC}"
     BYPRODUCTS "${NIM_IMPLIB_FILE}"
-    COMMENT "Compiling Nim library libmy_timer"
+    COMMENT "Compiling Nim library libecho"
     VERBATIM
 )
-add_custom_target(my_timer_nim_lib ALL DEPENDS "${NIM_LIB_FILE}")
+add_custom_target(echo_nim_lib ALL DEPENDS "${NIM_LIB_FILE}")
 
 # On Windows, an `IMPORTED SHARED` target needs IMPORTED_IMPLIB pointing at
 # the `.lib` import library so MSVC's `link.exe` can resolve symbols. The
 # Visual Studio multi-config generator did not pick up `IMPORTED_IMPLIB` —
 # nor per-config `IMPORTED_IMPLIB_<CONFIG>` variants — and emitted
-# `my_timer-NOTFOUND.obj` into every link line. Side-step the IMPORTED
+# `echo-NOTFOUND.obj` into every link line. Side-step the IMPORTED
 # machinery on Windows by exposing the import library through a plain
 # INTERFACE library that links the `.lib` by path.
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    add_library(my_timer INTERFACE)
-    target_link_libraries(my_timer INTERFACE "${NIM_IMPLIB_FILE}")
+    add_library(echo INTERFACE)
+    target_link_libraries(echo INTERFACE "${NIM_IMPLIB_FILE}")
 else()
-    add_library(my_timer SHARED IMPORTED GLOBAL)
-    set_target_properties(my_timer PROPERTIES IMPORTED_LOCATION "${NIM_LIB_FILE}")
+    add_library(echo SHARED IMPORTED GLOBAL)
+    set_target_properties(echo PROPERTIES IMPORTED_LOCATION "${NIM_LIB_FILE}")
 endif()
-add_dependencies(my_timer my_timer_nim_lib)
+add_dependencies(echo echo_nim_lib)
 
 # Absolute path to the runtime library (DLL/dylib/so). Exposed via the cache
 # so consumers in other directories (e.g. tests/e2e/cpp) can stage the DLL
 # next to their executable on Windows.
-set(my_timer_RUNTIME_LIB "${NIM_LIB_FILE}" CACHE INTERNAL
-    "Absolute path to the my_timer runtime library")
+set(echo_RUNTIME_LIB "${NIM_LIB_FILE}" CACHE INTERNAL
+    "Absolute path to the echo runtime library")
 
 # ── TinyCBOR (vendored at ffi/codegen/templates/cpp/vendor/tinycbor) ─────────
 # Guarded so two sibling cpp_bindings dirs in one parent project don't redefine
@@ -105,19 +105,19 @@ if(NOT TARGET tinycbor)
     set_property(TARGET tinycbor PROPERTY POSITION_INDEPENDENT_CODE ON)
 endif()
 
-add_library(my_timer_headers INTERFACE)
-target_include_directories(my_timer_headers INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(my_timer_headers INTERFACE my_timer tinycbor)
+add_library(echo_headers INTERFACE)
+target_include_directories(echo_headers INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(echo_headers INTERFACE echo tinycbor)
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp")
-    add_executable(my_timer_example main.cpp)
-    target_link_libraries(my_timer_example PRIVATE my_timer_headers)
-    add_dependencies(my_timer_example my_timer_nim_lib)
+    add_executable(echo_example main.cpp)
+    target_link_libraries(echo_example PRIVATE echo_headers)
+    add_dependencies(echo_example echo_nim_lib)
     if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-        add_custom_command(TARGET my_timer_example POST_BUILD
+        add_custom_command(TARGET echo_example POST_BUILD
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "${my_timer_RUNTIME_LIB}"
-                "$<TARGET_FILE_DIR:my_timer_example>"
-            COMMENT "Staging my_timer.dll next to my_timer_example.exe")
+                "${echo_RUNTIME_LIB}"
+                "$<TARGET_FILE_DIR:echo_example>"
+            COMMENT "Staging echo.dll next to echo_example.exe")
     endif()
 endif()

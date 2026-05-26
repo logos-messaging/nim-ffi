@@ -1,6 +1,9 @@
 // ============================================================
 // Synchronous call helper
 // ============================================================
+// Guarded so two nim-ffi headers can share a translation unit.
+#ifndef NIM_FFI_SYNC_CALL_HELPER_HPP_INCLUDED
+#define NIM_FFI_SYNC_CALL_HELPER_HPP_INCLUDED
 
 namespace {
 
@@ -50,3 +53,5 @@ inline std::vector<std::uint8_t> ffi_call_(std::function<int(FFICallback, void*)
 }
 
 } // anonymous namespace
+
+#endif // NIM_FFI_SYNC_CALL_HELPER_HPP_INCLUDED
