@@ -83,8 +83,7 @@ template callEventCallback*(ctx: ptr FFIContext, eventName: string, body: untype
   ## concurrent `setCallback` from a foreign thread blocks until the
   ## in-flight callback returns. Without this, the foreign-side binding
   ## could free the object `userData` points at between the snapshot and
-  ## the invocation, causing a use-after-free — issue #40 / PR #39
-  ## review #4356915554.
+  ## the invocation, causing a use-after-free.
   withLock ctx[].callbackState.lock:
     let cbPtr = ctx[].callbackState.callback
     let ud = ctx[].callbackState.userData
