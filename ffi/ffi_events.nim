@@ -93,9 +93,10 @@ proc removeEventListener*(reg: var FFIEventRegistry, id: uint64): bool {.raises:
   ## listener with that id exists. Safe to call from inside a dispatch:
   ## the in-flight snapshot still delivers exactly once to the listener
   ## being removed.
-  var removed = false
   if id == 0'u64:
-    return removed
+    return false
+
+  var removed = false
 
   withLock reg.lock:
     for i in 0 ..< reg.wildcard.len:
