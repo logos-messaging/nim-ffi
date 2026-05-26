@@ -74,9 +74,14 @@ proc deinitEventRegistry*(reg: var FFIEventRegistry) =
   ## stopped using it. `deinitLock` on a platform primitive that any
   ## thread might still be holding or about to acquire is UB at the OS
   ## layer.
+  ##
+  ## Resets the GC-managed fields to default so `FFIContextPool`'s
+  ## slot reuse on a *different* thread doesn't trigger Nim's hidden
+  ## assignment destructor against this thread's heap allocations.
   reg.lock.deinitLock()
-  reg.byEvent.clear()
-  reg.wildcard.setLen(0)
+  reg.byEvent = default(Table[string, seq[FFIEventListener]])
+  reg.wildcard = @[]
+  reg.nextId = 0'u64
 
 proc addEventListener*(
     reg: var FFIEventRegistry,
