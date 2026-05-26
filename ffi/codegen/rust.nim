@@ -74,6 +74,8 @@ proc generateCargoToml*(libName: string): string =
   # pulling its async-std/futures shims.
   # `tokio` is needed only for `tokio::time::timeout` around the async
   # `recv_async`. Feature-gating tokio (item 11) is a follow-up commit.
+  # `[dev-dependencies]` lets the bundled `examples/` use `#[tokio::main]`
+  # without pulling those features into the library's runtime profile.
   return
     """[package]
 name = "$1"
@@ -85,6 +87,9 @@ serde = { version = "1", features = ["derive"] }
 ciborium = "0.2"
 flume = { version = "0.11", default-features = false, features = ["async"] }
 tokio = { version = "1", features = ["sync", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 """ %
     [libName]
 
