@@ -126,6 +126,36 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
   stmts.add(newCall(ident("declareLibraryBase"), newStrLitNode(libraryName)))
 
   let ctxType = nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), libType))
+
+  let procBody = quote:
+    if isNil(ctx):
+      echo `errorMsg`
+      return
+    removeAllEventListeners(ctx[].eventRegistry)
+    if not callback.isNil():
+      discard addEventListener(
+        ctx[].eventRegistry, WildcardEventName, callback, userData
+      )
+
+  let procNode = newProc(
+    name = funcIdent,
+    params = @[
+      newEmptyNode(),
+      newIdentDefs(ident("ctx"), ctxType),
+      newIdentDefs(ident("callback"), ident("FFICallBack")),
+      newIdentDefs(ident("userData"), ident("pointer")),
+    ],
+    body = procBody,
+    pragmas = newTree(
+      nnkPragma,
+      ident("dynlib"),
+      ident("exportc"),
+      ident("cdecl"),
+      newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
+    ),
+  )
+
+  stmts.add(procNode)
   let cdeclExportPragma = newTree(
     nnkPragma,
     ident("dynlib"),
