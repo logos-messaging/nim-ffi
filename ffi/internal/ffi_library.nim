@@ -89,15 +89,12 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
       ## WSAStartup on Windows) runs as part of nimMainName, and a thread
       ## that races past would later see "WSAStartup failed" when its
       ## watchdog spins up a chronos dispatcher.
-      block waitForInit:
-        while true:
-          var expected: int = 0
-          if initState.compareExchange(expected, 1):
-            `nimMainName`()
-            initState.store(2)
-            break waitForInit
-          if initState.load() == 2:
-            break waitForInit
+      var expected: int = 0
+      if initState.compareExchange(expected, 1):
+        `nimMainName`()
+        initState.store(2)
+      else:
+        while initState.load() != 2:
           cpuRelax()
       when declared(setupForeignThreadGc):
         setupForeignThreadGc()

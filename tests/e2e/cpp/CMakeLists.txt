@@ -41,7 +41,7 @@ if(NIM_FFI_SAN_CFLAGS)
     target_link_options(timer_e2e_tests PRIVATE ${NIM_FFI_SAN_LFLAGS})
 endif()
 
-# Nim-built dylibs use `@rpath/lib*.dylib` install_names on macOS, so embed
+# Nim-built dylibs use `@rpath/lib*.dylib` install_names on macOS and Linux, so embed
 # each IMPORTED target's build-tree dir as an rpath. Windows has no rpath —
 # stage the DLLs next to the exe in the POST_BUILD branch below instead.
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
