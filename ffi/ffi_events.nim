@@ -43,6 +43,10 @@ const WildcardEventName* = ""
 # ---------------------------------------------------------------------------
 
 proc initEventRegistry*(reg: var FFIEventRegistry) =
+  ## Must be called exactly once on the owning thread before the registry
+  ## is shared. The embedded `Lock` wraps a platform primitive that cannot
+  ## be safely double-initialised, so concurrent callers would hit UB at
+  ## the OS layer — the lock itself can't defend against its own init.
   reg.lock.initLock()
   reg.nextId = 0'u64
   reg.byEvent = initTable[string, seq[FFIEventListener]]()
