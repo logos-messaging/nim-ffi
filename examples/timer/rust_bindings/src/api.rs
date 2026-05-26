@@ -154,6 +154,7 @@ pub struct MyTimerCtx {
     ptr: *mut c_void,
     timeout: Duration,
     events: *mut Events,
+    event_listener_id: u64,
 }
 
 // SAFETY: The `ptr` field points to an FFIContext owned by the Nim runtime.
@@ -190,7 +191,7 @@ impl MyTimerCtx {
         })?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
         let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
-        Ok(Self { ptr: addr as *mut c_void, timeout, events: std::ptr::null_mut() })
+        Ok(Self { ptr: addr as *mut c_void, timeout, events: std::ptr::null_mut(), event_listener_id: 0 })
     }
 
     pub async fn new_async(config: TimerConfig, timeout: Duration) -> Result<Self, String> {
@@ -202,14 +203,19 @@ impl MyTimerCtx {
         }).await?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
         let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
-        Ok(Self { ptr: addr as *mut c_void, timeout, events: std::ptr::null_mut() })
+        Ok(Self { ptr: addr as *mut c_void, timeout, events: std::ptr::null_mut(), event_listener_id: 0 })
     }
 
-    /// Attach typed event handlers. Replacing handlers calls the
-    /// dylib's set_event_callback with a fresh trampoline target.
-    /// The previously-installed Events box (if any) is dropped here,
-    /// so callbacks in flight on the FFI thread must already be done.
+    /// Attach typed event handlers. Each call removes any previous
+    /// listener via `_remove_event_listener` before adding the new
+    /// one, so the registry never holds a pointer into a freed box.
     pub fn set_event_handlers(&mut self, handlers: Events) {
+        if self.event_listener_id != 0 {
+            unsafe {
+                let _ = ffi::my_timer_remove_event_listener(self.ptr, self.event_listener_id);
+            }
+            self.event_listener_id = 0;
+        }
         if !self.events.is_null() {
             unsafe { drop(Box::from_raw(self.events)); }
             self.events = std::ptr::null_mut();
@@ -217,7 +223,9 @@ impl MyTimerCtx {
         let raw = Box::into_raw(Box::new(handlers));
         self.events = raw;
         unsafe {
-            ffi::my_timer_set_event_callback(self.ptr, my_timer_event_trampoline, raw as *mut c_void);
+            self.event_listener_id = ffi::my_timer_add_event_listener(
+                self.ptr, b"\0".as_ptr() as *const c_char,
+                my_timer_event_trampoline, raw as *mut c_void);
         }
     }
 

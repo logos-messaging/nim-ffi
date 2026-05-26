@@ -631,7 +631,8 @@ int my_timer_version(void* ctx, FFICallback callback, void* user_data, const uin
 int my_timer_complex(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int my_timer_schedule(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int my_timer_destroy(void* ctx);
-void my_timer_set_event_callback(void* ctx, FFICallback callback, void* user_data);
+uint64_t my_timer_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
+int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
 } // extern "C"
 
 // ============================================================
@@ -746,8 +747,13 @@ public:
     };
 
     void setEventHandlers(Events handlers) {
+        if (event_listener_id_ != 0) {
+            my_timer_remove_event_listener(ptr_, event_listener_id_);
+            event_listener_id_ = 0;
+        }
         events_ = std::make_unique<Events>(std::move(handlers));
-        my_timer_set_event_callback(ptr_, &MyTimerCtx::eventTrampoline, events_.get());
+        event_listener_id_ = my_timer_add_event_listener(
+            ptr_, "", &MyTimerCtx::eventTrampoline, events_.get());
     }
 
     EchoResponse echo(const EchoRequest& req) const {
@@ -806,6 +812,7 @@ private:
     void* ptr_;
     std::chrono::milliseconds timeout_;
     std::unique_ptr<Events> events_;
+    uint64_t event_listener_id_ = 0;
     explicit MyTimerCtx(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}
     static void eventTrampoline(int ret, const char* msg, std::size_t len, void* ud) {
         if (!ud) return;

@@ -207,10 +207,14 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
       params.add("ctx: *mut c_void")
       lines.add("    pub fn $1($2) -> c_int;" % [p.procName, params.join(", ")])
 
-  # Event-callback setter — emitted on the Nim side by `declareLibrary`,
-  # always present in the dylib.
+  # Listener-registration ABI — emitted by `declareLibrary`, always
+  # present in the dylib.
   lines.add(
-    "    pub fn $1_set_event_callback(ctx: *mut c_void, callback: FFICallback, user_data: *mut c_void);" %
+    "    pub fn $1_add_event_listener(ctx: *mut c_void, event_name: *const c_char, callback: FFICallback, user_data: *mut c_void) -> u64;" %
+      [linkLibName]
+  )
+  lines.add(
+    "    pub fn $1_remove_event_listener(ctx: *mut c_void, listener_id: u64) -> c_int;" %
       [linkLibName]
   )
 
@@ -523,6 +527,7 @@ proc generateApiRs*(
   lines.add("    timeout: Duration,")
   if events.len > 0:
     lines.add("    events: *mut Events,")
+    lines.add("    event_listener_id: u64,")
   lines.add("}")
   lines.add("")
   # SAFETY block applies to both impls below (PR #23 Rust review, item 7).
@@ -622,7 +627,7 @@ proc generateApiRs*(
       "        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;"
     )
     if events.len > 0:
-      lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout, events: std::ptr::null_mut() })")
+      lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout, events: std::ptr::null_mut(), event_listener_id: 0 })")
     else:
       lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout })")
     lines.add("    }")
@@ -648,7 +653,7 @@ proc generateApiRs*(
       "        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;"
     )
     if events.len > 0:
-      lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout, events: std::ptr::null_mut() })")
+      lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout, events: std::ptr::null_mut(), event_listener_id: 0 })")
     else:
       lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout })")
     lines.add("    }")
@@ -656,11 +661,25 @@ proc generateApiRs*(
 
   # ── Typed event registration ───────────────────────────────────────────
   if events.len > 0:
-    lines.add("    /// Attach typed event handlers. Replacing handlers calls the")
-    lines.add("    /// dylib's set_event_callback with a fresh trampoline target.")
-    lines.add("    /// The previously-installed Events box (if any) is dropped here,")
-    lines.add("    /// so callbacks in flight on the FFI thread must already be done.")
+    lines.add(
+      "    /// Attach typed event handlers. Each call removes any previous"
+    )
+    lines.add(
+      "    /// listener via `_remove_event_listener` before adding the new"
+    )
+    lines.add(
+      "    /// one, so the registry never holds a pointer into a freed box."
+    )
     lines.add("    pub fn set_event_handlers(&mut self, handlers: Events) {")
+    lines.add("        if self.event_listener_id != 0 {")
+    lines.add("            unsafe {")
+    lines.add(
+      "                let _ = ffi::$1_remove_event_listener(self.ptr, self.event_listener_id);" %
+        [libName]
+    )
+    lines.add("            }")
+    lines.add("            self.event_listener_id = 0;")
+    lines.add("        }")
     lines.add("        if !self.events.is_null() {")
     lines.add("            unsafe { drop(Box::from_raw(self.events)); }")
     lines.add("            self.events = std::ptr::null_mut();")
@@ -669,8 +688,12 @@ proc generateApiRs*(
     lines.add("        self.events = raw;")
     lines.add("        unsafe {")
     lines.add(
-      "            ffi::$1_set_event_callback(self.ptr, $1_event_trampoline, raw as *mut c_void);" %
+      "            self.event_listener_id = ffi::$1_add_event_listener(" %
         [libName]
+    )
+    lines.add("                self.ptr, b\"\\0\".as_ptr() as *const c_char,")
+    lines.add(
+      "                $1_event_trampoline, raw as *mut c_void);" % [libName]
     )
     lines.add("        }")
     lines.add("    }")

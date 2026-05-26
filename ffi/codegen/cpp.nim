@@ -161,10 +161,18 @@ proc emitEventDispatcher(
   lines.add("    };")
   lines.add("")
   lines.add("    void setEventHandlers(Events handlers) {")
-  lines.add("        events_ = std::make_unique<Events>(std::move(handlers));")
+  # Drop the previously-registered listener so the registry never holds
+  # a dangling pointer into a freed `Events` heap object.
+  lines.add("        if (event_listener_id_ != 0) {")
   lines.add(
-    "        $1_set_event_callback(ptr_, &$2::eventTrampoline, events_.get());" %
-      [libName, ctxTypeName]
+    "            $1_remove_event_listener(ptr_, event_listener_id_);" % [libName]
+  )
+  lines.add("            event_listener_id_ = 0;")
+  lines.add("        }")
+  lines.add("        events_ = std::make_unique<Events>(std::move(handlers));")
+  lines.add("        event_listener_id_ = $1_add_event_listener(" % [libName])
+  lines.add(
+    "            ptr_, \"\", &$1::eventTrampoline, events_.get());" % [ctxTypeName]
   )
   lines.add("    }")
   lines.add("")
@@ -303,12 +311,14 @@ proc generateCppHeader*(
       )
     of FFIKind.DTOR:
       lines.add("int $1(void* ctx);" % [p.procName])
-  # The event-callback setter is always exported by the dylib (via
-  # declareLibrary). Declare it here so the typed event-handler wiring
-  # below can call into it.
+  # `declareLibrary` always exports the listener-registration ABI;
+  # declare it here so the typed event-handler wiring below can call in.
   lines.add(
-    "void $1_set_event_callback(void* ctx, FFICallback callback, void* user_data);" %
+    "uint64_t $1_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);" %
       [libName]
+  )
+  lines.add(
+    "int $1_remove_event_listener(void* ctx, uint64_t listener_id);" % [libName]
   )
   lines.add("} // extern \"C\"")
   lines.add("")
@@ -501,6 +511,7 @@ proc generateCppHeader*(
   lines.add("    std::chrono::milliseconds timeout_;")
   if events.len > 0:
     lines.add("    std::unique_ptr<Events> events_;")
+    lines.add("    uint64_t event_listener_id_ = 0;")
   lines.add(
     "    explicit $1(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}" %
       [ctxTypeName]

@@ -1,4 +1,4 @@
-import std/[macros, atomics, sysatomics], strformat, chronicles, chronos
+import std/[macros, atomics], strformat, chronicles, chronos
 import ../codegen/meta
 
 macro declareLibraryBase*(libraryName: static[string]): untyped =
@@ -53,15 +53,10 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
   )
   res.add(procDef)
 
-  # Create: var initState: Atomic[int]
-  #   0 = not started, 1 = in progress (some thread is running nimMainName),
-  #   2 = done. A boolean flag flipped before nimMainName runs would let a
-  #   second concurrent caller skip past the gate while module init was
-  #   still in flight — on Windows that surfaces as "WSAStartup failed"
-  #   from chronos's later async dispatcher init on a watchdog thread.
-  let atomicType = nnkBracketExpr.newTree(ident("Atomic"), ident("int"))
+  # Create: var initialized: Atomic[bool]
+  let atomicType = nnkBracketExpr.newTree(ident("Atomic"), ident("bool"))
   let varStmt = nnkVarSection.newTree(
-    nnkIdentDefs.newTree(ident("initState"), atomicType, newEmptyNode())
+    nnkIdentDefs.newTree(ident("initialized"), atomicType, newEmptyNode())
   )
   res.add(varStmt)
 
@@ -79,23 +74,12 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
 
   let initializeLibraryProc = quote:
     proc `procName`*() {.exported.} =
-      ## Every Nim library needs to call `<yourprefix>NimMain` once exactly,
-      ## to initialize the Nim runtime.
-      ## Being `<yourprefix>` the value given in the optional
-      ## compilation flag --nimMainPrefix:yourprefix.
-      ##
-      ## Concurrent callers must NOT proceed past nimMainName until it has
-      ## fully returned: chronos's module-level globalInit (which calls
-      ## WSAStartup on Windows) runs as part of nimMainName, and a thread
-      ## that races past would later see "WSAStartup failed" when its
-      ## watchdog spins up a chronos dispatcher.
-      var expected: int = 0
-      if initState.compareExchange(expected, 1):
+      if not initialized.exchange(true):
+        ## Every Nim library needs to call `<yourprefix>NimMain` once exactly,
+        ## to initialize the Nim runtime.
+        ## Being `<yourprefix>` the value given in the optional
+        ## compilation flag --nimMainPrefix:yourprefix
         `nimMainName`()
-        initState.store(2)
-      else:
-        while initState.load() != 2:
-          cpuRelax()
       when declared(setupForeignThreadGc):
         setupForeignThreadGc()
       when declared(nimGC_setStackBottom):
@@ -108,51 +92,85 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
   return res
 
 macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
-  ## Declares a library with the given name and automatically generates
-  ## `{libraryName}_set_event_callback`, a C-exported function that stores the
-  ## caller's event callback on the FFIContext.
+  ## Declares a library with the given name and emits the C-exported event
+  ## ABI on its `FFIContext`:
   ##
-  ## `libType` is the Nim type of the main library object (e.g. `Waku`). It is used
-  ## to type the `ctx: ptr FFIContext[libType]` parameter of the generated
-  ## `{libraryName}_set_event_callback` proc.
+  ## - `{libraryName}_add_event_listener(ctx, event_name, cb, ud) -> uint64`
+  ##   — registers `cb` for `event_name` and returns its stable id. An
+  ##   empty `event_name` subscribes `cb` to *every* event (catch-all).
+  ## - `{libraryName}_remove_event_listener(ctx, id) -> cint` — returns 0 on
+  ##   success, non-zero if no listener with that id exists.
+  ##
+  ## `libType` is the Nim type of the main library object, used to type
+  ## the `ctx: ptr FFIContext[libType]` parameter. See
+  ## `examples/timer/timer.nim` for a working call site.
   var stmts = newStmtList()
 
   # Emit the base bootstrap (pragmas, linker flags, NimMain, initializeLibrary)
   stmts.add(newCall(ident("declareLibraryBase"), newStrLitNode(libraryName)))
 
-  let funcName = libraryName & "_set_event_callback"
-  let funcIdent = ident(funcName)
-  let errorMsg = "error: invalid context in " & funcName
-
   let ctxType = nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), libType))
-
-  let procBody = quote:
-    if isNil(ctx):
-      echo `errorMsg`
-      return
-    removeAllEventListeners(ctx[].eventRegistry)
-    if not callback.isNil():
-      discard addEventListener(
-        ctx[].eventRegistry, WildcardEventName, callback, userData
-      )
-
-  let procNode = newProc(
-    name = funcIdent,
-    params = @[
-      newEmptyNode(),
-      newIdentDefs(ident("ctx"), ctxType),
-      newIdentDefs(ident("callback"), ident("FFICallBack")),
-      newIdentDefs(ident("userData"), ident("pointer")),
-    ],
-    body = procBody,
-    pragmas = newTree(
-      nnkPragma,
-      ident("dynlib"),
-      ident("exportc"),
-      ident("cdecl"),
-      newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
-    ),
+  let cdeclExportPragma = newTree(
+    nnkPragma,
+    ident("dynlib"),
+    ident("exportc"),
+    ident("cdecl"),
+    newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
   )
 
-  stmts.add(procNode)
+  # {libraryName}_add_event_listener
+  let addName = libraryName & "_add_event_listener"
+  let addErr = "error: invalid context in " & addName
+  let addBody = quote:
+    var ret: uint64 = 0
+    if isNil(ctx):
+      echo `addErr`
+      return ret
+    let evtName = if eventName.isNil(): "" else: $eventName
+    ret = addEventListener(ctx[].eventRegistry, evtName, callback, userData)
+    return ret
+
+  stmts.add(
+    newProc(
+      name = ident(addName),
+      params = @[
+        ident("uint64"),
+        newIdentDefs(ident("ctx"), ctxType),
+        newIdentDefs(ident("eventName"), ident("cstring")),
+        newIdentDefs(ident("callback"), ident("FFICallBack")),
+        newIdentDefs(ident("userData"), ident("pointer")),
+      ],
+      body = addBody,
+      pragmas = cdeclExportPragma,
+    )
+  )
+
+  # --- {libraryName}_remove_event_listener --------------------------------
+  # Param is `listenerId`, not `id` — `id` collides with chronos's
+  # `futures.id` template under quote injection rules and the captured
+  # symbol wins over the injected one.
+  let removeName = libraryName & "_remove_event_listener"
+  let removeErr = "error: invalid context in " & removeName
+  let removeBody = quote:
+    var ret: cint = 1
+    if isNil(ctx):
+      echo `removeErr`
+      return ret
+    if removeEventListener(ctx[].eventRegistry, listenerId):
+      ret = 0
+    return ret
+
+  stmts.add(
+    newProc(
+      name = ident(removeName),
+      params = @[
+        ident("cint"),
+        newIdentDefs(ident("ctx"), ctxType),
+        newIdentDefs(ident("listenerId"), ident("uint64")),
+      ],
+      body = removeBody,
+      pragmas = cdeclExportPragma,
+    )
+  )
+
   return stmts
