@@ -78,7 +78,7 @@ proc addEventListener*(
   var assigned: uint64 = 0
 
   withLock reg.lock:
-    reg.nextId += 1
+    reg.nextId.inc()
     assigned = reg.nextId
     let listener =
       FFIEventListener(id: assigned, callback: callback, userData: userData)
