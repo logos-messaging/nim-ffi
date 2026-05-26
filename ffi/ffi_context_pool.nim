@@ -48,6 +48,12 @@ proc destroyFFIContext*[T](
   ## unsafe.
   ctx.stopAndJoinThreads().isOkOr:
     return err("destroyFFIContext(pool): " & $error)
+  # Tear down the event registry on the *owning* thread so its
+  # GC-managed Table / seq storage is freed on the same heap that
+  # allocated it. Without this, the next thread to grab this slot
+  # would crash inside `initEventRegistry`'s assignment-dtor when
+  # `initTable` tries to dealloc the previous thread's data.
+  deinitEventRegistry(ctx[].eventRegistry)
   pool.releaseSlot(ctx)
   return ok()
 
