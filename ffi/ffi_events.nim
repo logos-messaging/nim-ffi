@@ -72,9 +72,10 @@ proc addEventListener*(
   ## id (always non-zero on success). `eventName == ""` registers a wildcard
   ## listener that receives every dispatched event. Returns 0 if `callback`
   ## is nil — the only documented failure mode.
-  var assigned: uint64 = 0
   if callback.isNil():
-    return assigned
+    return 0
+
+  var assigned: uint64 = 0
 
   withLock reg.lock:
     reg.nextId += 1
