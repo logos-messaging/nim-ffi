@@ -107,11 +107,8 @@ proc onNotResponding*(ctx: ptr FFIContext) =
   ## Mirrors the dispatch templates' lock-during-invocation contract
   ## (see `ffi_events.nim`).
   withLock ctx[].eventRegistry.lock:
-    var snap: seq[FFIEventListener] = @[]
-    for l in ctx[].eventRegistry.byEvent.getOrDefault("onNotResponding"):
-      snap.add(l)
-    for l in ctx[].eventRegistry.wildcard:
-      snap.add(l)
+    let snap = ctx[].eventRegistry.byEvent.getOrDefault("onNotResponding") &
+               ctx[].eventRegistry.wildcard
     if snap.len == 0:
       chronicles.debug "onNotResponding - no listener registered"
       return
