@@ -179,9 +179,41 @@ var ffiCurrentEventRegistry* {.threadvar.}: ptr FFIEventRegistry
   ## Set by the FFI thread at startup so dispatchFFIEvent / dispatchFFIEventCbor
   ## can find their registry without taking a context pointer per call site.
 
+template withFFIEventDispatch(
+    eventName: string, listeners, body: untyped
+) =
+  ## Shared scaffold for `dispatchFFIEvent` / `dispatchFFIEventCbor`:
+  ## resolves the thread-local registry, snapshots listeners under
+  ## `reg.lock` into the caller-named `listeners` binding, then runs
+  ## `body` inside `foreignThreadGc` + try/except.
+  let regPtr = ffiCurrentEventRegistry
+  if regPtr.isNil():
+    chronicles.error eventName & " - event registry not set on this thread"
+    return
+
+  withLock regPtr[].lock:
+    let listeners =
+      regPtr[].byEvent.getOrDefault(eventName) & regPtr[].wildcard
+    if listeners.len == 0:
+      chronicles.debug eventName & " - no listener registered"
+    else:
+      foreignThreadGc:
+        try:
+          body
+        except Exception, CatchableError:
+          let msg =
+            "Exception dispatching " & eventName & ": " & getCurrentExceptionMsg()
+          for listener in listeners:
+            listener.callback(
+              RET_ERR,
+              cast[ptr cchar](unsafeAddr msg[0]),
+              cast[csize_t](len(msg)),
+              listener.userData,
+            )
+
 template dispatchFFIEvent*(eventName: string, body: untyped) =
   ## Dispatches an FFI event to every listener for `eventName` plus every
-  ## wildcard listener. `body` may produce a `string` or a `seq[byte]`.
+  ## wildcard listener. `body` must yield a `string` or `seq[byte]`.
   ##
   ## Valid only on the FFI thread (where `ffiCurrentEventRegistry` is
   ## set). Holds `reg.lock` for the entire snapshot + invocation so a
@@ -189,40 +221,15 @@ template dispatchFFIEvent*(eventName: string, body: untyped) =
   ## dispatch returns — closes the UAF window in #40 / PR #39 review
   ## #4356915554. Handlers must not call addEventListener /
   ## removeEventListener on the same registry (would self-deadlock).
-  let regPtr = ffiCurrentEventRegistry
-  if regPtr.isNil():
-    chronicles.error eventName & " - event registry not set on this thread"
-  else:
-    withLock regPtr[].lock:
-      var snap: seq[FFIEventListener] = @[]
-      if eventName.len > 0:
-        for l in regPtr[].byEvent.getOrDefault(eventName):
-          snap.add(l)
-      for l in regPtr[].wildcard:
-        snap.add(l)
-      if snap.len == 0:
-        chronicles.debug eventName & " - no listener registered"
-      else:
-        foreignThreadGc:
-          try:
-            let event = body
-            for listener in snap:
-              listener.callback(
-                RET_OK,
-                cast[ptr cchar](unsafeAddr event[0]),
-                cast[csize_t](len(event)),
-                listener.userData,
-              )
-          except Exception, CatchableError:
-            let msg =
-              "Exception dispatching " & eventName & ": " & getCurrentExceptionMsg()
-            for listener in snap:
-              listener.callback(
-                RET_ERR,
-                cast[ptr cchar](unsafeAddr msg[0]),
-                cast[csize_t](len(msg)),
-                listener.userData,
-              )
+  withFFIEventDispatch(eventName, listeners):
+    let event = body
+    for listener in listeners:
+      listener.callback(
+        RET_OK,
+        cast[ptr cchar](unsafeAddr event[0]),
+        cast[csize_t](len(event)),
+        listener.userData,
+      )
 
 template dispatchFFIEventCbor*(eventName: string, eventPayload: typed) =
   ## Typed CBOR variant of `dispatchFFIEvent`. Wraps `eventPayload` in an
@@ -232,43 +239,15 @@ template dispatchFFIEventCbor*(eventName: string, eventPayload: typed) =
   ## NB: the template parameter is intentionally named `eventPayload`
   ## rather than `payload` — Nim's template substitution would otherwise
   ## also replace the `payload:` field name inside `EventEnvelope`.
-  ## Lock-during-invocation contract: see `dispatchFFIEvent`.
-  let regPtr = ffiCurrentEventRegistry
-  if regPtr.isNil():
-    chronicles.error eventName & " - event registry not set on this thread"
-  else:
-    withLock regPtr[].lock:
-      var snap: seq[FFIEventListener] = @[]
-      if eventName.len > 0:
-        for l in regPtr[].byEvent.getOrDefault(eventName):
-          snap.add(l)
-      for l in regPtr[].wildcard:
-        snap.add(l)
-      if snap.len == 0:
-        chronicles.debug eventName & " - no listener registered"
-      else:
-        foreignThreadGc:
-          try:
-            var (data, dataLen) = cborEncodeShared(
-              EventEnvelope[typeof(eventPayload)](
-                eventType: eventName, payload: eventPayload
-              )
-            )
-            defer:
-              cborFreeShared(data)
-            for listener in snap:
-              listener.callback(
-                RET_OK, cast[ptr cchar](data), cast[csize_t](dataLen), listener.userData
-              )
-          except Exception, CatchableError:
-            # Catching `Exception` also catches Defects (OOM, overflow, ...) so
-            # the C caller always gets RET_OK / RET_ERR. Requires `--panics:off`.
-            let msg =
-              "Exception dispatching " & eventName & ": " & getCurrentExceptionMsg()
-            for listener in snap:
-              listener.callback(
-                RET_ERR,
-                cast[ptr cchar](unsafeAddr msg[0]),
-                cast[csize_t](len(msg)),
-                listener.userData,
-              )
+  withFFIEventDispatch(eventName, listeners):
+    var (data, dataLen) = cborEncodeShared(
+      EventEnvelope[typeof(eventPayload)](
+        eventType: eventName, payload: eventPayload
+      )
+    )
+    defer:
+      cborFreeShared(data)
+    for listener in listeners:
+      listener.callback(
+        RET_OK, cast[ptr cchar](data), cast[csize_t](dataLen), listener.userData
+      )
