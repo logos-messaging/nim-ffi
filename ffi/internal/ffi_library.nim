@@ -1,4 +1,4 @@
-import std/[macros, atomics], strformat, chronicles, chronos
+import std/[macros, atomics, sysatomics], strformat, chronicles, chronos
 import ../codegen/meta
 
 macro declareLibraryBase*(libraryName: static[string]): untyped =
@@ -53,10 +53,15 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
   )
   res.add(procDef)
 
-  # Create: var initialized: Atomic[bool]
-  let atomicType = nnkBracketExpr.newTree(ident("Atomic"), ident("bool"))
+  # Create: var initState: Atomic[int]
+  #   0 = not started, 1 = in progress (some thread is running nimMainName),
+  #   2 = done. A boolean flag flipped before nimMainName runs would let a
+  #   second concurrent caller skip past the gate while module init was
+  #   still in flight — on Windows that surfaces as "WSAStartup failed"
+  #   from chronos's later async dispatcher init on a watchdog thread.
+  let atomicType = nnkBracketExpr.newTree(ident("Atomic"), ident("int"))
   let varStmt = nnkVarSection.newTree(
-    nnkIdentDefs.newTree(ident("initialized"), atomicType, newEmptyNode())
+    nnkIdentDefs.newTree(ident("initState"), atomicType, newEmptyNode())
   )
   res.add(varStmt)
 
@@ -74,12 +79,23 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
 
   let initializeLibraryProc = quote:
     proc `procName`*() {.exported.} =
-      if not initialized.exchange(true):
-        ## Every Nim library needs to call `<yourprefix>NimMain` once exactly,
-        ## to initialize the Nim runtime.
-        ## Being `<yourprefix>` the value given in the optional
-        ## compilation flag --nimMainPrefix:yourprefix
+      ## Every Nim library needs to call `<yourprefix>NimMain` once exactly,
+      ## to initialize the Nim runtime.
+      ## Being `<yourprefix>` the value given in the optional
+      ## compilation flag --nimMainPrefix:yourprefix.
+      ##
+      ## Concurrent callers must NOT proceed past nimMainName until it has
+      ## fully returned: chronos's module-level globalInit (which calls
+      ## WSAStartup on Windows) runs as part of nimMainName, and a thread
+      ## that races past would later see "WSAStartup failed" when its
+      ## watchdog spins up a chronos dispatcher.
+      var expected: int = 0
+      if initState.compareExchange(expected, 1):
         `nimMainName`()
+        initState.store(2)
+      else:
+        while initState.load() != 2:
+          cpuRelax()
       when declared(setupForeignThreadGc):
         setupForeignThreadGc()
       when declared(nimGC_setStackBottom):
