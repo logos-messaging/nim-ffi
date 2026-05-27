@@ -1,4 +1,4 @@
-import std/[atomics, sysatomics, tables]
+import std/[atomics, tables]
 import chronos, chronicles
 import
   ffi/internal/[ffi_library, ffi_macro],
@@ -7,7 +7,7 @@ import
     cbor_serial,
   ]
 
-export atomics, sysatomics, tables
+export atomics, tables
 export chronos, chronicles
 export
   atomics, alloc, ffi_library, ffi_macro, ffi_types, ffi_events, ffi_context,

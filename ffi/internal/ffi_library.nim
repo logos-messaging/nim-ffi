@@ -130,7 +130,11 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
     if isNil(ctx):
       echo `errorMsg`
       return
-    setCallback(ctx[].callbackState, cast[pointer](callback), userData)
+    removeAllEventListeners(ctx[].eventRegistry)
+    if not callback.isNil():
+      discard addEventListener(
+        ctx[].eventRegistry, WildcardEventName, callback, userData
+      )
 
   let procNode = newProc(
     name = funcIdent,
