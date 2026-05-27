@@ -48,12 +48,12 @@ proc destroyFFIContext*[T](
   ## unsafe.
   ctx.stopAndJoinThreads().isOkOr:
     return err("destroyFFIContext(pool): " & $error)
-  # Full mirror of `initContextResources`: lock + registry + signal
-  # handles. Without this, slot reuse on Windows would re-init an
-  # already-initialised CRITICAL_SECTION (UB; segfaulted the cpp-e2e
-  # `StressShortLivedPerThreadContext` test under Nim 2.2.4 / ORC).
-  ctx.deinitContextResources().isOkOr:
-    return err("destroyFFIContext(pool) deinit: " & $error)
+  # Tear down the event registry on the *owning* thread so its
+  # GC-managed Table / seq storage is freed on the same heap that
+  # allocated it. Without this, the next thread to grab this slot
+  # would crash inside `initEventRegistry`'s assignment-dtor when
+  # `initTable` tries to dealloc the previous thread's data.
+  deinitEventRegistry(ctx[].eventRegistry)
   pool.releaseSlot(ctx)
   return ok()
 

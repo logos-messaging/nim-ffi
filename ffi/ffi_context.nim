@@ -274,13 +274,10 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
   waitFor ffiRun(ctx)
 
-proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## Mirror of `initContextResources` minus memory freeing: deinits the lock,
-  ## tears down the event registry, and closes the ThreadSignalPtrs. Safe to
-  ## call after a partial init because each signal is nil-checked. Threads
-  ## must have been stopped + joined first. Both heap (`cleanUpResources`)
-  ## and pool (`destroyFFIContext`) call this so slot reuse on Windows
-  ## doesn't re-init an already-initialised CRITICAL_SECTION (UB).
+proc cleanUpResources[T](ctx: ptr FFIContext[T]): Result[void, string] =
+  ## Full cleanup for heap-allocated contexts: closes all resources and frees memory.
+  defer:
+    freeShared(ctx)
   ctx.lock.deinitLock()
   deinitEventRegistry(ctx[].eventRegistry)
   when defined(gcRefc):
@@ -314,12 +311,6 @@ proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     if not ctx.threadExitSignal.isNil():
       ?ctx.threadExitSignal.close()
   return ok()
-
-proc cleanUpResources[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## Full cleanup for heap-allocated contexts: closes all resources and frees memory.
-  defer:
-    freeShared(ctx)
-  return ctx.deinitContextResources()
 
 proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Initialises all resources inside an already-allocated FFIContext slot.
