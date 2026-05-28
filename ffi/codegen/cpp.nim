@@ -335,6 +335,10 @@ proc generateCppHeader*(
   var lines: seq[string] = @[]
 
   lines.add(HeaderPreludeTpl)
+  if events.len > 0:
+    # Only pulled in when the library declares `{.ffiEvent.}` procs —
+    # backs the `listeners_` map on the generated context class.
+    lines.add("#include <unordered_map>")
 
   # CBOR primitive / container helpers must precede the per-struct codecs
   # below, because each emitted `encode_cbor`/`decode_cbor(T)` calls the

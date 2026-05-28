@@ -12,11 +12,11 @@
 #include <optional>
 #include <type_traits>
 #include <cstring>
-#include <unordered_map>
 extern "C" {
 #include <tinycbor/cbor.h>
 }
 
+#include <unordered_map>
 // ── encode_cbor overloads (primitives + containers) ─────────────────────
 // Per-struct encode_cbor / decode_cbor are emitted by cpp.nim next to each
 // generated struct; these helpers cover the leaf types they defer into.
