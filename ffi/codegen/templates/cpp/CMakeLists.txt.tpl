@@ -8,6 +8,13 @@ project({{LIB}}_cpp_bindings CXX C)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# MSVC defaults __cplusplus to 199711L regardless of the active /std:c++XX
+# level — the generated header's C++20 guard would then misfire. /Zc:__cplusplus
+# makes MSVC report the actual standard. Harmless on every other compiler.
+if(MSVC)
+    add_compile_options(/Zc:__cplusplus)
+endif()
+
 # ── Locate the repository root (contains ffi.nimble) ─────────────────────────
 set(_search_dir "${CMAKE_CURRENT_SOURCE_DIR}")
 set(REPO_ROOT "")
