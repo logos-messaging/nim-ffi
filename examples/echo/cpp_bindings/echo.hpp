@@ -332,7 +332,8 @@ void* echo_create(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback call
 int echo_shout(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int echo_version(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int echo_destroy(void* ctx);
-void echo_set_event_callback(void* ctx, FFICallback callback, void* user_data);
+uint64_t echo_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
+int echo_remove_event_listener(void* ctx, uint64_t listener_id);
 } // extern "C"
 
 // ============================================================
