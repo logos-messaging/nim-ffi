@@ -138,88 +138,188 @@ proc cppBracedInit(structName: string, fieldNames: seq[string]): string =
 proc emitEventDispatcher(
     lines: var seq[string], ctxTypeName, libName: string, events: seq[FFIEventMeta]
 ) =
-  ## Emit the typed-event support inside the C++ context class body:
-  ## a nested `Events` struct of std::function handlers, plus a
-  ## `setEventHandlers` method that owns the handlers on the heap and
-  ## hands the raw pointer to the dylib as `user_data` for the trampoline.
+  ## Public listener-registration API in the generated context class:
   ##
-  ## Storage strategy: `Events` lives on the heap (unique_ptr) so the raw
-  ## pointer we hand to the C ABI as `user_data` survives the (non-)
-  ## lifetime of the surrounding context object. The context itself is
-  ## owned via `std::unique_ptr<MyTimerCtx>` returned from `create`, so
-  ## it's never moved out from under the trampoline.
+  ## - `addOn<X>Listener(std::function<void(const T&)>) -> ListenerHandle`
+  ##   per declared `{.ffiEvent.}`. Internally registers under the wire
+  ##   event name; the per-listener trampoline decodes the CBOR
+  ##   envelope's `payload` field as `T` and invokes the user handler.
+  ## - `addEventListener(std::function<void(int, const std::string&)>) ->
+  ##   ListenerHandle` registers a catch-all wildcard listener
+  ##   (event_name == "") that receives every event as raw envelope
+  ##   bytes plus the FFI return code.
+  ## - `removeEventListener(ListenerHandle) -> bool` drops a listener by
+  ##   handle. After it returns true, no further callbacks for that id
+  ##   are in flight on the FFI side (the Nim-side registry lock plus
+  ##   snapshot copy guarantees this).
+  ##
+  ## Ownership: each listener's callable is held by a
+  ## `std::unique_ptr<ListenerBase>` in `listeners_`, keyed by id; the
+  ## raw pointer is handed to the dylib as `user_data`. The map entry
+  ## (and therefore the callable) survives at a stable heap address
+  ## until `removeEventListener` removes it.
   if events.len == 0:
     return
-  lines.add("    // ── Typed event handlers ────────────────────────────────")
-  lines.add("    struct Events {")
-  lines.add("        std::function<void(const std::string&)> on_error;")
-  for ev in events:
-    lines.add(
-      "        std::function<void(const $1&)> $2;" %
-        [ev.payloadTypeName, ev.nimProcName]
-    )
-  lines.add("    };")
+  lines.add("    // ── Event listener API ──────────────────────────────────")
+  lines.add("    struct ListenerHandle { std::uint64_t id = 0; };")
   lines.add("")
-  lines.add("    void setEventHandlers(Events handlers) {")
-  # Drop the previously-registered listener so the registry never holds
-  # a dangling pointer into a freed `Events` heap object.
-  lines.add("        if (event_listener_id_ != 0) {")
+  # Per-event typed registration helpers.
+  for ev in events:
+    let methodName =
+      "addOn" & capitalizeFirstLetter(ev.nimProcName).substr(2) & "Listener"
+    lines.add(
+      "    ListenerHandle $1(std::function<void(const $2&)> handler) {" %
+        [methodName, ev.payloadTypeName]
+    )
+    lines.add(
+      "        auto owned = std::make_unique<TypedListener<$1>>(std::move(handler));" %
+        [ev.payloadTypeName]
+    )
+    lines.add("        auto* raw = owned.get();")
+    lines.add(
+      "        const auto id = $1_add_event_listener(" % [libName]
+    )
+    lines.add(
+      "            ptr_, \"$1\", &$2::typedTrampoline<$3>, raw);" %
+        [ev.wireName, ctxTypeName, ev.payloadTypeName]
+    )
+    lines.add("        if (id == 0) return ListenerHandle{0};")
+    lines.add("        listeners_.emplace(id, std::move(owned));")
+    lines.add("        return ListenerHandle{id};")
+    lines.add("    }")
+    lines.add("")
+  # Generic wildcard registration.
+  #
+  # The handler receives the FFI return code, the wire `eventType` string
+  # extracted from the CBOR envelope (empty if the envelope is malformed
+  # or `ret != 0`), and a `std::span` view over the raw envelope bytes —
+  # the buffer is owned by the dylib and stays valid for the duration of
+  # the synchronous callback only. Pair with `decodeEventPayload<T>` to
+  # lift the payload into a typed value without hand-rolling CBOR parsing.
   lines.add(
-    "            $1_remove_event_listener(ptr_, event_listener_id_);" % [libName]
+    "    ListenerHandle addEventListener(std::function<void(int, const std::string&, std::span<const std::uint8_t>)> handler) {"
   )
-  lines.add("            event_listener_id_ = 0;")
-  lines.add("        }")
-  lines.add("        events_ = std::make_unique<Events>(std::move(handlers));")
-  lines.add("        event_listener_id_ = $1_add_event_listener(" % [libName])
   lines.add(
-    "            ptr_, \"\", &$1::eventTrampoline, events_.get());" % [ctxTypeName]
+    "        auto owned = std::make_unique<WildcardListener>(std::move(handler));"
   )
+  lines.add("        auto* raw = owned.get();")
+  lines.add("        const auto id = $1_add_event_listener(" % [libName])
+  lines.add(
+    "            ptr_, \"\", &$1::wildcardTrampoline, raw);" % [ctxTypeName]
+  )
+  lines.add("        if (id == 0) return ListenerHandle{0};")
+  lines.add("        listeners_.emplace(id, std::move(owned));")
+  lines.add("        return ListenerHandle{id};")
+  lines.add("    }")
+  lines.add("")
+  # Remove by handle.
+  lines.add("    bool removeEventListener(ListenerHandle handle) {")
+  lines.add("        if (handle.id == 0) return false;")
+  lines.add(
+    "        const auto rc = $1_remove_event_listener(ptr_, handle.id);" % [libName]
+  )
+  lines.add("        listeners_.erase(handle.id);")
+  lines.add("        return rc == 0;")
   lines.add("    }")
   lines.add("")
 
 proc emitEventTrampoline(
     lines: var seq[string], events: seq[FFIEventMeta]
 ) =
-  ## Emit the private static trampoline that backs `setEventHandlers`. The
-  ## generated function parses the CBOR `EventEnvelope`, picks the matching
-  ## std::function from the Events struct, decodes the payload as the
-  ## registered type, and fires the handler.
+  ## Private listener machinery for the public API emitted by
+  ## `emitEventDispatcher`:
+  ##
+  ## - `ListenerBase` is a polymorphic base so the context's
+  ##   `listeners_` map can own typed and wildcard listeners under a
+  ##   single value type.
+  ## - `TypedListener<T>` holds the user's `std::function<void(const T&)>`
+  ##   and is the target of `typedTrampoline<T>`, which CBOR-decodes the
+  ##   envelope's `payload` field as `T` and invokes the handler.
+  ## - `WildcardListener` holds a `std::function<void(int, const
+  ##   std::string&, std::span<const std::uint8_t>)>` and is the target
+  ##   of `wildcardTrampoline`, which forwards the FFI return code plus
+  ##   a span view over the raw payload bytes (no copy — the dylib owns
+  ##   the buffer for the duration of the synchronous callback).
   if events.len == 0:
     return
-  lines.add("    static void eventTrampoline(int ret, const char* msg, std::size_t len, void* ud) {")
-  lines.add("        if (!ud) return;")
-  lines.add("        auto* events = static_cast<Events*>(ud);")
-  lines.add("        if (ret != 0) {")
-  lines.add("            if (events->on_error) {")
-  lines.add("                std::string err(msg ? msg : \"\", len);")
-  lines.add("                events->on_error(err);")
-  lines.add("            }")
-  lines.add("            return;")
-  lines.add("        }")
-  lines.add("        if (!msg || len == 0) return;")
-  lines.add("        std::vector<std::uint8_t> bytes(reinterpret_cast<const std::uint8_t*>(msg),")
-  lines.add("                                        reinterpret_cast<const std::uint8_t*>(msg) + len);")
+  lines.add("    struct ListenerBase {")
+  lines.add("        virtual ~ListenerBase() = default;")
+  lines.add("    };")
+  lines.add("")
+  lines.add("    template <class T>")
+  lines.add("    struct TypedListener : ListenerBase {")
+  lines.add("        std::function<void(const T&)> fn;")
+  lines.add("        explicit TypedListener(std::function<void(const T&)> f) : fn(std::move(f)) {}")
+  lines.add("    };")
+  lines.add("")
+  lines.add("    struct WildcardListener : ListenerBase {")
+  lines.add(
+    "        std::function<void(int, const std::string&, std::span<const std::uint8_t>)> fn;"
+  )
+  lines.add(
+    "        explicit WildcardListener(std::function<void(int, const std::string&, std::span<const std::uint8_t>)> f) : fn(std::move(f)) {}"
+  )
+  lines.add("    };")
+  lines.add("")
+  # Typed trampoline — one instantiation per payload type, all sharing a body.
+  lines.add("    template <class T>")
+  lines.add("    static void typedTrampoline(int ret, const char* msg, std::size_t len, void* ud) {")
+  lines.add("        if (!ud || ret != 0 || !msg || len == 0) return;")
+  lines.add("        auto* listener = static_cast<TypedListener<T>*>(ud);")
+  lines.add("        if (!listener->fn) return;")
   lines.add("        CborParser parser; CborValue it;")
-  lines.add("        if (cbor_parser_init(bytes.data(), bytes.size(), 0, &parser, &it) != CborNoError) return;")
+  lines.add(
+    "        if (cbor_parser_init(reinterpret_cast<const std::uint8_t*>(msg), len, 0, &parser, &it) != CborNoError) return;"
+  )
   lines.add("        if (!cbor_value_is_map(&it)) return;")
-  lines.add("        CborValue evtField;")
-  lines.add("        if (cbor_value_map_find_value(&it, \"eventType\", &evtField) != CborNoError) return;")
-  lines.add("        if (!cbor_value_is_text_string(&evtField)) return;")
-  lines.add("        std::string evtName; if (decode_cbor(evtField, evtName) != CborNoError) return;")
   lines.add("        CborValue payloadField;")
-  lines.add("        if (cbor_value_map_find_value(&it, \"payload\", &payloadField) != CborNoError) return;")
-  var first = true
-  for ev in events:
-    let branchKw = if first: "if" else: "else if"
-    lines.add("        $1 (evtName == \"$2\") {" % [branchKw, ev.wireName])
-    lines.add("            if (events->$1) {" % [ev.nimProcName])
-    lines.add(
-      "                $1 payload{}; if (decode_cbor(payloadField, payload) == CborNoError) events->$2(payload);" %
-        [ev.payloadTypeName, ev.nimProcName]
-    )
-    lines.add("            }")
-    lines.add("        }")
-    first = false
+  lines.add(
+    "        if (cbor_value_map_find_value(&it, \"payload\", &payloadField) != CborNoError) return;"
+  )
+  lines.add("        T payload{};")
+  lines.add(
+    "        if (decode_cbor(payloadField, payload) != CborNoError) return;"
+  )
+  lines.add("        listener->fn(payload);")
+  lines.add("    }")
+  lines.add("")
+  # Wildcard trampoline — extracts `eventType` from the CBOR envelope so
+  # the user can match on the event name without hand-parsing. Falls back
+  # to an empty `eventId` if the envelope is missing, malformed, or the
+  # FFI return code signals an error (in which case the bytes are an
+  # error string, not a CBOR envelope).
+  lines.add(
+    "    static void wildcardTrampoline(int ret, const char* msg, std::size_t len, void* ud) {"
+  )
+  lines.add("        if (!ud) return;")
+  lines.add("        auto* listener = static_cast<WildcardListener*>(ud);")
+  lines.add("        if (!listener->fn) return;")
+  # The buffer pointed to by `msg` is owned by the dylib and stays valid
+  # for the duration of this synchronous call — safe to hand to the user
+  # as a span view rather than copying.
+  lines.add("        std::span<const std::uint8_t> envelope{};")
+  lines.add("        if (msg && len > 0) {")
+  lines.add(
+    "            envelope = std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(msg), len);"
+  )
+  lines.add("        }")
+  lines.add("        std::string eventId;")
+  lines.add("        if (ret == 0 && !envelope.empty()) {")
+  lines.add("            CborParser parser; CborValue it;")
+  lines.add(
+    "            if (cbor_parser_init(envelope.data(), envelope.size(), 0, &parser, &it) == CborNoError"
+  )
+  lines.add("                && cbor_value_is_map(&it)) {")
+  lines.add("                CborValue evtField;")
+  lines.add(
+    "                if (cbor_value_map_find_value(&it, \"eventType\", &evtField) == CborNoError"
+  )
+  lines.add("                    && cbor_value_is_text_string(&evtField)) {")
+  lines.add("                    (void)decode_cbor(evtField, eventId);")
+  lines.add("                }")
+  lines.add("            }")
+  lines.add("        }")
+  lines.add("        listener->fn(ret, eventId, envelope);")
   lines.add("    }")
   lines.add("")
 
@@ -232,6 +332,12 @@ proc generateCppHeader*(
   var lines: seq[string] = @[]
 
   lines.add(HeaderPreludeTpl)
+  if events.len > 0:
+    # Only pulled in when the library declares `{.ffiEvent.}` procs —
+    # `<unordered_map>` backs the `listeners_` map, `<span>` is the
+    # zero-copy view type handed to wildcard callbacks.
+    lines.add("#include <unordered_map>")
+    lines.add("#include <span>")
 
   # CBOR primitive / container helpers must precede the per-struct codecs
   # below, because each emitted `encode_cbor`/`decode_cbor(T)` calls the
@@ -311,8 +417,8 @@ proc generateCppHeader*(
       )
     of FFIKind.DTOR:
       lines.add("int $1(void* ctx);" % [p.procName])
-  # `declareLibrary` always exports the listener-registration ABI;
-  # declare it here so the typed event-handler wiring below can call in.
+  # `declareLibrary` always exports the listener-registration ABI. Declare
+  # it here so the typed event-handler wiring below can call into it.
   lines.add(
     "uint64_t $1_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);" %
       [libName]
@@ -324,6 +430,33 @@ proc generateCppHeader*(
   lines.add("")
 
   lines.add(SyncCallHelperTpl)
+
+  # ── Event-payload decoder helper ──────────────────────────────────────────
+  # Lets wildcard-listener bodies lift the `payload` field out of a CBOR
+  # envelope into any registered event type with a single call, e.g.
+  #     EchoEvent evt;
+  #     if (decodeEventPayload(envelope, evt)) { ... }
+  # Relies on the per-struct `decode_cbor` codec emitted above.
+  if events.len > 0:
+    lines.add("template <class T>")
+    lines.add(
+      "inline bool decodeEventPayload(std::span<const std::uint8_t> envelope, T& out) {"
+    )
+    lines.add("    if (envelope.empty()) return false;")
+    lines.add("    CborParser parser; CborValue it;")
+    lines.add(
+      "    if (cbor_parser_init(envelope.data(), envelope.size(), 0, &parser, &it) != CborNoError)"
+    )
+    lines.add("        return false;")
+    lines.add("    if (!cbor_value_is_map(&it)) return false;")
+    lines.add("    CborValue payloadField;")
+    lines.add(
+      "    if (cbor_value_map_find_value(&it, \"payload\", &payloadField) != CborNoError)"
+    )
+    lines.add("        return false;")
+    lines.add("    return decode_cbor(payloadField, out) == CborNoError;")
+    lines.add("}")
+    lines.add("")
 
   # ── High-level C++ context class ──────────────────────────────────────────
   var ctors: seq[FFIProcMeta] = @[]
@@ -507,17 +640,27 @@ proc generateCppHeader*(
     lines.add("")
 
   lines.add("private:")
+  # Listener machinery (`ListenerBase`, `TypedListener<T>`,
+  # `WildcardListener`, plus the static trampolines) must appear before
+  # the `listeners_` data member declaration — C++ requires the value
+  # type of a member to be complete at point of declaration. The public
+  # add*/remove methods above also reference these types, but member
+  # function bodies see the full class scope regardless of declaration
+  # order, so emitting here is sufficient for both.
+  emitEventTrampoline(lines, events)
   lines.add("    void* ptr_;")
   lines.add("    std::chrono::milliseconds timeout_;")
   if events.len > 0:
-    lines.add("    std::unique_ptr<Events> events_;")
-    lines.add("    uint64_t event_listener_id_ = 0;")
+    # One owning entry per live listener, keyed by id. Destroyed after
+    # the destructor body runs `<lib>_destroy(ptr_)`, by which point the
+    # FFI side has joined its threads so no callback is mid-flight.
+    lines.add(
+      "    std::unordered_map<std::uint64_t, std::unique_ptr<ListenerBase>> listeners_;"
+    )
   lines.add(
     "    explicit $1(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}" %
       [ctxTypeName]
   )
-  # Static trampoline stays private; user only sees Events + setEventHandlers.
-  emitEventTrampoline(lines, events)
   lines.add("};")
   lines.add("")
 

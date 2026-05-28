@@ -1,6 +1,9 @@
 #include "my_timer.hpp"
-#include <iostream>
+#include <atomic>
+#include <chrono>
 #include <future>
+#include <iostream>
+#include <thread>
 
 int main() {
     try {
@@ -35,7 +38,6 @@ int main() {
                   << ", itemCount=" << complex.itemCount
                   << ", hasNote=" << complex.hasNote << "\n";
 
-        // ── 6. Call with three complex parameters ─────────────────────
         // Each parameter is its own generated C++ struct. The nim-ffi
         // macro packs all three into one CBOR envelope on the wire — at
         // the call site, this is just a typed method invocation.
@@ -62,6 +64,57 @@ int main() {
                   << ", firstRunAtMs=" << scheduleRes.firstRunAtMs
                   << ", effectiveBackoffMs=" << scheduleRes.effectiveBackoffMs
                   << "\n";
+
+        // Each `{.ffiEvent.}` declared on the Nim side gets a typed
+        // registration method — `addOnEchoFiredListener(handler)` here.
+        // A second `addEventListener` overload registers a catch-all
+        // wildcard listener that receives every event as raw envelope
+        // bytes plus the FFI return code. Both fire from the lib's
+        // dispatch thread, so synchronise via std::promise / atomics.
+        std::promise<EchoEvent> echoEvtPromise;
+        auto echoEvtFuture = echoEvtPromise.get_future();
+        const auto typedHandle = ctx->addOnEchoFiredListener(
+            [&](const EchoEvent& evt) { echoEvtPromise.set_value(evt); });
+
+        std::atomic<int> wildcardHits{0};
+        // Wildcard listener receives every event with the wire `eventId`
+        // pre-extracted plus a span view over the raw CBOR envelope
+        // bytes (zero-copy; valid only for the duration of this call).
+        // Dispatch on `eventId` and use `decodeEventPayload<T>` to lift
+        // the payload into a typed value without hand-parsing CBOR.
+        const auto wildcardHandle = ctx->addEventListener(
+            [&](int retCode, const std::string& eventId,
+                std::span<const std::uint8_t> envelope) {
+                wildcardHits.fetch_add(1);
+                std::cout << "[7] wildcard event: retCode=" << retCode
+                          << ", eventId=" << eventId
+                          << ", envelope bytes=" << envelope.size() << "\n";
+                if (retCode != 0) return;
+                if (eventId == "on_echo_fired") {
+                    EchoEvent decoded{};
+                    if (decodeEventPayload(envelope, decoded)) {
+                        std::cout << "    decoded EchoEvent: message="
+                                  << decoded.message
+                                  << ", echoCount=" << decoded.echoCount << "\n";
+                    }
+                }
+            });
+
+        ctx->echo(EchoRequest{"event-demo", 1});
+        const auto evt = echoEvtFuture.get();
+        std::cout << "[7] typed event onEchoFired: message=" << evt.message
+                  << ", echoCount=" << evt.echoCount
+                  << ", wildcardHits=" << wildcardHits.load() << "\n";
+
+        // Drop the typed listener — only the wildcard fires for the
+        // follow-up echo. Sleep briefly to give the lib thread time to
+        // deliver before we tear the ctx down.
+        ctx->removeEventListener(typedHandle);
+        ctx->echo(EchoRequest{"event-demo-after-remove", 1});
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        std::cout << "[7] after removeEventListener: wildcardHits="
+                  << wildcardHits.load() << "\n";
+        ctx->removeEventListener(wildcardHandle);
 
         std::cout << "\nDone.\n";
     } catch (const std::exception& ex) {
