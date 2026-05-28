@@ -106,8 +106,6 @@ proc addEventListener*(
     if eventName.len == 0:
       reg.wildcard.add(listener)
     else:
-      # `mgetOrPut` lets us avoid a `[]` lookup that the effect tracker
-      # would otherwise see as raising `KeyError`.
       reg.byEvent.mgetOrPut(eventName, @[]).add(listener)
   return assigned
 
