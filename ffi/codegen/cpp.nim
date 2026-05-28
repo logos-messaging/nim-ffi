@@ -212,19 +212,11 @@ proc emitEventDispatcher(
   lines.add("        return ListenerHandle{id};")
   lines.add("    }")
   lines.add("")
-  lines.add("    void setEventHandlers(Events handlers) {")
-  # Drop the previously-registered listener so the registry never holds
-  # a dangling pointer into a freed `Events` heap object.
-  lines.add("        if (event_listener_id_ != 0) {")
+  # Remove by handle.
+  lines.add("    bool removeEventListener(ListenerHandle handle) {")
+  lines.add("        if (handle.id == 0) return false;")
   lines.add(
-    "            $1_remove_event_listener(ptr_, event_listener_id_);" % [libName]
-  )
-  lines.add("            event_listener_id_ = 0;")
-  lines.add("        }")
-  lines.add("        events_ = std::make_unique<Events>(std::move(handlers));")
-  lines.add("        event_listener_id_ = $1_add_event_listener(" % [libName])
-  lines.add(
-    "            ptr_, \"\", &$1::eventTrampoline, events_.get());" % [ctxTypeName]
+    "        const auto rc = $1_remove_event_listener(ptr_, handle.id);" % [libName]
   )
   lines.add("        listeners_.erase(handle.id);")
   lines.add("        return rc == 0;")
@@ -425,15 +417,11 @@ proc generateCppHeader*(
       )
     of FFIKind.DTOR:
       lines.add("int $1(void* ctx);" % [p.procName])
-  # `declareLibrary` always exports the listener-registration ABI;
-  # declare it here so the typed event-handler wiring below can call in.
+  # `declareLibrary` always exports the listener-registration ABI. Declare
+  # it here so the typed event-handler wiring below can call into it.
   lines.add(
-    "uint64_t $1_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);" %
     "uint64_t $1_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);" %
       [libName]
-  )
-  lines.add(
-    "int $1_remove_event_listener(void* ctx, uint64_t listener_id);" % [libName]
   )
   lines.add(
     "int $1_remove_event_listener(void* ctx, uint64_t listener_id);" % [libName]
@@ -663,8 +651,12 @@ proc generateCppHeader*(
   lines.add("    void* ptr_;")
   lines.add("    std::chrono::milliseconds timeout_;")
   if events.len > 0:
-    lines.add("    std::unique_ptr<Events> events_;")
-    lines.add("    uint64_t event_listener_id_ = 0;")
+    # One owning entry per live listener, keyed by id. Destroyed after
+    # the destructor body runs `<lib>_destroy(ptr_)`, by which point the
+    # FFI side has joined its threads so no callback is mid-flight.
+    lines.add(
+      "    std::unordered_map<std::uint64_t, std::unique_ptr<ListenerBase>> listeners_;"
+    )
   lines.add(
     "    explicit $1(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}" %
       [ctxTypeName]
