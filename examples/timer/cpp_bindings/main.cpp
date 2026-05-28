@@ -38,7 +38,6 @@ int main() {
                   << ", itemCount=" << complex.itemCount
                   << ", hasNote=" << complex.hasNote << "\n";
 
-        // ── 6. Call with three complex parameters ─────────────────────
         // Each parameter is its own generated C++ struct. The nim-ffi
         // macro packs all three into one CBOR envelope on the wire — at
         // the call site, this is just a typed method invocation.
@@ -66,7 +65,6 @@ int main() {
                   << ", effectiveBackoffMs=" << scheduleRes.effectiveBackoffMs
                   << "\n";
 
-        // ── 7. Library-initiated events ───────────────────────────────
         // Each `{.ffiEvent.}` declared on the Nim side gets a typed
         // registration method — `addOnEchoFiredListener(handler)` here.
         // A second `addEventListener` overload registers a catch-all
