@@ -857,10 +857,8 @@ private:
         if (!ud || ret != 0 || !msg || len == 0) return;
         auto* listener = static_cast<TypedListener<T>*>(ud);
         if (!listener->fn) return;
-        std::vector<std::uint8_t> bytes(reinterpret_cast<const std::uint8_t*>(msg),
-                                        reinterpret_cast<const std::uint8_t*>(msg) + len);
         CborParser parser; CborValue it;
-        if (cbor_parser_init(bytes.data(), bytes.size(), 0, &parser, &it) != CborNoError) return;
+        if (cbor_parser_init(reinterpret_cast<const std::uint8_t*>(msg), len, 0, &parser, &it) != CborNoError) return;
         if (!cbor_value_is_map(&it)) return;
         CborValue payloadField;
         if (cbor_value_map_find_value(&it, "payload", &payloadField) != CborNoError) return;

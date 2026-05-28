@@ -264,15 +264,9 @@ proc emitEventTrampoline(
   lines.add("        if (!ud || ret != 0 || !msg || len == 0) return;")
   lines.add("        auto* listener = static_cast<TypedListener<T>*>(ud);")
   lines.add("        if (!listener->fn) return;")
-  lines.add(
-    "        std::vector<std::uint8_t> bytes(reinterpret_cast<const std::uint8_t*>(msg),"
-  )
-  lines.add(
-    "                                        reinterpret_cast<const std::uint8_t*>(msg) + len);"
-  )
   lines.add("        CborParser parser; CborValue it;")
   lines.add(
-    "        if (cbor_parser_init(bytes.data(), bytes.size(), 0, &parser, &it) != CborNoError) return;"
+    "        if (cbor_parser_init(reinterpret_cast<const std::uint8_t*>(msg), len, 0, &parser, &it) != CborNoError) return;"
   )
   lines.add("        if (!cbor_value_is_map(&it)) return;")
   lines.add("        CborValue payloadField;")
