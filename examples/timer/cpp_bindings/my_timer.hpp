@@ -1,4 +1,9 @@
 #pragma once
+// Generated bindings require C++20 — the event-listener API uses
+// std::span<const std::uint8_t> for the wildcard callback.
+#if !defined(__cplusplus) || __cplusplus < 202002L
+#error "nim-ffi generated headers require C++20 or later"
+#endif
 #include <string>
 #include <cstdint>
 #include <chrono>
@@ -17,6 +22,7 @@ extern "C" {
 }
 
 #include <unordered_map>
+#include <span>
 // ── encode_cbor overloads (primitives + containers) ─────────────────────
 // Per-struct encode_cbor / decode_cbor are emitted by cpp.nim next to each
 // generated struct; these helpers cover the leaf types they defer into.
@@ -695,7 +701,7 @@ inline std::vector<std::uint8_t> ffi_call_(std::function<int(FFICallback, void*)
 #endif // NIM_FFI_SYNC_CALL_HELPER_HPP_INCLUDED
 
 template <class T>
-inline bool decodeEventPayload(const std::vector<std::uint8_t>& envelope, T& out) {
+inline bool decodeEventPayload(std::span<const std::uint8_t> envelope, T& out) {
     if (envelope.empty()) return false;
     CborParser parser; CborValue it;
     if (cbor_parser_init(envelope.data(), envelope.size(), 0, &parser, &it) != CborNoError)
@@ -767,7 +773,7 @@ public:
         return ListenerHandle{id};
     }
 
-    ListenerHandle addEventListener(std::function<void(int, const std::string&, const std::vector<std::uint8_t>&)> handler) {
+    ListenerHandle addEventListener(std::function<void(int, const std::string&, std::span<const std::uint8_t>)> handler) {
         auto owned = std::make_unique<WildcardListener>(std::move(handler));
         auto* raw = owned.get();
         const auto id = my_timer_add_event_listener(
@@ -848,8 +854,8 @@ private:
     };
 
     struct WildcardListener : ListenerBase {
-        std::function<void(int, const std::string&, const std::vector<std::uint8_t>&)> fn;
-        explicit WildcardListener(std::function<void(int, const std::string&, const std::vector<std::uint8_t>&)> f) : fn(std::move(f)) {}
+        std::function<void(int, const std::string&, std::span<const std::uint8_t>)> fn;
+        explicit WildcardListener(std::function<void(int, const std::string&, std::span<const std::uint8_t>)> f) : fn(std::move(f)) {}
     };
 
     template <class T>
@@ -871,10 +877,9 @@ private:
         if (!ud) return;
         auto* listener = static_cast<WildcardListener*>(ud);
         if (!listener->fn) return;
-        std::vector<std::uint8_t> envelope;
+        std::span<const std::uint8_t> envelope{};
         if (msg && len > 0) {
-            envelope.assign(reinterpret_cast<const std::uint8_t*>(msg),
-                            reinterpret_cast<const std::uint8_t*>(msg) + len);
+            envelope = std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(msg), len);
         }
         std::string eventId;
         if (ret == 0 && !envelope.empty()) {

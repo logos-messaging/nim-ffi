@@ -192,11 +192,12 @@ proc emitEventDispatcher(
   #
   # The handler receives the FFI return code, the wire `eventType` string
   # extracted from the CBOR envelope (empty if the envelope is malformed
-  # or `ret != 0`), and the raw envelope bytes. Pair with
-  # `decodeEventPayload<T>` to lift the payload into a typed value
-  # without hand-rolling CBOR parsing.
+  # or `ret != 0`), and a `std::span` view over the raw envelope bytes —
+  # the buffer is owned by the dylib and stays valid for the duration of
+  # the synchronous callback only. Pair with `decodeEventPayload<T>` to
+  # lift the payload into a typed value without hand-rolling CBOR parsing.
   lines.add(
-    "    ListenerHandle addEventListener(std::function<void(int, const std::string&, const std::vector<std::uint8_t>&)> handler) {"
+    "    ListenerHandle addEventListener(std::function<void(int, const std::string&, std::span<const std::uint8_t>)> handler) {"
   )
   lines.add(
     "        auto owned = std::make_unique<WildcardListener>(std::move(handler));"
@@ -235,8 +236,10 @@ proc emitEventTrampoline(
   ##   and is the target of `typedTrampoline<T>`, which CBOR-decodes the
   ##   envelope's `payload` field as `T` and invokes the handler.
   ## - `WildcardListener` holds a `std::function<void(int, const
-  ##   std::string&)>` and is the target of `wildcardTrampoline`, which
-  ##   forwards the FFI return code plus raw payload bytes verbatim.
+  ##   std::string&, std::span<const std::uint8_t>)>` and is the target
+  ##   of `wildcardTrampoline`, which forwards the FFI return code plus
+  ##   a span view over the raw payload bytes (no copy — the dylib owns
+  ##   the buffer for the duration of the synchronous callback).
   if events.len == 0:
     return
   lines.add("    struct ListenerBase {")
@@ -251,10 +254,10 @@ proc emitEventTrampoline(
   lines.add("")
   lines.add("    struct WildcardListener : ListenerBase {")
   lines.add(
-    "        std::function<void(int, const std::string&, const std::vector<std::uint8_t>&)> fn;"
+    "        std::function<void(int, const std::string&, std::span<const std::uint8_t>)> fn;"
   )
   lines.add(
-    "        explicit WildcardListener(std::function<void(int, const std::string&, const std::vector<std::uint8_t>&)> f) : fn(std::move(f)) {}"
+    "        explicit WildcardListener(std::function<void(int, const std::string&, std::span<const std::uint8_t>)> f) : fn(std::move(f)) {}"
   )
   lines.add("    };")
   lines.add("")
@@ -291,13 +294,13 @@ proc emitEventTrampoline(
   lines.add("        if (!ud) return;")
   lines.add("        auto* listener = static_cast<WildcardListener*>(ud);")
   lines.add("        if (!listener->fn) return;")
-  lines.add("        std::vector<std::uint8_t> envelope;")
+  # The buffer pointed to by `msg` is owned by the dylib and stays valid
+  # for the duration of this synchronous call — safe to hand to the user
+  # as a span view rather than copying.
+  lines.add("        std::span<const std::uint8_t> envelope{};")
   lines.add("        if (msg && len > 0) {")
   lines.add(
-    "            envelope.assign(reinterpret_cast<const std::uint8_t*>(msg),"
-  )
-  lines.add(
-    "                            reinterpret_cast<const std::uint8_t*>(msg) + len);"
+    "            envelope = std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(msg), len);"
   )
   lines.add("        }")
   lines.add("        std::string eventId;")
@@ -331,8 +334,10 @@ proc generateCppHeader*(
   lines.add(HeaderPreludeTpl)
   if events.len > 0:
     # Only pulled in when the library declares `{.ffiEvent.}` procs —
-    # backs the `listeners_` map on the generated context class.
+    # `<unordered_map>` backs the `listeners_` map, `<span>` is the
+    # zero-copy view type handed to wildcard callbacks.
     lines.add("#include <unordered_map>")
+    lines.add("#include <span>")
 
   # CBOR primitive / container helpers must precede the per-struct codecs
   # below, because each emitted `encode_cbor`/`decode_cbor(T)` calls the
@@ -435,7 +440,7 @@ proc generateCppHeader*(
   if events.len > 0:
     lines.add("template <class T>")
     lines.add(
-      "inline bool decodeEventPayload(const std::vector<std::uint8_t>& envelope, T& out) {"
+      "inline bool decodeEventPayload(std::span<const std::uint8_t> envelope, T& out) {"
     )
     lines.add("    if (envelope.empty()) return false;")
     lines.add("    CborParser parser; CborValue it;")

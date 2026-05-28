@@ -78,12 +78,13 @@ int main() {
 
         std::atomic<int> wildcardHits{0};
         // Wildcard listener receives every event with the wire `eventId`
-        // pre-extracted plus the raw CBOR envelope bytes. Dispatch on
-        // `eventId` and use `decodeEventPayload<T>` to lift the payload
-        // into a typed value without hand-parsing CBOR.
+        // pre-extracted plus a span view over the raw CBOR envelope
+        // bytes (zero-copy; valid only for the duration of this call).
+        // Dispatch on `eventId` and use `decodeEventPayload<T>` to lift
+        // the payload into a typed value without hand-parsing CBOR.
         const auto wildcardHandle = ctx->addEventListener(
             [&](int retCode, const std::string& eventId,
-                const std::vector<std::uint8_t>& envelope) {
+                std::span<const std::uint8_t> envelope) {
                 wildcardHits.fetch_add(1);
                 std::cout << "[7] wildcard event: retCode=" << retCode
                           << ", eventId=" << eventId

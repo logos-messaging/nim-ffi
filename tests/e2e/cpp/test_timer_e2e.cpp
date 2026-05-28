@@ -391,8 +391,9 @@ TEST(TimerE2E, RemoveEventListenerStopsDelivery) {
 }
 
 // The wildcard `addEventListener` overload receives every event with the
-// wire `eventId` pre-extracted plus the raw envelope bytes. The helper
-// `decodeEventPayload<T>` lifts the payload into a typed value.
+// wire `eventId` pre-extracted plus a `std::span` view over the raw
+// envelope bytes. The helper `decodeEventPayload<T>` lifts the payload
+// into a typed value.
 TEST(TimerE2E, WildcardListenerReceivesEventIdAndDecodesPayload) {
     auto ctx = makeCtx("wildcard");
 
@@ -407,7 +408,7 @@ TEST(TimerE2E, WildcardListenerReceivesEventIdAndDecodesPayload) {
     std::vector<Capture> captured;
     auto handle = ctx->addEventListener(
         [&](int retCode, const std::string& eventId,
-            const std::vector<std::uint8_t>& envelope) {
+            std::span<const std::uint8_t> envelope) {
             Capture c{retCode, eventId, envelope.size(), std::nullopt};
             if (retCode == 0 && eventId == "on_echo_fired") {
                 EchoEvent evt{};
