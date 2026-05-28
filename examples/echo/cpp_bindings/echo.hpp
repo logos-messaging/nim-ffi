@@ -12,6 +12,7 @@
 #include <optional>
 #include <type_traits>
 #include <cstring>
+#include <unordered_map>
 extern "C" {
 #include <tinycbor/cbor.h>
 }
