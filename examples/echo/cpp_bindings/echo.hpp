@@ -1,4 +1,16 @@
 #pragma once
+// Generated bindings require C++20 — the event-listener API uses
+// std::span<const std::uint8_t> for the wildcard callback.
+// MSVC keeps __cplusplus at 199711L unless /Zc:__cplusplus is passed,
+// so consult _MSVC_LANG when present (it always reflects the active
+// /std:c++XX level).
+#if defined(_MSVC_LANG)
+#  if _MSVC_LANG < 202002L
+#    error "nim-ffi generated headers require C++20 or later (use /std:c++20)"
+#  endif
+#elif !defined(__cplusplus) || __cplusplus < 202002L
+#  error "nim-ffi generated headers require C++20 or later"
+#endif
 #include <string>
 #include <cstdint>
 #include <chrono>
@@ -395,7 +407,8 @@ void* echo_create(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback call
 int echo_shout(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int echo_version(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int echo_destroy(void* ctx);
-void echo_set_event_callback(void* ctx, FFICallback callback, void* user_data);
+uint64_t echo_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
+int echo_remove_event_listener(void* ctx, uint64_t listener_id);
 } // extern "C"
 
 // ============================================================

@@ -1,4 +1,16 @@
 #pragma once
+// Generated bindings require C++20 — the event-listener API uses
+// std::span<const std::uint8_t> for the wildcard callback.
+// MSVC keeps __cplusplus at 199711L unless /Zc:__cplusplus is passed,
+// so consult _MSVC_LANG when present (it always reflects the active
+// /std:c++XX level).
+#if defined(_MSVC_LANG)
+#  if _MSVC_LANG < 202002L
+#    error "nim-ffi generated headers require C++20 or later (use /std:c++20)"
+#  endif
+#elif !defined(__cplusplus) || __cplusplus < 202002L
+#  error "nim-ffi generated headers require C++20 or later"
+#endif
 #include <string>
 #include <cstdint>
 #include <chrono>
@@ -694,7 +706,8 @@ int my_timer_version(void* ctx, FFICallback callback, void* user_data, const uin
 int my_timer_complex(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int my_timer_schedule(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int my_timer_destroy(void* ctx);
-void my_timer_set_event_callback(void* ctx, FFICallback callback, void* user_data);
+uint64_t my_timer_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
+int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
 } // extern "C"
 
 // ============================================================
@@ -758,6 +771,19 @@ inline Result<std::vector<std::uint8_t>> ffi_call_(
 
 #endif // NIM_FFI_SYNC_CALL_HELPER_HPP_INCLUDED
 
+template <class T>
+inline bool decodeEventPayload(std::span<const std::uint8_t> envelope, T& out) {
+    if (envelope.empty()) return false;
+    CborParser parser; CborValue it;
+    if (cbor_parser_init(envelope.data(), envelope.size(), 0, &parser, &it) != CborNoError)
+        return false;
+    if (!cbor_value_is_map(&it)) return false;
+    CborValue payloadField;
+    if (cbor_value_map_find_value(&it, "payload", &payloadField) != CborNoError)
+        return false;
+    return decode_cbor(payloadField, out) == CborNoError;
+}
+
 // ============================================================
 // High-level C++ context class
 // ============================================================
@@ -812,15 +838,34 @@ public:
     MyTimerCtx(MyTimerCtx&&) = delete;
     MyTimerCtx& operator=(MyTimerCtx&&) = delete;
 
-    // ── Typed event handlers ────────────────────────────────
-    struct Events {
-        std::function<void(const std::string&)> on_error;
-        std::function<void(const EchoEvent&)> onEchoFired;
-    };
+    // ── Event listener API ──────────────────────────────────
+    struct ListenerHandle { std::uint64_t id = 0; };
 
-    void setEventHandlers(Events handlers) {
-        events_ = std::make_unique<Events>(std::move(handlers));
-        my_timer_set_event_callback(ptr_, &MyTimerCtx::eventTrampoline, events_.get());
+    ListenerHandle addOnEchoFiredListener(std::function<void(const EchoEvent&)> handler) {
+        auto owned = std::make_unique<TypedListener<EchoEvent>>(std::move(handler));
+        auto* raw = owned.get();
+        const auto id = my_timer_add_event_listener(
+            ptr_, "on_echo_fired", &MyTimerCtx::typedTrampoline<EchoEvent>, raw);
+        if (id == 0) return ListenerHandle{0};
+        listeners_.emplace(id, std::move(owned));
+        return ListenerHandle{id};
+    }
+
+    ListenerHandle addEventListener(std::function<void(int, const std::string&, std::span<const std::uint8_t>)> handler) {
+        auto owned = std::make_unique<WildcardListener>(std::move(handler));
+        auto* raw = owned.get();
+        const auto id = my_timer_add_event_listener(
+            ptr_, "", &MyTimerCtx::wildcardTrampoline, raw);
+        if (id == 0) return ListenerHandle{0};
+        listeners_.emplace(id, std::move(owned));
+        return ListenerHandle{id};
+    }
+
+    bool removeEventListener(ListenerHandle handle) {
+        if (handle.id == 0) return false;
+        const auto rc = my_timer_remove_event_listener(ptr_, handle.id);
+        listeners_.erase(handle.id);
+        return rc == 0;
     }
 
     Result<EchoResponse> echo(const EchoRequest& req) const {
@@ -888,37 +933,61 @@ public:
     }
 
 private:
-    void* ptr_;
-    std::chrono::milliseconds timeout_;
-    std::unique_ptr<Events> events_;
-    explicit MyTimerCtx(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}
-    static void eventTrampoline(int ret, const char* msg, std::size_t len, void* ud) {
-        if (!ud) return;
-        auto* events = static_cast<Events*>(ud);
-        if (ret != 0) {
-            if (events->on_error) {
-                std::string err(msg ? msg : "", len);
-                events->on_error(err);
-            }
-            return;
-        }
-        if (!msg || len == 0) return;
-        std::vector<std::uint8_t> bytes(reinterpret_cast<const std::uint8_t*>(msg),
-                                        reinterpret_cast<const std::uint8_t*>(msg) + len);
+    struct ListenerBase {
+        virtual ~ListenerBase() = default;
+    };
+
+    template <class T>
+    struct TypedListener : ListenerBase {
+        std::function<void(const T&)> fn;
+        explicit TypedListener(std::function<void(const T&)> f) : fn(std::move(f)) {}
+    };
+
+    struct WildcardListener : ListenerBase {
+        std::function<void(int, const std::string&, std::span<const std::uint8_t>)> fn;
+        explicit WildcardListener(std::function<void(int, const std::string&, std::span<const std::uint8_t>)> f) : fn(std::move(f)) {}
+    };
+
+    template <class T>
+    static void typedTrampoline(int ret, const char* msg, std::size_t len, void* ud) {
+        if (!ud || ret != 0 || !msg || len == 0) return;
+        auto* listener = static_cast<TypedListener<T>*>(ud);
+        if (!listener->fn) return;
         CborParser parser; CborValue it;
-        if (cbor_parser_init(bytes.data(), bytes.size(), 0, &parser, &it) != CborNoError) return;
+        if (cbor_parser_init(reinterpret_cast<const std::uint8_t*>(msg), len, 0, &parser, &it) != CborNoError) return;
         if (!cbor_value_is_map(&it)) return;
-        CborValue evtField;
-        if (cbor_value_map_find_value(&it, "eventType", &evtField) != CborNoError) return;
-        if (!cbor_value_is_text_string(&evtField)) return;
-        std::string evtName; if (decode_cbor(evtField, evtName) != CborNoError) return;
         CborValue payloadField;
         if (cbor_value_map_find_value(&it, "payload", &payloadField) != CborNoError) return;
-        if (evtName == "on_echo_fired") {
-            if (events->onEchoFired) {
-                EchoEvent payload{}; if (decode_cbor(payloadField, payload) == CborNoError) events->onEchoFired(payload);
-            }
-        }
+        T payload{};
+        if (decode_cbor(payloadField, payload) != CborNoError) return;
+        listener->fn(payload);
     }
 
+    static void wildcardTrampoline(int ret, const char* msg, std::size_t len, void* ud) {
+        if (!ud) return;
+        auto* listener = static_cast<WildcardListener*>(ud);
+        if (!listener->fn) return;
+        std::span<const std::uint8_t> envelope{};
+        if (msg && len > 0) {
+            envelope = std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(msg), len);
+        }
+        std::string eventId;
+        if (ret == 0 && !envelope.empty()) {
+            CborParser parser; CborValue it;
+            if (cbor_parser_init(envelope.data(), envelope.size(), 0, &parser, &it) == CborNoError
+                && cbor_value_is_map(&it)) {
+                CborValue evtField;
+                if (cbor_value_map_find_value(&it, "eventType", &evtField) == CborNoError
+                    && cbor_value_is_text_string(&evtField)) {
+                    (void)decode_cbor(evtField, eventId);
+                }
+            }
+        }
+        listener->fn(ret, eventId, envelope);
+    }
+
+    void* ptr_;
+    std::chrono::milliseconds timeout_;
+    std::unordered_map<std::uint64_t, std::unique_ptr<ListenerBase>> listeners_;
+    explicit MyTimerCtx(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}
 };
