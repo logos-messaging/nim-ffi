@@ -211,6 +211,22 @@ impl MyTimerCtx {
         Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })
     }
 
+    fn add_listener_inner(
+        &self,
+        event_name: *const c_char,
+        callback: ffi::FFICallback,
+        raw: *mut c_void,
+        owned: Box<dyn std::any::Any + Send>,
+    ) -> ListenerHandle {
+        let id = unsafe {
+            ffi::my_timer_add_event_listener(self.ptr, event_name, callback, raw)
+        };
+        if id != 0 {
+            self.listeners.lock().unwrap().insert(id, owned);
+        }
+        ListenerHandle { id }
+    }
+
     /// Register a typed listener for `on_echo_fired`. The returned handle can be
     /// passed to `remove_event_listener` to unregister.
     pub fn add_on_echo_fired_listener<F>(&self, handler: F) -> ListenerHandle
@@ -218,15 +234,7 @@ impl MyTimerCtx {
     {
         let owned: Box<OnEchoFiredHandler> = Box::new(OnEchoFiredHandler { f: Box::new(handler) });
         let raw = &*owned as *const OnEchoFiredHandler as *mut c_void;
-        let id = unsafe {
-            ffi::my_timer_add_event_listener(
-                self.ptr, b"on_echo_fired\0".as_ptr() as *const c_char,
-                on_echo_fired_trampoline, raw)
-        };
-        if id != 0 {
-            self.listeners.lock().unwrap().insert(id, owned);
-        }
-        ListenerHandle { id }
+        self.add_listener_inner(b"on_echo_fired\0".as_ptr() as *const c_char, on_echo_fired_trampoline, raw, owned)
     }
 
     /// Register a catch-all listener that receives every event.
@@ -239,15 +247,7 @@ impl MyTimerCtx {
     {
         let owned: Box<WildcardHandler> = Box::new(WildcardHandler { f: Box::new(handler) });
         let raw = &*owned as *const WildcardHandler as *mut c_void;
-        let id = unsafe {
-            ffi::my_timer_add_event_listener(
-                self.ptr, b"\0".as_ptr() as *const c_char,
-                my_timer_wildcard_trampoline, raw)
-        };
-        if id != 0 {
-            self.listeners.lock().unwrap().insert(id, owned);
-        }
-        ListenerHandle { id }
+        self.add_listener_inner(b"\0".as_ptr() as *const c_char, my_timer_wildcard_trampoline, raw, owned)
     }
 
     /// Remove a previously-registered listener by handle. Returns true

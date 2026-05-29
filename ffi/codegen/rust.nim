@@ -691,6 +691,32 @@ proc generateApiRs*(
 
   # ── Listener-registration API ─────────────────────────────────────────
   if events.len > 0:
+    # Private helper shared by every public `add_*_listener`: the
+    # FFI call + map insertion is identical across the typed and
+    # wildcard variants, so it lives in one place. The caller owns
+    # the box (typed as the concrete handler struct so the raw
+    # pointer matches the trampoline's expected type) and only
+    # erases it to `dyn Any + Send` when handing ownership over.
+    lines.add("    fn add_listener_inner(")
+    lines.add("        &self,")
+    lines.add("        event_name: *const c_char,")
+    lines.add("        callback: ffi::FFICallback,")
+    lines.add("        raw: *mut c_void,")
+    lines.add("        owned: Box<dyn std::any::Any + Send>,")
+    lines.add("    ) -> ListenerHandle {")
+    lines.add("        let id = unsafe {")
+    lines.add(
+      "            ffi::$1_add_event_listener(self.ptr, event_name, callback, raw)" %
+        [libName]
+    )
+    lines.add("        };")
+    lines.add("        if id != 0 {")
+    lines.add("            self.listeners.lock().unwrap().insert(id, owned);")
+    lines.add("        }")
+    lines.add("        ListenerHandle { id }")
+    lines.add("    }")
+    lines.add("")
+
     for ev in events:
       let methodName = "add_" & camelToSnakeCase(ev.nimProcName) & "_listener"
       let handlerStruct = capitalizeFirstLetter(ev.nimProcName) & "Handler"
@@ -713,24 +739,10 @@ proc generateApiRs*(
       )
       lines.add("        let raw = &*owned as *const $1 as *mut c_void;" %
         [handlerStruct])
-      lines.add("        let id = unsafe {")
       lines.add(
-        "            ffi::$1_add_event_listener(" % [libName]
+        "        self.add_listener_inner(b\"$1\\0\".as_ptr() as *const c_char, $2, raw, owned)" %
+          [ev.wireName, trampolineName]
       )
-      lines.add(
-        "                self.ptr, b\"$1\\0\".as_ptr() as *const c_char," %
-          [ev.wireName]
-      )
-      lines.add(
-        "                $1, raw)" % [trampolineName]
-      )
-      lines.add("        };")
-      lines.add("        if id != 0 {")
-      lines.add(
-        "            self.listeners.lock().unwrap().insert(id, owned);"
-      )
-      lines.add("        }")
-      lines.add("        ListenerHandle { id }")
       lines.add("    }")
       lines.add("")
 
@@ -764,19 +776,10 @@ proc generateApiRs*(
     lines.add(
       "        let raw = &*owned as *const WildcardHandler as *mut c_void;"
     )
-    lines.add("        let id = unsafe {")
-    lines.add("            ffi::$1_add_event_listener(" % [libName])
     lines.add(
-      "                self.ptr, b\"\\0\".as_ptr() as *const c_char,"
+      "        self.add_listener_inner(b\"\\0\".as_ptr() as *const c_char, $1_wildcard_trampoline, raw, owned)" %
+        [libName]
     )
-    lines.add(
-      "                $1_wildcard_trampoline, raw)" % [libName]
-    )
-    lines.add("        };")
-    lines.add("        if id != 0 {")
-    lines.add("            self.listeners.lock().unwrap().insert(id, owned);")
-    lines.add("        }")
-    lines.add("        ListenerHandle { id }")
     lines.add("    }")
     lines.add("")
 
