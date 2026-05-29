@@ -207,8 +207,8 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
       params.add("ctx: *mut c_void")
       lines.add("    pub fn $1($2) -> c_int;" % [p.procName, params.join(", ")])
 
-  # Listener-registration ABI — emitted by `declareLibrary`, always
-  # present in the dylib.
+  # Listener-registration ABI — emitted on the Nim side by `declareLibrary`,
+  # always present in the dylib.
   lines.add(
     "    pub fn $1_add_event_listener(ctx: *mut c_void, event_name: *const c_char, callback: FFICallback, user_data: *mut c_void) -> u64;" %
       [linkLibName]
@@ -446,77 +446,105 @@ proc generateApiRs*(
   lines.add("}")
   lines.add("")
 
-  # ── Typed event handler struct + trampoline (only if events declared) ────
-  # The Events struct holds optional boxed closures, one per registered
-  # `{.ffiEvent.}`. The struct lives on the heap (Box::into_raw); its raw
-  # pointer is handed to the dylib as `user_data` for the event callback.
-  # The trampoline parses the CBOR `EventEnvelope`, picks the matching
-  # field on Events, decodes the payload as the registered type, and
-  # invokes the closure.
+  # ── Per-listener handler boxes + extern "C" trampolines ─────────────────
+  # Each registered listener owns a `Box<…Handler>` that is kept alive in
+  # `$1::listeners` (keyed by listener id). The raw pointer to the inner
+  # handler is handed to the dylib as `user_data` for the per-event or
+  # wildcard trampoline below.
   if events.len > 0:
-    lines.add("/// Typed event handlers for `$1`. Each field is `None` by" % [ctxTypeName])
-    lines.add("/// default; set the ones you care about and pass to")
-    lines.add("/// `$1::set_event_handlers`." % [ctxTypeName])
-    lines.add("#[allow(non_snake_case)]")
-    lines.add("pub struct Events {")
-    lines.add("    pub on_error: Option<Box<dyn Fn(&str) + Send + Sync>>,")
     for ev in events:
+      let handlerStruct = capitalizeFirstLetter(ev.nimProcName) & "Handler"
+      let trampolineName = camelToSnakeCase(ev.nimProcName) & "_trampoline"
+      lines.add("struct $1 {" % [handlerStruct])
       lines.add(
-        "    pub $1: Option<Box<dyn Fn(&$2) + Send + Sync>>," %
-          [ev.nimProcName, ev.payloadTypeName]
+        "    f: Box<dyn Fn(&$1) + Send + Sync>," % [ev.payloadTypeName]
       )
-    lines.add("}")
-    lines.add("")
-    lines.add("impl Default for Events {")
-    lines.add("    fn default() -> Self {")
-    lines.add("        Self { on_error: None, " &
-      events.mapIt(it.nimProcName & ": None").join(", ") & " }")
-    lines.add("    }")
-    lines.add("}")
-    lines.add("")
+      lines.add("}")
+      lines.add("")
+      lines.add("unsafe extern \"C\" fn $1(" % [trampolineName])
+      lines.add("    ret: c_int, msg: *const c_char, len: usize, ud: *mut c_void,")
+      lines.add(") {")
+      lines.add("    if ud.is_null() || ret != 0 || msg.is_null() || len == 0 {")
+      lines.add("        return;")
+      lines.add("    }")
+      lines.add("    let h = &*(ud as *const $1);" % [handlerStruct])
+      lines.add("    let bytes = slice::from_raw_parts(msg as *const u8, len);")
+      lines.add("    #[derive(serde::Deserialize)]")
+      lines.add(
+        "    struct Envelope { payload: $1 }" % [ev.payloadTypeName]
+      )
+      lines.add(
+        "    if let Ok(env) = ciborium::de::from_reader::<Envelope, _>(bytes) {"
+      )
+      lines.add("        (h.f)(&env.payload);")
+      lines.add("    }")
+      lines.add("}")
+      lines.add("")
 
-    # Trampoline — `extern "C"` free function. Deserialises the envelope
-    # twice: once for `eventType`, then with the typed payload via serde.
-    lines.add("unsafe extern \"C\" fn $1_event_trampoline(" % [libName])
+    # Wildcard handler — receives every event as raw envelope bytes,
+    # the FFI return code, and the `eventType` string pre-extracted
+    # from the CBOR envelope. `event_id` is empty when `ret != 0` or
+    # the envelope is malformed (the bytes are an error string, not a
+    # CBOR envelope, in that case).
+    lines.add("struct WildcardHandler {")
+    lines.add("    f: Box<dyn Fn(c_int, &str, &[u8]) + Send + Sync>,")
+    lines.add("}")
+    lines.add("")
+    lines.add("unsafe extern \"C\" fn $1_wildcard_trampoline(" % [libName])
     lines.add("    ret: c_int, msg: *const c_char, len: usize, ud: *mut c_void,")
     lines.add(") {")
     lines.add("    if ud.is_null() { return; }")
-    lines.add("    let events = &*(ud as *const Events);")
-    lines.add("    if ret != 0 {")
-    lines.add("        if let Some(ref on_err) = events.on_error {")
-    lines.add("            let bytes = if !msg.is_null() && len > 0 {")
-    lines.add("                slice::from_raw_parts(msg as *const u8, len)")
-    lines.add("            } else { &[] };")
-    lines.add("            let s = String::from_utf8_lossy(bytes);")
-    lines.add("            on_err(&s);")
+    lines.add("    let h = &*(ud as *const WildcardHandler);")
+    lines.add("    let bytes = if !msg.is_null() && len > 0 {")
+    lines.add("        slice::from_raw_parts(msg as *const u8, len)")
+    lines.add("    } else { &[] };")
+    lines.add("    let event_id = if ret == 0 && !bytes.is_empty() {")
+    lines.add("        #[derive(serde::Deserialize)]")
+    lines.add("        struct EnvelopeMeta {")
+    lines.add("            #[serde(rename = \"eventType\")]")
+    lines.add("            event_type: String,")
     lines.add("        }")
-    lines.add("        return;")
-    lines.add("    }")
-    lines.add("    if msg.is_null() || len == 0 { return; }")
-    lines.add("    let bytes = slice::from_raw_parts(msg as *const u8, len);")
-    lines.add("    #[derive(serde::Deserialize)]")
-    lines.add("    struct EnvelopeMeta {")
-    lines.add("        #[serde(rename = \"eventType\")]")
-    lines.add("        event_type: String,")
-    lines.add("    }")
-    lines.add("    let meta: EnvelopeMeta = match ciborium::de::from_reader(bytes) {")
-    lines.add("        Ok(m) => m,")
-    lines.add("        Err(_) => return,")
+    lines.add(
+      "        ciborium::de::from_reader::<EnvelopeMeta, _>(bytes)"
+    )
+    lines.add("            .map(|m| m.event_type).unwrap_or_default()")
+    lines.add("    } else {")
+    lines.add("        String::new()")
     lines.add("    };")
-    for ev in events:
-      lines.add("    if meta.event_type == \"$1\" {" % [ev.wireName])
-      lines.add("        #[derive(serde::Deserialize)]")
-      lines.add("        struct Envelope { payload: $1 }" % [ev.payloadTypeName])
-      lines.add(
-        "        if let Ok(env) = ciborium::de::from_reader::<Envelope, _>(bytes) {"
-      )
-      lines.add(
-        "            if let Some(ref h) = events.$1 { h(&env.payload); }" %
-          [ev.nimProcName]
-      )
-      lines.add("        }")
-      lines.add("        return;")
-      lines.add("    }")
+    lines.add("    (h.f)(ret, event_id.as_str(), bytes);")
+    lines.add("}")
+    lines.add("")
+
+    # Public handle returned by every add_…_listener call.
+    lines.add("#[derive(Debug, Clone, Copy)]")
+    lines.add("pub struct ListenerHandle { pub id: u64 }")
+    lines.add("")
+
+    # Helper: decode an event envelope's `payload` field into any typed
+    # `T` that the generated `types.rs` already derives `Deserialize` on.
+    # Pair with `add_event_listener` to lift raw envelope bytes into a
+    # typed payload without hand-rolling ciborium calls in each branch.
+    lines.add(
+      "/// Decode the `payload` field of a CBOR `EventEnvelope` as `T`."
+    )
+    lines.add(
+      "/// Returns `Err` if the envelope is empty / malformed / the payload"
+    )
+    lines.add("/// cannot be deserialised as `T`.")
+    lines.add(
+      "pub fn decode_event_payload<T: serde::de::DeserializeOwned>("
+    )
+    lines.add("    envelope: &[u8],")
+    lines.add(") -> Result<T, String> {")
+    lines.add("    #[derive(serde::Deserialize)]")
+    lines.add("    struct Envelope<T> { payload: T }")
+    lines.add(
+      "    let env: Envelope<T> = ciborium::de::from_reader(envelope)"
+    )
+    lines.add(
+      "        .map_err(|e| format!(\"decode event payload: {e}\"))?;"
+    )
+    lines.add("    Ok(env.payload)")
     lines.add("}")
     lines.add("")
 
@@ -526,8 +554,14 @@ proc generateApiRs*(
   lines.add("    ptr: *mut c_void,")
   lines.add("    timeout: Duration,")
   if events.len > 0:
-    lines.add("    events: *mut Events,")
-    lines.add("    event_listener_id: u64,")
+    # Keeps each registered handler box alive while its listener id is
+    # live on the Nim side. Removing an entry from the map drops the
+    # Box and frees the user's closure; the Nim-side registry has
+    # already guaranteed no callback for that id is in flight by the
+    # time `_remove_event_listener` returns.
+    lines.add(
+      "    listeners: std::sync::Mutex<std::collections::HashMap<u64, Box<dyn std::any::Any + Send>>>,"
+    )
   lines.add("}")
   lines.add("")
   # SAFETY block applies to both impls below (PR #23 Rust review, item 7).
@@ -564,13 +598,9 @@ proc generateApiRs*(
     lines.add("            unsafe { ffi::$1(self.ptr); }" % [dtorProcName])
     lines.add("            self.ptr = std::ptr::null_mut();")
     lines.add("        }")
-    # Reclaim the Events box after the dylib's destroy has torn down the
-    # FFI thread (no more events will fire by this point).
-    if events.len > 0:
-      lines.add("        if !self.events.is_null() {")
-      lines.add("            unsafe { drop(Box::from_raw(self.events)); }")
-      lines.add("            self.events = std::ptr::null_mut();")
-      lines.add("        }")
+    # `listeners` is dropped automatically after this body returns. By
+    # that point the dylib has joined its threads, so no callback is mid-
+    # flight against any of the raw pointers we handed it.
     lines.add("    }")
     lines.add("}")
     lines.add("")
@@ -627,7 +657,7 @@ proc generateApiRs*(
       "        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;"
     )
     if events.len > 0:
-      lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout, events: std::ptr::null_mut(), event_listener_id: 0 })")
+      lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })")
     else:
       lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout })")
     lines.add("    }")
@@ -653,49 +683,126 @@ proc generateApiRs*(
       "        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;"
     )
     if events.len > 0:
-      lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout, events: std::ptr::null_mut(), event_listener_id: 0 })")
+      lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })")
     else:
       lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout })")
     lines.add("    }")
     lines.add("")
 
-  # ── Typed event registration ───────────────────────────────────────────
+  # ── Listener-registration API ─────────────────────────────────────────
   if events.len > 0:
+    # Private helper shared by every public `add_*_listener`: the
+    # FFI call + map insertion is identical across the typed and
+    # wildcard variants, so it lives in one place. The caller owns
+    # the box (typed as the concrete handler struct so the raw
+    # pointer matches the trampoline's expected type) and only
+    # erases it to `dyn Any + Send` when handing ownership over.
+    lines.add("    fn add_listener_inner(")
+    lines.add("        &self,")
+    lines.add("        event_name: *const c_char,")
+    lines.add("        callback: ffi::FFICallback,")
+    lines.add("        raw: *mut c_void,")
+    lines.add("        owned: Box<dyn std::any::Any + Send>,")
+    lines.add("    ) -> ListenerHandle {")
+    lines.add("        let id = unsafe {")
     lines.add(
-      "    /// Attach typed event handlers. Each call removes any previous"
-    )
-    lines.add(
-      "    /// listener via `_remove_event_listener` before adding the new"
-    )
-    lines.add(
-      "    /// one, so the registry never holds a pointer into a freed box."
-    )
-    lines.add("    pub fn set_event_handlers(&mut self, handlers: Events) {")
-    lines.add("        if self.event_listener_id != 0 {")
-    lines.add("            unsafe {")
-    lines.add(
-      "                let _ = ffi::$1_remove_event_listener(self.ptr, self.event_listener_id);" %
+      "            ffi::$1_add_event_listener(self.ptr, event_name, callback, raw)" %
         [libName]
     )
-    lines.add("            }")
-    lines.add("            self.event_listener_id = 0;")
+    lines.add("        };")
+    lines.add("        if id != 0 {")
+    lines.add("            self.listeners.lock().unwrap().insert(id, owned);")
     lines.add("        }")
-    lines.add("        if !self.events.is_null() {")
-    lines.add("            unsafe { drop(Box::from_raw(self.events)); }")
-    lines.add("            self.events = std::ptr::null_mut();")
-    lines.add("        }")
-    lines.add("        let raw = Box::into_raw(Box::new(handlers));")
-    lines.add("        self.events = raw;")
-    lines.add("        unsafe {")
+    lines.add("        ListenerHandle { id }")
+    lines.add("    }")
+    lines.add("")
+
+    for ev in events:
+      let methodName = "add_" & camelToSnakeCase(ev.nimProcName) & "_listener"
+      let handlerStruct = capitalizeFirstLetter(ev.nimProcName) & "Handler"
+      let trampolineName = camelToSnakeCase(ev.nimProcName) & "_trampoline"
+      lines.add(
+        "    /// Register a typed listener for `$1`. The returned handle can be" %
+          [ev.wireName]
+      )
+      lines.add("    /// passed to `remove_event_listener` to unregister.")
+      lines.add(
+        "    pub fn $1<F>(&self, handler: F) -> ListenerHandle" % [methodName]
+      )
+      lines.add(
+        "    where F: Fn(&$1) + Send + Sync + 'static," % [ev.payloadTypeName]
+      )
+      lines.add("    {")
+      lines.add(
+        "        let owned: Box<$1> = Box::new($1 { f: Box::new(handler) });" %
+          [handlerStruct]
+      )
+      lines.add("        let raw = &*owned as *const $1 as *mut c_void;" %
+        [handlerStruct])
+      lines.add(
+        "        self.add_listener_inner(b\"$1\\0\".as_ptr() as *const c_char, $2, raw, owned)" %
+          [ev.wireName, trampolineName]
+      )
+      lines.add("    }")
+      lines.add("")
+
+    # Generic wildcard listener — receives every event with the wire
+    # `eventType` string pre-extracted plus the raw envelope bytes. Pair
+    # with `decode_event_payload::<T>` to lift the payload into a typed
+    # value.
     lines.add(
-      "            self.event_listener_id = ffi::$1_add_event_listener(" %
+      "    /// Register a catch-all listener that receives every event."
+    )
+    lines.add(
+      "    /// The handler arguments are (return_code, event_id, envelope_bytes):"
+    )
+    lines.add(
+      "    /// `event_id` is the wire `eventType` string extracted from the"
+    )
+    lines.add(
+      "    /// envelope (empty on error or malformed envelope); `envelope_bytes`"
+    )
+    lines.add(
+      "    /// is the full CBOR envelope, suitable for `decode_event_payload::<T>`."
+    )
+    lines.add(
+      "    pub fn add_event_listener<F>(&self, handler: F) -> ListenerHandle"
+    )
+    lines.add("    where F: Fn(c_int, &str, &[u8]) + Send + Sync + 'static,")
+    lines.add("    {")
+    lines.add(
+      "        let owned: Box<WildcardHandler> = Box::new(WildcardHandler { f: Box::new(handler) });"
+    )
+    lines.add(
+      "        let raw = &*owned as *const WildcardHandler as *mut c_void;"
+    )
+    lines.add(
+      "        self.add_listener_inner(b\"\\0\".as_ptr() as *const c_char, $1_wildcard_trampoline, raw, owned)" %
         [libName]
     )
-    lines.add("                self.ptr, b\"\\0\".as_ptr() as *const c_char,")
+    lines.add("    }")
+    lines.add("")
+
+    # Remove by handle. Drops the Box (and the user's closure) after the
+    # C ABI confirms the listener has been unregistered.
     lines.add(
-      "                $1_event_trampoline, raw as *mut c_void);" % [libName]
+      "    /// Remove a previously-registered listener by handle. Returns true"
     )
-    lines.add("        }")
+    lines.add(
+      "    /// if the listener existed and was removed; false otherwise."
+    )
+    lines.add(
+      "    pub fn remove_event_listener(&self, handle: ListenerHandle) -> bool {"
+    )
+    lines.add("        if handle.id == 0 { return false; }")
+    lines.add("        let rc = unsafe {")
+    lines.add(
+      "            ffi::$1_remove_event_listener(self.ptr, handle.id)" %
+        [libName]
+    )
+    lines.add("        };")
+    lines.add("        self.listeners.lock().unwrap().remove(&handle.id);")
+    lines.add("        rc == 0")
     lines.add("    }")
     lines.add("")
 
