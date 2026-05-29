@@ -34,7 +34,7 @@ namespace {
 template <typename T>
 T mustOk(Result<T> r) {
     if (r.isErr()) {
-        ADD_FAILURE() << "unexpected FFI error: " << r.error();
+        ADD_FAILURE() << "unexpected FFI error: " << r.error() << " line: " << __LINE__;
         return T{};
     }
     return r.take();

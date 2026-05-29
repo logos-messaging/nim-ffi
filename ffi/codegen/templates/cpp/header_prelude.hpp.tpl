@@ -24,6 +24,7 @@
 #include <optional>
 #include <type_traits>
 #include <cstring>
+#include <cassert>
 extern "C" {
 #include <tinycbor/cbor.h>
 }
