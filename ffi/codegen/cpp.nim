@@ -15,6 +15,7 @@ const CppPtrType* = "uint64_t"
 ## reflected in the generated bindings without touching this codegen.
 const
   HeaderPreludeTpl = staticRead("templates/cpp/header_prelude.hpp.tpl")
+  ResultTpl = staticRead("templates/cpp/result.hpp.tpl")
   CborHelpersTpl = staticRead("templates/cpp/cbor_helpers.hpp.tpl")
   SyncCallHelperTpl = staticRead("templates/cpp/sync_call_helper.hpp.tpl")
   ContextRuleOf5Tpl = staticRead("templates/cpp/context_rule_of_5.hpp.tpl")
@@ -339,6 +340,11 @@ proc generateCppHeader*(
     lines.add("#include <unordered_map>")
     lines.add("#include <span>")
 
+  # Result<T> is the exception-free return channel used by every generated
+  # entry point. It must precede the CBOR helpers and sync-call helper below,
+  # which now hand their failures back as Result rather than throwing.
+  lines.add(ResultTpl)
+
   # CBOR primitive / container helpers must precede the per-struct codecs
   # below, because each emitted `encode_cbor`/`decode_cbor(T)` calls the
   # generic overloads for the struct's fields (std::string, std::vector,
@@ -519,32 +525,43 @@ proc generateCppHeader*(
     # context owns library threads, so we forbid copy/move on the class
     # itself (see ContextRuleOf5Tpl) and hand out ownership through a
     # smart pointer that callers can move, store in containers, etc.
+    let createRet = "Result<std::unique_ptr<$1>>" % [ctxTypeName]
     lines.add(
-      "    static std::unique_ptr<$1> create($2) {" %
-        [ctxTypeName, ctorParamsWithTimeout]
+      "    static $1 create($2) {" % [createRet, ctorParamsWithTimeout]
     )
     lines.add("        const auto ffi_req_ = $1;" % [reqInit])
-    lines.add("        const auto ffi_req_bytes_ = encodeCborFFI(ffi_req_);")
-    lines.add("        const auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {")
+    lines.add("        auto ffi_enc_ = encodeCborFFI(ffi_req_);")
+    lines.add("        if (ffi_enc_.isErr()) return $1::err(ffi_enc_.error());" % [createRet])
+    lines.add("        const auto& ffi_req_bytes_ = ffi_enc_.value();")
+    lines.add("        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {")
     lines.add(
       "            (void)$1(ffi_req_bytes_.data(), ffi_req_bytes_.size(), cb, ud);" %
         [ctor.procName]
     )
     lines.add("            return 0;")
     lines.add("        }, timeout);")
-    lines.add("        const auto addr_str = decodeCborFFI<std::string>(ffi_raw_);")
-    lines.add("        try {")
-    lines.add("            const auto addr = std::stoull(addr_str);")
-    # Use `new` directly (not std::make_unique) so the ctor can stay private.
+    lines.add("        if (ffi_raw_.isErr()) return $1::err(ffi_raw_.error());" % [createRet])
+    lines.add("        auto ffi_addr_ = decodeCborFFI<std::string>(ffi_raw_.value());")
+    lines.add("        if (ffi_addr_.isErr()) return $1::err(ffi_addr_.error());" % [createRet])
+    lines.add("        const auto& addr_str = ffi_addr_.value();")
+    # Parse the ctx address without exceptions: std::stoull would throw on a
+    # non-numeric payload, so use std::from_chars and surface the failure as
+    # an err() Result instead.
+    lines.add("        std::uint64_t addr = 0;")
+    lines.add("        const char* addr_begin = addr_str.data();")
+    lines.add("        const char* addr_end = addr_begin + addr_str.size();")
+    lines.add("        const auto fc_ = std::from_chars(addr_begin, addr_end, addr);")
+    lines.add("        if (fc_.ec != std::errc() || fc_.ptr != addr_end) {")
     lines.add(
-      "            return std::unique_ptr<$1>(new $1(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout));" %
-        [ctxTypeName]
-    )
-    lines.add("        } catch (const std::exception&) {")
-    lines.add(
-      "            throw std::runtime_error(\"FFI create returned non-numeric address: \" + addr_str);"
+      "            return $1::err(\"FFI create returned non-numeric address: \" + addr_str);" %
+        [createRet]
     )
     lines.add("        }")
+    # Use `new` directly (not std::make_unique) so the ctor can stay private.
+    lines.add(
+      "        return $1::ok(std::unique_ptr<$2>(new $2(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout)));" %
+        [createRet, ctxTypeName]
+    )
     lines.add("    }")
     lines.add("")
 
@@ -559,7 +576,7 @@ proc generateCppHeader*(
       else:
         "timeout"
     lines.add(
-      "    static std::future<std::unique_ptr<$1>> createAsync($2) {" %
+      "    static std::future<Result<std::unique_ptr<$1>>> createAsync($2) {" %
         [ctxTypeName, ctorParamsWithTimeout]
     )
     lines.add(
@@ -602,18 +619,22 @@ proc generateCppHeader*(
 
     let reqInit = cppBracedInit(reqName, methParamNames)
 
+    let methRet = "Result<$1>" % [retCppType]
     # Use a single-underscore-suffixed local for the Req envelope so it can't
     # shadow a method parameter whose name happens to be `req` (or similar).
-    lines.add("    $1 $2($3) const {" % [retCppType, methodName, methParamsStr])
+    lines.add("    $1 $2($3) const {" % [methRet, methodName, methParamsStr])
     lines.add("        const auto ffi_req_ = $1;" % [reqInit])
-    lines.add("        const auto ffi_req_bytes_ = encodeCborFFI(ffi_req_);")
-    lines.add("        const auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {")
+    lines.add("        auto ffi_enc_ = encodeCborFFI(ffi_req_);")
+    lines.add("        if (ffi_enc_.isErr()) return $1::err(ffi_enc_.error());" % [methRet])
+    lines.add("        const auto& ffi_req_bytes_ = ffi_enc_.value();")
+    lines.add("        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {")
     lines.add(
       "            return $1(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());" %
         [m.procName]
     )
     lines.add("        }, timeout_);")
-    lines.add("        return decodeCborFFI<$1>(ffi_raw_);" % [retCppType])
+    lines.add("        if (ffi_raw_.isErr()) return $1::err(ffi_raw_.error());" % [methRet])
+    lines.add("        return decodeCborFFI<$1>(ffi_raw_.value());" % [retCppType])
     lines.add("    }")
     lines.add("")
     # The async wrapper calls the sync method via `this->methodName(...)` so
@@ -623,7 +644,7 @@ proc generateCppHeader*(
     if methParamsStr.len > 0:
       lines.add(
         "    std::future<$1> $2Async($3) const {" %
-          [retCppType, methodName, methParamsStr]
+          [methRet, methodName, methParamsStr]
       )
       lines.add(
         "        return std::async(std::launch::async, [this, $1]() { return this->$2($3); });" %
@@ -631,7 +652,7 @@ proc generateCppHeader*(
       )
       lines.add("    }")
     else:
-      lines.add("    std::future<$1> $2Async() const {" % [retCppType, methodName])
+      lines.add("    std::future<$1> $2Async() const {" % [methRet, methodName])
       lines.add(
         "        return std::async(std::launch::async, [this]() { return this->$1(); });" %
           [methodName]

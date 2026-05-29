@@ -129,7 +129,7 @@ inline CborError decode_cbor(CborValue& it, std::optional<T>& out) {
 // ── Public entry points ─────────────────────────────────────────────────
 
 template<typename T>
-inline std::vector<std::uint8_t> encodeCborFFI(const T& value) {
+inline Result<std::vector<std::uint8_t>> encodeCborFFI(const T& value) {
     // Start with a generous 4 KiB buffer; double on overflow until it fits.
     std::vector<std::uint8_t> buf(4096);
     while (true) {
@@ -139,34 +139,34 @@ inline std::vector<std::uint8_t> encodeCborFFI(const T& value) {
         if (err == CborNoError) {
             const size_t used = cbor_encoder_get_buffer_size(&enc, buf.data());
             buf.resize(used);
-            return buf;
+            return Result<std::vector<std::uint8_t>>::ok(std::move(buf));
         }
         if (err == CborErrorOutOfMemory) {
             const size_t extra = cbor_encoder_get_extra_bytes_needed(&enc);
             buf.resize(buf.size() + (extra > 0 ? extra : buf.size()));
             continue;
         }
-        throw std::runtime_error(std::string("FFI CBOR encode failed: ") +
-                                 cbor_error_string(err));
+        return Result<std::vector<std::uint8_t>>::err(
+            std::string("FFI CBOR encode failed: ") + cbor_error_string(err));
     }
 }
 
 template<typename T>
-inline T decodeCborFFI(const std::vector<std::uint8_t>& bytes) {
+inline Result<T> decodeCborFFI(const std::vector<std::uint8_t>& bytes) {
     CborParser parser;
     CborValue it;
     CborError err = cbor_parser_init(bytes.data(), bytes.size(), 0, &parser, &it);
     if (err != CborNoError) {
-        throw std::runtime_error(std::string("FFI CBOR parse init failed: ") +
-                                 cbor_error_string(err));
+        return Result<T>::err(std::string("FFI CBOR parse init failed: ") +
+                              cbor_error_string(err));
     }
     T out{};
     err = decode_cbor(it, out);
     if (err != CborNoError) {
-        throw std::runtime_error(std::string("FFI CBOR decode failed: ") +
-                                 cbor_error_string(err));
+        return Result<T>::err(std::string("FFI CBOR decode failed: ") +
+                              cbor_error_string(err));
     }
-    return out;
+    return Result<T>::ok(std::move(out));
 }
 
 #endif // NIM_FFI_CBOR_HELPERS_HPP_INCLUDED

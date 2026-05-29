@@ -34,22 +34,25 @@ inline void ffi_cb_(int ret, const char* msg, size_t len, void* ud) {
     s.cv.notify_one();
 }
 
-inline std::vector<std::uint8_t> ffi_call_(std::function<int(FFICallback, void*)> f,
-                                          std::chrono::milliseconds timeout) {
+inline Result<std::vector<std::uint8_t>> ffi_call_(
+        std::function<int(FFICallback, void*)> f,
+        std::chrono::milliseconds timeout) {
+    using Bytes = std::vector<std::uint8_t>;
     auto state = std::make_shared<FFICallState_>();
     auto* cb_ref = new std::shared_ptr<FFICallState_>(state);
     const int ret = f(ffi_cb_, cb_ref);
     if (ret == 2) {
         delete cb_ref;
-        throw std::runtime_error("RET_MISSING_CALLBACK (internal error)");
+        return Result<Bytes>::err("RET_MISSING_CALLBACK (internal error)");
     }
     std::unique_lock<std::mutex> lock(state->mtx);
     const bool fired = state->cv.wait_for(lock, timeout, [&]{ return state->done; });
     if (!fired)
-        throw std::runtime_error("FFI call timed out after " + std::to_string(timeout.count()) + "ms");
+        return Result<Bytes>::err("FFI call timed out after " +
+                                  std::to_string(timeout.count()) + "ms");
     if (!state->ok)
-        throw std::runtime_error(state->err);
-    return state->bytes;
+        return Result<Bytes>::err(state->err);
+    return Result<Bytes>::ok(std::move(state->bytes));
 }
 
 } // anonymous namespace
