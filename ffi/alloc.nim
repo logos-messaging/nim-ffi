@@ -44,6 +44,21 @@ proc dealloc*(p: cstring) {.inline.} =
   if not p.isNil():
     c_free(cast[pointer](p))
 
+proc ffiCMalloc*(T: typedesc): ptr T =
+  ## Allocates a zero-initialised `T` via `c_malloc` so the buffer can cross
+  ## threads safely (see the module note). Used to carry a native (non-CBOR)
+  ## request payload by pointer; release with `ffiCFree`. (Named with the `ffi`
+  ## prefix so it doesn't collide with `ansi_c.c_free`/`c_malloc` under Nim's
+  ## style-insensitive identifier rules.)
+  let p = cast[ptr T](c_malloc(csize_t(sizeof(T))))
+  zeroMem(p, sizeof(T))
+  return p
+
+proc ffiCFree*(p: pointer) {.inline.} =
+  ## Frees a buffer obtained from `ffiCMalloc`. Nil-safe.
+  if not p.isNil():
+    c_free(p)
+
 proc allocSharedSeq*[T](s: seq[T]): SharedSeq[T] =
   if s.len == 0:
     return (cast[ptr UncheckedArray[T]](nil), 0)

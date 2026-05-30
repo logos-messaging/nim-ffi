@@ -603,6 +603,73 @@ macro ffiRaw*(prc: untyped): untyped =
   return stmts
 
 # ---------------------------------------------------------------------------
+# Native (zero-serialization) C-POD payload helpers, shared by the {.ffi.} and
+# {.ffiCtor.} native code paths. The native path passes the typed args to the
+# FFI thread inside a c_malloc'd struct (by pointer) instead of CBOR, so the
+# struct keeps the user's original param types and owns copies of any cstrings.
+# ---------------------------------------------------------------------------
+
+proc isCstringType(t: NimNode): bool =
+  t.kind == nnkIdent and $t == "cstring"
+
+proc buildCArgsTypeDef(
+    cargsTypeName: NimNode, paramNames: seq[string], paramTypes: seq[NimNode]
+): NimNode =
+  ## `type <cargsTypeName> = object` with one field per param (original types).
+  ## Empty param lists get a `placeholder` field so the object is well-formed.
+  var fields: seq[NimNode] = @[]
+  for i in 0 ..< paramNames.len:
+    fields.add(
+      newTree(nnkIdentDefs, ident(paramNames[i]), paramTypes[i], newEmptyNode())
+    )
+  let recList =
+    if fields.len > 0:
+      newTree(nnkRecList, fields)
+    else:
+      newTree(
+        nnkRecList,
+        newTree(nnkIdentDefs, ident("placeholder"), ident("uint8"), newEmptyNode()),
+      )
+  return newNimNode(nnkTypeSection).add(
+      newTree(
+        nnkTypeDef,
+        cargsTypeName,
+        newEmptyNode(),
+        newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), recList),
+      )
+    )
+
+proc buildCArgsFreeProc(
+    cargsTypeName, cargsFreeName: NimNode,
+    paramNames: seq[string],
+    paramTypes: seq[NimNode],
+): NimNode =
+  ## `proc <cargsFreeName>(p: pointer) {.cdecl, raises:[], gcsafe.}` that frees
+  ## each owned cstring field (with c_free, matching `alloc`) and then the struct.
+  let freeS = genSym(nskLet, "s")
+  var freeBody = newStmtList()
+  freeBody.add quote do:
+    let `freeS` = cast[ptr `cargsTypeName`](p)
+  for i in 0 ..< paramNames.len:
+    if isCstringType(paramTypes[i]):
+      let f = ident(paramNames[i])
+      freeBody.add quote do:
+        ffiCFree(cast[pointer](`freeS`[].`f`))
+  freeBody.add quote do:
+    ffiCFree(p)
+  return newProc(
+    name = cargsFreeName,
+    params = @[newEmptyNode(), newIdentDefs(ident("p"), ident("pointer"))],
+    body = freeBody,
+    pragmas = newTree(
+      nnkPragma,
+      ident("cdecl"),
+      newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
+      ident("gcsafe"),
+    ),
+  )
+
+# ---------------------------------------------------------------------------
 # ffi macro — primary FFI proc / FFI type registration
 # ---------------------------------------------------------------------------
 
@@ -792,10 +859,150 @@ macro ffi*(prc: untyped): untyped =
         return RET_ERR
       return RET_OK
 
+    # The CBOR entry point is the generic / cross-language dispatcher; it keeps
+    # the per-proc Req type name as its handler key and is exported under the
+    # `<name>_cbor` symbol. The native typed-arg entry point (below) is the
+    # primary `<name>` symbol and is preferred for same-process callers.
+    let cborExportName = ident(procNameStr & "CborExport")
     let ffiProc = newProc(
-      name = postfix(cExportProcName, "*"),
+      name = cborExportName,
       params = exportedParams,
       body = ffiBody,
+      pragmas = newTree(
+        nnkPragma,
+        ident("dynlib"),
+        newTree(
+          nnkExprColonExpr, ident("exportc"), newStrLitNode(cExportName & "_cbor")
+        ),
+        ident("cdecl"),
+        newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
+      ),
+    )
+
+    # -------------------------------------------------------------------------
+    # Native (zero-serialization) path: the typed args travel to the FFI thread
+    # inside a c_malloc'd C-POD struct passed by pointer — no CBOR — and the
+    # response is delivered as raw bytes. Registered under a distinct
+    # "<Camel>ReqNative" key so it dispatches to its own handler.
+    # -------------------------------------------------------------------------
+    let cargsTypeName = ident(camelName & "CArgs")
+    let cargsFreeName = ident(camelName & "CArgsFree")
+    let nativeReqIdLit = newStrLitNode(camelName & "ReqNative")
+    let nativeExportName = ident(procNameStr & "NativeExport")
+
+    let cargsTypeDef =
+      buildCArgsTypeDef(cargsTypeName, extraParamNames, extraParamTypes)
+    let cargsFreeProc =
+      buildCArgsFreeProc(cargsTypeName, cargsFreeName, extraParamNames, extraParamTypes)
+
+    # Native FFI-thread handler: read the C-POD, call the helper, raw-encode.
+    let ndReq = genSym(nskLet, "ffiReq")
+    let ndCtx = genSym(nskLet, "nativeCtx")
+    let ndCargs = genSym(nskLet, "cargs")
+    let ndRet = genSym(nskLet, "retVal")
+    var ndBody = newStmtList()
+    ndBody.add quote do:
+      let `ndReq` = cast[ptr FFIThreadRequest](request)
+      let `ndCtx` = cast[ptr FFIContext[`libTypeName`]](reqHandler)
+      let `ndCargs` = cast[ptr `cargsTypeName`](`ndReq`[].data)
+    let ndHelperCall = newTree(
+      nnkCall,
+      userProcName,
+      newTree(nnkDerefExpr, newDotExpr(newTree(nnkDerefExpr, ndCtx), ident("myLib"))),
+    )
+    for nm in extraParamNames:
+      let f = ident(nm)
+      ndBody.add quote do:
+        let `f` = `ndCargs`[].`f`
+      ndHelperCall.add(ident(nm))
+    ndBody.add quote do:
+      let `ndRet` = (await `ndHelperCall`).valueOr:
+        return err($error)
+      when typeof(`ndRet`) is string:
+        var rb = newSeq[byte](`ndRet`.len)
+        if `ndRet`.len > 0:
+          copyMem(addr rb[0], unsafeAddr `ndRet`[0], `ndRet`.len)
+        return ok(rb)
+      elif typeof(`ndRet`) is seq[byte]:
+        return ok(`ndRet`)
+      else:
+        return ok(cborEncode(`ndRet`))
+    let seqByteRet = nnkBracketExpr.newTree(
+      ident("Future"),
+      nnkBracketExpr.newTree(
+        ident("Result"),
+        nnkBracketExpr.newTree(ident("seq"), ident("byte")),
+        ident("string"),
+      ),
+    )
+    let nativeHandlerProc = newProc(
+      name = newEmptyNode(),
+      params = @[
+        seqByteRet,
+        newIdentDefs(ident("request"), ident("pointer")),
+        newIdentDefs(ident("reqHandler"), ident("pointer")),
+      ],
+      body = ndBody,
+      pragmas = nnkPragma.newTree(ident("async")),
+    )
+    let nativeRegister = newAssignment(
+      newTree(nnkBracketExpr, ident("registeredRequests"), nativeReqIdLit),
+      nativeHandlerProc,
+    )
+
+    # Native C export: build the C-POD (duplicating cstrings) and dispatch.
+    let neCargs = genSym(nskLet, "cargs")
+    let neReq = genSym(nskLet, "nreq")
+    let neSend = genSym(nskLet, "sendRes")
+    var neBody = newStmtList()
+    neBody.add quote do:
+      if callback.isNil:
+        return RET_MISSING_CALLBACK
+      if not `asyncPoolIdent`.isValidCtx(cast[pointer](ctx)):
+        let errStr = "ctx is not a valid FFI context"
+        callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
+        return RET_ERR
+      let `neCargs` = ffiCMalloc(`cargsTypeName`)
+    for i in 0 ..< extraParamNames.len:
+      let f = ident(extraParamNames[i])
+      if isCstringType(extraParamTypes[i]):
+        neBody.add quote do:
+          `neCargs`[].`f` = `f`.alloc()
+      else:
+        neBody.add quote do:
+          `neCargs`[].`f` = `f`
+    neBody.add quote do:
+      let `neReq` = FFIThreadRequest.initNative(
+        callback,
+        userData,
+        `nativeReqIdLit`.cstring,
+        cast[pointer](`neCargs`),
+        `cargsFreeName`,
+      )
+      let `neSend` =
+        try:
+          ffi_context.sendRequestToFFIThread(ctx, `neReq`)
+        except Exception as exc:
+          Result[void, string].err("sendRequestToFFIThread exception: " & exc.msg)
+      if `neSend`.isErr():
+        let errStr = "error in sendRequestToFFIThread: " & `neSend`.error
+        callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
+        return RET_ERR
+      return RET_OK
+    var nativeExportParams = @[
+      ident("cint"),
+      newIdentDefs(ident("ctx"), ctxType),
+      newIdentDefs(ident("callback"), ident("FFICallBack")),
+      newIdentDefs(ident("userData"), ident("pointer")),
+    ]
+    for i in 0 ..< extraParamNames.len:
+      nativeExportParams.add(
+        newIdentDefs(ident(extraParamNames[i]), extraParamTypes[i])
+      )
+    let nativeExportProc = newProc(
+      name = nativeExportName,
+      params = nativeExportParams,
+      body = neBody,
       pragmas = newTree(
         nnkPragma,
         ident("dynlib"),
@@ -837,7 +1044,10 @@ macro ffi*(prc: untyped): untyped =
         )
       )
 
-    return newStmtList(helperProc, registerReq, ffiProc)
+    return newStmtList(
+      helperProc, registerReq, cargsTypeDef, cargsFreeProc, nativeRegister,
+      nativeExportProc, ffiProc,
+    )
 
   let stmts = asyncPath()
 
@@ -1209,14 +1419,17 @@ macro ffiCtor*(prc: untyped): untyped =
   ffiBody.add quote do:
     return cast[pointer](`ctxSym`)
 
+  # CBOR constructor entry point, exported under `<name>_cbor`. The native
+  # typed-arg constructor below is the primary `<name>` symbol.
+  let cborCtorExportName = ident(cleanName & "CborCtorExport")
   let ffiProc = newProc(
-    name = postfix(cExportProcName, "*"),
+    name = cborCtorExportName,
     params = exportedParams,
     body = ffiBody,
     pragmas = newTree(
       nnkPragma,
       ident("dynlib"),
-      newTree(nnkExprColonExpr, ident("exportc"), newStrLitNode(cExportName)),
+      newTree(nnkExprColonExpr, ident("exportc"), newStrLitNode(cExportName & "_cbor")),
       ident("cdecl"),
       newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
     ),
@@ -1247,12 +1460,139 @@ macro ffiCtor*(prc: untyped): untyped =
       )
     )
 
+  # -------------------------------------------------------------------------
+  # Native (zero-serialization) constructor: typed args -> C-POD by pointer,
+  # exported as the primary `<name>` symbol. Returns the ctx pointer; the
+  # callback fires with the ctx address as a raw decimal string.
+  # -------------------------------------------------------------------------
+  let ctorCamel = snakeToPascalCase(cleanName)
+  let cargsTypeName = ident(ctorCamel & "CtorCArgs")
+  let cargsFreeName = ident(ctorCamel & "CtorCArgsFree")
+  let nativeCtorReqIdLit = newStrLitNode(ctorCamel & "CtorReqNative")
+  let nativeCtorExportName = ident(cleanName & "NativeCtorExport")
+
+  let ctorCargsTypeDef = buildCArgsTypeDef(cargsTypeName, paramNames, paramTypes)
+  let ctorCargsFreeProc =
+    buildCArgsFreeProc(cargsTypeName, cargsFreeName, paramNames, paramTypes)
+
+  # Native handler: read the C-POD, run the ctor body, store myLib, raw address.
+  let ncReq = genSym(nskLet, "ffiReq")
+  let ncCtx = genSym(nskLet, "nativeCtx")
+  let ncCargs = genSym(nskLet, "cargs")
+  let ncLibVal = genSym(nskLet, "libVal")
+  let ncAddr = genSym(nskLet, "addrStr")
+  var ncBody = newStmtList()
+  ncBody.add quote do:
+    let `ncReq` = cast[ptr FFIThreadRequest](request)
+    let `ncCtx` = cast[ptr FFIContext[`libTypeName`]](reqHandler)
+    let `ncCargs` = cast[ptr `cargsTypeName`](`ncReq`[].data)
+  let ncHelperCall = newTree(nnkCall, userProcName)
+  for nm in paramNames:
+    let f = ident(nm)
+    ncBody.add quote do:
+      let `f` = `ncCargs`[].`f`
+    ncHelperCall.add(ident(nm))
+  let ncMyLib = newDotExpr(newTree(nnkDerefExpr, ncCtx), ident("myLib"))
+  ncBody.add quote do:
+    let `ncLibVal` = (await `ncHelperCall`).valueOr:
+      return err($error)
+    `ncMyLib` = createShared(`libTypeName`)
+    `ncMyLib`[] = `ncLibVal`
+    let `ncAddr` = $cast[uint](`ncCtx`)
+    var rb = newSeq[byte](`ncAddr`.len)
+    if `ncAddr`.len > 0:
+      copyMem(addr rb[0], unsafeAddr `ncAddr`[0], `ncAddr`.len)
+    return ok(rb)
+  let ctorSeqByteRet = nnkBracketExpr.newTree(
+    ident("Future"),
+    nnkBracketExpr.newTree(
+      ident("Result"),
+      nnkBracketExpr.newTree(ident("seq"), ident("byte")),
+      ident("string"),
+    ),
+  )
+  let nativeCtorHandler = newProc(
+    name = newEmptyNode(),
+    params = @[
+      ctorSeqByteRet,
+      newIdentDefs(ident("request"), ident("pointer")),
+      newIdentDefs(ident("reqHandler"), ident("pointer")),
+    ],
+    body = ncBody,
+    pragmas = nnkPragma.newTree(ident("async")),
+  )
+  let nativeCtorRegister = newAssignment(
+    newTree(nnkBracketExpr, ident("registeredRequests"), nativeCtorReqIdLit),
+    nativeCtorHandler,
+  )
+
+  # Native C export: create the ctx, build the C-POD (dup cstrings), dispatch.
+  let necCtx = genSym(nskLet, "ctx")
+  let necCargs = genSym(nskLet, "cargs")
+  let necReq = genSym(nskLet, "nreq")
+  let necSend = genSym(nskLet, "sendRes")
+  var necBody = newStmtList()
+  necBody.add quote do:
+    when declared(initializeLibrary):
+      initializeLibrary()
+    let `necCtx` = `poolIdent`.createFFIContext().valueOr:
+      if not callback.isNil:
+        let errStr = "ffiCtor: failed to create FFIContext: " & $error
+        callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
+      return nil
+    let `necCargs` = ffiCMalloc(`cargsTypeName`)
+  for i in 0 ..< paramNames.len:
+    let f = ident(paramNames[i])
+    if isCstringType(paramTypes[i]):
+      necBody.add quote do:
+        `necCargs`[].`f` = `f`.alloc()
+    else:
+      necBody.add quote do:
+        `necCargs`[].`f` = `f`
+  necBody.add quote do:
+    let `necReq` = FFIThreadRequest.initNative(
+      callback,
+      userData,
+      `nativeCtorReqIdLit`.cstring,
+      cast[pointer](`necCargs`),
+      `cargsFreeName`,
+    )
+    let `necSend` =
+      try:
+        `necCtx`.sendRequestToFFIThread(`necReq`)
+      except Exception as exc:
+        Result[void, string].err("sendRequestToFFIThread exception: " & exc.msg)
+    if `necSend`.isErr():
+      if not callback.isNil:
+        let errStr = "ffiCtor: failed to send request: " & $`necSend`.error
+        callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
+      return nil
+    return cast[pointer](`necCtx`)
+  var nativeCtorParams = @[ident("pointer")]
+  for i in 0 ..< paramNames.len:
+    nativeCtorParams.add(newIdentDefs(ident(paramNames[i]), paramTypes[i]))
+  nativeCtorParams.add(newIdentDefs(ident("callback"), ident("FFICallBack")))
+  nativeCtorParams.add(newIdentDefs(ident("userData"), ident("pointer")))
+  let nativeCtorExportProc = newProc(
+    name = nativeCtorExportName,
+    params = nativeCtorParams,
+    body = necBody,
+    pragmas = newTree(
+      nnkPragma,
+      ident("dynlib"),
+      newTree(nnkExprColonExpr, ident("exportc"), newStrLitNode(cExportName)),
+      ident("cdecl"),
+      newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
+    ),
+  )
+
   let poolDecl = quote:
     when not declared(`poolIdent`):
       var `poolIdent`: FFIContextPool[`libTypeName`]
 
   let stmts = newStmtList(
-    typeDef, ffiNewReqProc, helperProc, processProc, addToReg, poolDecl, ffiProc
+    typeDef, ffiNewReqProc, helperProc, processProc, addToReg, poolDecl, ffiProc,
+    ctorCargsTypeDef, ctorCargsFreeProc, nativeCtorRegister, nativeCtorExportProc,
   )
 
   when defined(ffiDumpMacros):
@@ -1421,8 +1761,10 @@ macro ffiEvent*(wireName: static[string], prc: untyped): untyped =
 
   let payloadTypeNameStr =
     case payloadTypeNode.kind
-    of nnkIdent: $payloadTypeNode
-    else: payloadTypeNode.repr
+    of nnkIdent:
+      $payloadTypeNode
+    else:
+      payloadTypeNode.repr
 
   var userProcName = procName
   if procName.kind == nnkPostfix:
@@ -1430,13 +1772,8 @@ macro ffiEvent*(wireName: static[string], prc: untyped): untyped =
 
   # The generated body: dispatchFFIEventCbor("wire_name", payload).
   let wireNameLit = newStrLitNode(wireName)
-  let dispatchBody = newStmtList(
-    newCall(
-      ident("dispatchFFIEventCbor"),
-      wireNameLit,
-      payloadParamName,
-    )
-  )
+  let dispatchBody =
+    newStmtList(newCall(ident("dispatchFFIEventCbor"), wireNameLit, payloadParamName))
 
   var newParams = newSeq[NimNode]()
   newParams.add(formalParams[0]) # return type (typically empty/void)

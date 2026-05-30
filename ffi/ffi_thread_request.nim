@@ -20,12 +20,29 @@ const EmptyErrorMarker = "unknown error"
   ## the callback's msg ptr non-nil and gives the foreign side a recognizable
   ## fallback to log.
 
+type PayloadFreeProc* = proc(p: pointer) {.cdecl, raises: [], gcsafe.}
+  ## Releases a non-CBOR (native C) request payload. The framework's own CBOR
+  ## payload is a single `c_malloc` buffer freed with `c_free`; a native payload
+  ## is a C-POD args struct that may own further allocations (e.g. duplicated
+  ## C strings), so it needs a per-type destructor.
+
 type FFIThreadRequest* = object
   callback*: FFICallBack
   userData*: pointer
   reqId*: cstring ## Per-proc Req type name used to look up the handler.
-  data*: ptr UncheckedArray[byte] ## Owned CBOR-encoded request payload.
+  data*: ptr UncheckedArray[byte]
+    ## Owned request payload: CBOR bytes when `cborMode`, otherwise an opaque
+    ## C-POD args struct (see `payloadFree`).
   dataLen*: int
+  cborMode*: bool
+    ## true  -> `data` is CBOR; the handler decodes it and the response is
+    ##          CBOR-encoded (cross-language / generic dispatch path).
+    ## false -> `data` is a native C-POD args struct passed by pointer with no
+    ##          serialization, and the response is delivered as raw bytes
+    ##          (the same-process "pure C" path).
+  payloadFree*: PayloadFreeProc
+    ## When non-nil, `data` is freed by calling this instead of `c_free` — used
+    ## for the native C-POD payload, which owns its duplicated string fields.
 
 proc allocBaseRequest(
     callback: FFICallBack, userData: pointer, reqId: cstring
@@ -39,6 +56,8 @@ proc allocBaseRequest(
   ret[].reqId = reqId.alloc()
   ret[].data = nil
   ret[].dataLen = 0
+  ret[].cborMode = true
+  ret[].payloadFree = nil
   return ret
 
 proc copySharedPayload(req: ptr FFIThreadRequest, data: ptr byte, dataLen: int) =
@@ -113,10 +132,32 @@ proc initFromOwnedShared*(
   adoptOwnedSharedPayload(ret, data, dataLen)
   return ret
 
+proc initNative*(
+    T: typedesc[FFIThreadRequest],
+    callback: FFICallBack,
+    userData: pointer,
+    reqId: cstring,
+    payload: pointer,
+    payloadFree: PayloadFreeProc,
+): ptr type T =
+  ## Builds a native (no-CBOR) request: `payload` is an opaque, already-allocated
+  ## C-POD args struct passed by pointer (zero serialization). `payloadFree`
+  ## releases it (and any duplicated string fields it owns) after the handler
+  ## runs. The response is delivered as raw bytes rather than CBOR.
+  var ret = allocBaseRequest(callback, userData, reqId)
+  ret[].data = cast[ptr UncheckedArray[byte]](payload)
+  ret[].dataLen = 0
+  ret[].cborMode = false
+  ret[].payloadFree = payloadFree
+  return ret
+
 proc deleteRequest*(request: ptr FFIThreadRequest) =
-  if not request[].data.isNil:
-    c_free(request[].data)
-  if not request[].reqId.isNil:
+  if not request[].data.isNil():
+    if not request[].payloadFree.isNil():
+      request[].payloadFree(cast[pointer](request[].data))
+    else:
+      c_free(request[].data)
+  if not request[].reqId.isNil():
     c_free(cast[pointer](request[].reqId))
   c_free(request)
 
@@ -143,11 +184,18 @@ proc handleRes*(res: Result[seq[byte], string], request: ptr FFIThreadRequest) =
         cast[csize_t](bytes.len),
         request[].userData,
       )
-    else:
-      # Always hand the callback a real buffer; CBOR null marks "no value".
+    elif request[].cborMode:
+      # CBOR path: hand the callback a real buffer; CBOR null marks "no value".
       var sentinel = CborNullByte
       request[].callback(
         RET_OK, cast[ptr cchar](addr sentinel), 1.csize_t, request[].userData
+      )
+    else:
+      # Native path: an empty result is just a zero-length payload. Pass a valid
+      # non-nil pointer with len 0 so the callback never sees a nil msg.
+      var empty: byte = 0
+      request[].callback(
+        RET_OK, cast[ptr cchar](addr empty), 0.csize_t, request[].userData
       )
 
 proc nilProcess*(reqId: cstring): Future[Result[seq[byte], string]] {.async.} =

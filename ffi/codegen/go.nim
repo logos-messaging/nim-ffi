@@ -1,10 +1,9 @@
 ## Go (cgo) binding generator for the nim-ffi framework.
 ##
-## Emits a single `<lib>.go` file that wraps the CBOR ABI behind idiomatic Go.
-## It builds on the C codegen's `<lib>.h` (included from the cgo preamble) for
-## the ergonomic typed wrappers, the CBOR encoder, and `ffi_decode_text`, and
-## adds the piece every async-only consumer needs: a per-call response capture
-## that BLOCKS until the FFI callback fires, then decodes the payload.
+## Emits a single `<lib>.go` file that wraps the native C ABI behind idiomatic
+## Go. It includes the C codegen's `<lib>.h` (the native typed-arg declarations)
+## and adds the piece every async-only consumer needs: a per-call response
+## capture that BLOCKS until the FFI callback fires, then copies the raw result.
 ##
 ## nim-ffi 0.2.0 dispatches every `{.ffi.}` call through the FFI thread (no sync
 ## fast-path), so a caller cannot read the result immediately after the call —
@@ -154,15 +153,12 @@ proc generateGoFile*(
   L.add("  " & respT & "* r = (" & respT & "*)ud;")
   L.add("  pthread_mutex_lock(&r->mu);")
   L.add("  r->ret = ret;")
-  L.add("  if (ret == RET_OK) {")
-  L.add("    char* d = ffi_decode_text((const uint8_t*)msg, len);")
-  L.add("    r->msg = d; r->len = d ? strlen(d) : 0;")
-  L.add("  } else {")
+  L.add("  // Native ABI: (msg, len) is the raw result (RET_OK) or error (RET_ERR).")
+  L.add("  // Copy it so it survives past the callback.")
   L.add(
-    "    char* e = (char*)malloc(len + 1); if (e) { memcpy(e, msg, len); e[len] = 0; }"
+    "  char* e = (char*)malloc(len + 1); if (e) { memcpy(e, msg, len); e[len] = 0; }"
   )
-  L.add("    r->msg = e; r->len = len;")
-  L.add("  }")
+  L.add("  r->msg = e; r->len = len;")
   L.add("  r->done = 1; pthread_cond_signal(&r->cv); pthread_mutex_unlock(&r->mu);")
   L.add("}")
   L.add("static void " & libName & "RespWait(" & respT & "* r) {")
