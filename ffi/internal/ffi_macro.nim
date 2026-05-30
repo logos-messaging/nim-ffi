@@ -6,6 +6,8 @@ when defined(ffiGenBindings):
   import ../codegen/rust
   import ../codegen/cpp
   import ../codegen/cddl
+  import ../codegen/c
+  import ../codegen/go
 
 # ---------------------------------------------------------------------------
 # String helpers used by multiple macros
@@ -1521,9 +1523,20 @@ macro genBindings*(
       generateCddlBindings(
         ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath
       )
+    of "c":
+      generateCBindings(
+        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
+        ffiEventRegistry,
+      )
+    of "go":
+      generateGoBindings(
+        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
+        ffiEventRegistry,
+      )
     else:
       error(
-        "genBindings: unknown targetLang '" & lang & "'. Use 'rust', 'cpp', or 'cddl'."
+        "genBindings: unknown targetLang '" & lang &
+          "'. Use 'c', 'go', 'rust', 'cpp', or 'cddl'."
       )
 
   return newEmptyNode()
