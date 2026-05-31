@@ -167,6 +167,10 @@ task genbindings_go, "Generate Go (cgo) bindings for the timer example":
     " -d:ffiOutputDir=examples/timer/go_bindings" &
     " -d:ffiSrcPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
+  # The codegen emits compilable but not column-aligned Go; gofmt finalizes it
+  # (cgo struct-field alignment etc.). Skipped silently if gofmt isn't present.
+  if findExe("gofmt").len > 0:
+    exec "gofmt -w examples/timer/go_bindings/my_timer.go"
 
 task genbindings_cddl, "Generate CDDL schema for the timer example":
   exec "nim c " & nimFlagsOrc &

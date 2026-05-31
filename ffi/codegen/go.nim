@@ -22,6 +22,7 @@
 
 import std/[os, strutils]
 import ./meta, ./string_helpers
+import ./c as cgen
 
 proc nimTypeToGo(typeName: string): string =
   let t = typeName.strip()
@@ -75,9 +76,63 @@ proc cgoArgType(typeName: string): string =
 proc supported(typeName: string): bool =
   cgoArgType(typeName).len > 0 or typeName.strip() in ["string", "cstring"]
 
-proc allSupported(p: FFIProcMeta): bool =
+# --- {.ffi.}-struct param support -------------------------------------------
+# A registered {.ffi.} type is passed to the native ABI as a flat C-POD struct
+# (see codegen/c.emitCStructs); cgo exposes it as `C.<Type>`. We mirror each
+# type as an idiomatic Go struct and marshal it into the C struct per call,
+# freeing the C-side allocations once the call returns (the native path deep-
+# copies every argument, so the C buffers are safe to release immediately).
+
+proc isFFIStruct(typeName: string, types: seq[FFITypeMeta]): bool =
+  let t = typeName.strip()
+  for ty in types:
+    if ty.name == t:
+      return true
+  return false
+
+proc isSeqT(t: string): bool =
+  t.strip().startsWith("seq[") and t.strip().endsWith("]")
+
+proc isOptT(t: string): bool =
+  let s = t.strip()
+  (s.startsWith("Option[") or s.startsWith("Maybe[")) and s.endsWith("]")
+
+proc seqElemT(t: string): string =
+  t.strip()["seq[".len .. ^2].strip()
+
+proc optElemT(t: string): string =
+  let s = t.strip()
+  let p = if s.startsWith("Maybe["): "Maybe[".len else: "Option[".len
+  s[p .. ^2].strip()
+
+proc isStringT(t: string): bool =
+  t.strip() in ["string", "cstring"]
+
+proc goFieldType(typeName: string, types: seq[FFITypeMeta]): string =
+  ## Idiomatic Go type for a struct field: seq -> slice, Option -> pointer,
+  ## string -> string, scalar -> mapped, nested {.ffi.} struct -> its Go name.
+  let t = typeName.strip()
+  if isSeqT(t):
+    "[]" & goFieldType(seqElemT(t), types)
+  elif isOptT(t):
+    "*" & goFieldType(optElemT(t), types)
+  else:
+    nimTypeToGo(t)
+
+proc cgoElemType(typeName: string, types: seq[FFITypeMeta]): string =
+  ## The cgo type for one scalar/element value.
+  let t = typeName.strip()
+  if isFFIStruct(t, types): "C." & t
+  elif isStringT(t): "*C.char"
+  else: cgoArgType(t)
+
+proc paramSupported(typeName: string, types: seq[FFITypeMeta]): bool =
+  let t = typeName.strip()
+  supported(t) or isFFIStruct(t, types)
+
+proc allSupported(p: FFIProcMeta, types: seq[FFITypeMeta]): bool =
   for ep in p.extraParams:
-    if ep.isPtr or not supported(ep.typeName):
+    if ep.isPtr or not paramSupported(ep.typeName, types):
       return false
   return true
 
@@ -89,6 +144,136 @@ proc methodName(procName, libName: string): string =
     else:
       procName
   return snakeToPascalCase(bare)
+
+# --- Go marshalling code generators -----------------------------------------
+# All emit tab-indented Go lines. `dst` is a cgo l-value, `src` a Go expression.
+# String/struct/seq marshalling appends a cleanup to the local `frees` slice.
+
+proc marshalValue(
+    dst, src, typeName: string, types: seq[FFITypeMeta], tok: string
+): seq[string] =
+  ## Convert a single Go value `src` into the cgo field `dst`.
+  var lines: seq[string] = @[]
+  let t = typeName.strip()
+  if isStringT(t):
+    lines.add("\tcs_" & tok & " := C.CString(" & src & ")")
+    lines.add(
+      "\tfrees = append(frees, func() { C.free(unsafe.Pointer(cs_" & tok & ")) })"
+    )
+    lines.add("\t" & dst & " = cs_" & tok)
+  elif isFFIStruct(t, types):
+    lines.add("\tcf_" & tok & ", ff_" & tok & " := (" & src & ").toC()")
+    lines.add("\tfrees = append(frees, ff_" & tok & "...)")
+    lines.add("\t" & dst & " = cf_" & tok)
+  elif t == "bool":
+    lines.add("\tif " & src & " {")
+    lines.add("\t\t" & dst & " = 1")
+    lines.add("\t} else {")
+    lines.add("\t\t" & dst & " = 0")
+    lines.add("\t}")
+  else:
+    lines.add("\t" & dst & " = " & cgoArgType(t) & "(" & src & ")")
+  return lines
+
+proc cgoZeroVal(typeName: string, types: seq[FFITypeMeta]): string =
+  ## A zero value of the element type, for `unsafe.Sizeof` in C array allocation.
+  let t = typeName.strip()
+  if isFFIStruct(t, types): "C." & t & "{}"
+  elif isStringT(t): "(*C.char)(nil)"
+  else: cgoArgType(t) & "(0)"
+
+proc goMarshalField(f: FFIFieldMeta, types: seq[FFITypeMeta]): seq[string] =
+  ## Populate `c.<field>` (and `c.<field>_len` / `c.<field>_present`) from
+  ## `v.<Field>`, matching the C-POD layout in codegen/c.emitCStructs.
+  var lines: seq[string] = @[]
+  let cname = f.name
+  let gofld = capitalizeFirstLetter(f.name)
+  let t = f.typeName.strip()
+  if isSeqT(t):
+    let elem = seqElemT(t)
+    let cElem = cgoElemType(elem, types)
+    lines.add("\tif n_" & cname & " := len(v." & gofld & "); n_" & cname & " > 0 {")
+    lines.add(
+      "\t\tarr_" & cname & " := C.malloc(C.size_t(n_" & cname &
+        ") * C.size_t(unsafe.Sizeof(" & cgoZeroVal(elem, types) & ")))"
+    )
+    lines.add(
+      "\t\tsl_" & cname & " := unsafe.Slice((*" & cElem & ")(arr_" & cname & "), n_" &
+        cname & ")"
+    )
+    lines.add("\t\tfor i := 0; i < n_" & cname & "; i++ {")
+    for ln in marshalValue(
+      "sl_" & cname & "[i]", "v." & gofld & "[i]", elem, types, cname & "_e"
+    ):
+      lines.add("\t\t" & ln)
+    lines.add("\t\t}")
+    lines.add("\t\tc." & cname & " = (*" & cElem & ")(arr_" & cname & ")")
+    lines.add("\t\tc." & cname & "_len = C.size_t(n_" & cname & ")")
+    lines.add("\t\ta_" & cname & " := arr_" & cname)
+    lines.add("\t\tfrees = append(frees, func() { C.free(a_" & cname & ") })")
+    lines.add("\t}")
+  elif isOptT(t):
+    let elem = optElemT(t)
+    lines.add("\tif v." & gofld & " != nil {")
+    lines.add("\t\tc." & cname & "_present = 1")
+    for ln in marshalValue("c." & cname, "*v." & gofld, elem, types, cname & "_o"):
+      lines.add("\t" & ln)
+    lines.add("\t}")
+  else:
+    for ln in marshalValue("c." & cname, "v." & gofld, t, types, cname):
+      lines.add(ln)
+  return lines
+
+proc emitGoTypesAndToC(types: seq[FFITypeMeta]): seq[string] =
+  ## A Go struct + `toC()` marshaller for every {.ffi.} type.
+  var lines: seq[string] = @[]
+  for ty in types:
+    lines.add("// " & ty.name & " mirrors the {.ffi.} type of the same name.")
+    lines.add("type " & ty.name & " struct {")
+    for f in ty.fields:
+      lines.add("\t" & capitalizeFirstLetter(f.name) & " " & goFieldType(f.typeName, types))
+    lines.add("}")
+    lines.add("")
+    lines.add(
+      "// toC marshals " & ty.name &
+        " into its C-POD form, returning cleanup funcs to run after the call."
+    )
+    lines.add("func (v " & ty.name & ") toC() (C." & ty.name & ", []func()) {")
+    lines.add("\tvar c C." & ty.name)
+    lines.add("\tvar frees []func()")
+    for f in ty.fields:
+      for ln in goMarshalField(f, types):
+        lines.add(ln)
+    lines.add("\treturn c, frees")
+    lines.add("}")
+    lines.add("")
+  return lines
+
+proc goParamConv(
+    extraParams: seq[FFIParamMeta], types: seq[FFITypeMeta]
+): tuple[goParams, conv, callArgs: seq[string]] =
+  ## Go method/ctor parameter list, the conversion lines that turn each Go arg
+  ## into a cgo value, and the resulting call-argument expressions.
+  var goParams, conv, callArgs: seq[string] = @[]
+  for ep in extraParams:
+    let nm = ep.name
+    let t = ep.typeName.strip()
+    goParams.add(nm & " " & goFieldType(t, types))
+    if isFFIStruct(t, types):
+      conv.add("\tc_" & nm & ", free_" & nm & " := " & nm & ".toC()")
+      conv.add("\tdefer func() { for _, f := range free_" & nm & " { f() } }()")
+      callArgs.add("c_" & nm)
+    elif isStringT(t):
+      conv.add("\tc_" & nm & " := C.CString(" & nm & ")")
+      conv.add("\tdefer C.free(unsafe.Pointer(c_" & nm & "))")
+      callArgs.add("c_" & nm)
+    elif t == "bool":
+      conv.add("\tc_" & nm & " := C.int(0)")
+      conv.add("\tif " & nm & " { c_" & nm & " = 1 }")
+      callArgs.add("c_" & nm)
+    else:
+      callArgs.add(cgoArgType(t) & "(" & nm & ")")
+  return (goParams, conv, callArgs)
 
 proc generateGoFile*(
     procs: seq[FFIProcMeta],
@@ -116,7 +301,11 @@ proc generateGoFile*(
   L.add("package " & libName)
   L.add("")
   L.add("/*")
-  L.add("#cgo LDFLAGS: -l" & libName)
+  # ${SRCDIR} expands to this package's directory, so the native header and the
+  # built lib (staged next to the .go) are found without extra env vars; the
+  # rpath lets the dylib/.so load at runtime from the same directory.
+  L.add("#cgo CFLAGS: -I${SRCDIR}")
+  L.add("#cgo LDFLAGS: -L${SRCDIR} -l" & libName & " -Wl,-rpath,${SRCDIR}")
   L.add("#include \"" & libName & ".h\"")
   L.add("#include <stdlib.h>")
   L.add("#include <string.h>")
@@ -199,7 +388,7 @@ proc generateGoFile*(
 
   # per-proc bridges
   for p in procs:
-    if p.kind != FFIKind.FFI or not allSupported(p):
+    if p.kind != FFIKind.FFI or not allSupported(p, types):
       continue
     var cparams: seq[string] = @[]
     var callArgs: seq[string] = @[]
@@ -247,6 +436,10 @@ proc generateGoFile*(
   L.add(")")
   L.add("")
 
+  # ---- Go mirrors of the {.ffi.} types (with C-POD marshalling) ------------
+  for line in emitGoTypesAndToC(types):
+    L.add(line)
+
   # ---- Go types + helpers --------------------------------------------------
   L.add("type " & nodeType & " struct {")
   L.add("\tctx unsafe.Pointer")
@@ -292,17 +485,7 @@ proc generateGoFile*(
 
   # ---- constructor ---------------------------------------------------------
   if haveCtor:
-    var goParams: seq[string] = @[]
-    var conv: seq[string] = @[]
-    var callArgs: seq[string] = @[]
-    for ep in ctor.extraParams:
-      goParams.add(ep.name & " " & nimTypeToGo(ep.typeName))
-      if nimTypeToGo(ep.typeName) == "string":
-        conv.add("\tc_" & ep.name & " := C.CString(" & ep.name & ")")
-        conv.add("\tdefer C.free(unsafe.Pointer(c_" & ep.name & "))")
-        callArgs.add("c_" & ep.name)
-      else:
-        callArgs.add(cgoArgType(ep.typeName) & "(" & ep.name & ")")
+    let (goParams, conv, callArgs) = goParamConv(ctor.extraParams, types)
     let callArgsStr =
       if callArgs.len > 0:
         callArgs.join(", ") & ", "
@@ -328,25 +511,15 @@ proc generateGoFile*(
   for p in procs:
     if p.kind != FFIKind.FFI:
       continue
-    if not allSupported(p):
+    if not allSupported(p, types):
       L.add(
         "// SKIPPED " & p.procName &
-          ": struct/seq/Option params unsupported by Go codegen"
+          ": unsupported param (raw pointer or bare seq/Option) for Go codegen"
       )
       L.add("")
       continue
     let mName = methodName(p.procName, libName)
-    var goParams: seq[string] = @[]
-    var conv: seq[string] = @[]
-    var callArgs: seq[string] = @[]
-    for ep in p.extraParams:
-      goParams.add(ep.name & " " & nimTypeToGo(ep.typeName))
-      if nimTypeToGo(ep.typeName) == "string":
-        conv.add("\tc_" & ep.name & " := C.CString(" & ep.name & ")")
-        conv.add("\tdefer C.free(unsafe.Pointer(c_" & ep.name & "))")
-        callArgs.add("c_" & ep.name)
-      else:
-        callArgs.add(cgoArgType(ep.typeName) & "(" & ep.name & ")")
+    let (goParams, conv, callArgs) = goParamConv(p.extraParams, types)
     let callArgsStr =
       if callArgs.len > 0:
         ", " & callArgs.join(", ")
@@ -390,6 +563,12 @@ proc generateGoBindings*(
 ) =
   writeFile(
     outputDir / (libName & ".go"), generateGoFile(procs, types, libName, events)
+  )
+  # cgo `#include "<lib>.h"` resolves against this package directory, so emit the
+  # native C header here too — the Go package is then self-contained (just stage
+  # the built lib next to it).
+  writeFile(
+    outputDir / (libName & ".h"), generateCHeader(procs, types, libName, events)
   )
   # Emit a go.mod so the generated package is an importable module (parity with
   # the Rust/C++ generators that emit Cargo.toml / CMakeLists.txt). Consumers can
