@@ -33,7 +33,9 @@ The native path passes `{.ffi.}` structs as flat C-POD values (`const char*` for
 strings, `{ T* ptr; size_t len }` for sequences, `{ int present; T }` for
 options). Arguments are **deep-copied** across the FFI-thread boundary, so the C
 caller's buffers can be freed immediately after the call returns. String returns
-come back raw; struct returns are CBOR-encoded inside the callback payload.
+arrive as raw bytes; **struct returns arrive as a typed `const <Type>*`** in the
+callback (cast and read it there — it is valid only for the callback's lifetime,
+and the library deep-frees it afterwards, so copy out anything you need).
 
 For the cross-process / cross-machine path, the same library is reached over a
 socket using the CBOR ABI — see [`../ipc`](../ipc).
