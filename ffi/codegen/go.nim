@@ -224,8 +224,50 @@ proc goMarshalField(f: FFIFieldMeta, types: seq[FFITypeMeta]): seq[string] =
       lines.add(ln)
   return lines
 
+# --- reverse marshalling: C-POD -> Go (for typed struct returns) ------------
+# Used inside the result callback, where the POD is still alive; everything is
+# copied out into Go-owned memory before the library frees the POD.
+
+proc fromCExpr(src, typeName: string, types: seq[FFITypeMeta]): string =
+  ## A Go expression converting the cgo value `src` to its Go type.
+  let t = typeName.strip()
+  if isStringT(t): "C.GoString(" & src & ")"
+  elif isFFIStruct(t, types): t & "FromC(&" & src & ")"
+  elif t == "bool": "(" & src & " != 0)"
+  else: nimTypeToGo(t) & "(" & src & ")"
+
+proc goUnmarshalField(f: FFIFieldMeta, types: seq[FFITypeMeta]): seq[string] =
+  ## Copy `c.<field>` (+ `_len` / `_present`) out into `v.<Field>`.
+  var lines: seq[string] = @[]
+  let cname = f.name
+  let gofld = capitalizeFirstLetter(f.name)
+  let t = f.typeName.strip()
+  if isSeqT(t):
+    let elem = seqElemT(t)
+    let elemGo = goFieldType(elem, types)
+    lines.add("\tif c." & cname & "_len > 0 {")
+    lines.add(
+      "\t\tsrc_" & cname & " := unsafe.Slice(c." & cname & ", int(c." & cname & "_len))"
+    )
+    lines.add("\t\tv." & gofld & " = make([]" & elemGo & ", int(c." & cname & "_len))")
+    lines.add("\t\tfor i := range src_" & cname & " {")
+    lines.add(
+      "\t\t\tv." & gofld & "[i] = " & fromCExpr("src_" & cname & "[i]", elem, types)
+    )
+    lines.add("\t\t}")
+    lines.add("\t}")
+  elif isOptT(t):
+    let elem = optElemT(t)
+    lines.add("\tif c." & cname & "_present != 0 {")
+    lines.add("\t\ttmp_" & cname & " := " & fromCExpr("c." & cname, elem, types))
+    lines.add("\t\tv." & gofld & " = &tmp_" & cname)
+    lines.add("\t}")
+  else:
+    lines.add("\tv." & gofld & " = " & fromCExpr("c." & cname, t, types))
+  return lines
+
 proc emitGoTypesAndToC(types: seq[FFITypeMeta]): seq[string] =
-  ## A Go struct + `toC()` marshaller for every {.ffi.} type.
+  ## A Go struct + `toC()` marshaller + `fromC()` reader for every {.ffi.} type.
   var lines: seq[string] = @[]
   for ty in types:
     lines.add("// " & ty.name & " mirrors the {.ffi.} type of the same name.")
@@ -245,6 +287,18 @@ proc emitGoTypesAndToC(types: seq[FFITypeMeta]): seq[string] =
       for ln in goMarshalField(f, types):
         lines.add(ln)
     lines.add("\treturn c, frees")
+    lines.add("}")
+    lines.add("")
+    lines.add(
+      "// " & ty.name & "FromC copies a C-POD " & ty.name & " (e.g. a typed return" &
+        ") into a Go value."
+    )
+    lines.add("func " & ty.name & "FromC(c *C." & ty.name & ") " & ty.name & " {")
+    lines.add("\tvar v " & ty.name)
+    for f in ty.fields:
+      for ln in goUnmarshalField(f, types):
+        lines.add(ln)
+    lines.add("\treturn v")
     lines.add("}")
     lines.add("")
   return lines
@@ -316,6 +370,15 @@ proc generateGoFile*(
   L.add(
     "extern void " & libName & "GoEvent(int ret, char* msg, size_t len, void* userData);"
   )
+  # One exported Go result callback per struct-returning proc (it reads the typed
+  # return POD in-callback). Forward-declared here so cgo's `char*` shape matches.
+  for p in procs:
+    if p.kind == FFIKind.FFI and allSupported(p, types) and
+        isFFIStruct(p.returnTypeName, types):
+      L.add(
+        "extern void " & libName & "Result" & methodName(p.procName, libName) &
+          "(int ret, char* msg, size_t len, void* ud);"
+      )
   L.add("")
   L.add("typedef struct {")
   L.add("  int ret; char* msg; size_t len; int done;")
@@ -386,9 +449,13 @@ proc generateGoFile*(
     L.add("  return ctx;")
     L.add("}")
 
-  # per-proc bridges
+  # per-proc bridges — only for string/raw-returning procs. Struct-returning
+  # procs call the native entry point directly from Go with an exported Go
+  # callback (the C RespCb would copy struct bytes whose pointers then dangle).
   for p in procs:
     if p.kind != FFIKind.FFI or not allSupported(p, types):
+      continue
+    if isFFIStruct(p.returnTypeName, types):
       continue
     var cparams: seq[string] = @[]
     var callArgs: seq[string] = @[]
@@ -431,9 +498,18 @@ proc generateGoFile*(
   L.add("")
   L.add("import (")
   L.add("\t\"errors\"")
+  L.add("\t\"runtime/cgo\"")
   L.add("\t\"sync\"")
   L.add("\t\"unsafe\"")
   L.add(")")
+  L.add("")
+  # Carries one typed result from the FFI-thread callback back to the blocked
+  # caller goroutine; passed through C as a cgo.Handle token (stable under GC).
+  L.add("type resultSlot struct {")
+  L.add("\tval  any")
+  L.add("\terr  error")
+  L.add("\tdone chan struct{}")
+  L.add("}")
   L.add("")
 
   # ---- Go mirrors of the {.ffi.} types (with C-POD marshalling) ------------
@@ -525,21 +601,75 @@ proc generateGoFile*(
         ", " & callArgs.join(", ")
       else:
         ""
-    L.add(
-      "func (n *" & nodeType & ") " & mName & "(" & goParams.join(", ") &
-        ") (string, error) {"
-    )
-    for c in conv:
-      L.add(c)
-    L.add("\tr := C." & libName & "RespNew()")
-    L.add("\tdefer C." & libName & "RespFree(r)")
-    L.add("\tC." & libName & "Call_" & p.procName & "(n.ctx" & callArgsStr & ", r)")
-    L.add("\tif C." & libName & "RespRet(r) != C.RET_OK {")
-    L.add("\t\treturn \"\", errors.New(respStr(r))")
-    L.add("\t}")
-    L.add("\treturn respStr(r), nil")
-    L.add("}")
-    L.add("")
+
+    if isFFIStruct(p.returnTypeName, types):
+      # Typed struct return: call the native entry point directly with an
+      # exported Go callback; a cgo.Handle token carries the result slot through
+      # C (stable under GC) so the async callback can deliver the typed value.
+      let retT = p.returnTypeName
+      let cbName = libName & "Result" & mName
+      L.add("//export " & cbName)
+      L.add(
+        "func " & cbName &
+          "(ret C.int, msg *C.char, length C.size_t, ud unsafe.Pointer) {"
+      )
+      L.add("\tslot := cgo.Handle(*(*C.uintptr_t)(ud)).Value().(*resultSlot)")
+      L.add("\tif ret == C.RET_OK {")
+      L.add("\t\tslot.val = " & retT & "FromC((*C." & retT & ")(unsafe.Pointer(msg)))")
+      L.add("\t} else {")
+      L.add("\t\tslot.err = errors.New(C.GoStringN(msg, C.int(length)))")
+      L.add("\t}")
+      L.add("\tclose(slot.done)")
+      L.add("}")
+      L.add("")
+      L.add(
+        "func (n *" & nodeType & ") " & mName & "(" & goParams.join(", ") & ") (" &
+          retT & ", error) {"
+      )
+      for c in conv:
+        L.add(c)
+      L.add("\tslot := &resultSlot{done: make(chan struct{})}")
+      L.add("\th := cgo.NewHandle(slot)")
+      L.add("\tdefer h.Delete()")
+      # Box the cgo.Handle in a small C allocation and pass that real C pointer as
+      # the void* userData. The handle is a stable GC-safe token; boxing it (vs.
+      # casting it straight to unsafe.Pointer) keeps -race/checkptr happy.
+      L.add(
+        "\thbox := (*C.uintptr_t)(C.malloc(C.size_t(unsafe.Sizeof(C.uintptr_t(0)))))"
+      )
+      L.add("\t*hbox = C.uintptr_t(h)")
+      L.add("\tdefer C.free(unsafe.Pointer(hbox))")
+      L.add(
+        "\trc := C." & p.procName &
+          "(n.ctx, C.FFICallBack(C." & cbName & "), unsafe.Pointer(hbox)" &
+          callArgsStr & ")"
+      )
+      L.add("\tif rc != C.RET_OK {")
+      L.add("\t\treturn " & retT & "{}, errors.New(\"" & p.procName & ": dispatch failed\")")
+      L.add("\t}")
+      L.add("\t<-slot.done")
+      L.add("\tif slot.err != nil {")
+      L.add("\t\treturn " & retT & "{}, slot.err")
+      L.add("\t}")
+      L.add("\treturn slot.val.(" & retT & "), nil")
+      L.add("}")
+      L.add("")
+    else:
+      L.add(
+        "func (n *" & nodeType & ") " & mName & "(" & goParams.join(", ") &
+          ") (string, error) {"
+      )
+      for c in conv:
+        L.add(c)
+      L.add("\tr := C." & libName & "RespNew()")
+      L.add("\tdefer C." & libName & "RespFree(r)")
+      L.add("\tC." & libName & "Call_" & p.procName & "(n.ctx" & callArgsStr & ", r)")
+      L.add("\tif C." & libName & "RespRet(r) != C.RET_OK {")
+      L.add("\t\treturn \"\", errors.New(respStr(r))")
+      L.add("\t}")
+      L.add("\treturn respStr(r), nil")
+      L.add("}")
+      L.add("")
 
   # ---- destructor ----------------------------------------------------------
   if haveDtor:

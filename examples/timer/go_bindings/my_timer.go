@@ -10,6 +10,9 @@ package my_timer
 #include <pthread.h>
 
 extern void my_timerGoEvent(int ret, char* msg, size_t len, void* userData);
+extern void my_timerResultEcho(int ret, char* msg, size_t len, void* ud);
+extern void my_timerResultComplex(int ret, char* msg, size_t len, void* ud);
+extern void my_timerResultSchedule(int ret, char* msg, size_t len, void* ud);
 
 typedef struct {
   int ret; char* msg; size_t len; int done;
@@ -51,23 +54,8 @@ static void* my_timerCall_my_timer_create(TimerConfig config, My_timerResp* r) {
   my_timerRespWait(r);
   return ctx;
 }
-static int my_timerCall_my_timer_echo(void* ctx, EchoRequest req, My_timerResp* r) {
-  int rc = my_timer_echo(ctx, my_timerRespCb, r, req);
-  if (rc == RET_OK) my_timerRespWait(r);
-  return rc;
-}
 static int my_timerCall_my_timer_version(void* ctx, My_timerResp* r) {
   int rc = my_timer_version(ctx, my_timerRespCb, r);
-  if (rc == RET_OK) my_timerRespWait(r);
-  return rc;
-}
-static int my_timerCall_my_timer_complex(void* ctx, ComplexRequest req, My_timerResp* r) {
-  int rc = my_timer_complex(ctx, my_timerRespCb, r, req);
-  if (rc == RET_OK) my_timerRespWait(r);
-  return rc;
-}
-static int my_timerCall_my_timer_schedule(void* ctx, JobSpec job, RetryPolicy retry, ScheduleConfig schedule, My_timerResp* r) {
-  int rc = my_timer_schedule(ctx, my_timerRespCb, r, job, retry, schedule);
   if (rc == RET_OK) my_timerRespWait(r);
   return rc;
 }
@@ -78,9 +66,16 @@ import "C"
 
 import (
 	"errors"
+	"runtime/cgo"
 	"sync"
 	"unsafe"
 )
+
+type resultSlot struct {
+	val  any
+	err  error
+	done chan struct{}
+}
 
 // TimerConfig mirrors the {.ffi.} type of the same name.
 type TimerConfig struct {
@@ -95,6 +90,13 @@ func (v TimerConfig) toC() (C.TimerConfig, []func()) {
 	frees = append(frees, func() { C.free(unsafe.Pointer(cs_name)) })
 	c.name = cs_name
 	return c, frees
+}
+
+// TimerConfigFromC copies a C-POD TimerConfig (e.g. a typed return) into a Go value.
+func TimerConfigFromC(c *C.TimerConfig) TimerConfig {
+	var v TimerConfig
+	v.Name = C.GoString(c.name)
+	return v
 }
 
 // EchoRequest mirrors the {.ffi.} type of the same name.
@@ -114,6 +116,14 @@ func (v EchoRequest) toC() (C.EchoRequest, []func()) {
 	return c, frees
 }
 
+// EchoRequestFromC copies a C-POD EchoRequest (e.g. a typed return) into a Go value.
+func EchoRequestFromC(c *C.EchoRequest) EchoRequest {
+	var v EchoRequest
+	v.Message = C.GoString(c.message)
+	v.DelayMs = int64(c.delayMs)
+	return v
+}
+
 // EchoResponse mirrors the {.ffi.} type of the same name.
 type EchoResponse struct {
 	Echoed    string
@@ -131,6 +141,14 @@ func (v EchoResponse) toC() (C.EchoResponse, []func()) {
 	frees = append(frees, func() { C.free(unsafe.Pointer(cs_timerName)) })
 	c.timerName = cs_timerName
 	return c, frees
+}
+
+// EchoResponseFromC copies a C-POD EchoResponse (e.g. a typed return) into a Go value.
+func EchoResponseFromC(c *C.EchoResponse) EchoResponse {
+	var v EchoResponse
+	v.Echoed = C.GoString(c.echoed)
+	v.TimerName = C.GoString(c.timerName)
+	return v
 }
 
 // ComplexRequest mirrors the {.ffi.} type of the same name.
@@ -184,6 +202,34 @@ func (v ComplexRequest) toC() (C.ComplexRequest, []func()) {
 	return c, frees
 }
 
+// ComplexRequestFromC copies a C-POD ComplexRequest (e.g. a typed return) into a Go value.
+func ComplexRequestFromC(c *C.ComplexRequest) ComplexRequest {
+	var v ComplexRequest
+	if c.messages_len > 0 {
+		src_messages := unsafe.Slice(c.messages, int(c.messages_len))
+		v.Messages = make([]EchoRequest, int(c.messages_len))
+		for i := range src_messages {
+			v.Messages[i] = EchoRequestFromC(&src_messages[i])
+		}
+	}
+	if c.tags_len > 0 {
+		src_tags := unsafe.Slice(c.tags, int(c.tags_len))
+		v.Tags = make([]string, int(c.tags_len))
+		for i := range src_tags {
+			v.Tags[i] = C.GoString(src_tags[i])
+		}
+	}
+	if c.note_present != 0 {
+		tmp_note := C.GoString(c.note)
+		v.Note = &tmp_note
+	}
+	if c.retries_present != 0 {
+		tmp_retries := int64(c.retries)
+		v.Retries = &tmp_retries
+	}
+	return v
+}
+
 // ComplexResponse mirrors the {.ffi.} type of the same name.
 type ComplexResponse struct {
 	Summary   string
@@ -207,6 +253,15 @@ func (v ComplexResponse) toC() (C.ComplexResponse, []func()) {
 	return c, frees
 }
 
+// ComplexResponseFromC copies a C-POD ComplexResponse (e.g. a typed return) into a Go value.
+func ComplexResponseFromC(c *C.ComplexResponse) ComplexResponse {
+	var v ComplexResponse
+	v.Summary = C.GoString(c.summary)
+	v.ItemCount = int64(c.itemCount)
+	v.HasNote = (c.hasNote != 0)
+	return v
+}
+
 // EchoEvent mirrors the {.ffi.} type of the same name.
 type EchoEvent struct {
 	Message   string
@@ -222,6 +277,14 @@ func (v EchoEvent) toC() (C.EchoEvent, []func()) {
 	c.message = cs_message
 	c.echoCount = C.int64_t(v.EchoCount)
 	return c, frees
+}
+
+// EchoEventFromC copies a C-POD EchoEvent (e.g. a typed return) into a Go value.
+func EchoEventFromC(c *C.EchoEvent) EchoEvent {
+	var v EchoEvent
+	v.Message = C.GoString(c.message)
+	v.EchoCount = int64(c.echoCount)
+	return v
 }
 
 // JobSpec mirrors the {.ffi.} type of the same name.
@@ -255,6 +318,21 @@ func (v JobSpec) toC() (C.JobSpec, []func()) {
 	return c, frees
 }
 
+// JobSpecFromC copies a C-POD JobSpec (e.g. a typed return) into a Go value.
+func JobSpecFromC(c *C.JobSpec) JobSpec {
+	var v JobSpec
+	v.Name = C.GoString(c.name)
+	if c.payload_len > 0 {
+		src_payload := unsafe.Slice(c.payload, int(c.payload_len))
+		v.Payload = make([]string, int(c.payload_len))
+		for i := range src_payload {
+			v.Payload[i] = C.GoString(src_payload[i])
+		}
+	}
+	v.Priority = int64(c.priority)
+	return v
+}
+
 // RetryPolicy mirrors the {.ffi.} type of the same name.
 type RetryPolicy struct {
 	MaxAttempts int64
@@ -284,6 +362,21 @@ func (v RetryPolicy) toC() (C.RetryPolicy, []func()) {
 	return c, frees
 }
 
+// RetryPolicyFromC copies a C-POD RetryPolicy (e.g. a typed return) into a Go value.
+func RetryPolicyFromC(c *C.RetryPolicy) RetryPolicy {
+	var v RetryPolicy
+	v.MaxAttempts = int64(c.maxAttempts)
+	v.BackoffMs = int64(c.backoffMs)
+	if c.retryOn_len > 0 {
+		src_retryOn := unsafe.Slice(c.retryOn, int(c.retryOn_len))
+		v.RetryOn = make([]string, int(c.retryOn_len))
+		for i := range src_retryOn {
+			v.RetryOn[i] = C.GoString(src_retryOn[i])
+		}
+	}
+	return v
+}
+
 // ScheduleConfig mirrors the {.ffi.} type of the same name.
 type ScheduleConfig struct {
 	StartAtMs  int64
@@ -302,6 +395,18 @@ func (v ScheduleConfig) toC() (C.ScheduleConfig, []func()) {
 		c.jitter = C.int64_t(*v.Jitter)
 	}
 	return c, frees
+}
+
+// ScheduleConfigFromC copies a C-POD ScheduleConfig (e.g. a typed return) into a Go value.
+func ScheduleConfigFromC(c *C.ScheduleConfig) ScheduleConfig {
+	var v ScheduleConfig
+	v.StartAtMs = int64(c.startAtMs)
+	v.IntervalMs = int64(c.intervalMs)
+	if c.jitter_present != 0 {
+		tmp_jitter := int64(c.jitter)
+		v.Jitter = &tmp_jitter
+	}
+	return v
 }
 
 // ScheduleResult mirrors the {.ffi.} type of the same name.
@@ -323,6 +428,16 @@ func (v ScheduleResult) toC() (C.ScheduleResult, []func()) {
 	c.firstRunAtMs = C.int64_t(v.FirstRunAtMs)
 	c.effectiveBackoffMs = C.int64_t(v.EffectiveBackoffMs)
 	return c, frees
+}
+
+// ScheduleResultFromC copies a C-POD ScheduleResult (e.g. a typed return) into a Go value.
+func ScheduleResultFromC(c *C.ScheduleResult) ScheduleResult {
+	var v ScheduleResult
+	v.JobId = C.GoString(c.jobId)
+	v.WillRunCount = int64(c.willRunCount)
+	v.FirstRunAtMs = int64(c.firstRunAtMs)
+	v.EffectiveBackoffMs = int64(c.effectiveBackoffMs)
+	return v
 }
 
 type My_timerNode struct {
@@ -374,20 +489,39 @@ func NewMy_timer(config TimerConfig) (*My_timerNode, error) {
 	return &My_timerNode{ctx: ctx}, nil
 }
 
-func (n *My_timerNode) Echo(req EchoRequest) (string, error) {
+//export my_timerResultEcho
+func my_timerResultEcho(ret C.int, msg *C.char, length C.size_t, ud unsafe.Pointer) {
+	slot := cgo.Handle(*(*C.uintptr_t)(ud)).Value().(*resultSlot)
+	if ret == C.RET_OK {
+		slot.val = EchoResponseFromC((*C.EchoResponse)(unsafe.Pointer(msg)))
+	} else {
+		slot.err = errors.New(C.GoStringN(msg, C.int(length)))
+	}
+	close(slot.done)
+}
+
+func (n *My_timerNode) Echo(req EchoRequest) (EchoResponse, error) {
 	c_req, free_req := req.toC()
 	defer func() {
 		for _, f := range free_req {
 			f()
 		}
 	}()
-	r := C.my_timerRespNew()
-	defer C.my_timerRespFree(r)
-	C.my_timerCall_my_timer_echo(n.ctx, c_req, r)
-	if C.my_timerRespRet(r) != C.RET_OK {
-		return "", errors.New(respStr(r))
+	slot := &resultSlot{done: make(chan struct{})}
+	h := cgo.NewHandle(slot)
+	defer h.Delete()
+	hbox := (*C.uintptr_t)(C.malloc(C.size_t(unsafe.Sizeof(C.uintptr_t(0)))))
+	*hbox = C.uintptr_t(h)
+	defer C.free(unsafe.Pointer(hbox))
+	rc := C.my_timer_echo(n.ctx, C.FFICallBack(C.my_timerResultEcho), unsafe.Pointer(hbox), c_req)
+	if rc != C.RET_OK {
+		return EchoResponse{}, errors.New("my_timer_echo: dispatch failed")
 	}
-	return respStr(r), nil
+	<-slot.done
+	if slot.err != nil {
+		return EchoResponse{}, slot.err
+	}
+	return slot.val.(EchoResponse), nil
 }
 
 func (n *My_timerNode) Version() (string, error) {
@@ -400,23 +534,53 @@ func (n *My_timerNode) Version() (string, error) {
 	return respStr(r), nil
 }
 
-func (n *My_timerNode) Complex(req ComplexRequest) (string, error) {
+//export my_timerResultComplex
+func my_timerResultComplex(ret C.int, msg *C.char, length C.size_t, ud unsafe.Pointer) {
+	slot := cgo.Handle(*(*C.uintptr_t)(ud)).Value().(*resultSlot)
+	if ret == C.RET_OK {
+		slot.val = ComplexResponseFromC((*C.ComplexResponse)(unsafe.Pointer(msg)))
+	} else {
+		slot.err = errors.New(C.GoStringN(msg, C.int(length)))
+	}
+	close(slot.done)
+}
+
+func (n *My_timerNode) Complex(req ComplexRequest) (ComplexResponse, error) {
 	c_req, free_req := req.toC()
 	defer func() {
 		for _, f := range free_req {
 			f()
 		}
 	}()
-	r := C.my_timerRespNew()
-	defer C.my_timerRespFree(r)
-	C.my_timerCall_my_timer_complex(n.ctx, c_req, r)
-	if C.my_timerRespRet(r) != C.RET_OK {
-		return "", errors.New(respStr(r))
+	slot := &resultSlot{done: make(chan struct{})}
+	h := cgo.NewHandle(slot)
+	defer h.Delete()
+	hbox := (*C.uintptr_t)(C.malloc(C.size_t(unsafe.Sizeof(C.uintptr_t(0)))))
+	*hbox = C.uintptr_t(h)
+	defer C.free(unsafe.Pointer(hbox))
+	rc := C.my_timer_complex(n.ctx, C.FFICallBack(C.my_timerResultComplex), unsafe.Pointer(hbox), c_req)
+	if rc != C.RET_OK {
+		return ComplexResponse{}, errors.New("my_timer_complex: dispatch failed")
 	}
-	return respStr(r), nil
+	<-slot.done
+	if slot.err != nil {
+		return ComplexResponse{}, slot.err
+	}
+	return slot.val.(ComplexResponse), nil
 }
 
-func (n *My_timerNode) Schedule(job JobSpec, retry RetryPolicy, schedule ScheduleConfig) (string, error) {
+//export my_timerResultSchedule
+func my_timerResultSchedule(ret C.int, msg *C.char, length C.size_t, ud unsafe.Pointer) {
+	slot := cgo.Handle(*(*C.uintptr_t)(ud)).Value().(*resultSlot)
+	if ret == C.RET_OK {
+		slot.val = ScheduleResultFromC((*C.ScheduleResult)(unsafe.Pointer(msg)))
+	} else {
+		slot.err = errors.New(C.GoStringN(msg, C.int(length)))
+	}
+	close(slot.done)
+}
+
+func (n *My_timerNode) Schedule(job JobSpec, retry RetryPolicy, schedule ScheduleConfig) (ScheduleResult, error) {
 	c_job, free_job := job.toC()
 	defer func() {
 		for _, f := range free_job {
@@ -435,13 +599,21 @@ func (n *My_timerNode) Schedule(job JobSpec, retry RetryPolicy, schedule Schedul
 			f()
 		}
 	}()
-	r := C.my_timerRespNew()
-	defer C.my_timerRespFree(r)
-	C.my_timerCall_my_timer_schedule(n.ctx, c_job, c_retry, c_schedule, r)
-	if C.my_timerRespRet(r) != C.RET_OK {
-		return "", errors.New(respStr(r))
+	slot := &resultSlot{done: make(chan struct{})}
+	h := cgo.NewHandle(slot)
+	defer h.Delete()
+	hbox := (*C.uintptr_t)(C.malloc(C.size_t(unsafe.Sizeof(C.uintptr_t(0)))))
+	*hbox = C.uintptr_t(h)
+	defer C.free(unsafe.Pointer(hbox))
+	rc := C.my_timer_schedule(n.ctx, C.FFICallBack(C.my_timerResultSchedule), unsafe.Pointer(hbox), c_job, c_retry, c_schedule)
+	if rc != C.RET_OK {
+		return ScheduleResult{}, errors.New("my_timer_schedule: dispatch failed")
 	}
-	return respStr(r), nil
+	<-slot.done
+	if slot.err != nil {
+		return ScheduleResult{}, slot.err
+	}
+	return slot.val.(ScheduleResult), nil
 }
 
 func (n *My_timerNode) Destroy() error {
