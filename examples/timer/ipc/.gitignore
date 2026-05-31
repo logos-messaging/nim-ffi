@@ -1,0 +1,5 @@
+/server
+/client
+/libmy_timer.dylib
+/libmy_timer.so
+/.srv.pid
