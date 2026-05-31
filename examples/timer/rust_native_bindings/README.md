@@ -21,8 +21,12 @@ Regenerate with `nimble genbindings_rust_native`.
 
 ## Status
 
-First cut — scalar / string / bool / float / nested-struct fields (create,
-version, echo). Methods taking sequences or optionals (complex, schedule) are
-`// SKIPPED`; those plus native typed events are the next increments. Linking is
-left to the consumer (`-L <dir> -l my_timer` + an rpath, as in `examples/demo.rs`);
-a build.rs that compiles the dylib (like the CBOR crate) can be added later.
+Requests are fully supported: scalar / string / bool / float / nested struct
+**and now sequences (`Vec`) and optionals (`Option`)** — create, version, echo,
+complex, schedule all generate and round-trip typed values. `to_c` returns a
+holder that owns the `CString`s and C-array backing (heap, so the C struct's raw
+pointers stay valid across the move and for the call).
+
+Still to come: native typed events and the native-bare / `_cbor` reconciliation.
+Linking is left to the consumer (`-L <dir> -l my_timer` + rpath, as in
+`examples/demo.rs`); a build.rs that compiles the dylib can be added later.

@@ -31,6 +31,20 @@ unsafe extern "C" fn cb_my_timer_echo(ret: c_int, msg: *const c_char, len: usize
     } else { Err(err_text(msg, len)) };
     let _ = tx.send(r);
 }
+unsafe extern "C" fn cb_my_timer_complex(ret: c_int, msg: *const c_char, len: usize, ud: *mut c_void) {
+    let tx = Box::from_raw(ud as *mut SyncSender<Result<ComplexResponse, String>>);
+    let r = if ret == RET_OK && !msg.is_null() {
+        Ok(ComplexResponse::from_c(&*(msg as *const ffi::ComplexResponse)))
+    } else { Err(err_text(msg, len)) };
+    let _ = tx.send(r);
+}
+unsafe extern "C" fn cb_my_timer_schedule(ret: c_int, msg: *const c_char, len: usize, ud: *mut c_void) {
+    let tx = Box::from_raw(ud as *mut SyncSender<Result<ScheduleResult, String>>);
+    let r = if ret == RET_OK && !msg.is_null() {
+        Ok(ScheduleResult::from_c(&*(msg as *const ffi::ScheduleResult)))
+    } else { Err(err_text(msg, len)) };
+    let _ = tx.send(r);
+}
 
 pub struct MyTimerNode { ctx: *mut c_void }
 unsafe impl Send for MyTimerNode {}
@@ -38,29 +52,25 @@ unsafe impl Sync for MyTimerNode {}
 
 impl MyTimerNode {
     pub fn new(config: TimerConfig) -> Result<Self, String> {
-        let mut strings = Vec::new();
-        let c_config = config.to_c_inner(&mut strings);
+        let c_config = config.to_c();
         let (tx, rx) = sync_channel::<Result<(), String>>(1);
         let raw = Box::into_raw(Box::new(tx)) as *mut c_void;
-        let ctx = unsafe { ffi::my_timer_create(c_config, ack_cb, raw) };
+        let ctx = unsafe { ffi::my_timer_create(c_config.c, ack_cb, raw) };
         let res = rx.recv().map_err(|_| String::from("callback channel closed"))?;
         res?;
         if ctx.is_null() { return Err(String::from("my_timer_create returned null")); }
-        let _ = strings;
         Ok(MyTimerNode { ctx })
     }
 
     pub fn echo(&self, req: EchoRequest) -> Result<EchoResponse, String> {
-        let mut strings = Vec::new();
-        let c_req = req.to_c_inner(&mut strings);
+        let c_req = req.to_c();
         let (tx, rx) = sync_channel::<Result<EchoResponse, String>>(1);
         let raw = Box::into_raw(Box::new(tx)) as *mut c_void;
-        let rc = unsafe { ffi::my_timer_echo(self.ctx, cb_my_timer_echo, raw, c_req) };
+        let rc = unsafe { ffi::my_timer_echo(self.ctx, cb_my_timer_echo, raw, c_req.c) };
         if rc != RET_OK {
             drop(unsafe { Box::from_raw(raw as *mut SyncSender<Result<EchoResponse, String>>) });
             return Err(String::from("my_timer_echo dispatch failed"));
         }
-        let _ = strings;
         rx.recv().map_err(|_| String::from("callback channel closed"))?
     }
 
@@ -75,8 +85,32 @@ impl MyTimerNode {
         rx.recv().map_err(|_| String::from("callback channel closed"))?
     }
 
-    // SKIPPED my_timer_complex: seq/Option params not yet supported by native Rust codegen
-    // SKIPPED my_timer_schedule: seq/Option params not yet supported by native Rust codegen
+    pub fn complex(&self, req: ComplexRequest) -> Result<ComplexResponse, String> {
+        let c_req = req.to_c();
+        let (tx, rx) = sync_channel::<Result<ComplexResponse, String>>(1);
+        let raw = Box::into_raw(Box::new(tx)) as *mut c_void;
+        let rc = unsafe { ffi::my_timer_complex(self.ctx, cb_my_timer_complex, raw, c_req.c) };
+        if rc != RET_OK {
+            drop(unsafe { Box::from_raw(raw as *mut SyncSender<Result<ComplexResponse, String>>) });
+            return Err(String::from("my_timer_complex dispatch failed"));
+        }
+        rx.recv().map_err(|_| String::from("callback channel closed"))?
+    }
+
+    pub fn schedule(&self, job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig) -> Result<ScheduleResult, String> {
+        let c_job = job.to_c();
+        let c_retry = retry.to_c();
+        let c_schedule = schedule.to_c();
+        let (tx, rx) = sync_channel::<Result<ScheduleResult, String>>(1);
+        let raw = Box::into_raw(Box::new(tx)) as *mut c_void;
+        let rc = unsafe { ffi::my_timer_schedule(self.ctx, cb_my_timer_schedule, raw, c_job.c, c_retry.c, c_schedule.c) };
+        if rc != RET_OK {
+            drop(unsafe { Box::from_raw(raw as *mut SyncSender<Result<ScheduleResult, String>>) });
+            return Err(String::from("my_timer_schedule dispatch failed"));
+        }
+        rx.recv().map_err(|_| String::from("callback channel closed"))?
+    }
+
 }
 
 impl Drop for MyTimerNode {

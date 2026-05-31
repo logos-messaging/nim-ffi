@@ -27,6 +27,19 @@ pub struct EchoResponse {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct ComplexRequest {
+    pub messages: *const EchoRequest,
+    pub messages_len: usize,
+    pub tags: *const *const c_char,
+    pub tags_len: usize,
+    pub note_present: c_int,
+    pub note: *const c_char,
+    pub retries_present: c_int,
+    pub retries: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct ComplexResponse {
     pub summary: *const c_char,
     pub item_count: i64,
@@ -38,6 +51,33 @@ pub struct ComplexResponse {
 pub struct EchoEvent {
     pub message: *const c_char,
     pub echo_count: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct JobSpec {
+    pub name: *const c_char,
+    pub payload: *const *const c_char,
+    pub payload_len: usize,
+    pub priority: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RetryPolicy {
+    pub max_attempts: i64,
+    pub backoff_ms: i64,
+    pub retry_on: *const *const c_char,
+    pub retry_on_len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ScheduleConfig {
+    pub start_at_ms: i64,
+    pub interval_ms: i64,
+    pub jitter_present: c_int,
+    pub jitter: i64,
 }
 
 #[repr(C)]
@@ -54,5 +94,7 @@ extern "C" {
     pub fn my_timer_create(config: TimerConfig, callback: FFICallback, user_data: *mut c_void) -> *mut c_void;
     pub fn my_timer_echo(ctx: *mut c_void, callback: FFICallback, user_data: *mut c_void, req: EchoRequest) -> c_int;
     pub fn my_timer_version(ctx: *mut c_void, callback: FFICallback, user_data: *mut c_void) -> c_int;
+    pub fn my_timer_complex(ctx: *mut c_void, callback: FFICallback, user_data: *mut c_void, req: ComplexRequest) -> c_int;
+    pub fn my_timer_schedule(ctx: *mut c_void, callback: FFICallback, user_data: *mut c_void, job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig) -> c_int;
     pub fn my_timer_destroy(ctx: *mut c_void) -> c_int;
 }
