@@ -195,15 +195,18 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
       params.add("user_data: *mut c_void")
       params.add("req_cbor: *const u8")
       params.add("req_cbor_len: usize")
-      lines.add("    pub fn $1($2) -> c_int;" % [p.procName, params.join(", ")])
+      # The Rust wrapper speaks CBOR, so it targets the `<name>_cbor` exports;
+      # the bare `<name>` symbol is the native (typed-args) entry point.
+      lines.add("    pub fn $1_cbor($2) -> c_int;" % [p.procName, params.join(", ")])
     of FFIKind.CTOR:
       # Constructor: no ctx; returns the freshly-allocated handle
       params.add("req_cbor: *const u8")
       params.add("req_cbor_len: usize")
       params.add("callback: FFICallback")
       params.add("user_data: *mut c_void")
-      lines.add("    pub fn $1($2) -> *mut c_void;" % [p.procName, params.join(", ")])
+      lines.add("    pub fn $1_cbor($2) -> *mut c_void;" % [p.procName, params.join(", ")])
     of FFIKind.DTOR:
+      # The destructor takes no request payload, so it has no `_cbor` variant.
       params.add("ctx: *mut c_void")
       lines.add("    pub fn $1($2) -> c_int;" % [p.procName, params.join(", ")])
 
@@ -646,7 +649,7 @@ proc generateApiRs*(
     # on the callback.
     lines.add("        let raw_bytes = ffi_call_sync(timeout, |cb, ud| unsafe {")
     lines.add(
-      "            let _ = ffi::$1(req_bytes.as_ptr(), req_bytes.len(), cb, ud);" %
+      "            let _ = ffi::$1_cbor(req_bytes.as_ptr(), req_bytes.len(), cb, ud);" %
         [ctor.procName]
     )
     lines.add("            0")
@@ -673,7 +676,7 @@ proc generateApiRs*(
     # and rely on the callback to deliver the ctx address.
     lines.add("        let raw_bytes = ffi_call_async(timeout, move |cb, ud| unsafe {")
     lines.add(
-      "            let _ = ffi::$1(req_bytes.as_ptr(), req_bytes.len(), cb, ud);" %
+      "            let _ = ffi::$1_cbor(req_bytes.as_ptr(), req_bytes.len(), cb, ud);" %
         [ctor.procName]
     )
     lines.add("            0")
@@ -846,7 +849,7 @@ proc generateApiRs*(
     lines.add("        let req_bytes = encode_cbor(&req)?;")
     lines.add("        let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {")
     lines.add(
-      "            ffi::$1(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())" %
+      "            ffi::$1_cbor(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())" %
         [m.procName]
     )
     lines.add("        })?;")
@@ -868,7 +871,7 @@ proc generateApiRs*(
       "        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {"
     )
     lines.add(
-      "            ffi::$1(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())" %
+      "            ffi::$1_cbor(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())" %
         [m.procName]
     )
     lines.add("        }).await?;")

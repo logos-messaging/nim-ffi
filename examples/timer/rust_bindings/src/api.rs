@@ -191,7 +191,7 @@ impl MyTimerCtx {
         let req = MyTimerCreateCtorReq { config };
         let req_bytes = encode_cbor(&req)?;
         let raw_bytes = ffi_call_sync(timeout, |cb, ud| unsafe {
-            let _ = ffi::my_timer_create(req_bytes.as_ptr(), req_bytes.len(), cb, ud);
+            let _ = ffi::my_timer_create_cbor(req_bytes.as_ptr(), req_bytes.len(), cb, ud);
             0
         })?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
@@ -203,7 +203,7 @@ impl MyTimerCtx {
         let req = MyTimerCreateCtorReq { config };
         let req_bytes = encode_cbor(&req)?;
         let raw_bytes = ffi_call_async(timeout, move |cb, ud| unsafe {
-            let _ = ffi::my_timer_create(req_bytes.as_ptr(), req_bytes.len(), cb, ud);
+            let _ = ffi::my_timer_create_cbor(req_bytes.as_ptr(), req_bytes.len(), cb, ud);
             0
         }).await?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
@@ -265,7 +265,7 @@ impl MyTimerCtx {
         let req = MyTimerEchoReq { req };
         let req_bytes = encode_cbor(&req)?;
         let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
-            ffi::my_timer_echo(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+            ffi::my_timer_echo_cbor(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         })?;
         decode_cbor::<EchoResponse>(&raw_bytes)
     }
@@ -275,7 +275,7 @@ impl MyTimerCtx {
         let req_bytes = encode_cbor(&req)?;
         let ptr = self.ptr as usize;
         let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
-            ffi::my_timer_echo(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+            ffi::my_timer_echo_cbor(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         }).await?;
         decode_cbor::<EchoResponse>(&raw_bytes)
     }
@@ -284,7 +284,7 @@ impl MyTimerCtx {
         let req = MyTimerVersionReq {};
         let req_bytes = encode_cbor(&req)?;
         let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
-            ffi::my_timer_version(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+            ffi::my_timer_version_cbor(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         })?;
         decode_cbor::<String>(&raw_bytes)
     }
@@ -294,7 +294,7 @@ impl MyTimerCtx {
         let req_bytes = encode_cbor(&req)?;
         let ptr = self.ptr as usize;
         let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
-            ffi::my_timer_version(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+            ffi::my_timer_version_cbor(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         }).await?;
         decode_cbor::<String>(&raw_bytes)
     }
@@ -303,7 +303,7 @@ impl MyTimerCtx {
         let req = MyTimerComplexReq { req };
         let req_bytes = encode_cbor(&req)?;
         let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
-            ffi::my_timer_complex(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+            ffi::my_timer_complex_cbor(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         })?;
         decode_cbor::<ComplexResponse>(&raw_bytes)
     }
@@ -313,7 +313,7 @@ impl MyTimerCtx {
         let req_bytes = encode_cbor(&req)?;
         let ptr = self.ptr as usize;
         let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
-            ffi::my_timer_complex(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+            ffi::my_timer_complex_cbor(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         }).await?;
         decode_cbor::<ComplexResponse>(&raw_bytes)
     }
@@ -322,7 +322,7 @@ impl MyTimerCtx {
         let req = MyTimerScheduleReq { job, retry, schedule };
         let req_bytes = encode_cbor(&req)?;
         let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
-            ffi::my_timer_schedule(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+            ffi::my_timer_schedule_cbor(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         })?;
         decode_cbor::<ScheduleResult>(&raw_bytes)
     }
@@ -332,7 +332,7 @@ impl MyTimerCtx {
         let req_bytes = encode_cbor(&req)?;
         let ptr = self.ptr as usize;
         let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
-            ffi::my_timer_schedule(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+            ffi::my_timer_schedule_cbor(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         }).await?;
         decode_cbor::<ScheduleResult>(&raw_bytes)
     }
