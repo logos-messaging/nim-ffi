@@ -14,6 +14,7 @@ extern uint64_t my_timer_add_event_listener_cbor(void* ctx, const char* eventNam
 extern void my_timerResultEcho(int ret, char* msg, size_t len, void* ud);
 extern void my_timerResultComplex(int ret, char* msg, size_t len, void* ud);
 extern void my_timerResultSchedule(int ret, char* msg, size_t len, void* ud);
+extern void my_timerEvtOnEchoFired(int ret, char* msg, size_t len, void* ud);
 
 typedef struct {
   int ret; char* msg; size_t len; int done;
@@ -471,6 +472,28 @@ func my_timerGoEvent(ret C.int, msg *C.char, length C.size_t, userData unsafe.Po
 	eventMu.Unlock()
 	if h != nil && ret == C.RET_OK {
 		h(C.GoStringN(msg, C.int(length)))
+	}
+}
+
+var evtOnEchoFiredHandler func(EchoEvent)
+
+// OnEchoFired installs the native typed handler for the "on_echo_fired" event.
+func (n *My_timerNode) OnEchoFired(h func(EchoEvent)) {
+	eventMu.Lock()
+	evtOnEchoFiredHandler = h
+	eventMu.Unlock()
+	cn := C.CString("on_echo_fired")
+	defer C.free(unsafe.Pointer(cn))
+	C.my_timer_add_event_listener(n.ctx, cn, C.FFICallBack(C.my_timerEvtOnEchoFired), n.ctx)
+}
+
+//export my_timerEvtOnEchoFired
+func my_timerEvtOnEchoFired(ret C.int, msg *C.char, length C.size_t, ud unsafe.Pointer) {
+	eventMu.Lock()
+	h := evtOnEchoFiredHandler
+	eventMu.Unlock()
+	if h != nil && ret == C.RET_OK {
+		h(EchoEventFromC((*C.EchoEvent)(unsafe.Pointer(msg))))
 	}
 }
 
