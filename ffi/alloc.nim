@@ -59,6 +59,16 @@ proc ffiCFree*(p: pointer) {.inline.} =
   if not p.isNil():
     c_free(p)
 
+proc ffiCAllocArray*(T: typedesc, n: int): ptr UncheckedArray[T] =
+  ## Allocates a zero-initialised array of `n` × `T` via `c_malloc` so it can
+  ## cross threads safely. Used by the native POD codegen for `seq[T]` fields;
+  ## release with `ffiCFree`. Returns nil for a non-positive count.
+  if n <= 0:
+    return nil
+  let p = c_malloc(csize_t(sizeof(T) * n))
+  zeroMem(p, sizeof(T) * n)
+  return cast[ptr UncheckedArray[T]](p)
+
 proc allocSharedSeq*[T](s: seq[T]): SharedSeq[T] =
   if s.len == 0:
     return (cast[ptr UncheckedArray[T]](nil), 0)

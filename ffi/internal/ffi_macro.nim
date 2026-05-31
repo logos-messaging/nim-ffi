@@ -2,6 +2,7 @@ import std/[macros, tables, strutils]
 import chronos
 import ../ffi_types
 import ../codegen/[meta, string_helpers]
+import ./native_pod
 when defined(ffiGenBindings):
   import ../codegen/rust
   import ../codegen/cpp
@@ -74,7 +75,20 @@ proc registerFFITypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
           for i in 0 ..< identDef.len - 2:
             fieldMetas.add(FFIFieldMeta(name: $identDef[i], typeName: fieldTypeName))
 
+  # Names of all {.ffi.} types registered *before* this one — used to classify
+  # nested-struct fields in the POD machinery (forward refs aren't supported,
+  # but a type can only reference earlier-declared {.ffi.} types anyway).
+  var known: seq[string] = @[]
+  for t in ffiTypeRegistry:
+    known.add(t.name)
+
   ffiTypeRegistry.add(FFITypeMeta(name: typeNameStr, fields: fieldMetas))
+
+  # Queue the native POD mirror + clone/podToNim/nimToPod/freePod overloads so
+  # deep nested structures cross the FFI-thread boundary as deep-copied
+  # shared-memory C-POD graphs (no GC memory, no aliasing). The procs are
+  # flushed into the next proc-macro expansion (see flushPendingPods).
+  queuePodMachinery(typeNameStr, fieldMetas, known)
   return typeDef
 
 proc nimTypeNameRepr(typ: NimNode): string =
@@ -612,15 +626,78 @@ macro ffiRaw*(prc: untyped): untyped =
 proc isCstringType(t: NimNode): bool =
   t.kind == nnkIdent and $t == "cstring"
 
+proc isStringNode(t: NimNode): bool =
+  t.kind in {nnkIdent, nnkSym} and $t == "string"
+
+proc isFFIStructType(t: NimNode): bool {.compileTime.} =
+  ## True if `t` names a registered `{.ffi.}` object type — i.e. one that has a
+  ## generated `<T>Pod` mirror plus clonePod/podToNim/freePod overloads.
+  if t.kind in {nnkIdent, nnkSym}:
+    let s = $t
+    for reg in ffiTypeRegistry:
+      if reg.name == s:
+        return true
+  return false
+
+proc nativeWireType(t: NimNode): NimNode {.compileTime.} =
+  ## The C-ABI-safe type carrying param `t` across the native (non-CBOR) boundary.
+  ## A registered `{.ffi.}` struct travels as its `<T>Pod` mirror — laid out
+  ## *identically* to the C-header struct emitted by `codegen/c.emitCStructs`, so
+  ## the `exportc` symbol's ABI matches the header even though Nim's own struct
+  ## name differs. `string` collapses to `cstring`; scalars are already POD.
+  if isFFIStructType(t):
+    ident($t & "Pod")
+  elif isStringNode(t):
+    ident("cstring")
+  else:
+    t
+
+proc nativeArgCopyStmt(cargs, f, t: NimNode): NimNode {.compileTime.} =
+  ## Caller-thread deep copy of param `f` into the shared-memory CArgs field:
+  ## a `{.ffi.}` struct is `clonePod`'d (recursive deep copy off the caller's
+  ## buffers); a string/cstring is duplicated via `alloc`; a scalar is copied.
+  if isFFIStructType(t):
+    quote:
+      `cargs`[].`f` = clonePod(`f`)
+  elif isStringNode(t) or isCstringType(t):
+    quote:
+      `cargs`[].`f` = `f`.alloc()
+  else:
+    quote:
+      `cargs`[].`f` = `f`
+
+proc nativeArgUnpackStmt(cargs, f, t: NimNode): NimNode {.compileTime.} =
+  ## FFI-thread reconstruction of the Nim-typed local the user body expects from
+  ## the shared CArgs field: `podToNim` for a struct, a fresh Nim `string` for a
+  ## `string` param, the field as-is for a `cstring`/scalar.
+  if isFFIStructType(t):
+    quote:
+      let `f` = podToNim(`cargs`[].`f`)
+  elif isStringNode(t):
+    quote:
+      let `f` =
+        if `cargs`[].`f`.isNil:
+          ""
+        else:
+          $`cargs`[].`f`
+  else:
+    quote:
+      let `f` = `cargs`[].`f`
+
 proc buildCArgsTypeDef(
     cargsTypeName: NimNode, paramNames: seq[string], paramTypes: seq[NimNode]
 ): NimNode =
-  ## `type <cargsTypeName> = object` with one field per param (original types).
+  ## `type <cargsTypeName> = object` with one field per param, each typed as its
+  ## native *wire* type (`<T>Pod` for a `{.ffi.}` struct, `cstring` for a string)
+  ## so the struct owns shared-memory copies that cross the FFI thread safely.
   ## Empty param lists get a `placeholder` field so the object is well-formed.
   var fields: seq[NimNode] = @[]
   for i in 0 ..< paramNames.len:
     fields.add(
-      newTree(nnkIdentDefs, ident(paramNames[i]), paramTypes[i], newEmptyNode())
+      newTree(
+        nnkIdentDefs, ident(paramNames[i]), nativeWireType(paramTypes[i]),
+        newEmptyNode(),
+      )
     )
   let recList =
     if fields.len > 0:
@@ -644,15 +721,20 @@ proc buildCArgsFreeProc(
     paramNames: seq[string],
     paramTypes: seq[NimNode],
 ): NimNode =
-  ## `proc <cargsFreeName>(p: pointer) {.cdecl, raises:[], gcsafe.}` that frees
-  ## each owned cstring field (with c_free, matching `alloc`) and then the struct.
+  ## `proc <cargsFreeName>(p: pointer) {.cdecl, raises:[], gcsafe.}` that releases
+  ## every owned field — `freePod` for a `{.ffi.}` struct (recursive), `ffiCFree`
+  ## for a duplicated string/cstring — and then the struct itself. Built from the
+  ## same param list as `nativeArgCopyStmt` so allocation and release can't drift.
   let freeS = genSym(nskLet, "s")
   var freeBody = newStmtList()
   freeBody.add quote do:
     let `freeS` = cast[ptr `cargsTypeName`](p)
   for i in 0 ..< paramNames.len:
-    if isCstringType(paramTypes[i]):
-      let f = ident(paramNames[i])
+    let f = ident(paramNames[i])
+    if isFFIStructType(paramTypes[i]):
+      freeBody.add quote do:
+        freePod(`freeS`[].`f`)
+    elif isStringNode(paramTypes[i]) or isCstringType(paramTypes[i]):
       freeBody.add quote do:
         ffiCFree(cast[pointer](`freeS`[].`f`))
   freeBody.add quote do:
@@ -910,11 +992,10 @@ macro ffi*(prc: untyped): untyped =
       userProcName,
       newTree(nnkDerefExpr, newDotExpr(newTree(nnkDerefExpr, ndCtx), ident("myLib"))),
     )
-    for nm in extraParamNames:
-      let f = ident(nm)
-      ndBody.add quote do:
-        let `f` = `ndCargs`[].`f`
-      ndHelperCall.add(ident(nm))
+    for i in 0 ..< extraParamNames.len:
+      let f = ident(extraParamNames[i])
+      ndBody.add(nativeArgUnpackStmt(ndCargs, f, extraParamTypes[i]))
+      ndHelperCall.add(f)
     ndBody.add quote do:
       let `ndRet` = (await `ndHelperCall`).valueOr:
         return err($error)
@@ -965,12 +1046,7 @@ macro ffi*(prc: untyped): untyped =
       let `neCargs` = ffiCMalloc(`cargsTypeName`)
     for i in 0 ..< extraParamNames.len:
       let f = ident(extraParamNames[i])
-      if isCstringType(extraParamTypes[i]):
-        neBody.add quote do:
-          `neCargs`[].`f` = `f`.alloc()
-      else:
-        neBody.add quote do:
-          `neCargs`[].`f` = `f`
+      neBody.add(nativeArgCopyStmt(neCargs, f, extraParamTypes[i]))
     neBody.add quote do:
       let `neReq` = FFIThreadRequest.initNative(
         callback,
@@ -997,7 +1073,7 @@ macro ffi*(prc: untyped): untyped =
     ]
     for i in 0 ..< extraParamNames.len:
       nativeExportParams.add(
-        newIdentDefs(ident(extraParamNames[i]), extraParamTypes[i])
+        newIdentDefs(ident(extraParamNames[i]), nativeWireType(extraParamTypes[i]))
       )
     let nativeExportProc = newProc(
       name = nativeExportName,
@@ -1049,7 +1125,7 @@ macro ffi*(prc: untyped): untyped =
       nativeExportProc, ffiProc,
     )
 
-  let stmts = asyncPath()
+  let stmts = newStmtList(flushPendingPods(), asyncPath())
 
   when defined(ffiDumpMacros):
     echo stmts.repr
@@ -1487,11 +1563,10 @@ macro ffiCtor*(prc: untyped): untyped =
     let `ncCtx` = cast[ptr FFIContext[`libTypeName`]](reqHandler)
     let `ncCargs` = cast[ptr `cargsTypeName`](`ncReq`[].data)
   let ncHelperCall = newTree(nnkCall, userProcName)
-  for nm in paramNames:
-    let f = ident(nm)
-    ncBody.add quote do:
-      let `f` = `ncCargs`[].`f`
-    ncHelperCall.add(ident(nm))
+  for i in 0 ..< paramNames.len:
+    let f = ident(paramNames[i])
+    ncBody.add(nativeArgUnpackStmt(ncCargs, f, paramTypes[i]))
+    ncHelperCall.add(f)
   let ncMyLib = newDotExpr(newTree(nnkDerefExpr, ncCtx), ident("myLib"))
   ncBody.add quote do:
     let `ncLibVal` = (await `ncHelperCall`).valueOr:
@@ -1543,12 +1618,7 @@ macro ffiCtor*(prc: untyped): untyped =
     let `necCargs` = ffiCMalloc(`cargsTypeName`)
   for i in 0 ..< paramNames.len:
     let f = ident(paramNames[i])
-    if isCstringType(paramTypes[i]):
-      necBody.add quote do:
-        `necCargs`[].`f` = `f`.alloc()
-    else:
-      necBody.add quote do:
-        `necCargs`[].`f` = `f`
+    necBody.add(nativeArgCopyStmt(necCargs, f, paramTypes[i]))
   necBody.add quote do:
     let `necReq` = FFIThreadRequest.initNative(
       callback,
@@ -1570,7 +1640,9 @@ macro ffiCtor*(prc: untyped): untyped =
     return cast[pointer](`necCtx`)
   var nativeCtorParams = @[ident("pointer")]
   for i in 0 ..< paramNames.len:
-    nativeCtorParams.add(newIdentDefs(ident(paramNames[i]), paramTypes[i]))
+    nativeCtorParams.add(
+      newIdentDefs(ident(paramNames[i]), nativeWireType(paramTypes[i]))
+    )
   nativeCtorParams.add(newIdentDefs(ident("callback"), ident("FFICallBack")))
   nativeCtorParams.add(newIdentDefs(ident("userData"), ident("pointer")))
   let nativeCtorExportProc = newProc(
@@ -1591,8 +1663,9 @@ macro ffiCtor*(prc: untyped): untyped =
       var `poolIdent`: FFIContextPool[`libTypeName`]
 
   let stmts = newStmtList(
-    typeDef, ffiNewReqProc, helperProc, processProc, addToReg, poolDecl, ffiProc,
-    ctorCargsTypeDef, ctorCargsFreeProc, nativeCtorRegister, nativeCtorExportProc,
+    flushPendingPods(), typeDef, ffiNewReqProc, helperProc, processProc, addToReg,
+    poolDecl, ffiProc, ctorCargsTypeDef, ctorCargsFreeProc, nativeCtorRegister,
+    nativeCtorExportProc,
   )
 
   when defined(ffiDumpMacros):
@@ -1709,7 +1782,7 @@ macro ffiDtor*(prc: untyped): untyped =
     when not declared(`poolIdent`):
       var `poolIdent`: FFIContextPool[`libTypeName`]
 
-  let stmts = newStmtList(poolDecl, ffiProc)
+  let stmts = newStmtList(flushPendingPods(), poolDecl, ffiProc)
 
   when defined(ffiDumpMacros):
     echo stmts.repr
@@ -1802,9 +1875,10 @@ macro ffiEvent*(wireName: static[string], prc: untyped): untyped =
     )
   )
 
+  let withPods = newStmtList(flushPendingPods(), generated)
   when defined(ffiDumpMacros):
-    echo generated.repr
-  return generated
+    echo withPods.repr
+  return withPods
 
 # ---------------------------------------------------------------------------
 # genBindings — codegen entry point
