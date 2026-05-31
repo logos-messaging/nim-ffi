@@ -28,10 +28,12 @@ make run
 
 ## Status
 
-First cut. Methods whose params/returns use only scalar / string / bool /
-nested-struct fields are generated (create, version, echo). Methods using
-**sequences or optionals** are emitted as `// SKIPPED` for now (complex,
-schedule) — those plus **native typed events** are the next increments. The
-native-bare / `_cbor` filename reconciliation (matching the C headers) is also a
-follow-up; today this emits `my_timer_native.hpp` so it coexists with the CBOR
-`my_timer.hpp`.
+Requests are fully supported: scalar / string / bool / nested struct **and now
+sequences (`std::vector`) and optionals (`std::optional`)** — create, version,
+echo, complex, schedule all generate and round-trip typed values (ASAN-clean).
+`toC` uses a holder that owns the C-array backing while string pointers borrow
+the C++ argument (valid for the call's duration; the library deep-copies).
+
+Still to come: **native typed events** (`On<Event>` handlers) and the
+native-bare / `_cbor` filename reconciliation (matching the C headers). Today
+this emits `my_timer_native.hpp` so it coexists with the CBOR `my_timer.hpp`.

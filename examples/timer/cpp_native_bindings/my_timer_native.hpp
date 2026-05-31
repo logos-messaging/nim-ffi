@@ -8,18 +8,23 @@
 #include "my_timer.h"
 #include <cstdint>
 #include <future>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace my_timer {
 
 struct TimerConfig {
     std::string name{};
 };
-inline ::TimerConfig toC(const TimerConfig& v) {
+struct TimerConfigC {
     ::TimerConfig c{};
-    c.name = v.name.c_str();
-    return c;
+};
+inline TimerConfigC toC(const TimerConfig& v) {
+    TimerConfigC h;
+    h.c.name = v.name.c_str();
+    return h;
 }
 inline TimerConfig fromC(const ::TimerConfig& c) {
     TimerConfig v{};
@@ -31,11 +36,14 @@ struct EchoRequest {
     std::string message{};
     int64_t delayMs{};
 };
-inline ::EchoRequest toC(const EchoRequest& v) {
+struct EchoRequestC {
     ::EchoRequest c{};
-    c.message = v.message.c_str();
-    c.delayMs = v.delayMs;
-    return c;
+};
+inline EchoRequestC toC(const EchoRequest& v) {
+    EchoRequestC h;
+    h.c.message = v.message.c_str();
+    h.c.delayMs = v.delayMs;
+    return h;
 }
 inline EchoRequest fromC(const ::EchoRequest& c) {
     EchoRequest v{};
@@ -48,11 +56,14 @@ struct EchoResponse {
     std::string echoed{};
     std::string timerName{};
 };
-inline ::EchoResponse toC(const EchoResponse& v) {
+struct EchoResponseC {
     ::EchoResponse c{};
-    c.echoed = v.echoed.c_str();
-    c.timerName = v.timerName.c_str();
-    return c;
+};
+inline EchoResponseC toC(const EchoResponse& v) {
+    EchoResponseC h;
+    h.c.echoed = v.echoed.c_str();
+    h.c.timerName = v.timerName.c_str();
+    return h;
 }
 inline EchoResponse fromC(const ::EchoResponse& c) {
     EchoResponse v{};
@@ -61,17 +72,68 @@ inline EchoResponse fromC(const ::EchoResponse& c) {
     return v;
 }
 
+struct ComplexRequest {
+    std::vector<EchoRequest> messages{};
+    std::vector<std::string> tags{};
+    std::optional<std::string> note{};
+    std::optional<int64_t> retries{};
+};
+struct ComplexRequestC {
+    ::ComplexRequest c{};
+    std::vector<::EchoRequest> _messages;
+    std::vector<EchoRequestC> _messagesH;
+    std::vector<const char*> _tags;
+};
+inline ComplexRequestC toC(const ComplexRequest& v) {
+    ComplexRequestC h;
+    for (const auto& it : v.messages) {
+        h._messagesH.push_back(toC(it));
+    }
+    for (const auto& hh : h._messagesH) h._messages.push_back(hh.c);
+    h.c.messages = h._messages.empty() ? nullptr : h._messages.data();
+    h.c.messages_len = h._messages.size();
+    for (const auto& it : v.tags) {
+        h._tags.push_back(it.c_str());
+    }
+    h.c.tags = h._tags.empty() ? nullptr : h._tags.data();
+    h.c.tags_len = h._tags.size();
+    if (v.note.has_value()) {
+        h.c.note_present = 1;
+        h.c.note = (*v.note).c_str();
+    }
+    if (v.retries.has_value()) {
+        h.c.retries_present = 1;
+        h.c.retries = (*v.retries);
+    }
+    return h;
+}
+inline ComplexRequest fromC(const ::ComplexRequest& c) {
+    ComplexRequest v{};
+    for (std::size_t i = 0; i < c.messages_len; i++)
+        v.messages.push_back(fromC(c.messages[i]));
+    for (std::size_t i = 0; i < c.tags_len; i++)
+        v.tags.push_back((c.tags[i] ? std::string(c.tags[i]) : std::string()));
+    if (c.note_present)
+        v.note = (c.note ? std::string(c.note) : std::string());
+    if (c.retries_present)
+        v.retries = c.retries;
+    return v;
+}
+
 struct ComplexResponse {
     std::string summary{};
     int64_t itemCount{};
     bool hasNote{};
 };
-inline ::ComplexResponse toC(const ComplexResponse& v) {
+struct ComplexResponseC {
     ::ComplexResponse c{};
-    c.summary = v.summary.c_str();
-    c.itemCount = v.itemCount;
-    c.hasNote = (v.hasNote ? 1 : 0);
-    return c;
+};
+inline ComplexResponseC toC(const ComplexResponse& v) {
+    ComplexResponseC h;
+    h.c.summary = v.summary.c_str();
+    h.c.itemCount = v.itemCount;
+    h.c.hasNote = v.hasNote ? 1 : 0;
+    return h;
 }
 inline ComplexResponse fromC(const ::ComplexResponse& c) {
     ComplexResponse v{};
@@ -85,16 +147,104 @@ struct EchoEvent {
     std::string message{};
     int64_t echoCount{};
 };
-inline ::EchoEvent toC(const EchoEvent& v) {
+struct EchoEventC {
     ::EchoEvent c{};
-    c.message = v.message.c_str();
-    c.echoCount = v.echoCount;
-    return c;
+};
+inline EchoEventC toC(const EchoEvent& v) {
+    EchoEventC h;
+    h.c.message = v.message.c_str();
+    h.c.echoCount = v.echoCount;
+    return h;
 }
 inline EchoEvent fromC(const ::EchoEvent& c) {
     EchoEvent v{};
     v.message = c.message ? std::string(c.message) : std::string();
     v.echoCount = c.echoCount;
+    return v;
+}
+
+struct JobSpec {
+    std::string name{};
+    std::vector<std::string> payload{};
+    int64_t priority{};
+};
+struct JobSpecC {
+    ::JobSpec c{};
+    std::vector<const char*> _payload;
+};
+inline JobSpecC toC(const JobSpec& v) {
+    JobSpecC h;
+    h.c.name = v.name.c_str();
+    for (const auto& it : v.payload) {
+        h._payload.push_back(it.c_str());
+    }
+    h.c.payload = h._payload.empty() ? nullptr : h._payload.data();
+    h.c.payload_len = h._payload.size();
+    h.c.priority = v.priority;
+    return h;
+}
+inline JobSpec fromC(const ::JobSpec& c) {
+    JobSpec v{};
+    v.name = c.name ? std::string(c.name) : std::string();
+    for (std::size_t i = 0; i < c.payload_len; i++)
+        v.payload.push_back((c.payload[i] ? std::string(c.payload[i]) : std::string()));
+    v.priority = c.priority;
+    return v;
+}
+
+struct RetryPolicy {
+    int64_t maxAttempts{};
+    int64_t backoffMs{};
+    std::vector<std::string> retryOn{};
+};
+struct RetryPolicyC {
+    ::RetryPolicy c{};
+    std::vector<const char*> _retryOn;
+};
+inline RetryPolicyC toC(const RetryPolicy& v) {
+    RetryPolicyC h;
+    h.c.maxAttempts = v.maxAttempts;
+    h.c.backoffMs = v.backoffMs;
+    for (const auto& it : v.retryOn) {
+        h._retryOn.push_back(it.c_str());
+    }
+    h.c.retryOn = h._retryOn.empty() ? nullptr : h._retryOn.data();
+    h.c.retryOn_len = h._retryOn.size();
+    return h;
+}
+inline RetryPolicy fromC(const ::RetryPolicy& c) {
+    RetryPolicy v{};
+    v.maxAttempts = c.maxAttempts;
+    v.backoffMs = c.backoffMs;
+    for (std::size_t i = 0; i < c.retryOn_len; i++)
+        v.retryOn.push_back((c.retryOn[i] ? std::string(c.retryOn[i]) : std::string()));
+    return v;
+}
+
+struct ScheduleConfig {
+    int64_t startAtMs{};
+    int64_t intervalMs{};
+    std::optional<int64_t> jitter{};
+};
+struct ScheduleConfigC {
+    ::ScheduleConfig c{};
+};
+inline ScheduleConfigC toC(const ScheduleConfig& v) {
+    ScheduleConfigC h;
+    h.c.startAtMs = v.startAtMs;
+    h.c.intervalMs = v.intervalMs;
+    if (v.jitter.has_value()) {
+        h.c.jitter_present = 1;
+        h.c.jitter = (*v.jitter);
+    }
+    return h;
+}
+inline ScheduleConfig fromC(const ::ScheduleConfig& c) {
+    ScheduleConfig v{};
+    v.startAtMs = c.startAtMs;
+    v.intervalMs = c.intervalMs;
+    if (c.jitter_present)
+        v.jitter = c.jitter;
     return v;
 }
 
@@ -104,13 +254,16 @@ struct ScheduleResult {
     int64_t firstRunAtMs{};
     int64_t effectiveBackoffMs{};
 };
-inline ::ScheduleResult toC(const ScheduleResult& v) {
+struct ScheduleResultC {
     ::ScheduleResult c{};
-    c.jobId = v.jobId.c_str();
-    c.willRunCount = v.willRunCount;
-    c.firstRunAtMs = v.firstRunAtMs;
-    c.effectiveBackoffMs = v.effectiveBackoffMs;
-    return c;
+};
+inline ScheduleResultC toC(const ScheduleResult& v) {
+    ScheduleResultC h;
+    h.c.jobId = v.jobId.c_str();
+    h.c.willRunCount = v.willRunCount;
+    h.c.firstRunAtMs = v.firstRunAtMs;
+    h.c.effectiveBackoffMs = v.effectiveBackoffMs;
+    return h;
 }
 inline ScheduleResult fromC(const ::ScheduleResult& c) {
     ScheduleResult v{};
@@ -159,6 +312,20 @@ inline void my_timer_native_my_timer_echo(int ret, const char* msg, std::size_t 
     else c->err = detail::rawText(msg, len);
     c->done.set_value();
 }
+inline void my_timer_native_my_timer_complex(int ret, const char* msg, std::size_t len, void* ud) {
+    auto* c = static_cast<detail::Capture<ComplexResponse>*>(ud);
+    c->ret = ret;
+    if (ret == RET_OK) c->value = fromC(*reinterpret_cast<const ::ComplexResponse*>(msg));
+    else c->err = detail::rawText(msg, len);
+    c->done.set_value();
+}
+inline void my_timer_native_my_timer_schedule(int ret, const char* msg, std::size_t len, void* ud) {
+    auto* c = static_cast<detail::Capture<ScheduleResult>*>(ud);
+    c->ret = ret;
+    if (ret == RET_OK) c->value = fromC(*reinterpret_cast<const ::ScheduleResult*>(msg));
+    else c->err = detail::rawText(msg, len);
+    c->done.set_value();
+}
 } // extern "C"
 
 class My_timerNode {
@@ -167,7 +334,7 @@ class My_timerNode {
         detail::AckCapture cap;
         auto fut = cap.done.get_future();
         auto c_config = toC(config);
-        ctx_ = my_timer_create(c_config, my_timer_native_ack, &cap);
+        ctx_ = my_timer_create(c_config.c, my_timer_native_ack, &cap);
         if (!ctx_) throw std::runtime_error("my_timer_create returned null");
         fut.wait();
         if (cap.ret != RET_OK) throw std::runtime_error(cap.err);
@@ -177,7 +344,7 @@ class My_timerNode {
         detail::Capture<EchoResponse> cap;
         auto fut = cap.done.get_future();
         auto c_req = toC(req);
-        if (my_timer_echo(ctx_, my_timer_native_my_timer_echo, &cap, c_req) != RET_OK)
+        if (my_timer_echo(ctx_, my_timer_native_my_timer_echo, &cap, c_req.c) != RET_OK)
             throw std::runtime_error("my_timer_echo dispatch failed");
         fut.wait();
         if (cap.ret != RET_OK) throw std::runtime_error(cap.err);
@@ -194,8 +361,30 @@ class My_timerNode {
         return cap.value;
     }
 
-    // SKIPPED my_timer_complex: seq/Option/multi-struct params not yet supported by native C++ codegen
-    // SKIPPED my_timer_schedule: seq/Option/multi-struct params not yet supported by native C++ codegen
+    ComplexResponse Complex(const ComplexRequest& req) {
+        detail::Capture<ComplexResponse> cap;
+        auto fut = cap.done.get_future();
+        auto c_req = toC(req);
+        if (my_timer_complex(ctx_, my_timer_native_my_timer_complex, &cap, c_req.c) != RET_OK)
+            throw std::runtime_error("my_timer_complex dispatch failed");
+        fut.wait();
+        if (cap.ret != RET_OK) throw std::runtime_error(cap.err);
+        return cap.value;
+    }
+
+    ScheduleResult Schedule(const JobSpec& job, const RetryPolicy& retry, const ScheduleConfig& schedule) {
+        detail::Capture<ScheduleResult> cap;
+        auto fut = cap.done.get_future();
+        auto c_job = toC(job);
+        auto c_retry = toC(retry);
+        auto c_schedule = toC(schedule);
+        if (my_timer_schedule(ctx_, my_timer_native_my_timer_schedule, &cap, c_job.c, c_retry.c, c_schedule.c) != RET_OK)
+            throw std::runtime_error("my_timer_schedule dispatch failed");
+        fut.wait();
+        if (cap.ret != RET_OK) throw std::runtime_error(cap.err);
+        return cap.value;
+    }
+
     ~My_timerNode() { if (ctx_) my_timer_destroy(ctx_); }
     My_timerNode(const My_timerNode&) = delete;
     My_timerNode& operator=(const My_timerNode&) = delete;

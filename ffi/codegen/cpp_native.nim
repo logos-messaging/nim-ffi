@@ -14,10 +14,32 @@ import std/[os, strutils]
 import ./meta, ./string_helpers
 import ./c as cgen
 
-proc cppType(t: string): string =
-  ## Idiomatic C++ type for an `{.ffi.}` field / scalar.
+proc isSeqT(t: string): bool =
+  t.strip().startsWith("seq[") and t.strip().endsWith("]")
+
+proc isOptT(t: string): bool =
+  let s = t.strip()
+  (s.startsWith("Option[") or s.startsWith("Maybe[")) and s.endsWith("]")
+
+proc seqElem(t: string): string =
+  t.strip()["seq[".len .. ^2].strip()
+
+proc optElem(t: string): string =
+  let s = t.strip()
+  let p = if s.startsWith("Maybe["): "Maybe[".len else: "Option[".len
+  s[p .. ^2].strip()
+
+proc isStringT(t: string): bool =
+  t.strip() in ["string", "cstring"]
+
+proc isStructT(t: string, types: seq[FFITypeMeta]): bool =
+  for ty in types:
+    if ty.name == t.strip():
+      return true
+  false
+
+proc scalarCpp(t: string): string =
   case t.strip()
-  of "string", "cstring": "std::string"
   of "int", "int64", "clong": "int64_t"
   of "int32", "cint": "int32_t"
   of "int16": "int16_t"
@@ -29,94 +51,122 @@ proc cppType(t: string): string =
   of "bool": "bool"
   of "float", "float32": "float"
   of "float64": "double"
-  else: t.strip() # nested {.ffi.} struct -> its C++ name
+  else: t.strip() # nested struct -> its C++ name
 
-proc isSeqT(t: string): bool =
-  t.strip().startsWith("seq[") and t.strip().endsWith("]")
-
-proc isOptT(t: string): bool =
+proc cppType(t: string): string =
+  ## Idiomatic C++ type for an `{.ffi.}` field / param.
   let s = t.strip()
-  (s.startsWith("Option[") or s.startsWith("Maybe[")) and s.endsWith("]")
+  if isSeqT(s): "std::vector<" & cppType(seqElem(s)) & ">"
+  elif isOptT(s): "std::optional<" & cppType(optElem(s)) & ">"
+  elif isStringT(s): "std::string"
+  else: scalarCpp(s)
 
-proc isStringT(t: string): bool =
-  t.strip() in ["string", "cstring"]
+proc cElemCpp(t: string, types: seq[FFITypeMeta]): string =
+  ## The C type used for one seq element / option payload (matches emitCStructs).
+  let s = t.strip()
+  if isStringT(s): "const char*"
+  elif isStructT(s, types): "::" & s
+  elif s == "bool": "int"
+  else: scalarCpp(s)
 
-proc isStructT(t: string, types: seq[FFITypeMeta]): bool =
-  for ty in types:
-    if ty.name == t.strip():
-      return true
-  false
+# Element-granular converters. `src` yields one element on the source side.
+proc toCElem(t, src: string, types: seq[FFITypeMeta]): string =
+  let s = t.strip()
+  if isStringT(s): src & ".c_str()"
+  elif s == "bool": "(" & src & " ? 1 : 0)"
+  elif isStructT(s, types): "toC(" & src & ").c"
+  else: src
 
-proc isSimpleType(t: FFITypeMeta, types: seq[FFITypeMeta]): bool =
-  ## True if every field is scalar / string / bool / nested *simple* struct
-  ## (no sequences or optionals yet).
-  for f in t.fields:
-    let ft = f.typeName.strip()
-    if isSeqT(ft) or isOptT(ft):
-      return false
-    if isStructT(ft, types):
-      for inner in types:
-        if inner.name == ft and not isSimpleType(inner, types):
-          return false
-  true
-
-proc paramSimple(typeName: string, types: seq[FFITypeMeta]): bool =
-  let t = typeName.strip()
-  if isStringT(t) or t == "bool":
-    return true
-  if cppType(t) != t: # mapped scalar
-    return true
-  if isStructT(t, types):
-    for ty in types:
-      if ty.name == t:
-        return isSimpleType(ty, types)
-  false
-
-# --- toC / fromC field converters -------------------------------------------
-proc toCField(f: FFIFieldMeta, types: seq[FFITypeMeta]): string =
-  let t = f.typeName.strip()
-  if isStringT(t):
-    "v." & f.name & ".c_str()"
-  elif t == "bool":
-    "(v." & f.name & " ? 1 : 0)"
-  elif isStructT(t, types):
-    "toC(v." & f.name & ")"
-  else:
-    "v." & f.name
-
-proc fromCField(f: FFIFieldMeta, types: seq[FFITypeMeta]): string =
-  let t = f.typeName.strip()
-  if isStringT(t):
-    "c." & f.name & " ? std::string(c." & f.name & ") : std::string()"
-  elif t == "bool":
-    "c." & f.name & " != 0"
-  elif isStructT(t, types):
-    "fromC(c." & f.name & ")"
-  else:
-    "c." & f.name
+proc fromCElem(t, src: string, types: seq[FFITypeMeta]): string =
+  let s = t.strip()
+  if isStringT(s): "(" & src & " ? std::string(" & src & ") : std::string())"
+  elif s == "bool": "(" & src & " != 0)"
+  elif isStructT(s, types): "fromC(" & src & ")"
+  else: src
 
 proc emitTypes(types: seq[FFITypeMeta]): seq[string] =
   var L: seq[string] = @[]
   for t in types:
-    if not isSimpleType(t, types):
-      continue
+    # C++ struct.
     L.add("struct " & t.name & " {")
     for f in t.fields:
       L.add("    " & cppType(f.typeName) & " " & f.name & "{};")
     L.add("};")
-    # toC: build the C-POD struct (strings borrow the C++ object's storage,
-    # valid for the duration of the call).
-    L.add("inline ::" & t.name & " toC(const " & t.name & "& v) {")
+
+    # Holder: owns the backing storage for any seq fields and exposes the C-POD
+    # struct. Returned by value from `toC`; the std::vector buffers survive the
+    # move/NRVO, and string pointers borrow the source `v` (kept alive by the
+    # caller for the duration of the call).
+    L.add("struct " & t.name & "C {")
     L.add("    ::" & t.name & " c{};")
     for f in t.fields:
-      L.add("    c." & f.name & " = " & toCField(f, types) & ";")
-    L.add("    return c;")
+      if isSeqT(f.typeName):
+        L.add("    std::vector<" & cElemCpp(seqElem(f.typeName), types) & "> _" &
+          f.name & ";")
+        if isStructT(seqElem(f.typeName), types):
+          L.add("    std::vector<" & cppType(seqElem(f.typeName)) & "C> _" &
+            f.name & "H;")
+    L.add("};")
+
+    L.add("inline " & t.name & "C toC(const " & t.name & "& v) {")
+    L.add("    " & t.name & "C h;")
+    for f in t.fields:
+      let ft = f.typeName.strip()
+      if isSeqT(ft):
+        let e = seqElem(ft)
+        L.add("    for (const auto& it : v." & f.name & ") {")
+        if isStructT(e, types):
+          # Keep element holders alive, then collect their C structs.
+          L.add("        h._" & f.name & "H.push_back(toC(it));")
+        else:
+          L.add("        h._" & f.name & ".push_back(" & toCElem(e, "it", types) & ");")
+        L.add("    }")
+        if isStructT(e, types):
+          L.add("    for (const auto& hh : h._" & f.name & "H) h._" & f.name &
+            ".push_back(hh.c);")
+        L.add("    h.c." & f.name & " = h._" & f.name & ".empty() ? nullptr : h._" &
+          f.name & ".data();")
+        L.add("    h.c." & f.name & "_len = h._" & f.name & ".size();")
+      elif isOptT(ft):
+        let e = optElem(ft)
+        L.add("    if (v." & f.name & ".has_value()) {")
+        L.add("        h.c." & f.name & "_present = 1;")
+        L.add("        h.c." & f.name & " = " & toCElem(e, "(*v." & f.name & ")", types) & ";")
+        L.add("    }")
+      elif isStringT(ft):
+        L.add("    h.c." & f.name & " = v." & f.name & ".c_str();")
+      elif ft == "bool":
+        L.add("    h.c." & f.name & " = v." & f.name & " ? 1 : 0;")
+      elif isStructT(ft, types):
+        L.add("    h.c." & f.name & " = toC(v." & f.name & ").c;")
+      else:
+        L.add("    h.c." & f.name & " = v." & f.name & ";")
+    L.add("    return h;")
     L.add("}")
-    # fromC: copy out of a C-POD struct into C++-owned values.
+
     L.add("inline " & t.name & " fromC(const ::" & t.name & "& c) {")
     L.add("    " & t.name & " v{};")
     for f in t.fields:
-      L.add("    v." & f.name & " = " & fromCField(f, types) & ";")
+      let ft = f.typeName.strip()
+      if isSeqT(ft):
+        let e = seqElem(ft)
+        L.add("    for (std::size_t i = 0; i < c." & f.name & "_len; i++)")
+        L.add("        v." & f.name & ".push_back(" &
+          fromCElem(e, "c." & f.name & "[i]", types) & ");")
+      elif isOptT(ft):
+        let e = optElem(ft)
+        L.add("    if (c." & f.name & "_present)")
+        L.add("        v." & f.name & " = " &
+          fromCElem(e, "c." & f.name, types) & ";")
+      elif isStringT(ft):
+        L.add("    v." & f.name & " = c." & f.name & " ? std::string(c." & f.name &
+          ") : std::string();")
+      elif ft == "bool":
+        L.add("    v." & f.name & " = c." & f.name & " != 0;")
+      elif isStructT(ft, types):
+        L.add("    v." & f.name & " = fromC(c." & f.name & ");")
+      else:
+        L.add("    v." & f.name & " = c." & f.name & ";")
     L.add("    return v;")
     L.add("}")
     L.add("")
@@ -132,8 +182,12 @@ proc methodName(procName, libName: string): string =
   capitalizeFirstLetter(snakeToPascalCase(bare))
 
 proc procSupported(p: FFIProcMeta, types: seq[FFITypeMeta]): bool =
+  ## Scalar / string / `{.ffi.}`-struct params are supported (structs may carry
+  ## seq/Option fields now). Bare seq/Option top-level params and raw pointers
+  ## are not (the native ABI doesn't expose them either).
   for ep in p.extraParams:
-    if ep.isPtr or not paramSimple(ep.typeName, types):
+    let t = ep.typeName.strip()
+    if ep.isPtr or isSeqT(t) or isOptT(t):
       return false
   true
 
@@ -157,8 +211,10 @@ proc generateCppNativeHeader*(
   L.add("#include \"" & libName & ".h\"")
   L.add("#include <cstdint>")
   L.add("#include <future>")
+  L.add("#include <optional>")
   L.add("#include <stdexcept>")
   L.add("#include <string>")
+  L.add("#include <vector>")
   L.add("")
   L.add("namespace " & libName & " {")
   L.add("")
@@ -240,7 +296,7 @@ proc generateCppNativeHeader*(
       params.add("const " & cppType(ep.typeName) & "& " & ep.name)
       if isStructT(ep.typeName, types):
         conv.add("        auto c_" & ep.name & " = toC(" & ep.name & ");")
-        args.add("c_" & ep.name)
+        args.add("c_" & ep.name & ".c")
       else:
         args.add(ep.name)
     let argsStr = if args.len > 0: args.join(", ") & ", " else: ""
@@ -273,7 +329,7 @@ proc generateCppNativeHeader*(
       params.add("const " & cppType(ep.typeName) & "& " & ep.name)
       if isStructT(ep.typeName, types):
         conv.add("        auto c_" & ep.name & " = toC(" & ep.name & ");")
-        args.add("c_" & ep.name)
+        args.add("c_" & ep.name & ".c")
       else:
         args.add(ep.name)
     let argsStr = if args.len > 0: ", " & args.join(", ") else: ""
