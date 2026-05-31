@@ -6,6 +6,7 @@ import ./native_pod
 when defined(ffiGenBindings):
   import ../codegen/rust
   import ../codegen/cpp
+  import ../codegen/cpp_native
   import ../codegen/cddl
   import ../codegen/c
   import ../codegen/go
@@ -1971,10 +1972,16 @@ macro genBindings*(
         ffiEventRegistry,
       )
     of "cpp", "c++":
-      generateCppBindings(
-        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
-        ffiEventRegistry,
-      )
+      if ffiEmitCbor():
+        generateCppBindings(
+          ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
+          ffiEventRegistry,
+        )
+      if ffiEmitNative():
+        generateCppNativeBindings(
+          ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
+          ffiEventRegistry,
+        )
     of "cddl":
       generateCddlBindings(
         ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath
