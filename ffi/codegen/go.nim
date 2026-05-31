@@ -370,6 +370,12 @@ proc generateGoFile*(
   L.add(
     "extern void " & libName & "GoEvent(int ret, char* msg, size_t len, void* userData);"
   )
+  # The Go wrapper consumes events over CBOR; the native header only declares the
+  # native listener, so forward-declare the CBOR registration we call below.
+  L.add(
+    "extern uint64_t " & libName &
+      "_add_event_listener_cbor(void* ctx, const char* eventName, FFICallBack callback, void* userData);"
+  )
   # One exported Go result callback per struct-returning proc (it reads the typed
   # return POD in-callback). Forward-declared here so cgo's `char*` shape matches.
   for p in procs:
@@ -377,6 +383,14 @@ proc generateGoFile*(
         isFFIStruct(p.returnTypeName, types):
       L.add(
         "extern void " & libName & "Result" & methodName(p.procName, libName) &
+          "(int ret, char* msg, size_t len, void* ud);"
+      )
+  # One exported Go callback per event (native typed delivery): msg is a typed
+  # `const <Payload>*` that the callback reads into a Go value.
+  for e in events:
+    if isFFIStruct(e.payloadTypeName, types):
+      L.add(
+        "extern void " & libName & "Evt" & snakeToPascalCase(e.wireName) &
           "(int ret, char* msg, size_t len, void* ud);"
       )
   L.add("")
@@ -491,7 +505,7 @@ proc generateGoFile*(
     )
   L.add(
     "static uint64_t " & libName & "RegisterEvents(void* ctx) { return " & libName &
-      "_add_event_listener(ctx, \"\", (FFICallBack)" & libName & "GoEvent, ctx); }"
+      "_add_event_listener_cbor(ctx, \"\", (FFICallBack)" & libName & "GoEvent, ctx); }"
   )
   L.add("*/")
   L.add("import \"C\"")
@@ -558,6 +572,47 @@ proc generateGoFile*(
   L.add("\t}")
   L.add("}")
   L.add("")
+
+  # ---- per-event NATIVE typed handlers -------------------------------------
+  # `On<Event>(h)` registers a native listener; the library delivers the typed
+  # `<Payload>` POD, which the exported callback reads into a Go value and hands
+  # to `h`. No CBOR — this is the same-process path (cf. SetEventHandler).
+  for e in events:
+    if not isFFIStruct(e.payloadTypeName, types):
+      continue
+    let pascal = snakeToPascalCase(e.wireName)
+    let goType = e.payloadTypeName
+    let handlerVar = "evt" & pascal & "Handler"
+    let cbName = libName & "Evt" & pascal
+    L.add("var " & handlerVar & " func(" & goType & ")")
+    L.add("")
+    L.add("// " & pascal & " installs the native typed handler for the \"" &
+      e.wireName & "\" event.")
+    L.add("func (n *" & nodeType & ") " & pascal & "(h func(" & goType & ")) {")
+    L.add("\teventMu.Lock()")
+    L.add("\t" & handlerVar & " = h")
+    L.add("\teventMu.Unlock()")
+    L.add("\tcn := C.CString(\"" & e.wireName & "\")")
+    L.add("\tdefer C.free(unsafe.Pointer(cn))")
+    L.add(
+      "\tC." & libName & "_add_event_listener(n.ctx, cn, C.FFICallBack(C." & cbName &
+        "), n.ctx)"
+    )
+    L.add("}")
+    L.add("")
+    L.add("//export " & cbName)
+    L.add(
+      "func " & cbName &
+        "(ret C.int, msg *C.char, length C.size_t, ud unsafe.Pointer) {"
+    )
+    L.add("\teventMu.Lock()")
+    L.add("\th := " & handlerVar)
+    L.add("\teventMu.Unlock()")
+    L.add("\tif h != nil && ret == C.RET_OK {")
+    L.add("\t\th(" & goType & "FromC((*C." & goType & ")(unsafe.Pointer(msg))))")
+    L.add("\t}")
+    L.add("}")
+    L.add("")
 
   # ---- constructor ---------------------------------------------------------
   if haveCtor:

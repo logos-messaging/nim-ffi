@@ -178,7 +178,7 @@ proc emitEventDispatcher(
     )
     lines.add("        auto* raw = owned.get();")
     lines.add(
-      "        const auto id = $1_add_event_listener(" % [libName]
+      "        const auto id = $1_add_event_listener_cbor(" % [libName]
     )
     lines.add(
       "            ptr_, \"$1\", &$2::typedTrampoline<$3>, raw);" %
@@ -204,7 +204,7 @@ proc emitEventDispatcher(
     "        auto owned = std::make_unique<WildcardListener>(std::move(handler));"
   )
   lines.add("        auto* raw = owned.get();")
-  lines.add("        const auto id = $1_add_event_listener(" % [libName])
+  lines.add("        const auto id = $1_add_event_listener_cbor(" % [libName])
   lines.add(
     "            ptr_, \"\", &$1::wildcardTrampoline, raw);" % [ctxTypeName]
   )
@@ -429,7 +429,7 @@ proc generateCppHeader*(
   # `declareLibrary` always exports the listener-registration ABI. Declare
   # it here so the typed event-handler wiring below can call into it.
   lines.add(
-    "uint64_t $1_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);" %
+    "uint64_t $1_add_event_listener_cbor(void* ctx, const char* event_name, FFICallback callback, void* user_data);" %
       [libName]
   )
   lines.add(

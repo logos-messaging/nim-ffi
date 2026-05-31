@@ -31,11 +31,22 @@ func main() {
 		fmt.Printf("version: %s\n", v)
 	}
 
+	// Native typed event: Echo fires onEchoFired(EchoEvent) inside the library.
+	// Register a typed handler — the payload arrives as a Go struct, no CBOR.
+	events := make(chan timer.EchoEvent, 4)
+	node.OnEchoFired(func(e timer.EchoEvent) { events <- e })
+
 	// Struct param + typed struct return: EchoResponse { Echoed; TimerName }.
 	if resp, err := node.Echo(timer.EchoRequest{Message: "hello from Go", DelayMs: 5}); err != nil {
 		log.Printf("echo: %v", err)
 	} else {
 		fmt.Printf("echo: echoed=%q timerName=%q\n", resp.Echoed, resp.TimerName)
+	}
+	select {
+	case e := <-events:
+		fmt.Printf("event OnEchoFired: message=%q echoCount=%d\n", e.Message, e.EchoCount)
+	default:
+		fmt.Println("event OnEchoFired: (none received)")
 	}
 
 	// Deeply nested param + typed return: slice of structs, slice of strings,

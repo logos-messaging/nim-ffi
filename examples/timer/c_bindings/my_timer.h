@@ -111,6 +111,8 @@ int my_timer_schedule(void *ctx, FFICallBack callback, void *userData, JobSpec j
 
 int my_timer_destroy(void *ctx);
 
+// Native event payloads — cast the callback's msg accordingly:
+//   "on_echo_fired"  ->  const EchoEvent *
 uint64_t my_timer_add_event_listener(void *ctx, const char *eventName, FFICallBack callback, void *userData);
 int my_timer_remove_event_listener(void *ctx, uint64_t listenerId);
 

@@ -41,6 +41,10 @@ type
     id*: uint64
     callback*: FFICallBack
     userData*: pointer
+    native*: bool
+      ## true  -> deliver the payload as a typed `<T>Pod` by pointer (zero
+      ##          serialization, same-process). false -> deliver the CBOR
+      ##          `EventEnvelope` bytes (inter-process).
 
   FFIEventRegistry* = object
     ## Per-context multi-listener registry. `lock` guards every mutation;
@@ -88,11 +92,13 @@ proc addEventListener*(
     eventName: string,
     callback: FFICallBack,
     userData: pointer,
+    native = false,
 ): uint64 {.raises: [].} =
   ## Registers `callback` for `eventName` and returns the listener's stable
   ## id (always non-zero on success). `eventName == ""` registers a wildcard
-  ## listener that receives every dispatched event. Returns 0 if `callback`
-  ## is nil — the only documented failure mode.
+  ## listener that receives every dispatched event. `native` selects the
+  ## payload form delivered on dispatch (typed `<T>Pod` pointer vs CBOR bytes).
+  ## Returns 0 if `callback` is nil — the only documented failure mode.
   if callback.isNil():
     return 0
 
@@ -101,8 +107,9 @@ proc addEventListener*(
   withLock reg.lock:
     reg.nextId.inc()
     assigned = reg.nextId
-    let listener =
-      FFIEventListener(id: assigned, callback: callback, userData: userData)
+    let listener = FFIEventListener(
+      id: assigned, callback: callback, userData: userData, native: native
+    )
     if eventName.len == 0:
       reg.wildcard.add(listener)
     else:
@@ -251,3 +258,45 @@ template dispatchFFIEventCbor*(eventName: string, eventPayload: typed) =
       listener.callback(
         RET_OK, cast[ptr cchar](data), cast[csize_t](dataLen), listener.userData
       )
+
+template dispatchFFIEventDual*(eventName: string, eventPayload: typed) =
+  ## Dual-ABI event dispatch used by `{.ffiEvent.}` procs — the event-side
+  ## mirror of the native/CBOR request split. Native listeners get the payload
+  ## as a typed `<T>Pod` by pointer (zero serialization, valid only for the
+  ## callback's lifetime); CBOR listeners get the `EventEnvelope` bytes. Each
+  ## form is built at most once per dispatch and fanned out to its listeners.
+  ##
+  ## `nimToPod`/`freePod` are the per-type POD machinery generated next to each
+  ## `{.ffi.}` event type; `mixin` resolves them in the dispatching module.
+  mixin nimToPod, freePod
+  withFFIEventDispatch(eventName, listeners):
+    var nativeBuilt = false
+    var nativePod: typeof(nimToPod(eventPayload))
+    var cborBuilt = false
+    var cborData: ptr UncheckedArray[byte]
+    var cborLen: int
+    defer:
+      if nativeBuilt:
+        freePod(nativePod)
+      if cborBuilt:
+        cborFreeShared(cborData)
+    for listener in listeners:
+      if listener.native:
+        if not nativeBuilt:
+          nativePod = nimToPod(eventPayload)
+          nativeBuilt = true
+        listener.callback(
+          RET_OK, cast[ptr cchar](addr nativePod), sizeof(nativePod).csize_t,
+          listener.userData,
+        )
+      else:
+        if not cborBuilt:
+          (cborData, cborLen) = cborEncodeShared(
+            EventEnvelope[typeof(eventPayload)](
+              eventType: eventName, payload: eventPayload
+            )
+          )
+          cborBuilt = true
+        listener.callback(
+          RET_OK, cast[ptr cchar](cborData), cborLen.csize_t, listener.userData
+        )

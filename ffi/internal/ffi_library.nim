@@ -134,7 +134,21 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
     newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
   )
 
-  # {libraryName}_add_event_listener
+  # Event registration mirrors the request naming convention: the bare
+  # `<lib>_add_event_listener` is the NATIVE (typed `<T>Pod` payload) entry
+  # point; `<lib>_add_event_listener_cbor` is the CBOR (EventEnvelope bytes) one.
+  # Both are exported — native for same-process consumers, CBOR for inter-process.
+  # Fresh param nodes per proc — AST nodes must not be shared across two procs.
+  proc evtParams(): seq[NimNode] =
+    @[
+      ident("uint64"),
+      newIdentDefs(ident("ctx"), ctxType.copyNimTree()),
+      newIdentDefs(ident("eventName"), ident("cstring")),
+      newIdentDefs(ident("callback"), ident("FFICallBack")),
+      newIdentDefs(ident("userData"), ident("pointer")),
+    ]
+
+  # {libraryName}_add_event_listener (native)
   let addName = libraryName & "_add_event_listener"
   let addErr = "error: invalid context in " & addName
   let addBody = quote:
@@ -143,20 +157,33 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
       echo `addErr`
       return ret
     let evtName = if eventName.isNil(): "" else: $eventName
+    ret = addEventListener(
+      ctx[].eventRegistry, evtName, callback, userData, native = true
+    )
+    return ret
+
+  stmts.add(
+    newProc(
+      name = ident(addName), params = evtParams(), body = addBody,
+      pragmas = cdeclExportPragma,
+    )
+  )
+
+  # {libraryName}_add_event_listener_cbor (CBOR / inter-process)
+  let addCborName = libraryName & "_add_event_listener_cbor"
+  let addCborErr = "error: invalid context in " & addCborName
+  let addCborBody = quote:
+    var ret: uint64 = 0
+    if isNil(ctx):
+      echo `addCborErr`
+      return ret
+    let evtName = if eventName.isNil(): "" else: $eventName
     ret = addEventListener(ctx[].eventRegistry, evtName, callback, userData)
     return ret
 
   stmts.add(
     newProc(
-      name = ident(addName),
-      params = @[
-        ident("uint64"),
-        newIdentDefs(ident("ctx"), ctxType),
-        newIdentDefs(ident("eventName"), ident("cstring")),
-        newIdentDefs(ident("callback"), ident("FFICallBack")),
-        newIdentDefs(ident("userData"), ident("pointer")),
-      ],
-      body = addBody,
+      name = ident(addCborName), params = evtParams(), body = addCborBody,
       pragmas = cdeclExportPragma,
     )
   )
