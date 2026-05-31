@@ -3,8 +3,8 @@
 // The generated cgo package marshals each {.ffi.} struct param into its flat
 // C-POD form and passes it to the native ABI by value — so methods that take
 // structs, sequences and optionals (Echo, Complex, Schedule) are now callable
-// directly with idiomatic Go types. String-returning calls (Version) come back
-// as a Go string; struct-returning calls deliver their CBOR encoding.
+// directly with idiomatic Go types. Struct-returning calls hand back a typed Go
+// struct too (read out of the C-POD inside the result callback).
 package main
 
 import (
@@ -31,15 +31,16 @@ func main() {
 		fmt.Printf("version: %s\n", v)
 	}
 
-	// Struct param: EchoRequest { Message string; DelayMs int64 }.
-	if _, err := node.Echo(timer.EchoRequest{Message: "hello from Go", DelayMs: 5}); err != nil {
+	// Struct param + typed struct return: EchoResponse { Echoed; TimerName }.
+	if resp, err := node.Echo(timer.EchoRequest{Message: "hello from Go", DelayMs: 5}); err != nil {
 		log.Printf("echo: %v", err)
 	} else {
-		fmt.Println("echo: ok (struct param round-tripped)")
+		fmt.Printf("echo: echoed=%q timerName=%q\n", resp.Echoed, resp.TimerName)
 	}
 
-	// Deeply nested: slice of structs, slice of strings, two optionals.
-	_, err = node.Complex(timer.ComplexRequest{
+	// Deeply nested param + typed return: slice of structs, slice of strings,
+	// two optionals in; ComplexResponse { Summary; ItemCount; HasNote } out.
+	cresp, err := node.Complex(timer.ComplexRequest{
 		Messages: []timer.EchoRequest{
 			{Message: "one", DelayMs: 0},
 			{Message: "two", DelayMs: 0},
@@ -51,11 +52,12 @@ func main() {
 	if err != nil {
 		log.Printf("complex: %v", err)
 	} else {
-		fmt.Println("complex: ok (seq/option graph deep-copied)")
+		fmt.Printf("complex: itemCount=%d hasNote=%v summary=%q\n",
+			cresp.ItemCount, cresp.HasNote, cresp.Summary)
 	}
 
-	// Multiple struct params at once.
-	_, err = node.Schedule(
+	// Multiple struct params at once; ScheduleResult out.
+	sresp, err := node.Schedule(
 		timer.JobSpec{Name: "nightly", Payload: []string{"x"}, Priority: 5},
 		timer.RetryPolicy{MaxAttempts: 3, BackoffMs: 100, RetryOn: []string{"timeout"}},
 		timer.ScheduleConfig{StartAtMs: 1000, IntervalMs: 5000, Jitter: intp(50)},
@@ -63,7 +65,7 @@ func main() {
 	if err != nil {
 		log.Printf("schedule: %v", err)
 	} else {
-		fmt.Println("schedule: ok (three struct params in one call)")
+		fmt.Printf("schedule: jobId=%q willRunCount=%d\n", sresp.JobId, sresp.WillRunCount)
 	}
 
 	fmt.Println("done")
