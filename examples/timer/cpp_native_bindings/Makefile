@@ -31,7 +31,7 @@ all: example
 $(LIBNAME):
 	cd $(REPO_ROOT) && nim c $(NIMFLAGS) -o:$(CURDIR)/$(LIBNAME) $(NIM_SRC)
 
-example: main.cpp my_timer_native.hpp my_timer.h $(LIBNAME)
+example: main.cpp my_timer.hpp my_timer.h $(LIBNAME)
 	$(CXX) $(CXXFLAGS) main.cpp -L. -lmy_timer $(RPATH) -o example
 
 run: example
