@@ -146,19 +146,22 @@ task genbindings_rust, "Generate Rust bindings for the timer example":
     " -d:ffiSrcPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
 
-task genbindings_c, "Generate C bindings for the timer example":
-  exec "nim c " & nimFlagsOrc &
-    " --app:lib --noMain --nimMainPrefix:libmy_timer" &
-    " -d:ffiGenBindings -d:targetLang=c" &
-    " -d:ffiOutputDir=examples/timer/c_bindings" &
-    " -d:ffiSrcPath=../timer.nim" &
-    " -o:/dev/null examples/timer/timer.nim"
-  exec "nim c " & nimFlagsRefc &
-    " --app:lib --noMain --nimMainPrefix:libmy_timer" &
-    " -d:ffiGenBindings -d:targetLang=c" &
-    " -d:ffiOutputDir=examples/timer/c_bindings" &
-    " -d:ffiSrcPath=../timer.nim" &
-    " -o:/dev/null examples/timer/timer.nim"
+# `mode` selects the ABI to emit: "native", "cbor", or "both" (-d:ffiMode).
+proc genC(mode: string) =
+  for flags in [nimFlagsOrc, nimFlagsRefc]:
+    exec "nim c " & flags & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
+      " -d:ffiGenBindings -d:targetLang=c -d:ffiMode=" & mode &
+      " -d:ffiOutputDir=examples/timer/c_bindings -d:ffiSrcPath=../timer.nim" &
+      " -o:/dev/null examples/timer/timer.nim"
+
+task genbindings_c, "Generate C bindings (native + CBOR) for the timer example":
+  genC("both")
+
+task genbindings_c_native, "Generate only the native C bindings (<lib>.h)":
+  genC("native")
+
+task genbindings_c_cbor, "Generate only the CBOR C bindings (<lib>_cbor.h)":
+  genC("cbor")
 
 task genbindings_go, "Generate Go (cgo) bindings for the timer example":
   exec "nim c " & nimFlagsOrc &

@@ -167,8 +167,13 @@ proc generateCHeader*(
     lines.add("")
 
   # `declareLibrary` always exports the listener-registration ABI. The native
-  # header advertises the native listener: the callback's msg is a typed
-  # `const <Event>*` (cast it), not CBOR.
+  # listener delivers the payload as a typed struct: on RET_OK the callback's
+  # `msg` is a `const <Event>*` (cast it; valid only for the callback), keyed by
+  # the registered event name below.
+  if events.len > 0:
+    lines.add("// Native event payloads — cast the callback's msg accordingly:")
+    for e in events:
+      lines.add("//   \"" & e.wireName & "\"  ->  const " & e.payloadTypeName & " *")
   lines.add(
     "uint64_t " & libName &
       "_add_event_listener(void *ctx, const char *eventName, FFICallBack callback, void *userData);"
@@ -401,12 +406,14 @@ proc generateCBindings*(
     nimSrcRelPath: string,
     events: seq[FFIEventMeta] = @[],
 ) =
-  # Emit both ABIs so consumers can choose per call site: the native (zero-copy,
-  # same-process) one and the CBOR (boundary-crossing / generic) one.
-  writeFile(
-    outputDir / (libName & ".h"), generateCHeader(procs, types, libName, events)
-  )
-  writeFile(
-    outputDir / (libName & "_cbor.h"),
-    generateCborCHeader(procs, types, libName, events),
-  )
+  # Emit the ABI(s) selected by -d:ffiMode (default both): the native (zero-copy,
+  # same-process) header and/or the CBOR (boundary-crossing / generic) one.
+  if ffiEmitNative():
+    writeFile(
+      outputDir / (libName & ".h"), generateCHeader(procs, types, libName, events)
+    )
+  if ffiEmitCbor():
+    writeFile(
+      outputDir / (libName & "_cbor.h"),
+      generateCborCHeader(procs, types, libName, events),
+    )

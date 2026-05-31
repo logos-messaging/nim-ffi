@@ -49,6 +49,16 @@ var currentLibName* {.compileTime.}: string
 # Target language for binding generation; override with -d:targetLang=cpp
 const targetLang* {.strdefine.} = "rust"
 
+# Which ABI(s) to emit: "native" (zero-serialization C structs), "cbor"
+# (inter-process), or "both" (default). Override with -d:ffiMode=native.
+const ffiMode* {.strdefine.} = "both"
+
+func ffiEmitNative*(): bool =
+  ffiMode == "native" or ffiMode == "both"
+
+func ffiEmitCbor*(): bool =
+  ffiMode == "cbor" or ffiMode == "both"
+
 # Output directory for generated bindings; set with -d:ffiOutputDir=path/to/dir
 const ffiOutputDir* {.strdefine.} = ""
 
