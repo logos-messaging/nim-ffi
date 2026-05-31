@@ -1,0 +1,4 @@
+/target
+/libmy_timer.dylib
+/libmy_timer.so
+Cargo.lock

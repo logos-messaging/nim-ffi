@@ -132,17 +132,20 @@ task genbindings_example, "Generate Rust bindings for the timer example":
   exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libmy_timer -d:ffiGenBindings -o:/dev/null examples/timer/timer.nim"
   exec "nim c " & nimFlagsRefc & " --app:lib --noMain --nimMainPrefix:libmy_timer -d:ffiGenBindings -o:/dev/null examples/timer/timer.nim"
 
-task genbindings_rust, "Generate Rust bindings for the timer example":
+task genbindings_rust, "Generate CBOR Rust bindings for the timer example":
+  # The native and CBOR Rust crates share file names, so each mode writes to its
+  # own output dir (mirroring rust_bindings vs rust_native_bindings).
+  for flags in [nimFlagsOrc, nimFlagsRefc]:
+    exec "nim c " & flags & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
+      " -d:ffiGenBindings -d:targetLang=rust -d:ffiMode=cbor" &
+      " -d:ffiOutputDir=examples/timer/rust_bindings -d:ffiSrcPath=../timer.nim" &
+      " -o:/dev/null examples/timer/timer.nim"
+
+task genbindings_rust_native, "Generate native (non-CBOR) Rust bindings for the timer example":
   exec "nim c " & nimFlagsOrc &
     " --app:lib --noMain --nimMainPrefix:libmy_timer" &
-    " -d:ffiGenBindings -d:targetLang=rust" &
-    " -d:ffiOutputDir=examples/timer/rust_bindings" &
-    " -d:ffiSrcPath=../timer.nim" &
-    " -o:/dev/null examples/timer/timer.nim"
-  exec "nim c " & nimFlagsRefc &
-    " --app:lib --noMain --nimMainPrefix:libmy_timer" &
-    " -d:ffiGenBindings -d:targetLang=rust" &
-    " -d:ffiOutputDir=examples/timer/rust_bindings" &
+    " -d:ffiGenBindings -d:targetLang=rust -d:ffiMode=native" &
+    " -d:ffiOutputDir=examples/timer/rust_native_bindings" &
     " -d:ffiSrcPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
 
