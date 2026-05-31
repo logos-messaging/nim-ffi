@@ -359,7 +359,7 @@ suite "ffiCtor macro":
       deinitCallbackData(d)
 
     var cfg = cborEncode(TestlibCreateCtorReq(config: SimpleConfig(initialValue: 42)))
-    let ret = testlib_create(encodedPtr(cfg), cfg.len.csize_t, testCallback, addr d)
+    let ret = testlib_createCborCtorExport(encodedPtr(cfg), cfg.len.csize_t, testCallback, addr d)
 
     check not ret.isNil()
 
@@ -396,7 +396,7 @@ suite "simplified .ffi. macro":
 
     var cfg = cborEncode(TestlibCreateCtorReq(config: SimpleConfig(initialValue: 7)))
     let ctorRet =
-      testlib_create(encodedPtr(cfg), cfg.len.csize_t, testCallback, addr ctorD)
+      testlib_createCborCtorExport(encodedPtr(cfg), cfg.len.csize_t, testCallback, addr ctorD)
     check not ctorRet.isNil()
 
     waitCallback(ctorD)
@@ -415,7 +415,7 @@ suite "simplified .ffi. macro":
 
     # The .ffi. macro packs all extra params into one CBOR Req struct.
     var reqBytes = cborEncode(TestlibSendReq(cfg: SendConfig(message: "hello")))
-    let ret = testlib_send(
+    let ret = testlib_sendCborExport(
       ctx, testCallback, addr d, encodedPtr(reqBytes), reqBytes.len.csize_t
     )
     check ret == RET_OK
@@ -441,7 +441,7 @@ suite "sync-body .ffi. is dispatched on FFI thread":
 
     var cfg = cborEncode(TestlibCreateCtorReq(config: SimpleConfig(initialValue: 3)))
     let ctorRet =
-      testlib_create(encodedPtr(cfg), cfg.len.csize_t, testCallback, addr ctorD)
+      testlib_createCborCtorExport(encodedPtr(cfg), cfg.len.csize_t, testCallback, addr ctorD)
     check not ctorRet.isNil()
 
     waitCallback(ctorD)
@@ -460,7 +460,7 @@ suite "sync-body .ffi. is dispatched on FFI thread":
 
     # No-extra-param .ffi. proc; pack an empty Req.
     var emptyBytes = cborEncode(TestlibVersionReq())
-    let ret = testlib_version(
+    let ret = testlib_versionCborExport(
       ctx, testCallback, addr d2, encodedPtr(emptyBytes), emptyBytes.len.csize_t
     )
     check ret == RET_OK
@@ -524,7 +524,7 @@ suite "sync-body .ffi. runs on FFI thread (PR #23 regression)":
 
     var cfg = cborEncode(TestlibCreateCtorReq(config: SimpleConfig(initialValue: 0)))
     let ctorRet =
-      testlib_create(encodedPtr(cfg), cfg.len.csize_t, testCallback, addr ctorD)
+      testlib_createCborCtorExport(encodedPtr(cfg), cfg.len.csize_t, testCallback, addr ctorD)
     check not ctorRet.isNil()
     waitCallback(ctorD)
     check ctorD.retCode == RET_OK
@@ -543,7 +543,7 @@ suite "sync-body .ffi. runs on FFI thread (PR #23 regression)":
       deinitCallbackData(d)
 
     var reqBytes = cborEncode(TestlibRecordTidReq(req: RecordTidReq(dummy: 1)))
-    let ret = testlib_record_tid(
+    let ret = testlib_record_tidCborExport(
       ctx, testCallback, addr d, encodedPtr(reqBytes), reqBytes.len.csize_t
     )
     check ret == RET_OK
