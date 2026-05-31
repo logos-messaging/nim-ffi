@@ -3,6 +3,15 @@
 Generated C headers for the timer library plus a small driver that links the
 library directly and calls the **native** (zero-serialization) ABI.
 
+> **Which ABI?** The library exports **both** ABIs from the same shared object,
+> side by side: the native `<name>` symbols and the CBOR `<name>_cbor` symbols.
+> Use the **native (pure-C) ABI for same-process / local calls** — it passes
+> flat C structs with zero serialization. Use the **CBOR ABI only for
+> inter-process communication** (a different process, or a different machine),
+> where the data has to be serialized to cross the boundary anyway. In one
+> address space, CBOR is pure overhead — prefer native. See [`../ipc`](../ipc)
+> for the CBOR/IPC path.
+
 ## Files
 
 | File | Description |

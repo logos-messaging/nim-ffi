@@ -6,6 +6,11 @@ library **in the same process**. When the caller lives in a *different process*
 request has to be serialized. That is exactly what the **CBOR ABI**
 (`<name>_cbor`, declared in `my_timer_cbor.h`) is for.
 
+> **The CBOR ABI exists solely for inter-process communication.** If you are in
+> the same process as the library, use the native ABI instead — serializing to
+> CBOR and decoding it on a sibling thread is pure overhead when you already
+> share memory. Both ABIs ship in the same library; pick per call site.
+
 This example wires that ABI across a socket:
 
 - **`server`** links `libmy_timer`, creates one timer context at startup, and
