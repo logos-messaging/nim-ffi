@@ -4,7 +4,8 @@ import ../ffi_types
 import ../codegen/[meta, string_helpers]
 import ./native_pod
 when defined(ffiGenBindings):
-  import ../codegen/rust
+  import ../codegen/rust_cbor
+  import ../codegen/rust_native
   import ../codegen/cpp
   import ../codegen/cddl
   import ../codegen/c
@@ -1966,10 +1967,16 @@ macro genBindings*(
     let libName = deriveLibName(ffiProcRegistry)
     case lang
     of "rust":
-      generateRustCrate(
-        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
-        ffiEventRegistry,
-      )
+      if ffiEmitCbor():
+        generateRustCrate(
+          ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
+          ffiEventRegistry,
+        )
+      if ffiEmitNative():
+        generateRustNativeCrate(
+          ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
+          ffiEventRegistry,
+        )
     of "cpp", "c++":
       generateCppBindings(
         ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
