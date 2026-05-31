@@ -1,4 +1,4 @@
 [package]
-name = "my_timer_native"
+name = "my_timer"
 version = "0.1.0"
 edition = "2021"

@@ -74,9 +74,13 @@ proc generateCargoToml*(libName: string): string =
   # pulling its async-std/futures shims.
   # `tokio` is needed only for `tokio::time::timeout` around the async
   # `recv_async`. Feature-gating tokio (item 11) is a follow-up commit.
+  # CBOR (inter-process) crate carries the `_cbor` suffix, matching the
+  # `<name>_cbor` symbol naming and the C `<lib>_cbor.h` header; the native
+  # crate is the bare `<lib>`. The linked dylib is still `lib<lib>.dylib`
+  # (see generateBuildRs / the `#[link]` name) — only the crate name changes.
   return
     """[package]
-name = "$1"
+name = "$1_cbor"
 version = "0.1.0"
 edition = "2021"
 

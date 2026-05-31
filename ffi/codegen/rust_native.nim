@@ -1,7 +1,8 @@
 ## Native (zero-serialization) Rust binding generator.
 ##
-## Emits a `<lib>_native` crate that wraps the *native* C ABI (the `<name>`
-## entry points + flat C-POD structs) — no CBOR. Each `{.ffi.}` type is a
+## Emits a bare `<lib>` crate that wraps the *native* C ABI (the `<name>`
+## entry points + flat C-POD structs) — no CBOR; the CBOR crate is `<lib>_cbor`.
+## Each `{.ffi.}` type is a
 ## `#[repr(C)]` mirror (`ffi`) plus an idiomatic Rust struct with `to_c`/`from_c`
 ## (`types`), and `<Lib>Node` marshals typed args in / reads typed struct
 ## returns out (`api`). Counterpart of the CBOR generator in `rust_cbor.nim`, and
@@ -452,8 +453,10 @@ proc generateRustNativeCrate*(
     events: seq[FFIEventMeta] = @[],
 ) =
   createDir(outputDir / "src")
+  # Native (same-process) crate is the bare `<lib>`, matching the `<name>`
+  # symbol naming and the C `<lib>.h` header; the CBOR crate is `<lib>_cbor`.
   writeFile(outputDir / "Cargo.toml",
-    "[package]\nname = \"" & libName & "_native\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
+    "[package]\nname = \"" & libName & "\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
   writeFile(outputDir / "src" / "lib.rs",
     "mod ffi;\nmod types;\nmod api;\npub use types::*;\npub use api::*;\n")
   writeFile(outputDir / "src" / "ffi.rs", emitFfiRs(procs, types, libName, events))
