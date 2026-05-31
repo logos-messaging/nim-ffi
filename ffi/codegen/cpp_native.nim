@@ -1,0 +1,333 @@
+## Native (zero-serialization) C++ binding generator.
+##
+## Emits `<lib>.hpp`: an idiomatic C++ wrapper over the *native* C ABI (the
+## `<name>` entry points + flat C structs declared in `<lib>.h`). Each `{.ffi.}`
+## type is mirrored as a C++ struct with `toC` / `fromC` converters to the C-POD
+## layout, and methods marshal typed args in / read typed struct returns out —
+## no CBOR. Companion to the CBOR generator in `cpp.nim` (`<lib>_cbor.hpp`).
+##
+## Commit 1 covers scalar / string / bool / nested-struct fields and the procs
+## that use only those (the timer's create / version / echo). Sequences,
+## optionals and native events are layered on next.
+
+import std/[os, strutils]
+import ./meta, ./string_helpers
+import ./c as cgen
+
+proc cppType(t: string): string =
+  ## Idiomatic C++ type for an `{.ffi.}` field / scalar.
+  case t.strip()
+  of "string", "cstring": "std::string"
+  of "int", "int64", "clong": "int64_t"
+  of "int32", "cint": "int32_t"
+  of "int16": "int16_t"
+  of "int8": "int8_t"
+  of "uint", "uint64", "csize_t": "uint64_t"
+  of "uint32", "cuint": "uint32_t"
+  of "uint16": "uint16_t"
+  of "uint8", "byte": "uint8_t"
+  of "bool": "bool"
+  of "float", "float32": "float"
+  of "float64": "double"
+  else: t.strip() # nested {.ffi.} struct -> its C++ name
+
+proc isSeqT(t: string): bool =
+  t.strip().startsWith("seq[") and t.strip().endsWith("]")
+
+proc isOptT(t: string): bool =
+  let s = t.strip()
+  (s.startsWith("Option[") or s.startsWith("Maybe[")) and s.endsWith("]")
+
+proc isStringT(t: string): bool =
+  t.strip() in ["string", "cstring"]
+
+proc isStructT(t: string, types: seq[FFITypeMeta]): bool =
+  for ty in types:
+    if ty.name == t.strip():
+      return true
+  false
+
+proc isSimpleType(t: FFITypeMeta, types: seq[FFITypeMeta]): bool =
+  ## True if every field is scalar / string / bool / nested *simple* struct
+  ## (no sequences or optionals yet).
+  for f in t.fields:
+    let ft = f.typeName.strip()
+    if isSeqT(ft) or isOptT(ft):
+      return false
+    if isStructT(ft, types):
+      for inner in types:
+        if inner.name == ft and not isSimpleType(inner, types):
+          return false
+  true
+
+proc paramSimple(typeName: string, types: seq[FFITypeMeta]): bool =
+  let t = typeName.strip()
+  if isStringT(t) or t == "bool":
+    return true
+  if cppType(t) != t: # mapped scalar
+    return true
+  if isStructT(t, types):
+    for ty in types:
+      if ty.name == t:
+        return isSimpleType(ty, types)
+  false
+
+# --- toC / fromC field converters -------------------------------------------
+proc toCField(f: FFIFieldMeta, types: seq[FFITypeMeta]): string =
+  let t = f.typeName.strip()
+  if isStringT(t):
+    "v." & f.name & ".c_str()"
+  elif t == "bool":
+    "(v." & f.name & " ? 1 : 0)"
+  elif isStructT(t, types):
+    "toC(v." & f.name & ")"
+  else:
+    "v." & f.name
+
+proc fromCField(f: FFIFieldMeta, types: seq[FFITypeMeta]): string =
+  let t = f.typeName.strip()
+  if isStringT(t):
+    "c." & f.name & " ? std::string(c." & f.name & ") : std::string()"
+  elif t == "bool":
+    "c." & f.name & " != 0"
+  elif isStructT(t, types):
+    "fromC(c." & f.name & ")"
+  else:
+    "c." & f.name
+
+proc emitTypes(types: seq[FFITypeMeta]): seq[string] =
+  var L: seq[string] = @[]
+  for t in types:
+    if not isSimpleType(t, types):
+      continue
+    L.add("struct " & t.name & " {")
+    for f in t.fields:
+      L.add("    " & cppType(f.typeName) & " " & f.name & "{};")
+    L.add("};")
+    # toC: build the C-POD struct (strings borrow the C++ object's storage,
+    # valid for the duration of the call).
+    L.add("inline ::" & t.name & " toC(const " & t.name & "& v) {")
+    L.add("    ::" & t.name & " c{};")
+    for f in t.fields:
+      L.add("    c." & f.name & " = " & toCField(f, types) & ";")
+    L.add("    return c;")
+    L.add("}")
+    # fromC: copy out of a C-POD struct into C++-owned values.
+    L.add("inline " & t.name & " fromC(const ::" & t.name & "& c) {")
+    L.add("    " & t.name & " v{};")
+    for f in t.fields:
+      L.add("    v." & f.name & " = " & fromCField(f, types) & ";")
+    L.add("    return v;")
+    L.add("}")
+    L.add("")
+  return L
+
+proc methodName(procName, libName: string): string =
+  let prefix = libName & "_"
+  let bare =
+    if procName.startsWith(prefix):
+      procName[prefix.len .. ^1]
+    else:
+      procName
+  capitalizeFirstLetter(snakeToPascalCase(bare))
+
+proc procSupported(p: FFIProcMeta, types: seq[FFITypeMeta]): bool =
+  for ep in p.extraParams:
+    if ep.isPtr or not paramSimple(ep.typeName, types):
+      return false
+  true
+
+proc generateCppNativeHeader*(
+    procs: seq[FFIProcMeta],
+    types: seq[FFITypeMeta],
+    libName: string,
+    events: seq[FFIEventMeta] = @[],
+): string =
+  let guard = "NIM_FFI_GEN_" & libName.toUpper() & "_NATIVE_HPP"
+  let nodeT = capitalizeFirstLetter(libName) & "Node"
+  var L: seq[string] = @[]
+  L.add("// Generated by nim-ffi native C++ codegen. Do not edit by hand.")
+  L.add("//")
+  L.add("// Native (zero-serialization) wrapper over the C ABI in \"" & libName &
+    ".h\". Struct params/returns cross as flat C-POD structs — no CBOR. For the")
+  L.add("// inter-process path use the CBOR header (" & libName & "_cbor.hpp).")
+  L.add("#ifndef " & guard)
+  L.add("#define " & guard)
+  L.add("")
+  L.add("#include \"" & libName & ".h\"")
+  L.add("#include <cstdint>")
+  L.add("#include <future>")
+  L.add("#include <stdexcept>")
+  L.add("#include <string>")
+  L.add("")
+  L.add("namespace " & libName & " {")
+  L.add("")
+
+  for line in emitTypes(types):
+    L.add(line)
+
+  # Per-call blocking capture, parameterised by the C++ return type.
+  L.add("namespace detail {")
+  L.add("template <typename T> struct Capture {")
+  L.add("    int ret = RET_ERR;")
+  L.add("    T value{};")
+  L.add("    std::string err;")
+  L.add("    std::promise<void> done;")
+  L.add("};")
+  L.add("struct AckCapture {")
+  L.add("    int ret = RET_ERR;")
+  L.add("    std::string err;")
+  L.add("    std::promise<void> done;")
+  L.add("};")
+  L.add("inline std::string rawText(const char* msg, std::size_t len) {")
+  L.add("    return (msg && len) ? std::string(msg, len) : std::string();")
+  L.add("}")
+  L.add("} // namespace detail")
+  L.add("")
+
+  # Find ctor / dtor.
+  var ctor, dtor: FFIProcMeta
+  var haveCtor, haveDtor = false
+  for p in procs:
+    if p.kind == FFIKind.CTOR:
+      (ctor, haveCtor) = (p, true)
+    elif p.kind == FFIKind.DTOR:
+      (dtor, haveDtor) = (p, true)
+
+  # Exported C callbacks (one per struct-returning method + shared ack/string).
+  L.add("extern \"C\" {")
+  L.add("inline void " & libName &
+    "_native_ack(int ret, const char* msg, std::size_t len, void* ud) {")
+  L.add("    auto* c = static_cast<detail::AckCapture*>(ud);")
+  L.add("    c->ret = ret;")
+  L.add("    if (ret == RET_ERR) c->err = detail::rawText(msg, len);")
+  L.add("    c->done.set_value();")
+  L.add("}")
+  L.add("inline void " & libName &
+    "_native_str(int ret, const char* msg, std::size_t len, void* ud) {")
+  L.add("    auto* c = static_cast<detail::Capture<std::string>*>(ud);")
+  L.add("    c->ret = ret;")
+  L.add("    if (ret == RET_OK) c->value = detail::rawText(msg, len);")
+  L.add("    else c->err = detail::rawText(msg, len);")
+  L.add("    c->done.set_value();")
+  L.add("}")
+  for p in procs:
+    if p.kind != FFIKind.FFI or not procSupported(p, types):
+      continue
+    if not isStructT(p.returnTypeName, types):
+      continue
+    let rt = p.returnTypeName
+    L.add("inline void " & libName & "_native_" & p.procName &
+      "(int ret, const char* msg, std::size_t len, void* ud) {")
+    L.add("    auto* c = static_cast<detail::Capture<" & rt & ">*>(ud);")
+    L.add("    c->ret = ret;")
+    L.add("    if (ret == RET_OK) c->value = fromC(*reinterpret_cast<const ::" &
+      rt & "*>(msg));")
+    L.add("    else c->err = detail::rawText(msg, len);")
+    L.add("    c->done.set_value();")
+    L.add("}")
+  L.add("} // extern \"C\"")
+  L.add("")
+
+  # The node class.
+  L.add("class " & nodeT & " {")
+  L.add(" public:")
+  if haveCtor:
+    var params: seq[string] = @[]
+    var conv: seq[string] = @[]
+    var args: seq[string] = @[]
+    for ep in ctor.extraParams:
+      params.add("const " & cppType(ep.typeName) & "& " & ep.name)
+      if isStructT(ep.typeName, types):
+        conv.add("        auto c_" & ep.name & " = toC(" & ep.name & ");")
+        args.add("c_" & ep.name)
+      else:
+        args.add(ep.name)
+    let argsStr = if args.len > 0: args.join(", ") & ", " else: ""
+    L.add("    explicit " & nodeT & "(" & params.join(", ") & ") {")
+    L.add("        detail::AckCapture cap;")
+    L.add("        auto fut = cap.done.get_future();")
+    for c in conv:
+      L.add(c)
+    L.add("        ctx_ = " & ctor.procName & "(" & argsStr &
+      libName & "_native_ack, &cap);")
+    L.add("        if (!ctx_) throw std::runtime_error(\"" & ctor.procName &
+      " returned null\");")
+    L.add("        fut.wait();")
+    L.add("        if (cap.ret != RET_OK) throw std::runtime_error(cap.err);")
+    L.add("    }")
+    L.add("")
+
+  for p in procs:
+    if p.kind != FFIKind.FFI:
+      continue
+    if not procSupported(p, types):
+      L.add("    // SKIPPED " & p.procName &
+        ": seq/Option/multi-struct params not yet supported by native C++ codegen")
+      continue
+    let mName = methodName(p.procName, libName)
+    var params: seq[string] = @[]
+    var conv: seq[string] = @[]
+    var args: seq[string] = @[]
+    for ep in p.extraParams:
+      params.add("const " & cppType(ep.typeName) & "& " & ep.name)
+      if isStructT(ep.typeName, types):
+        conv.add("        auto c_" & ep.name & " = toC(" & ep.name & ");")
+        args.add("c_" & ep.name)
+      else:
+        args.add(ep.name)
+    let argsStr = if args.len > 0: ", " & args.join(", ") else: ""
+    let structRet = isStructT(p.returnTypeName, types)
+    let retT = if structRet: p.returnTypeName else: "std::string"
+    let capT = if structRet: p.returnTypeName else: "std::string"
+    let cbName =
+      if structRet: libName & "_native_" & p.procName else: libName & "_native_str"
+    L.add("    " & retT & " " & mName & "(" & params.join(", ") & ") {")
+    L.add("        detail::Capture<" & capT & "> cap;")
+    L.add("        auto fut = cap.done.get_future();")
+    for c in conv:
+      L.add(c)
+    L.add("        if (" & p.procName & "(ctx_, " & cbName & ", &cap" & argsStr &
+      ") != RET_OK)")
+    L.add("            throw std::runtime_error(\"" & p.procName &
+      " dispatch failed\");")
+    L.add("        fut.wait();")
+    L.add("        if (cap.ret != RET_OK) throw std::runtime_error(cap.err);")
+    L.add("        return cap.value;")
+    L.add("    }")
+    L.add("")
+
+  if haveDtor:
+    L.add("    ~" & nodeT & "() { if (ctx_) " & dtor.procName & "(ctx_); }")
+    L.add("    " & nodeT & "(const " & nodeT & "&) = delete;")
+    L.add("    " & nodeT & "& operator=(const " & nodeT & "&) = delete;")
+    L.add("")
+  L.add(" private:")
+  L.add("    void* ctx_ = nullptr;")
+  L.add("};")
+  L.add("")
+  L.add("} // namespace " & libName)
+  L.add("")
+  L.add("#endif // " & guard)
+  return L.join("\n")
+
+proc generateCppNativeBindings*(
+    procs: seq[FFIProcMeta],
+    types: seq[FFITypeMeta],
+    libName: string,
+    outputDir: string,
+    nimSrcRelPath: string,
+    events: seq[FFIEventMeta] = @[],
+) =
+  # `<lib>_native.hpp` for now so it coexists with the CBOR `<lib>.hpp`; the
+  # native-bare / `_cbor` rename (matching C) is a follow-up. Emit the native C
+  # header too (the structs + entry points the .hpp includes), so the binding is
+  # self-contained.
+  writeFile(
+    outputDir / (libName & ".h"),
+    cgen.generateCHeader(procs, types, libName, events),
+  )
+  writeFile(
+    outputDir / (libName & "_native.hpp"),
+    generateCppNativeHeader(procs, types, libName, events),
+  )

@@ -197,6 +197,14 @@ task genbindings_cpp, "Generate C++ bindings for the timer example":
     " -d:ffiSrcPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
 
+task genbindings_cpp_native, "Generate native (non-CBOR) C++ bindings for the timer example":
+  exec "nim c " & nimFlagsOrc &
+    " --app:lib --noMain --nimMainPrefix:libmy_timer" &
+    " -d:ffiGenBindings -d:targetLang=cpp -d:ffiMode=native" &
+    " -d:ffiOutputDir=examples/timer/cpp_native_bindings" &
+    " -d:ffiSrcPath=../timer.nim" &
+    " -o:/dev/null examples/timer/timer.nim"
+
 task genbindings_cpp_echo, "Generate C++ bindings for the echo example":
   exec "nim c " & nimFlagsOrc &
     " --app:lib --noMain --nimMainPrefix:libecho" &
