@@ -27,6 +27,11 @@ complex, schedule all generate and round-trip typed values. `to_c` returns a
 holder that owns the `CString`s and C-array backing (heap, so the C struct's raw
 pointers stay valid across the move and for the call).
 
-Still to come: native typed events and the native-bare / `_cbor` reconciliation.
+Native typed events are supported too: `add_<event>_listener` takes a closure
+receiving the payload as a borrowed idiomatic struct (the trampoline reads the
+raw C-POD directly — no CBOR), the handle goes through `remove_event_listener`,
+and the node owns the boxed closures for their lifetime.
+
+Still to come: the native-bare / `_cbor` filename reconciliation.
 Linking is left to the consumer (`-L <dir> -l my_timer` + rpath, as in
 `examples/demo.rs`); a build.rs that compiles the dylib can be added later.

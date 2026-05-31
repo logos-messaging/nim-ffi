@@ -2,8 +2,16 @@ use my_timer_native::*;
 fn main() {
     let node = MyTimerNode::new(TimerConfig { name: "rust-native-gen".into() }).unwrap();
     println!("version: {}", node.version().unwrap());
+
+    // Native typed event: echo fires on_echo_fired inline with a raw C-POD
+    // EchoEvent payload, delivered straight to the closure (no CBOR decode).
+    let h = node.add_on_echo_fired_listener(|e: &EchoEvent| {
+        println!("event on_echo_fired: message={:?} echo_count={}", e.message, e.echo_count);
+    });
+
     let r = node.echo(EchoRequest { message: "hello from generated Rust".into(), delay_ms: 5 }).unwrap();
     println!("echo: echoed={} timer_name={}", r.echoed, r.timer_name);
+    println!("removed listener: {}", node.remove_event_listener(h));
 
     let c = node.complex(ComplexRequest {
         messages: vec![EchoRequest { message: "one".into(), delay_ms: 0 },

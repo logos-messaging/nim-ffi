@@ -46,7 +46,20 @@ unsafe extern "C" fn cb_my_timer_schedule(ret: c_int, msg: *const c_char, len: u
     let _ = tx.send(r);
 }
 
-pub struct MyTimerNode { ctx: *mut c_void }
+struct OnEchoFiredHandler { f: Box<dyn Fn(&EchoEvent) + Send + Sync> }
+unsafe extern "C" fn on_echo_fired_trampoline(ret: c_int, msg: *const c_char, _len: usize, ud: *mut c_void) {
+    if ud.is_null() || ret != RET_OK || msg.is_null() { return; }
+    let h = &*(ud as *const OnEchoFiredHandler);
+    (h.f)(&EchoEvent::from_c(&*(msg as *const ffi::EchoEvent)));
+}
+
+#[derive(Clone, Copy)]
+pub struct ListenerHandle { pub id: u64 }
+
+pub struct MyTimerNode {
+    ctx: *mut c_void,
+    listeners: std::sync::Mutex<std::collections::HashMap<u64, Box<dyn std::any::Any + Send>>>,
+}
 unsafe impl Send for MyTimerNode {}
 unsafe impl Sync for MyTimerNode {}
 
@@ -59,7 +72,7 @@ impl MyTimerNode {
         let res = rx.recv().map_err(|_| String::from("callback channel closed"))?;
         res?;
         if ctx.is_null() { return Err(String::from("my_timer_create returned null")); }
-        Ok(MyTimerNode { ctx })
+        Ok(MyTimerNode { ctx, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })
     }
 
     pub fn echo(&self, req: EchoRequest) -> Result<EchoResponse, String> {
@@ -109,6 +122,22 @@ impl MyTimerNode {
             return Err(String::from("my_timer_schedule dispatch failed"));
         }
         rx.recv().map_err(|_| String::from("callback channel closed"))?
+    }
+
+    pub fn add_on_echo_fired_listener<F>(&self, handler: F) -> ListenerHandle
+    where F: Fn(&EchoEvent) + Send + Sync + 'static {
+        let owned: Box<OnEchoFiredHandler> = Box::new(OnEchoFiredHandler { f: Box::new(handler) });
+        let raw = &*owned as *const OnEchoFiredHandler as *mut c_void;
+        let id = unsafe { ffi::my_timer_add_event_listener(self.ctx, b"on_echo_fired\0".as_ptr() as *const c_char, on_echo_fired_trampoline, raw) };
+        if id != 0 { self.listeners.lock().unwrap().insert(id, owned as Box<dyn std::any::Any + Send>); }
+        ListenerHandle { id }
+    }
+
+    pub fn remove_event_listener(&self, handle: ListenerHandle) -> bool {
+        if handle.id == 0 { return false; }
+        let rc = unsafe { ffi::my_timer_remove_event_listener(self.ctx, handle.id) };
+        self.listeners.lock().unwrap().remove(&handle.id);
+        rc == RET_OK
     }
 
 }
