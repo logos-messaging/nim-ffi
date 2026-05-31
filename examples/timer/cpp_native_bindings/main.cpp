@@ -6,8 +6,13 @@ int main() {
     my_timer::My_timerNode node(my_timer::TimerConfig{"cpp-native-gen"});
     std::cout << "version: " << node.Version() << "\n";
 
+    my_timer::EchoEvent gotEvt;
+    bool got = false;
+    node.OnEchoFired([&](const my_timer::EchoEvent& e){ gotEvt = e; got = true; });
+
     auto r = node.Echo(my_timer::EchoRequest{"hello from generated C++", 5});
     std::cout << "echo: echoed=" << r.echoed << " timerName=" << r.timerName << "\n";
+    if (got) std::cout << "event OnEchoFired: message=\"" << gotEvt.message << "\" echoCount=" << gotEvt.echoCount << "\n";
 
     // seq + Option params (ComplexRequest), typed ComplexResponse return.
     my_timer::ComplexRequest creq;

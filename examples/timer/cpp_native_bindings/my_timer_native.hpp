@@ -7,7 +7,10 @@
 
 #include "my_timer.h"
 #include <cstdint>
+#include <functional>
 #include <future>
+#include <map>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -289,7 +292,16 @@ struct AckCapture {
 inline std::string rawText(const char* msg, std::size_t len) {
     return (msg && len) ? std::string(msg, len) : std::string();
 }
+// Event listener storage: a heap handler kept alive by the node so the
+// native callback's userData stays valid until removed.
+struct ListenerBase { virtual ~ListenerBase() = default; };
+template <typename T> struct EventListener : ListenerBase {
+    std::function<void(const T&)> handler;
+    explicit EventListener(std::function<void(const T&)> h)
+        : handler(std::move(h)) {}
+};
 } // namespace detail
+struct ListenerHandle { std::uint64_t id = 0; };
 
 extern "C" {
 inline void my_timer_native_ack(int ret, const char* msg, std::size_t len, void* ud) {
@@ -325,6 +337,11 @@ inline void my_timer_native_my_timer_schedule(int ret, const char* msg, std::siz
     if (ret == RET_OK) c->value = fromC(*reinterpret_cast<const ::ScheduleResult*>(msg));
     else c->err = detail::rawText(msg, len);
     c->done.set_value();
+}
+inline void my_timer_evt_OnEchoFired(int ret, const char* msg, std::size_t, void* ud) {
+    auto* l = static_cast<detail::EventListener<EchoEvent>*>(ud);
+    if (ret == RET_OK && l->handler)
+        l->handler(fromC(*reinterpret_cast<const ::EchoEvent*>(msg)));
 }
 } // extern "C"
 
@@ -385,12 +402,29 @@ class My_timerNode {
         return cap.value;
     }
 
+    ListenerHandle OnEchoFired(std::function<void(const EchoEvent&)> handler) {
+        auto l = std::make_unique<detail::EventListener<EchoEvent>>(std::move(handler));
+        auto* raw = l.get();
+        const auto id = my_timer_add_event_listener(ctx_, "on_echo_fired", &my_timer_evt_OnEchoFired, raw);
+        if (id == 0) return ListenerHandle{0};
+        listeners_.emplace(id, std::move(l));
+        return ListenerHandle{id};
+    }
+
+    bool removeEventListener(ListenerHandle handle) {
+        if (handle.id == 0) return false;
+        const auto rc = my_timer_remove_event_listener(ctx_, handle.id);
+        listeners_.erase(handle.id);
+        return rc == 0;
+    }
+
     ~My_timerNode() { if (ctx_) my_timer_destroy(ctx_); }
     My_timerNode(const My_timerNode&) = delete;
     My_timerNode& operator=(const My_timerNode&) = delete;
 
  private:
     void* ctx_ = nullptr;
+    std::map<std::uint64_t, std::unique_ptr<detail::ListenerBase>> listeners_;
 };
 
 } // namespace my_timer

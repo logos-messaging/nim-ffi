@@ -34,6 +34,8 @@ echo, complex, schedule all generate and round-trip typed values (ASAN-clean).
 `toC` uses a holder that owns the C-array backing while string pointers borrow
 the C++ argument (valid for the call's duration; the library deep-copies).
 
-Still to come: **native typed events** (`On<Event>` handlers) and the
+Native typed events are supported too: `node.On<Event>(handler)` registers a
+native listener and the typed payload arrives via `fromC` (no CBOR). Still to
+come: the
 native-bare / `_cbor` filename reconciliation (matching the C headers). Today
 this emits `my_timer_native.hpp` so it coexists with the CBOR `my_timer.hpp`.

@@ -210,7 +210,10 @@ proc generateCppNativeHeader*(
   L.add("")
   L.add("#include \"" & libName & ".h\"")
   L.add("#include <cstdint>")
+  L.add("#include <functional>")
   L.add("#include <future>")
+  L.add("#include <map>")
+  L.add("#include <memory>")
   L.add("#include <optional>")
   L.add("#include <stdexcept>")
   L.add("#include <string>")
@@ -238,7 +241,18 @@ proc generateCppNativeHeader*(
   L.add("inline std::string rawText(const char* msg, std::size_t len) {")
   L.add("    return (msg && len) ? std::string(msg, len) : std::string();")
   L.add("}")
+  if events.len > 0:
+    L.add("// Event listener storage: a heap handler kept alive by the node so the")
+    L.add("// native callback's userData stays valid until removed.")
+    L.add("struct ListenerBase { virtual ~ListenerBase() = default; };")
+    L.add("template <typename T> struct EventListener : ListenerBase {")
+    L.add("    std::function<void(const T&)> handler;")
+    L.add("    explicit EventListener(std::function<void(const T&)> h)")
+    L.add("        : handler(std::move(h)) {}")
+    L.add("};")
   L.add("} // namespace detail")
+  if events.len > 0:
+    L.add("struct ListenerHandle { std::uint64_t id = 0; };")
   L.add("")
 
   # Find ctor / dtor.
@@ -281,6 +295,17 @@ proc generateCppNativeHeader*(
       rt & "*>(msg));")
     L.add("    else c->err = detail::rawText(msg, len);")
     L.add("    c->done.set_value();")
+    L.add("}")
+  # One native event trampoline per event: read the typed POD, call the handler.
+  for e in events:
+    if not isStructT(e.payloadTypeName, types):
+      continue
+    let pt = e.payloadTypeName
+    L.add("inline void " & libName & "_evt_" & snakeToPascalCase(e.wireName) &
+      "(int ret, const char* msg, std::size_t, void* ud) {")
+    L.add("    auto* l = static_cast<detail::EventListener<" & pt & ">*>(ud);")
+    L.add("    if (ret == RET_OK && l->handler)")
+    L.add("        l->handler(fromC(*reinterpret_cast<const ::" & pt & "*>(msg)));")
     L.add("}")
   L.add("} // extern \"C\"")
   L.add("")
@@ -353,6 +378,37 @@ proc generateCppNativeHeader*(
     L.add("    }")
     L.add("")
 
+  # Native typed event handlers: On<Event>(handler) registers a native listener
+  # that delivers the typed payload (read via fromC). The handler is owned by the
+  # node so its address stays valid until removeEventListener.
+  for e in events:
+    if not isStructT(e.payloadTypeName, types):
+      continue
+    let pascal = snakeToPascalCase(e.wireName)
+    let pt = e.payloadTypeName
+    L.add("    ListenerHandle " & pascal &
+      "(std::function<void(const " & pt & "&)> handler) {")
+    L.add("        auto l = std::make_unique<detail::EventListener<" & pt &
+      ">>(std::move(handler));")
+    L.add("        auto* raw = l.get();")
+    L.add("        const auto id = " & libName &
+      "_add_event_listener(ctx_, \"" & e.wireName & "\", &" & libName & "_evt_" &
+      pascal & ", raw);")
+    L.add("        if (id == 0) return ListenerHandle{0};")
+    L.add("        listeners_.emplace(id, std::move(l));")
+    L.add("        return ListenerHandle{id};")
+    L.add("    }")
+    L.add("")
+  if events.len > 0:
+    L.add("    bool removeEventListener(ListenerHandle handle) {")
+    L.add("        if (handle.id == 0) return false;")
+    L.add("        const auto rc = " & libName &
+      "_remove_event_listener(ctx_, handle.id);")
+    L.add("        listeners_.erase(handle.id);")
+    L.add("        return rc == 0;")
+    L.add("    }")
+    L.add("")
+
   if haveDtor:
     L.add("    ~" & nodeT & "() { if (ctx_) " & dtor.procName & "(ctx_); }")
     L.add("    " & nodeT & "(const " & nodeT & "&) = delete;")
@@ -360,6 +416,8 @@ proc generateCppNativeHeader*(
     L.add("")
   L.add(" private:")
   L.add("    void* ctx_ = nullptr;")
+  if events.len > 0:
+    L.add("    std::map<std::uint64_t, std::unique_ptr<detail::ListenerBase>> listeners_;")
   L.add("};")
   L.add("")
   L.add("} // namespace " & libName)
