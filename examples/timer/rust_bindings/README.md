@@ -31,7 +31,8 @@ The `rust_client` example consumes this crate:
 
 ```toml
 [dependencies]
-my_timer = { path = "../rust_bindings" }
+# CBOR (inter-process) crate carries the `_cbor` suffix; the native crate is the bare `my_timer`.
+my_timer_cbor = { path = "../rust_bindings" }
 ```
 
 ## Do Not Edit

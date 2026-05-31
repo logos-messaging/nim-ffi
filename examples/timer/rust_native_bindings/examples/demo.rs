@@ -1,4 +1,4 @@
-use my_timer_native::*;
+use my_timer::*;
 fn main() {
     let node = MyTimerNode::new(TimerConfig { name: "rust-native-gen".into() }).unwrap();
     println!("version: {}", node.version().unwrap());

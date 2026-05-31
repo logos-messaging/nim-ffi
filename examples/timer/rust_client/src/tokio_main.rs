@@ -1,5 +1,5 @@
 use std::time::Duration;
-use my_timer::{
+use my_timer_cbor::{
     EchoRequest, JobSpec, MyTimerCtx, RetryPolicy, ScheduleConfig, TimerConfig,
 };
 
