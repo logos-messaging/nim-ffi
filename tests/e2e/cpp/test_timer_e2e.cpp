@@ -13,8 +13,8 @@
 // aborting) when it carries an error, so single-threaded tests read as if
 // the value came back directly.
 
-#include "my_timer.hpp"
-#include "echo.hpp"
+#include "my_timer_cbor.hpp"
+#include "echo_cbor.hpp"
 
 #include <atomic>
 #include <chrono>

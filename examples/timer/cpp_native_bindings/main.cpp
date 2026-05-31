@@ -1,5 +1,5 @@
-// Driver for the GENERATED native C++ bindings (my_timer_native.hpp).
-#include "my_timer_native.hpp"
+// Driver for the GENERATED native C++ bindings (my_timer.hpp).
+#include "my_timer.hpp"
 #include <iostream>
 int main() {
   try {

@@ -6,7 +6,7 @@ in [`../cpp_bindings`](../cpp_bindings).
 
 | File | Description |
 |------|-------------|
-| `my_timer_native.hpp` | Generated wrapper: a C++ struct + `toC`/`fromC` per `{.ffi.}` type, and a `My_timerNode` class whose methods marshal typed args into / read typed struct returns out of the native ABI — no CBOR. |
+| `my_timer.hpp` | Generated wrapper: a C++ struct + `toC`/`fromC` per `{.ffi.}` type, and a `My_timerNode` class whose methods marshal typed args into / read typed struct returns out of the native ABI — no CBOR. |
 | `my_timer.h` | Native C header (structs + entry points) the `.hpp` includes. |
 | `main.cpp`, `Makefile` | A driver + build. |
 
@@ -35,7 +35,8 @@ echo, complex, schedule all generate and round-trip typed values (ASAN-clean).
 the C++ argument (valid for the call's duration; the library deep-copies).
 
 Native typed events are supported too: `node.On<Event>(handler)` registers a
-native listener and the typed payload arrives via `fromC` (no CBOR). Still to
-come: the
-native-bare / `_cbor` filename reconciliation (matching the C headers). Today
-this emits `my_timer_native.hpp` so it coexists with the CBOR `my_timer.hpp`.
+native listener and the typed payload arrives via `fromC` (no CBOR).
+
+The native header is the bare `my_timer.hpp` and the CBOR counterpart is
+`my_timer_cbor.hpp` — matching the C headers (`my_timer.h` / `my_timer_cbor.h`)
+and the `<name>` / `<name>_cbor` symbol naming.

@@ -2,11 +2,11 @@
 
 These tests validate that a Nim FFI library exported with `nim-ffi`'s C++
 codegen is usable from a real C++ consumer. They drive the `my_timer` example
-through its auto-generated `my_timer.hpp` bindings (constructor, sync method,
+through its auto-generated `my_timer_cbor.hpp` bindings (constructor, sync method,
 async methods, complex types with optional fields, multiple contexts, error
 propagation, async pipelines, short-lived-thread stress, concurrent hammer)
 and assert the round-tripped values. The `CrossLibrary` test additionally
-loads `examples/echo`'s `echo.hpp` alongside the timer to prove two
+loads `examples/echo`'s `echo_cbor.hpp` alongside the timer to prove two
 independent nim-ffi libraries coexist in one process with no symbol clash
 and no shared global state.
 

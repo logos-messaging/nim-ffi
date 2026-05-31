@@ -433,15 +433,15 @@ proc generateCppNativeBindings*(
     nimSrcRelPath: string,
     events: seq[FFIEventMeta] = @[],
 ) =
-  # `<lib>_native.hpp` for now so it coexists with the CBOR `<lib>.hpp`; the
-  # native-bare / `_cbor` rename (matching C) is a follow-up. Emit the native C
-  # header too (the structs + entry points the .hpp includes), so the binding is
-  # self-contained.
+  # Native header is the bare `<lib>.hpp` (matching C's bare `<lib>.h` and the
+  # `<name>` symbol naming); the CBOR counterpart is `<lib>_cbor.hpp`. Emit the
+  # native C header too (the structs + entry points the .hpp includes), so the
+  # binding is self-contained.
   writeFile(
     outputDir / (libName & ".h"),
     cgen.generateCHeader(procs, types, libName, events),
   )
   writeFile(
-    outputDir / (libName & "_native.hpp"),
+    outputDir / (libName & ".hpp"),
     generateCppNativeHeader(procs, types, libName, events),
   )

@@ -1,7 +1,9 @@
 ## C++ binding generator for the nim-ffi framework.
-## Generates a header-only C++ binding and CMakeLists.txt. Requests/responses
-## travel as CBOR (encoded with vendored TinyCBOR on the C++ side, matching
-## the Nim-side cbor_serial codec on the wire — both ends speak RFC 8949).
+## Generates a header-only C++ binding (`<lib>_cbor.hpp`) and CMakeLists.txt.
+## Requests/responses travel as CBOR (encoded with vendored TinyCBOR on the C++
+## side, matching the Nim-side cbor_serial codec on the wire — both ends speak
+## RFC 8949). The native (zero-serialization) counterpart is `<lib>.hpp`,
+## emitted by cpp_native.nim.
 
 import std/[os, strutils]
 import ./meta, ./string_helpers
@@ -703,8 +705,11 @@ proc generateCppBindings*(
     events: seq[FFIEventMeta] = @[],
 ) =
   createDir(outputDir)
+  # CBOR (inter-process) header carries the `_cbor` suffix, matching the C
+  # generator's `<lib>_cbor.h` and the `<name>_cbor` symbol naming; the native
+  # header is the bare `<lib>.hpp`.
   writeFile(
-    outputDir / (libName & ".hpp"),
+    outputDir / (libName & "_cbor.hpp"),
     generateCppHeader(procs, types, libName, events),
   )
   writeFile(outputDir / "CMakeLists.txt", generateCppCMakeLists(libName, nimSrcRelPath))
