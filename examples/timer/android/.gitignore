@@ -1,0 +1,5 @@
+/src/main/jniLibs/
+/.nimcache/
+/build/
+/.gradle/
+*.so
