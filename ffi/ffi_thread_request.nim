@@ -43,6 +43,15 @@ type FFIThreadRequest* = object
   payloadFree*: PayloadFreeProc
     ## When non-nil, `data` is freed by calling this instead of `c_free` — used
     ## for the native C-POD payload, which owns its duplicated string fields.
+  respPod*: pointer
+    ## Native typed response: when non-nil, the handler produced a heap C-POD
+    ## struct (the `nimToPod` of a `{.ffi.}`-typed return) to hand to the
+    ## callback *instead of* the `res` bytes. The callback receives it as its
+    ## `msg` pointer (cast to `const <Type>*`) with `len = respPodLen`; it is
+    ## valid only for the callback's lifetime — `handleRes` deep-frees it via
+    ## `respPodFree` immediately after the callback returns.
+  respPodLen*: int
+  respPodFree*: PayloadFreeProc
 
 proc allocBaseRequest(
     callback: FFICallBack, userData: pointer, reqId: cstring
@@ -58,6 +67,9 @@ proc allocBaseRequest(
   ret[].dataLen = 0
   ret[].cborMode = true
   ret[].payloadFree = nil
+  ret[].respPod = nil
+  ret[].respPodLen = 0
+  ret[].respPodFree = nil
   return ret
 
 proc copySharedPayload(req: ptr FFIThreadRequest, data: ptr byte, dataLen: int) =
@@ -173,6 +185,21 @@ proc handleRes*(res: Result[seq[byte], string], request: ptr FFIThreadRequest) =
       request[].callback(
         RET_ERR, unsafeAddr msg[0], cast[csize_t](msg.len), request[].userData
       )
+    return
+
+  # Native typed return: deliver the heap C-POD to the callback, then deep-free
+  # it (caller frees nothing). Takes precedence over the byte payload, which the
+  # handler leaves empty in this case.
+  if not request[].respPod.isNil():
+    foreignThreadGc:
+      request[].callback(
+        RET_OK,
+        cast[ptr cchar](request[].respPod),
+        cast[csize_t](request[].respPodLen),
+        request[].userData,
+      )
+    if request[].respPodFree != nil:
+      request[].respPodFree(request[].respPod)
     return
 
   foreignThreadGc:

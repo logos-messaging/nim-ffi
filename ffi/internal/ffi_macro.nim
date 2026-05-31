@@ -996,18 +996,38 @@ macro ffi*(prc: untyped): untyped =
       let f = ident(extraParamNames[i])
       ndBody.add(nativeArgUnpackStmt(ndCargs, f, extraParamTypes[i]))
       ndHelperCall.add(f)
-    ndBody.add quote do:
-      let `ndRet` = (await `ndHelperCall`).valueOr:
-        return err($error)
-      when typeof(`ndRet`) is string:
-        var rb = newSeq[byte](`ndRet`.len)
-        if `ndRet`.len > 0:
-          copyMem(addr rb[0], unsafeAddr `ndRet`[0], `ndRet`.len)
-        return ok(rb)
-      elif typeof(`ndRet`) is seq[byte]:
-        return ok(`ndRet`)
-      else:
-        return ok(cborEncode(`ndRet`))
+    # A `{.ffi.}`-struct return travels back natively too: build its `<T>Pod`
+    # mirror on the heap, hand it to the callback as a typed `const <T>*`, and
+    # let handleRes deep-free it after the callback (caller frees nothing). Any
+    # other return (string -> raw bytes, seq[byte] -> raw, else -> CBOR) keeps
+    # the byte-payload path.
+    let retIsStruct = isFFIStructType(resultRetType)
+    let respPodFreeName = ident(camelName & "RespPodFree")
+    if retIsStruct:
+      let retPodType = ident($resultRetType & "Pod")
+      let ndPodPtr = genSym(nskLet, "respPod")
+      ndBody.add quote do:
+        let `ndRet` = (await `ndHelperCall`).valueOr:
+          return err($error)
+        let `ndPodPtr` = ffiCMalloc(`retPodType`)
+        `ndPodPtr`[] = nimToPod(`ndRet`)
+        `ndReq`[].respPod = cast[pointer](`ndPodPtr`)
+        `ndReq`[].respPodLen = sizeof(`retPodType`)
+        `ndReq`[].respPodFree = `respPodFreeName`
+        return ok(newSeq[byte](0))
+    else:
+      ndBody.add quote do:
+        let `ndRet` = (await `ndHelperCall`).valueOr:
+          return err($error)
+        when typeof(`ndRet`) is string:
+          var rb = newSeq[byte](`ndRet`.len)
+          if `ndRet`.len > 0:
+            copyMem(addr rb[0], unsafeAddr `ndRet`[0], `ndRet`.len)
+          return ok(rb)
+        elif typeof(`ndRet`) is seq[byte]:
+          return ok(`ndRet`)
+        else:
+          return ok(cborEncode(`ndRet`))
     let seqByteRet = nnkBracketExpr.newTree(
       ident("Future"),
       nnkBracketExpr.newTree(
@@ -1030,6 +1050,30 @@ macro ffi*(prc: untyped): untyped =
       newTree(nnkBracketExpr, ident("registeredRequests"), nativeReqIdLit),
       nativeHandlerProc,
     )
+
+    # Per-proc destructor for the native typed response POD (only emitted when
+    # the return is a `{.ffi.}` struct). `freePod` recursively releases the
+    # duplicated strings / nested graphs; then the heap struct itself.
+    var respPodFreeProc: NimNode = newStmtList()
+    if retIsStruct:
+      let retPodType = ident($resultRetType & "Pod")
+      let fpP = genSym(nskParam, "p")
+      let fpPod = genSym(nskLet, "pod")
+      let respPodFreeBody = quote do:
+        let `fpPod` = cast[ptr `retPodType`](`fpP`)
+        freePod(`fpPod`[])
+        ffiCFree(`fpP`)
+      respPodFreeProc = newProc(
+        name = respPodFreeName,
+        params = @[newEmptyNode(), newIdentDefs(fpP, ident("pointer"))],
+        body = respPodFreeBody,
+        pragmas = newTree(
+          nnkPragma,
+          ident("cdecl"),
+          newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
+          ident("gcsafe"),
+        ),
+      )
 
     # Native C export: build the C-POD (duplicating cstrings) and dispatch.
     let neCargs = genSym(nskLet, "cargs")
@@ -1121,8 +1165,8 @@ macro ffi*(prc: untyped): untyped =
       )
 
     return newStmtList(
-      helperProc, registerReq, cargsTypeDef, cargsFreeProc, nativeRegister,
-      nativeExportProc, ffiProc,
+      helperProc, registerReq, cargsTypeDef, cargsFreeProc, respPodFreeProc,
+      nativeRegister, nativeExportProc, ffiProc,
     )
 
   let stmts = newStmtList(flushPendingPods(), asyncPath())
