@@ -403,9 +403,9 @@ inline CborError decode_cbor(CborValue& it, EchoVersionReq&) {
 extern "C" {
 typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_data);
 
-void* echo_create(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback callback, void* user_data);
-int echo_shout(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
-int echo_version(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+void* echo_create_cbor(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback callback, void* user_data);
+int echo_shout_cbor(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int echo_version_cbor(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int echo_destroy(void* ctx);
 uint64_t echo_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
 int echo_remove_event_listener(void* ctx, uint64_t listener_id);
@@ -484,7 +484,7 @@ public:
         if (ffi_enc_.isErr()) return Result<std::unique_ptr<EchoCtx>>::err(ffi_enc_.error());
         const auto& ffi_req_bytes_ = ffi_enc_.value();
         auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            (void)echo_create(ffi_req_bytes_.data(), ffi_req_bytes_.size(), cb, ud);
+            (void)echo_create_cbor(ffi_req_bytes_.data(), ffi_req_bytes_.size(), cb, ud);
             return 0;
         }, timeout);
         if (ffi_raw_.isErr()) return Result<std::unique_ptr<EchoCtx>>::err(ffi_raw_.error());
@@ -532,7 +532,7 @@ public:
         if (ffi_enc_.isErr()) return Result<ShoutResponse>::err(ffi_enc_.error());
         const auto& ffi_req_bytes_ = ffi_enc_.value();
         auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return echo_shout(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+            return echo_shout_cbor(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
         }, timeout_);
         if (ffi_raw_.isErr()) return Result<ShoutResponse>::err(ffi_raw_.error());
         return decodeCborFFI<ShoutResponse>(ffi_raw_.value());
@@ -548,7 +548,7 @@ public:
         if (ffi_enc_.isErr()) return Result<std::string>::err(ffi_enc_.error());
         const auto& ffi_req_bytes_ = ffi_enc_.value();
         auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return echo_version(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+            return echo_version_cbor(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
         }, timeout_);
         if (ffi_raw_.isErr()) return Result<std::string>::err(ffi_raw_.error());
         return decodeCborFFI<std::string>(ffi_raw_.value());

@@ -702,11 +702,11 @@ inline CborError decode_cbor(CborValue& it, MyTimerScheduleReq& v) {
 extern "C" {
 typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_data);
 
-void* my_timer_create(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback callback, void* user_data);
-int my_timer_echo(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
-int my_timer_version(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
-int my_timer_complex(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
-int my_timer_schedule(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+void* my_timer_create_cbor(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback callback, void* user_data);
+int my_timer_echo_cbor(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int my_timer_version_cbor(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int my_timer_complex_cbor(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int my_timer_schedule_cbor(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int my_timer_destroy(void* ctx);
 uint64_t my_timer_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
 int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
@@ -798,7 +798,7 @@ public:
         if (ffi_enc_.isErr()) return Result<std::unique_ptr<MyTimerCtx>>::err(ffi_enc_.error());
         const auto& ffi_req_bytes_ = ffi_enc_.value();
         auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            (void)my_timer_create(ffi_req_bytes_.data(), ffi_req_bytes_.size(), cb, ud);
+            (void)my_timer_create_cbor(ffi_req_bytes_.data(), ffi_req_bytes_.size(), cb, ud);
             return 0;
         }, timeout);
         if (ffi_raw_.isErr()) return Result<std::unique_ptr<MyTimerCtx>>::err(ffi_raw_.error());
@@ -876,7 +876,7 @@ public:
         if (ffi_enc_.isErr()) return Result<EchoResponse>::err(ffi_enc_.error());
         const auto& ffi_req_bytes_ = ffi_enc_.value();
         auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return my_timer_echo(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+            return my_timer_echo_cbor(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
         }, timeout_);
         if (ffi_raw_.isErr()) return Result<EchoResponse>::err(ffi_raw_.error());
         return decodeCborFFI<EchoResponse>(ffi_raw_.value());
@@ -892,7 +892,7 @@ public:
         if (ffi_enc_.isErr()) return Result<std::string>::err(ffi_enc_.error());
         const auto& ffi_req_bytes_ = ffi_enc_.value();
         auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return my_timer_version(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+            return my_timer_version_cbor(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
         }, timeout_);
         if (ffi_raw_.isErr()) return Result<std::string>::err(ffi_raw_.error());
         return decodeCborFFI<std::string>(ffi_raw_.value());
@@ -908,7 +908,7 @@ public:
         if (ffi_enc_.isErr()) return Result<ComplexResponse>::err(ffi_enc_.error());
         const auto& ffi_req_bytes_ = ffi_enc_.value();
         auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return my_timer_complex(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+            return my_timer_complex_cbor(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
         }, timeout_);
         if (ffi_raw_.isErr()) return Result<ComplexResponse>::err(ffi_raw_.error());
         return decodeCborFFI<ComplexResponse>(ffi_raw_.value());
@@ -924,7 +924,7 @@ public:
         if (ffi_enc_.isErr()) return Result<ScheduleResult>::err(ffi_enc_.error());
         const auto& ffi_req_bytes_ = ffi_enc_.value();
         auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return my_timer_schedule(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+            return my_timer_schedule_cbor(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
         }, timeout_);
         if (ffi_raw_.isErr()) return Result<ScheduleResult>::err(ffi_raw_.error());
         return decodeCborFFI<ScheduleResult>(ffi_raw_.value());

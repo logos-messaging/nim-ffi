@@ -412,16 +412,19 @@ proc generateCppHeader*(
   for p in procs:
     case p.kind
     of FFIKind.FFI:
+      # The C++ wrapper speaks CBOR, so it targets the `<name>_cbor` exports; the
+      # bare `<name>` symbol is the native (typed-args) entry point.
       lines.add(
-        "int $1(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);" %
+        "int $1_cbor(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);" %
           [p.procName]
       )
     of FFIKind.CTOR:
       lines.add(
-        "void* $1(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback callback, void* user_data);" %
+        "void* $1_cbor(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback callback, void* user_data);" %
           [p.procName]
       )
     of FFIKind.DTOR:
+      # The destructor takes no request payload, so it has no `_cbor` variant.
       lines.add("int $1(void* ctx);" % [p.procName])
   # `declareLibrary` always exports the listener-registration ABI. Declare
   # it here so the typed event-handler wiring below can call into it.
@@ -535,7 +538,7 @@ proc generateCppHeader*(
     lines.add("        const auto& ffi_req_bytes_ = ffi_enc_.value();")
     lines.add("        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {")
     lines.add(
-      "            (void)$1(ffi_req_bytes_.data(), ffi_req_bytes_.size(), cb, ud);" %
+      "            (void)$1_cbor(ffi_req_bytes_.data(), ffi_req_bytes_.size(), cb, ud);" %
         [ctor.procName]
     )
     lines.add("            return 0;")
@@ -629,7 +632,7 @@ proc generateCppHeader*(
     lines.add("        const auto& ffi_req_bytes_ = ffi_enc_.value();")
     lines.add("        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {")
     lines.add(
-      "            return $1(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());" %
+      "            return $1_cbor(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());" %
         [m.procName]
     )
     lines.add("        }, timeout_);")
