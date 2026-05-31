@@ -213,7 +213,7 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
   # Listener-registration ABI — emitted on the Nim side by `declareLibrary`,
   # always present in the dylib.
   lines.add(
-    "    pub fn $1_add_event_listener(ctx: *mut c_void, event_name: *const c_char, callback: FFICallback, user_data: *mut c_void) -> u64;" %
+    "    pub fn $1_add_event_listener_cbor(ctx: *mut c_void, event_name: *const c_char, callback: FFICallback, user_data: *mut c_void) -> u64;" %
       [linkLibName]
   )
   lines.add(
@@ -709,7 +709,7 @@ proc generateApiRs*(
     lines.add("    ) -> ListenerHandle {")
     lines.add("        let id = unsafe {")
     lines.add(
-      "            ffi::$1_add_event_listener(self.ptr, event_name, callback, raw)" %
+      "            ffi::$1_add_event_listener_cbor(self.ptr, event_name, callback, raw)" %
         [libName]
     )
     lines.add("        };")

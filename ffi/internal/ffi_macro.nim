@@ -1887,10 +1887,11 @@ macro ffiEvent*(wireName: static[string], prc: untyped): untyped =
   if procName.kind == nnkPostfix:
     userProcName = procName[1]
 
-  # The generated body: dispatchFFIEventCbor("wire_name", payload).
+  # The generated body: dispatchFFIEventDual("wire_name", payload) — delivers a
+  # typed POD to native listeners and CBOR bytes to CBOR listeners.
   let wireNameLit = newStrLitNode(wireName)
   let dispatchBody =
-    newStmtList(newCall(ident("dispatchFFIEventCbor"), wireNameLit, payloadParamName))
+    newStmtList(newCall(ident("dispatchFFIEventDual"), wireNameLit, payloadParamName))
 
   var newParams = newSeq[NimNode]()
   newParams.add(formalParams[0]) # return type (typically empty/void)

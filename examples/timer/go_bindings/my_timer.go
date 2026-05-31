@@ -10,6 +10,7 @@ package my_timer
 #include <pthread.h>
 
 extern void my_timerGoEvent(int ret, char* msg, size_t len, void* userData);
+extern uint64_t my_timer_add_event_listener_cbor(void* ctx, const char* eventName, FFICallBack callback, void* userData);
 extern void my_timerResultEcho(int ret, char* msg, size_t len, void* ud);
 extern void my_timerResultComplex(int ret, char* msg, size_t len, void* ud);
 extern void my_timerResultSchedule(int ret, char* msg, size_t len, void* ud);
@@ -60,7 +61,7 @@ static int my_timerCall_my_timer_version(void* ctx, My_timerResp* r) {
   return rc;
 }
 static int my_timerCall_my_timer_destroy(void* ctx) { return my_timer_destroy(ctx); }
-static uint64_t my_timerRegisterEvents(void* ctx) { return my_timer_add_event_listener(ctx, "", (FFICallBack)my_timerGoEvent, ctx); }
+static uint64_t my_timerRegisterEvents(void* ctx) { return my_timer_add_event_listener_cbor(ctx, "", (FFICallBack)my_timerGoEvent, ctx); }
 */
 import "C"
 

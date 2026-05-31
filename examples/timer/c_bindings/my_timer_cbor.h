@@ -168,7 +168,7 @@ int my_timer_schedule_cbor(void *ctx, FFICallBack callback, void *userData, cons
 
 int my_timer_destroy(void *ctx);
 
-uint64_t my_timer_add_event_listener(void *ctx, const char *eventName, FFICallBack callback, void *userData);
+uint64_t my_timer_add_event_listener_cbor(void *ctx, const char *eventName, FFICallBack callback, void *userData);
 int my_timer_remove_event_listener(void *ctx, uint64_t listenerId);
 
 #ifdef __cplusplus

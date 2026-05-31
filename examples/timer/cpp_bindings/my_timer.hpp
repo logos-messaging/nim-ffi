@@ -708,7 +708,7 @@ int my_timer_version_cbor(void* ctx, FFICallback callback, void* user_data, cons
 int my_timer_complex_cbor(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int my_timer_schedule_cbor(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int my_timer_destroy(void* ctx);
-uint64_t my_timer_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
+uint64_t my_timer_add_event_listener_cbor(void* ctx, const char* event_name, FFICallback callback, void* user_data);
 int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
 } // extern "C"
 
@@ -846,7 +846,7 @@ public:
     ListenerHandle addOnEchoFiredListener(std::function<void(const EchoEvent&)> handler) {
         auto owned = std::make_unique<TypedListener<EchoEvent>>(std::move(handler));
         auto* raw = owned.get();
-        const auto id = my_timer_add_event_listener(
+        const auto id = my_timer_add_event_listener_cbor(
             ptr_, "on_echo_fired", &MyTimerCtx::typedTrampoline<EchoEvent>, raw);
         if (id == 0) return ListenerHandle{0};
         listeners_.emplace(id, std::move(owned));
@@ -856,7 +856,7 @@ public:
     ListenerHandle addEventListener(std::function<void(int, const std::string&, std::span<const std::uint8_t>)> handler) {
         auto owned = std::make_unique<WildcardListener>(std::move(handler));
         auto* raw = owned.get();
-        const auto id = my_timer_add_event_listener(
+        const auto id = my_timer_add_event_listener_cbor(
             ptr_, "", &MyTimerCtx::wildcardTrampoline, raw);
         if (id == 0) return ListenerHandle{0};
         listeners_.emplace(id, std::move(owned));

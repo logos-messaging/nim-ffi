@@ -219,7 +219,7 @@ impl MyTimerCtx {
         owned: Box<dyn std::any::Any + Send>,
     ) -> ListenerHandle {
         let id = unsafe {
-            ffi::my_timer_add_event_listener(self.ptr, event_name, callback, raw)
+            ffi::my_timer_add_event_listener_cbor(self.ptr, event_name, callback, raw)
         };
         if id != 0 {
             self.listeners.lock().unwrap().insert(id, owned);

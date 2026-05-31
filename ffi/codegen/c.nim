@@ -166,7 +166,9 @@ proc generateCHeader*(
       )
     lines.add("")
 
-  # `declareLibrary` always exports the listener-registration ABI.
+  # `declareLibrary` always exports the listener-registration ABI. The native
+  # header advertises the native listener: the callback's msg is a typed
+  # `const <Event>*` (cast it), not CBOR.
   lines.add(
     "uint64_t " & libName &
       "_add_event_listener(void *ctx, const char *eventName, FFICallBack callback, void *userData);"
@@ -378,7 +380,7 @@ proc generateCborCHeader*(
 
   lines.add(
     "uint64_t " & libName &
-      "_add_event_listener(void *ctx, const char *eventName, FFICallBack callback, void *userData);"
+      "_add_event_listener_cbor(void *ctx, const char *eventName, FFICallBack callback, void *userData);"
   )
   lines.add(
     "int " & libName & "_remove_event_listener(void *ctx, uint64_t listenerId);"

@@ -407,7 +407,7 @@ void* echo_create_cbor(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback
 int echo_shout_cbor(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int echo_version_cbor(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int echo_destroy(void* ctx);
-uint64_t echo_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
+uint64_t echo_add_event_listener_cbor(void* ctx, const char* event_name, FFICallback callback, void* user_data);
 int echo_remove_event_listener(void* ctx, uint64_t listener_id);
 } // extern "C"
 

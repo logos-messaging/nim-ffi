@@ -370,6 +370,12 @@ proc generateGoFile*(
   L.add(
     "extern void " & libName & "GoEvent(int ret, char* msg, size_t len, void* userData);"
   )
+  # The Go wrapper consumes events over CBOR; the native header only declares the
+  # native listener, so forward-declare the CBOR registration we call below.
+  L.add(
+    "extern uint64_t " & libName &
+      "_add_event_listener_cbor(void* ctx, const char* eventName, FFICallBack callback, void* userData);"
+  )
   # One exported Go result callback per struct-returning proc (it reads the typed
   # return POD in-callback). Forward-declared here so cgo's `char*` shape matches.
   for p in procs:
@@ -491,7 +497,7 @@ proc generateGoFile*(
     )
   L.add(
     "static uint64_t " & libName & "RegisterEvents(void* ctx) { return " & libName &
-      "_add_event_listener(ctx, \"\", (FFICallBack)" & libName & "GoEvent, ctx); }"
+      "_add_event_listener_cbor(ctx, \"\", (FFICallBack)" & libName & "GoEvent, ctx); }"
   )
   L.add("*/")
   L.add("import \"C\"")
