@@ -138,6 +138,12 @@ proc my_timer_destroy*(timer: MyTimer) {.ffiDtor.} =
   ## Blocks until the FFI thread and watchdog thread have joined.
   discard
 
+# Optional in-library CBOR-over-socket server (the "remote channel"). Compiled
+# in only with -d:ffiIpcServe so every other build is unaffected; it reuses the
+# async procs above directly. See examples/timer/ipc_chronos/serve.nim.
+when defined(ffiIpcServe):
+  include "ipc_chronos/serve.nim"
+
 # genBindings() must be the LAST top-level call in the FFI root file —
 # after every {.ffi.}, {.ffiCtor.} and {.ffiDtor.} pragma. Each pragma
 # fires at compile time and registers its proc into the compile-time

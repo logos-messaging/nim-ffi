@@ -90,6 +90,12 @@ task test_serial, "Run CBOR codec unit tests":
   exec "nim c -r " & nimFlagsOrc & " tests/unit/test_serial.nim"
   exec "nim c -r " & nimFlagsRefc & " tests/unit/test_serial.nim"
 
+task test_ipc, "Cross-platform IPC round-trip: in-library CBOR serve over TCP":
+  # Compiled driver (Linux/macOS/Windows) builds the dylib + Nim host + Nim
+  # client and round-trips over a loopback socket, asserting the replies. It is
+  # a compiled program (not NimScript) because it must spawn the server process.
+  runOrQuit "nim c -r " & nimFlagsOrc & " tests/e2e/ipc/run_roundtrip.nim"
+
 task test_cpp_e2e, "Build and run the C++ end-to-end tests for the timer example":
   # Regenerate the C++ bindings so the suite always runs against fresh codegen.
   runOrQuit "nimble genbindings_cpp"
