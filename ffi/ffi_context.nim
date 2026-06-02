@@ -1,7 +1,7 @@
 {.passc: "-fPIC".}
 
 import system/ansi_c
-import std/[atomics, locks, json, options, tables]
+import std/[atomics, locks, options, tables]
 import chronicles, chronos, chronos/threadsync, taskpools/channels_spsc_single, results
 import
   ./ffi_types,
@@ -78,40 +78,66 @@ const
     ## heartbeat at least once per this interval or it is considered
     ## blocked and onNotResponding fires.
 
-type JsonNotRespondingEvent = object
-  eventType: string
+type NotRespondingEvent* = object
+  ## Empty CBOR payload — the event itself is the signal. Consumers
+  ## discriminate on the surrounding `EventEnvelope.eventType`
+  ## (`NotRespondingEventName`); this struct exists so the wire shape
+  ## matches the typed-event contract every other `{.ffiEvent.}`
+  ## produces (`{ eventType, payload }`).
 
-proc init(T: type JsonNotRespondingEvent): T =
-  return JsonNotRespondingEvent(eventType: "not_responding")
-
-proc `$`(event: JsonNotRespondingEvent): string =
-  $(%*event)
+const NotRespondingEventName* = "not_responding"
+  ## Registry key and CBOR `eventType` for `onNotResponding`. Exposed so
+  ## typed listeners can register against the same name the dispatch
+  ## path uses, without depending on a string literal.
 
 proc onNotResponding*(ctx: ptr FFIContext) =
-  ## Shim: still emits the legacy JSON payload through the registry, so
-  ## existing foreign consumers see no wire-shape change. A follow-up
-  ## PR replaces this with a CBOR `NotRespondingEvent`.
+  ## Fans out the "library is unhealthy" event to every listener
+  ## registered for `not_responding` plus every wildcard listener. The
+  ## payload is `EventEnvelope[NotRespondingEvent]`, CBOR-encoded once
+  ## and reused across listeners — same wire shape as
+  ## `dispatchFFIEventCbor`.
   ##
   ## Synchronous, lock-during-invocation by design: this is the global
   ## "library is unhealthy" notification path and bypasses the event
   ## queue (which may itself be the thing that's stuck). The dispatch
   ## templates' lock-during-invocation contract is mirrored here.
+  ##
+  ## Cannot reuse `dispatchFFIEventCbor`: that template resolves the
+  ## registry via the `ffiCurrentEventRegistry` threadvar, which is only
+  ## set on the FFI thread. `onNotResponding` runs on the event thread,
+  ## so it goes through `ctx[].eventRegistry` directly.
   withLock ctx[].eventRegistry.lock:
     let snap =
-      ctx[].eventRegistry.byEvent.getOrDefault("onNotResponding") &
+      ctx[].eventRegistry.byEvent.getOrDefault(NotRespondingEventName) &
       ctx[].eventRegistry.wildcard
     if snap.len == 0:
       chronicles.debug "onNotResponding - no listener registered"
       return
     foreignThreadGc:
-      let event = $JsonNotRespondingEvent.init()
-      for listener in snap:
-        listener.callback(
-          RET_OK,
-          cast[ptr cchar](unsafeAddr event[0]),
-          cast[csize_t](len(event)),
-          listener.userData,
+      try:
+        let event = cborEncode(
+          EventEnvelope[NotRespondingEvent](
+            eventType: NotRespondingEventName, payload: NotRespondingEvent()
+          )
         )
+        for listener in snap:
+          listener.callback(
+            RET_OK,
+            cast[ptr cchar](unsafeAddr event[0]),
+            cast[csize_t](event.len),
+            listener.userData,
+          )
+      except Exception, CatchableError:
+        let msg =
+          "Exception dispatching " & NotRespondingEventName & ": " &
+          getCurrentExceptionMsg()
+        for listener in snap:
+          listener.callback(
+            RET_ERR,
+            cast[ptr cchar](unsafeAddr msg[0]),
+            cast[csize_t](msg.len),
+            listener.userData,
+          )
 
 proc sendRequestToFFIThread*(
     ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, timeout = InfiniteDuration
