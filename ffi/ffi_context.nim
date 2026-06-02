@@ -19,38 +19,25 @@ type FFIContext*[T] = object
   ffiThread: Thread[(ptr FFIContext[T])]
     # represents the main FFI thread in charge of attending API consumer actions
   eventThread: Thread[(ptr FFIContext[T])]
-    # drains the bounded event queue and runs the heartbeat health check;
-    # replaces the previous standalone watchdog thread
+    # drains the event queue and runs the FFI-thread heartbeat check
   lock: Lock
   reqChannel: ChannelSPSCSingle[ptr FFIThreadRequest]
   reqSignal: ThreadSignalPtr # to notify the FFI Thread that a new request is sent
   reqReceivedSignal: ThreadSignalPtr
     # to signal main thread, interfacing with the FFI thread, that FFI thread received the request
   stopSignal: ThreadSignalPtr
-    # fired by destroyFFIContext so both ffiThread and eventThread can exit promptly
   threadExitSignal: ThreadSignalPtr
-    # fired by ffiThread just before it exits; destroyFFIContext waits on
-    # this with a bounded timeout instead of joining unconditionally, so a
-    # blocked event loop cannot hang the caller forever
-  eventQueueSignal: ThreadSignalPtr
-    # fired by the FFI thread (via the dispatch templates) when it enqueues
-    # an event, so the event thread wakes promptly instead of waiting out
-    # the tick interval
-  eventThreadExitSignal: ThreadSignalPtr
-    # fired by the event thread just before it exits; mirrors threadExitSignal
-    # so destroyFFIContext can do a bounded wait on the event thread too
+    # fired by ffiThread before exit; bounds destroyFFIContext's wait so
+    # a blocked event loop cannot hang the caller
+  eventQueueSignal: ThreadSignalPtr # wakes the event thread on enqueue
+  eventThreadExitSignal: ThreadSignalPtr # mirrors threadExitSignal for the event thread
   userData*: pointer
   eventRegistry*: FFIEventRegistry
   eventQueue*: EventQueue
-    # bounded SPSC ring; the FFI thread is the only producer, the event
-    # thread the only consumer
   ffiHeartbeat*: Atomic[int64]
-    # advanced by the FFI thread on every iteration of its main loop; the
-    # event thread reads it to detect a wedged FFI thread (>1s without an
-    # advance after the start-grace window) and fires onNotResponding
-  eventQueueStuck*: Atomic[bool]
-    # sticky overflow flag — once the queue saturates, sendRequestToFFIThread
-    # rejects further calls so the library can't dig itself deeper
+    # advanced by the FFI thread each loop iteration; event thread reads it
+    # for liveness
+  eventQueueStuck*: Atomic[bool] # sticky overflow flag; recovery is destroy+recreate
   running: Atomic[bool] # To control when the threads are running
   registeredRequests: ptr Table[cstring, FFIRequestProc]
     # Pointer to with the registered requests at compile time
@@ -63,49 +50,18 @@ var onFFIThread* {.threadvar.}: bool
 const git_version* {.strdefine.} = "n/a"
 
 const
-  EventThreadTickInterval* = 1.seconds
-    ## How often the event thread wakes to do a heartbeat check when no
-    ## events are pending. The dispatch templates also fire
-    ## `eventQueueSignal` on enqueue, so this only bounds the *idle*
-    ## latency between consecutive heartbeat checks.
-  FFIHeartbeatStartDelay* = 10.seconds
-    ## Grace window after thread startup during which heartbeat stalls
-    ## are ignored — gives the host library (waku / libp2p / …) time to
-    ## come up before we start measuring liveness. Same value the old
-    ## standalone watchdog used.
+  EventThreadTickInterval* = 1.seconds # bounds idle heartbeat check latency
+  FFIHeartbeatStartDelay* = 10.seconds # grace window for library startup
   FFIHeartbeatStaleThreshold* = 1.seconds
-    ## Once past the start delay, the FFI thread must advance its
-    ## heartbeat at least once per this interval or it is considered
-    ## blocked and onNotResponding fires.
 
 type NotRespondingEvent* = object
-  ## Empty CBOR payload — the event itself is the signal. Consumers
-  ## discriminate on the surrounding `EventEnvelope.eventType`
-  ## (`NotRespondingEventName`); this struct exists so the wire shape
-  ## matches the typed-event contract every other `{.ffiEvent.}`
-  ## produces (`{ eventType, payload }`).
 
 const NotRespondingEventName* = "not_responding"
-  ## Registry key and CBOR `eventType` for `onNotResponding`. Exposed so
-  ## typed listeners can register against the same name the dispatch
-  ## path uses, without depending on a string literal.
 
 proc onNotResponding*(ctx: ptr FFIContext) =
-  ## Fans out the "library is unhealthy" event to every listener
-  ## registered for `not_responding` plus every wildcard listener. The
-  ## payload is `EventEnvelope[NotRespondingEvent]`, CBOR-encoded once
-  ## and reused across listeners — same wire shape as
-  ## `dispatchFFIEventCbor`.
-  ##
-  ## Synchronous, lock-during-invocation by design: this is the global
-  ## "library is unhealthy" notification path and bypasses the event
-  ## queue (which may itself be the thing that's stuck). The dispatch
-  ## templates' lock-during-invocation contract is mirrored here.
-  ##
-  ## Cannot reuse `dispatchFFIEventCbor`: that template resolves the
-  ## registry via the `ffiCurrentEventRegistry` threadvar, which is only
-  ## set on the FFI thread. `onNotResponding` runs on the event thread,
-  ## so it goes through `ctx[].eventRegistry` directly.
+  ## Bypasses the event queue (which may itself be wedged). Cannot reuse
+  ## `dispatchFFIEventCbor`: that template reads `ffiCurrentEventRegistry`,
+  ## a threadvar only set on the FFI thread, but this runs on the event thread.
   withLock ctx[].eventRegistry.lock:
     let snap =
       ctx[].eventRegistry.byEvent.getOrDefault(NotRespondingEventName) &
@@ -142,24 +98,15 @@ proc onNotResponding*(ctx: ptr FFIContext) =
 proc sendRequestToFFIThread*(
     ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, timeout = InfiniteDuration
 ): Result[void, string] =
-  # Issue #6: once the event queue has overflowed we stop accepting new
-  # requests entirely, on the assumption that any further work will just
-  # produce more events the listener side already can't keep up with.
-  # Stuck flag is sticky for the context lifetime — recovery requires
-  # destroy + recreate, matching the issue's "expected malfunctioning".
-  # NB: we deliberately do NOT call onNotResponding here. The event
-  # thread fires it once when it observes the stuck flag (its loop is
-  # the only place where reg.lock is guaranteed not to be held by an
-  # in-flight listener); calling it from a foreign thread would
-  # deadlock against a back-pressuring listener mid-invocation.
+  # Once the event queue overflows, refuse further requests. onNotResponding
+  # is fired by the event thread (not here) to avoid deadlocking against a
+  # back-pressuring listener that holds reg.lock.
   if ctx.eventQueueStuck.load():
     deleteRequest(ffiRequest)
     return err("event queue stuck - library cannot accept new requests")
 
-  # Reentrancy guard (PR #23 review, item 6): if a handler running on the FFI
-  # thread tries to dispatch back through this proc, it would wait forever on
-  # `reqReceivedSignal` — which only this thread can fire — and self-deadlock.
-  # Return an error instead so the caller can surface it.
+  # Reentrancy guard: a handler dispatching back through this proc would
+  # wait forever on `reqReceivedSignal` — only this thread can fire it.
   if onFFIThread:
     deleteRequest(ffiRequest)
     return err(
@@ -241,22 +188,13 @@ proc processRequest[T](
   except Exception as exc:
     error "Unexpected exception in handleRes", error = exc.msg
 
-# ---------------------------------------------------------------------------
-# Heartbeat-aware closure capturing for the dispatch threadvar hook
-# ---------------------------------------------------------------------------
-
 var ffiEventQueueSignalPtr {.threadvar.}: ThreadSignalPtr
-  ## Stash for the event-thread wakeup signal. Captured here so the
-  ## notify-enqueued hook below has no closure environment.
+  ## Stashed so the hook below has no closure environment.
 
 proc ffiNotifyEventEnqueuedHook() {.gcsafe, raises: [].} =
-  ## Wakes the event thread immediately after a successful enqueue so
-  ## the listener fan-out latency isn't bounded by the tick interval.
   if not ffiEventQueueSignalPtr.isNil():
     let res = ffiEventQueueSignalPtr.fireSync()
     if res.isErr():
-      # The event thread will still see the queue depth on the next
-      # tick; logging is enough to flag a misconfigured signal fd.
       error "failed to fire eventQueueSignal after enqueue", err = res.error
 
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
@@ -298,11 +236,8 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
           inc i
 
     while ctx.running.load():
-      # Heartbeat: the event thread reads this to confirm the FFI thread
-      # isn't wedged. The 100 ms `reqSignal.wait` below means we advance
-      # at least ~10x per second under any normal load; a sync handler
-      # that blocks the dispatcher will freeze the counter, which is
-      # exactly the failure mode the watchdog used to detect.
+      # A sync handler blocking the dispatcher freezes this counter; the
+      # event thread reads it to detect a wedged FFI thread.
       discard ctx.ffiHeartbeat.fetchAdd(1)
 
       reapCompleted()
@@ -340,20 +275,10 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   waitFor ffiRun(ctx)
 
 proc eventThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
-  ## Drains the bounded event queue and runs the FFI-thread heartbeat
-  ## health check. Replaces the standalone watchdog thread: the event
-  ## thread checks liveness in-band (no probe request round-trip), and
-  ## the dispatch templates' queue-overflow path is the second trigger
-  ## for `onNotResponding`.
-  ##
-  ## The queue stores raw `c_malloc` payloads + names; this thread owns
-  ## them for the duration of dispatch and frees them after the listener
-  ## fan-out returns.
+  ## Drains the event queue and runs the FFI-thread heartbeat check.
+  ## Owns the queued `c_malloc` payloads until dispatch returns.
 
   defer:
-    # Best-effort: tell stopAndJoinThreads we've exited so its bounded
-    # wait unblocks. If this fails we still exit; the caller's timeout
-    # path will take over.
     let fireRes = ctx.eventThreadExitSignal.fireSync()
     if fireRes.isErr():
       error "failed to fire eventThreadExitSignal", err = fireRes.error
@@ -366,19 +291,11 @@ proc eventThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
     var notifiedStuck = false
 
     while ctx.running.load():
-      # Wake on either an enqueue (eventQueueSignal) or the tick interval —
-      # whichever comes first. The signal path keeps dispatch latency low
-      # under load; the timeout path bounds idle latency for the
-      # heartbeat check.
+      # Wake on enqueue or tick — whichever first.
       discard await ctx.eventQueueSignal.wait().withTimeout(EventThreadTickInterval)
 
-      # Drain whatever is currently in the queue. Each iteration:
-      #   1. Pop one event (queue lock).
-      #   2. Snapshot listeners + invoke them under reg.lock — the
-      #      lock-during-invocation contract from PR #39 / issue #40 is
-      #      preserved here: a foreign `removeEventListener` blocks
-      #      until the in-flight callback fan-out returns.
-      #   3. Free the payload.
+      # Listener fan-out runs under reg.lock — preserves the
+      # lock-during-invocation contract from PR #39 / issue #40.
       while true:
         let opt = ctx.eventQueue.tryDequeueEvent()
         if opt.isNone:
@@ -417,20 +334,13 @@ proc eventThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
                     listener.userData,
                   )
 
-      # Queue-overflow notification: the FFI thread can only set the
-      # sticky flag (firing onNotResponding from there would deadlock
-      # against a back-pressuring listener that's holding reg.lock on
-      # this thread). We fire it once from here, after the drain loop,
-      # so the slow listener has already released the lock.
+      # Overflow notification fires here (after drain releases reg.lock)
+      # rather than from the FFI thread, which would deadlock against an
+      # in-flight back-pressuring listener.
       if not notifiedStuck and ctx.eventQueueStuck.load():
         onNotResponding(ctx)
         notifiedStuck = true
 
-      # Heartbeat staleness check. Skipped during the start-delay grace
-      # window so a slow library bring-up doesn't fire a spurious
-      # not_responding. Once we've fired, latch `notifiedStale` until
-      # the FFI thread proves it's alive again — avoids spamming the
-      # listener while the FFI thread is still stuck.
       if not ctx.running.load():
         break
       if Moment.now() - startedAt <= FFIHeartbeatStartDelay:
@@ -443,6 +353,7 @@ proc eventThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
         notifiedStale = false
       elif not notifiedStale and
           Moment.now() - lastHeartbeatChange > FFIHeartbeatStaleThreshold:
+        # Latch until the FFI thread proves it's alive again.
         onNotResponding(ctx)
         notifiedStale = true
 
@@ -452,14 +363,10 @@ proc eventThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
     error "event thread exited with exception", error = exc.msg
 
 proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## Mirror of `initContextResources`: tears down the lock, registry,
-  ## queue, and signal fds in place. The caller is responsible for the
-  ## memory holding `ctx` (free it for heap allocations, return it to the
-  ## pool for slot-allocated contexts). Threads MUST already be joined.
-  ##
-  ## Each field is nil'd after close so a subsequent re-init on the same
-  ## storage (pool slot reuse) doesn't double-close a stale pointer if
-  ## init's deferred cleanup runs.
+  ## Mirror of `initContextResources`: tears down lock, registry, queue,
+  ## and signal fds in place. Threads MUST already be joined. Caller owns
+  ## the memory holding `ctx`. Fields are nil'd after close so a re-init
+  ## on the same slot doesn't double-close.
   ctx.lock.deinitLock()
   deinitEventRegistry(ctx[].eventRegistry)
   deinitEventQueue(ctx[].eventQueue)
@@ -515,11 +422,8 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Initialises all resources inside an already-allocated FFIContext slot.
   ## On failure every partially-initialised resource is closed; the caller
   ## is responsible for releasing the slot (freeShared or pool.releaseSlot).
-  ##
-  ## Defensive: a reused pool slot still holds the previous lifetime's
-  ## signal pointers (set to nil by `deinitContextResources` on destroy,
-  ## but explicit here in case a future path forgets). Nil before
-  ## allocating so the deferred cleanup never double-closes.
+  # Defensive nil so the deferred cleanup never double-closes if a future
+  # path forgets to clear stale pointers on a reused pool slot.
   ctx.reqSignal = nil
   ctx.reqReceivedSignal = nil
   ctx.stopSignal = nil
@@ -583,11 +487,10 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   return ok()
 
 proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
+  # Error paths intentionally skip onNotResponding: a back-pressuring
+  # listener may hold reg.lock, and onNotResponding takes it — would
+  # amplify the stuck state into a deadlock instead of escaping it.
   ctx.running.store(false)
-  # We deliberately do NOT call onNotResponding from these error paths:
-  # the event thread may be stuck mid-callback holding `eventRegistry.lock`,
-  # and onNotResponding takes that same lock — exactly the scenario the
-  # bounded-timeout caller needs to escape from, not amplify into a deadlock.
   let reqSignaled = ctx.reqSignal.fireSync().valueOr:
     return err("error signaling reqSignal in signalStop: " & $error)
   if not reqSignaled:
@@ -596,10 +499,7 @@ proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     return err("error signaling stopSignal in signalStop: " & $error)
   if not stopSignaled:
     return err("failed to signal stopSignal on time in signalStop")
-  # Wake the event thread so it observes `running == false` immediately
-  # instead of waiting out the tick interval. fireSync failing here is
-  # not fatal — the event thread will still notice on the next tick — so
-  # we only log and continue.
+  # Non-fatal: event thread will see running==false on the next tick.
   let evtSignaled = ctx.eventQueueSignal.fireSync()
   if evtSignaled.isErr():
     error "failed to signal eventQueueSignal in signalStop", error = evtSignaled.error
@@ -615,18 +515,15 @@ proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
 const ThreadExitTimeout* = 1500.milliseconds
 
 proc stopAndJoinThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## Signals the FFI and event threads to stop, waits up to ThreadExitTimeout
-  ## for each to exit, and joins them. On timeout returns err and skips the
-  ## remaining joinThread (leaving the threads live) rather than hanging the
-  ## caller. Resource cleanup (signal fds, lock) is the caller's
-  ## responsibility.
+  ## Signals both threads to stop, waits up to ThreadExitTimeout per thread,
+  ## and joins them. On timeout returns err and skips remaining joins
+  ## (leaving the threads live) rather than hanging the caller. Resource
+  ## cleanup is the caller's responsibility.
+  ##
+  ## Timeout paths skip onNotResponding for the same reason signalStop does.
   ctx.signalStop().isOkOr:
     return err("signalStop failed: " & $error)
 
-  # We deliberately do NOT call onNotResponding from the timeout paths:
-  # the event thread may be stuck mid-callback holding `eventRegistry.lock`,
-  # and onNotResponding takes that same lock — exactly the scenario the
-  # bounded-timeout caller needs to escape from, not amplify into a deadlock.
   let ffiExitedOnTime = ctx.threadExitSignal.waitSync(ThreadExitTimeout).valueOr:
     return err("error waiting for FFI thread exit: " & $error)
 

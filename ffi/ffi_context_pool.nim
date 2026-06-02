@@ -48,11 +48,8 @@ proc destroyFFIContext*[T](
   ## unsafe.
   ctx.stopAndJoinThreads().isOkOr:
     return err("destroyFFIContext(pool): " & $error)
-  # Mirror initContextResources: tear down the lock, registry, queue,
-  # and signal fds in place. Without this the next slot acquisition would
-  # re-init an already-initialised lock (UB at the pthread layer) and
-  # overwrite the existing ThreadSignalPtr fields without closing the
-  # underlying fds (unbounded fd leak across create/destroy cycles).
+  # Without this, the next acquisition would re-init an already-initialised
+  # lock (UB) and leak the previous signal fds.
   let deinitRes = ctx.deinitContextResources()
   pool.releaseSlot(ctx)
   deinitRes.isOkOr:
