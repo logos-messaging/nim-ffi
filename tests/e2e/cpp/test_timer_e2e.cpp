@@ -455,3 +455,49 @@ TEST(TimerE2E, WildcardListenerReceivesEventIdAndDecodesPayload) {
     EXPECT_EQ(captured.front().decoded->message, "hello");
     EXPECT_EQ(captured.front().decoded->echoCount, 1);
 }
+
+// Re-entrancy: from *inside* an event handler the consumer issues another
+// request to the library, carrying information taken from the event.
+//
+// The handler runs on the FFI thread with the event-registry lock held, so it
+// must not:
+//   (a) call add/removeEventListener        — self-deadlock on the registry lock;
+//   (b) make a *synchronous* request         — the FFI thread is busy running
+//       this handler, so a blocking call would wait on itself forever.
+// Issuing an *async* request is safe: it only queues work on the FFI request
+// channel and returns immediately; the FFI thread drains it once the handler
+// returns. We move the returned future out of the handler and resolve it on the
+// main thread. A hang here (caught by the timeouts below) would mean the
+// re-entrant request deadlocked.
+TEST(TimerE2E, EventHandlerCanIssueAsyncRequest) {
+    auto ctx = makeCtx("reentrant");
+
+    std::atomic<bool> issued{false};
+    // The handler stashes the nested request's future here; resolving it inside
+    // the handler would block the FFI thread, so the main thread does it.
+    auto nested = std::make_shared<std::future<Result<EchoResponse>>>();
+    std::promise<void> ready;
+    auto readyFuture = ready.get_future();
+
+    ctx->addOnEchoFiredListener([&, nested](const EchoEvent& evt) {
+        // echo() re-fires this event, so guard to issue exactly one nested
+        // request (otherwise each nested echo would spawn another — a storm).
+        bool expected = false;
+        if (!issued.compare_exchange_strong(expected, true)) return;
+        // Carry information from the event into the new request.
+        *nested = ctx->echoAsync(EchoRequest{"reentrant:" + evt.message, 0});
+        ready.set_value();
+    });
+
+    const auto outer = mustOk(ctx->echo(EchoRequest{"trigger", 1}));
+    EXPECT_EQ(outer.echoed, "trigger");
+
+    ASSERT_EQ(readyFuture.wait_for(std::chrono::seconds(2)), std::future_status::ready)
+        << "handler never issued the nested request (possible deadlock)";
+    ASSERT_EQ(nested->wait_for(std::chrono::seconds(2)), std::future_status::ready)
+        << "nested request never completed (possible deadlock)";
+
+    const auto reentrantResp = mustOk(nested->get());
+    EXPECT_EQ(reentrantResp.echoed, "reentrant:trigger");
+    EXPECT_EQ(reentrantResp.timerName, "reentrant");
+}
