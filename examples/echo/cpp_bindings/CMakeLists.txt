@@ -1,10 +1,8 @@
 cmake_minimum_required(VERSION 3.14)
 project(echo_cpp_bindings CXX C)
 
-# The generated bindings target C++20. The event-listener API uses
-# std::span<const std::uint8_t> on its wildcard callback to hand the
-# CBOR envelope to consumers as a zero-copy view; <span> only became
-# part of the standard library in C++20.
+# The generated bindings target C++20: designated initializers and other
+# C++20 constructs are used throughout the emitted code.
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 

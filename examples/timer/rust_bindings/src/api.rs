@@ -117,47 +117,8 @@ unsafe extern "C" fn on_echo_fired_trampoline(
     }
 }
 
-struct WildcardHandler {
-    f: Box<dyn Fn(c_int, &str, &[u8]) + Send + Sync>,
-}
-
-unsafe extern "C" fn my_timer_wildcard_trampoline(
-    ret: c_int, msg: *const c_char, len: usize, ud: *mut c_void,
-) {
-    if ud.is_null() { return; }
-    let h = &*(ud as *const WildcardHandler);
-    let bytes = if !msg.is_null() && len > 0 {
-        slice::from_raw_parts(msg as *const u8, len)
-    } else { &[] };
-    let event_id = if ret == 0 && !bytes.is_empty() {
-        #[derive(serde::Deserialize)]
-        struct EnvelopeMeta {
-            #[serde(rename = "eventType")]
-            event_type: String,
-        }
-        ciborium::de::from_reader::<EnvelopeMeta, _>(bytes)
-            .map(|m| m.event_type).unwrap_or_default()
-    } else {
-        String::new()
-    };
-    (h.f)(ret, event_id.as_str(), bytes);
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct ListenerHandle { pub id: u64 }
-
-/// Decode the `payload` field of a CBOR `EventEnvelope` as `T`.
-/// Returns `Err` if the envelope is empty / malformed / the payload
-/// cannot be deserialised as `T`.
-pub fn decode_event_payload<T: serde::de::DeserializeOwned>(
-    envelope: &[u8],
-) -> Result<T, String> {
-    #[derive(serde::Deserialize)]
-    struct Envelope<T> { payload: T }
-    let env: Envelope<T> = ciborium::de::from_reader(envelope)
-        .map_err(|e| format!("decode event payload: {e}"))?;
-    Ok(env.payload)
-}
 
 /// High-level context for `MyTimer`.
 pub struct MyTimerCtx {
@@ -235,19 +196,6 @@ impl MyTimerCtx {
         let owned: Box<OnEchoFiredHandler> = Box::new(OnEchoFiredHandler { f: Box::new(handler) });
         let raw = &*owned as *const OnEchoFiredHandler as *mut c_void;
         self.add_listener_inner(b"on_echo_fired\0".as_ptr() as *const c_char, on_echo_fired_trampoline, raw, owned)
-    }
-
-    /// Register a catch-all listener that receives every event.
-    /// The handler arguments are (return_code, event_id, envelope_bytes):
-    /// `event_id` is the wire `eventType` string extracted from the
-    /// envelope (empty on error or malformed envelope); `envelope_bytes`
-    /// is the full CBOR envelope, suitable for `decode_event_payload::<T>`.
-    pub fn add_event_listener<F>(&self, handler: F) -> ListenerHandle
-    where F: Fn(c_int, &str, &[u8]) + Send + Sync + 'static,
-    {
-        let owned: Box<WildcardHandler> = Box::new(WildcardHandler { f: Box::new(handler) });
-        let raw = &*owned as *const WildcardHandler as *mut c_void;
-        self.add_listener_inner(b"\0".as_ptr() as *const c_char, my_timer_wildcard_trampoline, raw, owned)
     }
 
     /// Remove a previously-registered listener by handle. Returns true
