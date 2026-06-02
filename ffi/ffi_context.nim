@@ -4,11 +4,7 @@ import system/ansi_c
 import std/[atomics, locks, options, tables]
 import chronicles, chronos, chronos/threadsync, taskpools/channels_spsc_single, results
 import
-  ./ffi_types,
-  ./ffi_events,
-  ./ffi_thread_request,
-  ./internal/ffi_macro,
-  ./logging,
+  ./ffi_types, ./ffi_events, ./ffi_thread_request, ./internal/ffi_macro, ./logging,
   ./cbor_serial
 
 export ffi_events
@@ -98,7 +94,8 @@ proc sendRequestToFFIThread*(
   # Event-queue overflow refuses further requests; the event thread fires onNotResponding to avoid deadlocking on reg.lock here.
   if ctx.eventQueueStuck.load():
     deleteRequest(ffiRequest)
-    return err("event queue stuck - library cannot accept new requests")
+    return
+      err("event queue stuck - library cannot accept new requests")
 
   # Reentrancy guard: only this thread can fire `reqReceivedSignal`, so a handler dispatching back would self-deadlock.
   if onFFIThread:
@@ -262,7 +259,8 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
       try:
         await allFutures(pending)
       except CatchableError as exc:
-        error "draining pending FFI requests on shutdown raised", error = exc.msg
+        error "draining pending FFI requests on shutdown raised",
+          error = exc.msg
 
   waitFor ffiRun(ctx)
 
@@ -486,7 +484,8 @@ proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   # Non-fatal: event thread will see running==false on the next tick.
   let evtSignaled = ctx.eventQueueSignal.fireSync()
   if evtSignaled.isErr():
-    error "failed to signal eventQueueSignal in signalStop", error = evtSignaled.error
+    error "failed to signal eventQueueSignal in signalStop",
+      error = evtSignaled.error
   elif evtSignaled.get() == false:
     error "failed to signal eventQueueSignal on time in signalStop"
   ok()

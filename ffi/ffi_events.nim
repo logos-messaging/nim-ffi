@@ -2,13 +2,21 @@
 ## FFI library-initiated events. Listeners receive only the event name
 ## they subscribed to. Queue payloads travel via `c_malloc` so transfer
 ## across Nim heaps is safe under both `--mm:orc` and `--mm:refc`.
+##
+## Dispatch templates enqueue and return on the FFI thread; a dedicated
+## event thread (owned by `FFIContext`) drains the queue and invokes
+## listeners, so a slow handler can never block the FFI event loop. On
+## queue overflow the templates log, set a sticky stuck flag, and wake
+## the event thread — which fires the global "not responding"
+## notification from its own loop (firing it from the FFI thread would
+## risk deadlocking against a listener back-pressuring under `reg.lock`).
 
 {.pragma: callback, cdecl, raises: [], gcsafe.}
 
 import system/ansi_c
 import std/[atomics, locks, sequtils, options, tables]
 import chronicles
-import ./ffi_types, ./cbor_serial
+import ./ffi_types, ./cbor_serial, ./alloc
 
 
 type EventEnvelope*[T] = object
@@ -226,62 +234,86 @@ proc notifyListenersErr*(listeners: seq[FFIEventListener], msg: string) =
     )
 
 var ffiCurrentEventRegistry* {.threadvar.}: ptr FFIEventRegistry
+  ## Kept for tests that drive the registry directly. Dispatch no longer
+  ## reads it — invocation has moved to the event thread.
+
 var ffiCurrentEventQueue* {.threadvar.}: ptr EventQueue
+  ## Installed by the FFI thread so dispatch templates enqueue without
+  ## threading a `ctx` parameter through every call site.
+
 var ffiCurrentEventQueueStuck* {.threadvar.}: ptr Atomic[bool]
+  ## Sticky overflow flag on the owning `FFIContext`. Set by dispatch
+  ## templates when enqueue fails; read by the FFI request entry point
+  ## to reject further calls.
+
 var ffiCurrentNotifyEventEnqueued* {.threadvar.}: proc() {.gcsafe, raises: [].}
   ## Hook (not a queue field) so this module doesn't depend on chronos's
-  ## ThreadSignalPtr. Nil-safe.
+  ## ThreadSignalPtr. Nil-safe — tests that drive the queue directly leave
+  ## it unset and the event thread picks up enqueued events on the next tick.
 
-template withFFIEventDispatch(eventName: string, listeners, body: untyped) =
-  ## Resolves the thread-local registry, snapshots listeners under
-  ## `reg.lock`, then runs `body` inside `foreignThreadGc` + try/except.
-  let regPtr = ffiCurrentEventRegistry
-  if regPtr.isNil():
-    chronicles.error eventName & " - event registry not set on this thread"
-    return
-
-  withLock regPtr[].lock:
-    let listeners = regPtr[].byEvent.getOrDefault(eventName)
-    if listeners.len == 0:
-      chronicles.debug eventName & " - no listener registered"
-    else:
-      foreignThreadGc:
-        try:
-          body
-        except Exception, CatchableError:
-          notifyListenersErr(
-            listeners,
-            "Exception dispatching " & eventName & ": " & getCurrentExceptionMsg(),
-          )
+template enqueueOrMarkStuck(
+    eventName: string,
+    namePtr: cstring,
+    dataPtr: ptr UncheckedArray[byte],
+    dataLen: int,
+) =
+  ## Common tail for both dispatch templates. Takes ownership of `namePtr`
+  ## and `dataPtr` (both `c_malloc`'d). On queue-full, frees the buffers,
+  ## sets the sticky stuck flag, and wakes the event thread — which fires
+  ## onNotResponding from its loop (firing it here would risk deadlocking
+  ## against a listener back-pressuring under `reg.lock`).
+  let q = ffiCurrentEventQueue
+  if q.isNil():
+    chronicles.error "event queue not set on this thread", event = eventName
+    if not namePtr.isNil:
+      c_free(cast[pointer](namePtr))
+    if not dataPtr.isNil:
+      c_free(dataPtr)
+  elif not q[].tryEnqueueEvent(namePtr, dataPtr, dataLen):
+    chronicles.error "event queue full; library marked stuck",
+      event = eventName, capacity = EventQueueCapacity
+    if not namePtr.isNil:
+      c_free(cast[pointer](namePtr))
+    if not dataPtr.isNil:
+      c_free(dataPtr)
+    if not ffiCurrentEventQueueStuck.isNil():
+      ffiCurrentEventQueueStuck[].store(true)
+    if not ffiCurrentNotifyEventEnqueued.isNil():
+      ffiCurrentNotifyEventEnqueued()
+  else:
+    if not ffiCurrentNotifyEventEnqueued.isNil():
+      ffiCurrentNotifyEventEnqueued()
 
 template dispatchFFIEvent*(eventName: string, body: untyped) =
   ## Dispatches an FFI event to every listener subscribed to `eventName`.
   ## `body` must yield a `string` or `seq[byte]`.
   ##
-  ## Valid only on the FFI thread (where `ffiCurrentEventRegistry` is set).
-  ## Holds `reg.lock` for the entire snapshot + invocation so a concurrent
-  ## `removeEventListener` from a foreign thread blocks until dispatch
-  ## returns. Handlers must not call addEventListener / removeEventListener
-  ## on the same registry (would self-deadlock).
-  withFFIEventDispatch(eventName, listeners):
-    let event = body
-    let dataPtr: pointer =
-      if event.len > 0: unsafeAddr event[0]
-      else: nil
-    notifyListenersOk(listeners, dataPtr, event.len)
+  ## Runs on the FFI thread: encodes the body into a fresh `c_malloc`
+  ## buffer and enqueues it. Listener invocation happens later on the
+  ## dedicated event thread, so user code can never block the FFI loop.
+  block:
+    let evtName: string = eventName
+    let bodyVal = body
+    var dataPtr: ptr UncheckedArray[byte] = nil
+    let dataLen = bodyVal.len
+    if dataLen > 0:
+      dataPtr = cast[ptr UncheckedArray[byte]](c_malloc(csize_t(dataLen)))
+      copyMem(dataPtr, unsafeAddr bodyVal[0], dataLen)
+    let namePtr = alloc(evtName)
+    enqueueOrMarkStuck(evtName, namePtr, dataPtr, dataLen)
 
 template dispatchFFIEventCbor*(eventName: string, eventPayload: typed) =
   ## Typed CBOR variant of `dispatchFFIEvent`. Wraps `eventPayload` in an
   ## `EventEnvelope`, CBOR-encodes it into a `c_malloc` buffer once, and
-  ## fans the same buffer out to every registered listener.
+  ## queues it for the event thread to fan out to listeners.
   ##
   ## NB: parameter is `eventPayload`, not `payload` — Nim's template
   ## substitution would otherwise also rewrite the `payload:` field inside
   ## `EventEnvelope`.
-  withFFIEventDispatch(eventName, listeners):
-    var (data, dataLen) = cborEncodeShared(
-      EventEnvelope[typeof(eventPayload)](eventType: eventName, payload: eventPayload)
+  block:
+    let evtName: string = eventName
+    var (dataPtr, dataLen) = cborEncodeShared(
+      EventEnvelope[typeof(eventPayload)](eventType: evtName, payload: eventPayload)
     )
-    defer:
-      cborFreeShared(data)
-    notifyListenersOk(listeners, data, dataLen)
+    let namePtr = alloc(evtName)
+    enqueueOrMarkStuck(evtName, namePtr, dataPtr, dataLen)

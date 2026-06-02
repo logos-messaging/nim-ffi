@@ -104,6 +104,20 @@ proc setterThreadBody(args: SetterArgs) {.thread.} =
 
 suite "dispatchFFIEventCbor":
   test "delivers EventEnvelope-shaped CBOR payload to event callback":
+    # CallbackData defers declared first so they run LAST (LIFO),
+    # AFTER pool.destroyFFIContext joins the event thread. Otherwise
+    # TSan flags `captureCb` accessing an already-destroyed mutex
+    # whose memory got reused by the next test's stack frame.
+    var evt: CallbackData
+    initCallbackData(evt)
+    defer:
+      deinitCallbackData(evt)
+
+    var rsp: CallbackData
+    initCallbackData(rsp)
+    defer:
+      deinitCallbackData(rsp)
+
     var pool: FFIContextPool[TestEvtLib]
     let ctx = pool.createFFIContext().valueOr:
       check false
@@ -111,23 +125,10 @@ suite "dispatchFFIEventCbor":
     defer:
       discard pool.destroyFFIContext(ctx)
 
-    var evt: CallbackData
-    initCallbackData(evt)
-    defer:
-      deinitCallbackData(evt)
-
     # Subscribe to the specific event the request below dispatches.
     discard addEventListener(
       ctx[].eventRegistry, "message_sent", captureCb, addr evt
     )
-
-    # Trigger the dispatch from the FFI thread; the response callback is
-    # ignored (we only care that the request completed so we know the event
-    # has fired).
-    var rsp: CallbackData
-    initCallbackData(rsp)
-    defer:
-      deinitCallbackData(rsp)
 
     check sendRequestToFFIThread(
       ctx, EmitCborEventRequest.ffiNewReq(captureCb, addr rsp)
@@ -145,6 +146,16 @@ suite "dispatchFFIEventCbor":
 
 suite "dispatchFFIEvent with seq[byte]":
   test "accepts a raw seq[byte] body":
+    var evt: CallbackData
+    initCallbackData(evt)
+    defer:
+      deinitCallbackData(evt)
+
+    var rsp: CallbackData
+    initCallbackData(rsp)
+    defer:
+      deinitCallbackData(rsp)
+
     var pool: FFIContextPool[TestEvtLib]
     let ctx = pool.createFFIContext().valueOr:
       check false
@@ -152,19 +163,9 @@ suite "dispatchFFIEvent with seq[byte]":
     defer:
       discard pool.destroyFFIContext(ctx)
 
-    var evt: CallbackData
-    initCallbackData(evt)
-    defer:
-      deinitCallbackData(evt)
-
     discard addEventListener(
       ctx[].eventRegistry, "raw_bytes", captureCb, addr evt
     )
-
-    var rsp: CallbackData
-    initCallbackData(rsp)
-    defer:
-      deinitCallbackData(rsp)
 
     check sendRequestToFFIThread(
       ctx, EmitRawBytesEventRequest.ffiNewReq(captureCb, addr rsp)
@@ -188,17 +189,22 @@ when not defined(gcRefc):
     ## Run under tsan to actually validate the fix:
     ##   NIM_FFI_SAN=tsan NIM_FFI_MM=orc nimble test_sanitized
     test "concurrent add/remove writers vs dispatch reads stay race-free":
+      var evt: CallbackData
+      initCallbackData(evt)
+      defer:
+        deinitCallbackData(evt)
+
+      var rsp: CallbackData
+      initCallbackData(rsp)
+      defer:
+        deinitCallbackData(rsp)
+
       var pool: FFIContextPool[TestEvtLib]
       let ctx = pool.createFFIContext().valueOr:
         check false
         return
       defer:
         discard pool.destroyFFIContext(ctx)
-
-      var evt: CallbackData
-      initCallbackData(evt)
-      defer:
-        deinitCallbackData(evt)
 
       # Seed an initial callback so the FFI thread's first dispatch has a
       # target. The setter threads will then repeatedly re-install the same
@@ -216,11 +222,6 @@ when not defined(gcRefc):
       var setters: array[NumSetterThreads, Thread[SetterArgs]]
       for i in 0 ..< NumSetterThreads:
         createThread(setters[i], setterThreadBody, (ctx, addr stop, addr evt))
-
-      var rsp: CallbackData
-      initCallbackData(rsp)
-      defer:
-        deinitCallbackData(rsp)
 
       for _ in 0 ..< NumDispatchIters:
         # Reset rsp so each iteration's `waitCallback` blocks until the
@@ -243,12 +244,13 @@ when not defined(gcRefc):
       # actually landed so a silently-broken dispatch loop is caught.
       check evt.called
 
-
-## A foreign-thread mutation must not be able to invalidate the
-## listener's `userData` while an in-flight dispatch is mid-invocation.
-## The dispatch templates hold `reg.lock` for the entire snapshot +
-## invocation, so foreign `removeEventListener` blocks until dispatch
-## returns.
+## A foreign-thread mutation must not be able to invalidate a listener's
+## `userData` while an in-flight dispatch is mid-invocation. Dispatch
+## now lives on the dedicated event thread, which still holds
+## `reg.lock` across the listener fan-out — so foreign
+## `removeEventListener` blocks until dispatch returns. This test
+## drives a real `FFIContext` (FFI thread enqueues, event thread
+## dispatches) and asserts the same contract end-to-end.
 
 type SlowState = object
   entered: Atomic[bool]
@@ -257,44 +259,49 @@ type SlowState = object
 proc slowEventCb(
     retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
-  ## Signal entry, sleep briefly (the window during which the main
-  ## thread must call removeEventListener and block), signal exit.
+  ## Signal entry, sleep long enough that the test thread can race in
+  ## with removeEventListener and observe the block, then signal exit.
   let st = cast[ptr SlowState](userData)
   st[].entered.store(true)
-  os.sleep(15)
+  os.sleep(60)
   st[].exited.store(true)
-
-type DispatcherArgs = tuple
-  reg: ptr FFIEventRegistry
-  done: ptr Atomic[bool]
-
-proc dispatcherBody(args: DispatcherArgs) {.thread.} =
-  ffiCurrentEventRegistry = args.reg
-  dispatchFFIEvent("evt"):
-    "payload"
-  args.done[].store(true)
 
 suite "registry lock held during invocation":
   test "removeEventListener blocks until in-flight dispatch finishes":
-    var reg: FFIEventRegistry
-    initEventRegistry(reg)
+    var rsp: CallbackData
+    initCallbackData(rsp)
     defer:
-      deinitEventRegistry(reg)
+      deinitCallbackData(rsp)
+
+    var pool: FFIContextPool[TestEvtLib]
+    let ctx = pool.createFFIContext().valueOr:
+      check false
+      return
+    defer:
+      discard pool.destroyFFIContext(ctx)
 
     var st: SlowState
     st.entered.store(false)
     st.exited.store(false)
 
-    let id = addEventListener(reg, "evt", slowEventCb, addr st)
+    # Register the slow callback under the same event the dispatch fires.
+    let id = addEventListener(
+      ctx[].eventRegistry, "message_sent", slowEventCb, addr st
+    )
     check id != 0'u64
 
-    var done: Atomic[bool]
-    done.store(false)
-    var thr: Thread[DispatcherArgs]
-    createThread(thr, dispatcherBody, (addr reg, addr done))
+    # Fire an event from the FFI thread; the request-response callback
+    # only confirms the request completed — the slow listener is invoked
+    # asynchronously by the event thread.
 
-    # Wait until the worker thread is inside slowEventCb.
-    for _ in 0 ..< 200:
+    check sendRequestToFFIThread(
+      ctx, EmitCborEventRequest.ffiNewReq(captureCb, addr rsp)
+    )
+      .isOk()
+    waitCallback(rsp)
+
+    # Wait until the event thread is inside slowEventCb.
+    for _ in 0 ..< 500:
       if st.entered.load():
         break
       os.sleep(1)
@@ -303,7 +310,5 @@ suite "registry lock held during invocation":
 
     # Lock-during-invocation contract: remove blocks until dispatch
     # finishes; by the time it returns, slowEventCb has set exited=true.
-    check removeEventListener(reg, id)
+    check removeEventListener(ctx[].eventRegistry, id)
     check st.exited.load()
-    joinThread(thr)
-    check done.load()
