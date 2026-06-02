@@ -68,7 +68,7 @@ suite "FFIEventRegistry mutation":
 
     let id1 = addEventListener(reg, "evt", tagCb, addr t)
     let id2 = addEventListener(reg, "evt", tagCb, addr t)
-    let id3 = addEventListener(reg, "", tagCb, addr t)
+    let id3 = addEventListener(reg, "other", tagCb, addr t)
     check id1 == 1'u64
     check id2 == 2'u64
     check id3 == 3'u64
@@ -89,7 +89,7 @@ suite "FFIEventRegistry mutation":
     check not removeEventListener(reg, 0'u64)
     check not removeEventListener(reg, 99'u64)
 
-  test "removeEventListener removes from per-event seq and wildcard":
+  test "removeEventListener removes listeners across distinct events":
     var reg: FFIEventRegistry
     initEventRegistry(reg)
     defer:
@@ -101,18 +101,18 @@ suite "FFIEventRegistry mutation":
     var t = Tag(name: "a", rec: addr rec)
 
     let id1 = addEventListener(reg, "evt", tagCb, addr t)
-    let id2 = addEventListener(reg, "", tagCb, addr t)
+    let id2 = addEventListener(reg, "other", tagCb, addr t)
 
     check removeEventListener(reg, id1)
     check removeEventListener(reg, id2)
     # Second remove of the same id is a no-op.
     check not removeEventListener(reg, id1)
 
-    let snap = snapshotListeners(reg, "evt")
-    check snap.len == 0
+    check snapshotListeners(reg, "evt").len == 0
+    check snapshotListeners(reg, "other").len == 0
 
 suite "FFIEventRegistry snapshot semantics":
-  test "snapshot includes both per-event listeners and wildcards":
+  test "snapshot returns only the listeners for the requested event":
     var reg: FFIEventRegistry
     initEventRegistry(reg)
     defer:
@@ -126,17 +126,17 @@ suite "FFIEventRegistry snapshot semantics":
     var c = Tag(name: "c", rec: addr rec)
 
     discard addEventListener(reg, "evt", tagCb, addr a)
-    discard addEventListener(reg, "other", tagCb, addr b)
-    discard addEventListener(reg, "", tagCb, addr c)
+    discard addEventListener(reg, "evt", tagCb, addr b)
+    discard addEventListener(reg, "other", tagCb, addr c)
 
     let snapEvt = snapshotListeners(reg, "evt")
-    check snapEvt.len == 2 # listener for "evt" + wildcard
+    check snapEvt.len == 2 # both listeners for "evt"
 
     let snapOther = snapshotListeners(reg, "other")
-    check snapOther.len == 2 # listener for "other" + wildcard
+    check snapOther.len == 1 # only the listener for "other"
 
     let snapUnknown = snapshotListeners(reg, "no-subscriber")
-    check snapUnknown.len == 1 # only the wildcard
+    check snapUnknown.len == 0 # no listener for this event
 
   test "snapshot is a copy: post-snapshot mutation does not affect it":
     var reg: FFIEventRegistry
@@ -161,7 +161,7 @@ suite "FFIEventRegistry snapshot semantics":
     check snap[0].id == id1
 
 suite "removeAllEventListeners":
-  test "drops every listener (per-event and wildcard)":
+  test "drops every registered listener":
     var reg: FFIEventRegistry
     initEventRegistry(reg)
     defer:
@@ -174,8 +174,8 @@ suite "removeAllEventListeners":
     var b = Tag(name: "b", rec: addr rec)
 
     discard addEventListener(reg, "evt", tagCb, addr a)
-    discard addEventListener(reg, WildcardEventName, tagCb, addr b)
+    discard addEventListener(reg, "other", tagCb, addr b)
     removeAllEventListeners(reg)
 
     check snapshotListeners(reg, "evt").len == 0
-    check snapshotListeners(reg, WildcardEventName).len == 0
+    check snapshotListeners(reg, "other").len == 0

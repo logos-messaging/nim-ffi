@@ -449,8 +449,8 @@ proc generateApiRs*(
   # ── Per-listener handler boxes + extern "C" trampolines ─────────────────
   # Each registered listener owns a `Box<…Handler>` that is kept alive in
   # `$1::listeners` (keyed by listener id). The raw pointer to the inner
-  # handler is handed to the dylib as `user_data` for the per-event or
-  # wildcard trampoline below.
+  # handler is handed to the dylib as `user_data` for the per-event
+  # trampoline below.
   if events.len > 0:
     for ev in events:
       let handlerStruct = capitalizeFirstLetter(ev.nimProcName) & "Handler"
@@ -481,71 +481,9 @@ proc generateApiRs*(
       lines.add("}")
       lines.add("")
 
-    # Wildcard handler — receives every event as raw envelope bytes,
-    # the FFI return code, and the `eventType` string pre-extracted
-    # from the CBOR envelope. `event_id` is empty when `ret != 0` or
-    # the envelope is malformed (the bytes are an error string, not a
-    # CBOR envelope, in that case).
-    lines.add("struct WildcardHandler {")
-    lines.add("    f: Box<dyn Fn(c_int, &str, &[u8]) + Send + Sync>,")
-    lines.add("}")
-    lines.add("")
-    lines.add("unsafe extern \"C\" fn $1_wildcard_trampoline(" % [libName])
-    lines.add("    ret: c_int, msg: *const c_char, len: usize, ud: *mut c_void,")
-    lines.add(") {")
-    lines.add("    if ud.is_null() { return; }")
-    lines.add("    let h = &*(ud as *const WildcardHandler);")
-    lines.add("    let bytes = if !msg.is_null() && len > 0 {")
-    lines.add("        slice::from_raw_parts(msg as *const u8, len)")
-    lines.add("    } else { &[] };")
-    lines.add("    let event_id = if ret == 0 && !bytes.is_empty() {")
-    lines.add("        #[derive(serde::Deserialize)]")
-    lines.add("        struct EnvelopeMeta {")
-    lines.add("            #[serde(rename = \"eventType\")]")
-    lines.add("            event_type: String,")
-    lines.add("        }")
-    lines.add(
-      "        ciborium::de::from_reader::<EnvelopeMeta, _>(bytes)"
-    )
-    lines.add("            .map(|m| m.event_type).unwrap_or_default()")
-    lines.add("    } else {")
-    lines.add("        String::new()")
-    lines.add("    };")
-    lines.add("    (h.f)(ret, event_id.as_str(), bytes);")
-    lines.add("}")
-    lines.add("")
-
     # Public handle returned by every add_…_listener call.
     lines.add("#[derive(Debug, Clone, Copy)]")
     lines.add("pub struct ListenerHandle { pub id: u64 }")
-    lines.add("")
-
-    # Helper: decode an event envelope's `payload` field into any typed
-    # `T` that the generated `types.rs` already derives `Deserialize` on.
-    # Pair with `add_event_listener` to lift raw envelope bytes into a
-    # typed payload without hand-rolling ciborium calls in each branch.
-    lines.add(
-      "/// Decode the `payload` field of a CBOR `EventEnvelope` as `T`."
-    )
-    lines.add(
-      "/// Returns `Err` if the envelope is empty / malformed / the payload"
-    )
-    lines.add("/// cannot be deserialised as `T`.")
-    lines.add(
-      "pub fn decode_event_payload<T: serde::de::DeserializeOwned>("
-    )
-    lines.add("    envelope: &[u8],")
-    lines.add(") -> Result<T, String> {")
-    lines.add("    #[derive(serde::Deserialize)]")
-    lines.add("    struct Envelope<T> { payload: T }")
-    lines.add(
-      "    let env: Envelope<T> = ciborium::de::from_reader(envelope)"
-    )
-    lines.add(
-      "        .map_err(|e| format!(\"decode event payload: {e}\"))?;"
-    )
-    lines.add("    Ok(env.payload)")
-    lines.add("}")
     lines.add("")
 
   # ── Context struct ─────────────────────────────────────────────────────────
@@ -692,11 +630,11 @@ proc generateApiRs*(
   # ── Listener-registration API ─────────────────────────────────────────
   if events.len > 0:
     # Private helper shared by every public `add_*_listener`: the
-    # FFI call + map insertion is identical across the typed and
-    # wildcard variants, so it lives in one place. The caller owns
-    # the box (typed as the concrete handler struct so the raw
-    # pointer matches the trampoline's expected type) and only
-    # erases it to `dyn Any + Send` when handing ownership over.
+    # FFI call + map insertion is identical across the typed event
+    # variants, so it lives in one place. The caller owns the box
+    # (typed as the concrete handler struct so the raw pointer matches
+    # the trampoline's expected type) and only erases it to
+    # `dyn Any + Send` when handing ownership over.
     lines.add("    fn add_listener_inner(")
     lines.add("        &self,")
     lines.add("        event_name: *const c_char,")
@@ -745,43 +683,6 @@ proc generateApiRs*(
       )
       lines.add("    }")
       lines.add("")
-
-    # Generic wildcard listener — receives every event with the wire
-    # `eventType` string pre-extracted plus the raw envelope bytes. Pair
-    # with `decode_event_payload::<T>` to lift the payload into a typed
-    # value.
-    lines.add(
-      "    /// Register a catch-all listener that receives every event."
-    )
-    lines.add(
-      "    /// The handler arguments are (return_code, event_id, envelope_bytes):"
-    )
-    lines.add(
-      "    /// `event_id` is the wire `eventType` string extracted from the"
-    )
-    lines.add(
-      "    /// envelope (empty on error or malformed envelope); `envelope_bytes`"
-    )
-    lines.add(
-      "    /// is the full CBOR envelope, suitable for `decode_event_payload::<T>`."
-    )
-    lines.add(
-      "    pub fn add_event_listener<F>(&self, handler: F) -> ListenerHandle"
-    )
-    lines.add("    where F: Fn(c_int, &str, &[u8]) + Send + Sync + 'static,")
-    lines.add("    {")
-    lines.add(
-      "        let owned: Box<WildcardHandler> = Box::new(WildcardHandler { f: Box::new(handler) });"
-    )
-    lines.add(
-      "        let raw = &*owned as *const WildcardHandler as *mut c_void;"
-    )
-    lines.add(
-      "        self.add_listener_inner(b\"\\0\".as_ptr() as *const c_char, $1_wildcard_trampoline, raw, owned)" %
-        [libName]
-    )
-    lines.add("    }")
-    lines.add("")
 
     # Remove by handle. Drops the Box (and the user's closure) after the
     # C ABI confirms the listener has been unregistered.
