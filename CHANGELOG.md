@@ -14,6 +14,15 @@ All notable changes to this project are documented in this file.
   runs on the event thread. The FFI thread advances an atomic heartbeat
   each loop iteration; if it stalls for more than 1s past the start-up
   grace window, the event thread emits the `not_responding` event.
+- Removed the redundant `ffiType` macro; the `ffi` macro is now the single
+  authoring entry point
+  ([#22](https://github.com/logos-messaging/nim-ffi/pull/22)).
+- Generated C++ avoids move constructors and assignment operators
+  ([#36](https://github.com/logos-messaging/nim-ffi/pull/36)) and no longer
+  throws exceptions across the binding boundary
+  ([#46](https://github.com/logos-messaging/nim-ffi/pull/46)).
+- Removed the wildcard event listener; event dispatch is now strictly
+  per-event ([#70](https://github.com/logos-messaging/nim-ffi/pull/70)).
 
 ### Added
 - Queue-overflow handling: when the bounded event queue is full, the
@@ -21,15 +30,6 @@ All notable changes to this project are documented in this file.
   `not_responding` from the event thread, and rejects subsequent
   `sendRequestToFFIThread` calls with `event queue stuck - library
   cannot accept new requests`.
-
-## [0.2.0] - 2026-06-04
-
-Major release introducing the CBOR-based wire format, CBOR-backed FFI events
-with a multi-listener registry, multi-language binding generation (C++, Rust,
-CDDL), CI hardening with sanitizers, and several robustness fixes around
-context lifetime and memory safety.
-
-### Added
 - **CBOR serialization** as the FFI wire format, replacing the previous
   JSON/string-based `serial.nim`
   ([#23](https://github.com/logos-messaging/nim-ffi/pull/23)).
@@ -62,17 +62,6 @@ context lifetime and memory safety.
   ([#38](https://github.com/logos-messaging/nim-ffi/pull/38)).
 - CBOR type-coverage tests
   ([#41](https://github.com/logos-messaging/nim-ffi/pull/41)).
-
-### Changed
-- Removed the redundant `ffiType` macro; the `ffi` macro is now the single
-  authoring entry point
-  ([#22](https://github.com/logos-messaging/nim-ffi/pull/22)).
-- Generated C++ avoids move constructors and assignment operators
-  ([#36](https://github.com/logos-messaging/nim-ffi/pull/36)) and no longer
-  throws exceptions across the binding boundary
-  ([#46](https://github.com/logos-messaging/nim-ffi/pull/46)).
-- Removed the wildcard event listener; event dispatch is now strictly
-  per-event ([#70](https://github.com/logos-messaging/nim-ffi/pull/70)).
 
 ### Fixed
 - Use-after-free in the event/context lifetime path
@@ -132,3 +121,35 @@ Initial tagged release.
   watchdog with configurable timeout
   ([#7](https://github.com/logos-messaging/nim-ffi/pull/7)).
 - License files updated to comply with Logos licensing requirements.
+# Changelog
+
+## [0.1.4] - 2026-06-02
+
+[Full changelog](https://github.com/logos-messaging/nim-ffi/compare/v0.1.3...v0.1.4)
+
+### Added
+
+- Simplified FFI authoring with auto-generated C++ and Rust language bindings,
+  including new `ffi/codegen/cpp.nim`, `ffi/codegen/rust.nim` and shared
+  `ffi/codegen/meta.nim` helpers (#15).
+- Rust example bindings and clients under `examples/nim_timer/` (`rust_bindings`
+  and `rust_client`, the latter with a Tokio async variant) (#15).
+- CBOR serialization support via `ffi/serial.nim`, with `tests/test_serial.nim`
+  coverage.
+- FFI context pool (`ffi/ffi_context_pool.nim`) using a fixed array of contexts.
+- Test suite expansion: `test_alloc.nim`, `test_ctx_validation.nim`,
+  `test_ffi_context.nim`, `test_gc_compat.nim`.
+- Continuous integration pipeline (#12).
+
+### Fixed
+
+- Context buffer overflow (#21).
+- Use a fixed array of contexts to avoid consuming all file descriptors (#14).
+- Memory leaks (#11).
+- Add `install_name` for macOS shared libraries (#8).
+
+### Changed
+
+- Run tests with the `refc` garbage collector (#20).
+- Remove `CatchableError` usage (#19).
+- Update license files to comply with Logos licensing requirements.
