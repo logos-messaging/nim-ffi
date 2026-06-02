@@ -17,7 +17,7 @@
 
 {.pragma: callback, cdecl, raises: [], gcsafe.}
 
-import std/[locks, tables]
+import std/[locks, sequtils, tables]
 import chronicles
 import ./ffi_types, ./cbor_serial
 
@@ -112,23 +112,20 @@ proc removeEventListener*(reg: var FFIEventRegistry, id: uint64): bool {.raises:
   var removed = false
 
   withLock reg.lock:
-    var emptyKey = ""
-    var prune = false
+    var
+      pruneKey = ""
+      prune = false
     for key, listeners in reg.byEvent.mpairs:
-      var idx = -1
-      for i in 0 ..< listeners.len:
-        if listeners[i].id == id:
-          idx = i
-          break
-      if idx >= 0:
-        listeners.delete(idx)
+      let before = listeners.len
+      listeners.keepItIf(it.id != id)
+      if listeners.len < before:
         removed = true
         if listeners.len == 0:
-          emptyKey = key
+          pruneKey = key
           prune = true
         break
     if prune:
-      reg.byEvent.del(emptyKey)
+      reg.byEvent.del(pruneKey)
   return removed
 
 proc removeAllEventListeners*(reg: var FFIEventRegistry) {.raises: [].} =
