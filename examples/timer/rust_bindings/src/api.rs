@@ -98,63 +98,33 @@ where
     }
 }
 
-/// Typed event handlers for `MyTimerCtx`. Each field is `None` by
-/// default; set the ones you care about and pass to
-/// `MyTimerCtx::set_event_handlers`.
-#[allow(non_snake_case)]
-pub struct Events {
-    pub on_error: Option<Box<dyn Fn(&str) + Send + Sync>>,
-    pub onEchoFired: Option<Box<dyn Fn(&EchoEvent) + Send + Sync>>,
+struct OnEchoFiredHandler {
+    f: Box<dyn Fn(&EchoEvent) + Send + Sync>,
 }
 
-impl Default for Events {
-    fn default() -> Self {
-        Self { on_error: None, onEchoFired: None }
-    }
-}
-
-unsafe extern "C" fn my_timer_event_trampoline(
+unsafe extern "C" fn on_echo_fired_trampoline(
     ret: c_int, msg: *const c_char, len: usize, ud: *mut c_void,
 ) {
-    if ud.is_null() { return; }
-    let events = &*(ud as *const Events);
-    if ret != 0 {
-        if let Some(ref on_err) = events.on_error {
-            let bytes = if !msg.is_null() && len > 0 {
-                slice::from_raw_parts(msg as *const u8, len)
-            } else { &[] };
-            let s = String::from_utf8_lossy(bytes);
-            on_err(&s);
-        }
+    if ud.is_null() || ret != 0 || msg.is_null() || len == 0 {
         return;
     }
-    if msg.is_null() || len == 0 { return; }
+    let h = &*(ud as *const OnEchoFiredHandler);
     let bytes = slice::from_raw_parts(msg as *const u8, len);
     #[derive(serde::Deserialize)]
-    struct EnvelopeMeta {
-        #[serde(rename = "eventType")]
-        event_type: String,
-    }
-    let meta: EnvelopeMeta = match ciborium::de::from_reader(bytes) {
-        Ok(m) => m,
-        Err(_) => return,
-    };
-    if meta.event_type == "on_echo_fired" {
-        #[derive(serde::Deserialize)]
-        struct Envelope { payload: EchoEvent }
-        if let Ok(env) = ciborium::de::from_reader::<Envelope, _>(bytes) {
-            if let Some(ref h) = events.onEchoFired { h(&env.payload); }
-        }
-        return;
+    struct Envelope { payload: EchoEvent }
+    if let Ok(env) = ciborium::de::from_reader::<Envelope, _>(bytes) {
+        (h.f)(&env.payload);
     }
 }
+
+#[derive(Debug, Clone, Copy)]
+pub struct ListenerHandle { pub id: u64 }
 
 /// High-level context for `MyTimer`.
 pub struct MyTimerCtx {
     ptr: *mut c_void,
     timeout: Duration,
-    events: *mut Events,
-    event_listener_id: u64,
+    listeners: std::sync::Mutex<std::collections::HashMap<u64, Box<dyn std::any::Any + Send>>>,
 }
 
 // SAFETY: The `ptr` field points to an FFIContext owned by the Nim runtime.
@@ -174,10 +144,6 @@ impl Drop for MyTimerCtx {
             unsafe { ffi::my_timer_destroy(self.ptr); }
             self.ptr = std::ptr::null_mut();
         }
-        if !self.events.is_null() {
-            unsafe { drop(Box::from_raw(self.events)); }
-            self.events = std::ptr::null_mut();
-        }
     }
 }
 
@@ -191,7 +157,7 @@ impl MyTimerCtx {
         })?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
         let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
-        Ok(Self { ptr: addr as *mut c_void, timeout, events: std::ptr::null_mut(), event_listener_id: 0 })
+        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })
     }
 
     pub async fn new_async(config: TimerConfig, timeout: Duration) -> Result<Self, String> {
@@ -203,30 +169,44 @@ impl MyTimerCtx {
         }).await?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
         let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
-        Ok(Self { ptr: addr as *mut c_void, timeout, events: std::ptr::null_mut(), event_listener_id: 0 })
+        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })
     }
 
-    /// Attach typed event handlers. Each call removes any previous
-    /// listener via `_remove_event_listener` before adding the new
-    /// one, so the registry never holds a pointer into a freed box.
-    pub fn set_event_handlers(&mut self, handlers: Events) {
-        if self.event_listener_id != 0 {
-            unsafe {
-                let _ = ffi::my_timer_remove_event_listener(self.ptr, self.event_listener_id);
-            }
-            self.event_listener_id = 0;
+    fn add_listener_inner(
+        &self,
+        event_name: *const c_char,
+        callback: ffi::FFICallback,
+        raw: *mut c_void,
+        owned: Box<dyn std::any::Any + Send>,
+    ) -> ListenerHandle {
+        let id = unsafe {
+            ffi::my_timer_add_event_listener(self.ptr, event_name, callback, raw)
+        };
+        if id != 0 {
+            self.listeners.lock().unwrap().insert(id, owned);
         }
-        if !self.events.is_null() {
-            unsafe { drop(Box::from_raw(self.events)); }
-            self.events = std::ptr::null_mut();
-        }
-        let raw = Box::into_raw(Box::new(handlers));
-        self.events = raw;
-        unsafe {
-            self.event_listener_id = ffi::my_timer_add_event_listener(
-                self.ptr, b"\0".as_ptr() as *const c_char,
-                my_timer_event_trampoline, raw as *mut c_void);
-        }
+        ListenerHandle { id }
+    }
+
+    /// Register a typed listener for `on_echo_fired`. The returned handle can be
+    /// passed to `remove_event_listener` to unregister.
+    pub fn add_on_echo_fired_listener<F>(&self, handler: F) -> ListenerHandle
+    where F: Fn(&EchoEvent) + Send + Sync + 'static,
+    {
+        let owned: Box<OnEchoFiredHandler> = Box::new(OnEchoFiredHandler { f: Box::new(handler) });
+        let raw = &*owned as *const OnEchoFiredHandler as *mut c_void;
+        self.add_listener_inner(b"on_echo_fired\0".as_ptr() as *const c_char, on_echo_fired_trampoline, raw, owned)
+    }
+
+    /// Remove a previously-registered listener by handle. Returns true
+    /// if the listener existed and was removed; false otherwise.
+    pub fn remove_event_listener(&self, handle: ListenerHandle) -> bool {
+        if handle.id == 0 { return false; }
+        let rc = unsafe {
+            ffi::my_timer_remove_event_listener(self.ptr, handle.id)
+        };
+        self.listeners.lock().unwrap().remove(&handle.id);
+        rc == 0
     }
 
     pub fn echo(&self, req: EchoRequest) -> Result<EchoResponse, String> {

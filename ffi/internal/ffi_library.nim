@@ -112,8 +112,9 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
   ## ABI on its `FFIContext`:
   ##
   ## - `{libraryName}_add_event_listener(ctx, event_name, cb, ud) -> uint64`
-  ##   — registers `cb` for `event_name` and returns its stable id. An
-  ##   empty `event_name` subscribes `cb` to *every* event (catch-all).
+  ##   — registers `cb` for `event_name` and returns its stable id. `cb`
+  ##   only receives events dispatched under `event_name`; subscribe to
+  ##   each event separately.
   ## - `{libraryName}_remove_event_listener(ctx, id) -> cint` — returns 0 on
   ##   success, non-zero if no listener with that id exists.
   ##

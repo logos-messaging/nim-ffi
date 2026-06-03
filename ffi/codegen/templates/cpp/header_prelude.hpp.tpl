@@ -1,6 +1,6 @@
 #pragma once
-// Generated bindings require C++20 — the event-listener API uses
-// std::span<const std::uint8_t> for the wildcard callback.
+// Generated bindings require C++20 (designated initializers and other
+// C++20 constructs are used throughout the emitted code).
 // MSVC keeps __cplusplus at 199711L unless /Zc:__cplusplus is passed,
 // so consult _MSVC_LANG when present (it always reflects the active
 // /std:c++XX level).
@@ -14,7 +14,7 @@
 #include <string>
 #include <cstdint>
 #include <chrono>
-#include <stdexcept>
+#include <charconv>
 #include <mutex>
 #include <condition_variable>
 #include <memory>
@@ -24,6 +24,7 @@
 #include <optional>
 #include <type_traits>
 #include <cstring>
+#include <cassert>
 extern "C" {
 #include <tinycbor/cbor.h>
 }

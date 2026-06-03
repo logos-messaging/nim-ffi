@@ -86,8 +86,8 @@ registerReqFFI(EmitRawBytesEventRequest, lib: ptr TestEvtLib):
     return ok("emitted")
 
 ## Setter-thread worker for the registry race regression test. Each
-## iteration adds then immediately removes a wildcard listener so a
-## TSan-instrumented build can confirm `FFIEventRegistry.lock`
+## iteration adds then immediately removes a listener for the dispatched
+## event so a TSan-instrumented build can confirm `FFIEventRegistry.lock`
 ## serialises the cross-thread mutation against dispatch-time
 ## `snapshotListeners` reads from the FFI thread.
 type SetterArgs = tuple
@@ -98,7 +98,7 @@ type SetterArgs = tuple
 proc setterThreadBody(args: SetterArgs) {.thread.} =
   while not args.stop[].load():
     let id = addEventListener(
-      args.ctx[].eventRegistry, WildcardEventName, captureCb, args.target
+      args.ctx[].eventRegistry, "message_sent", captureCb, args.target
     )
     discard removeEventListener(args.ctx[].eventRegistry, id)
 
@@ -116,10 +116,9 @@ suite "dispatchFFIEventCbor":
     defer:
       deinitCallbackData(evt)
 
-    # Register the event callback via the same locked helper that the
-    # codegen-emitted `{libname}_set_event_callback` uses.
+    # Subscribe to the specific event the request below dispatches.
     discard addEventListener(
-      ctx[].eventRegistry, WildcardEventName, captureCb, addr evt
+      ctx[].eventRegistry, "message_sent", captureCb, addr evt
     )
 
     # Trigger the dispatch from the FFI thread; the response callback is
@@ -159,7 +158,7 @@ suite "dispatchFFIEvent with seq[byte]":
       deinitCallbackData(evt)
 
     discard addEventListener(
-      ctx[].eventRegistry, WildcardEventName, captureCb, addr evt
+      ctx[].eventRegistry, "raw_bytes", captureCb, addr evt
     )
 
     var rsp: CallbackData
@@ -178,8 +177,8 @@ suite "dispatchFFIEvent with seq[byte]":
     check callbackBytes(evt) == @[byte 0x01, 0x02, 0x03]
 
 when not defined(gcRefc):
-  ## Skipped under `--mm:refc`: each setter thread grows / shrinks
-  ## `reg.wildcard` (a `seq[FFIEventListener]`) via `addEventListener`,
+  ## Skipped under `--mm:refc`: each setter thread grows / shrinks the
+  ## per-event listener `seq[FFIEventListener]` via `addEventListener`,
   ## and refc's per-thread GC heap ownership makes cross-thread seq
   ## buffer reallocation unsafe even when the surrounding lock is held.
   ## ORC + the FFI thread + tsan (the combo this test was written for)
@@ -206,7 +205,7 @@ when not defined(gcRefc):
       # (callback, userData) pair — what matters is the cross-thread write
       # racing the FFI thread's read, not which pair "wins".
       discard addEventListener(
-        ctx[].eventRegistry, WildcardEventName, captureCb, addr evt
+        ctx[].eventRegistry, "message_sent", captureCb, addr evt
       )
 
       const NumSetterThreads = 4

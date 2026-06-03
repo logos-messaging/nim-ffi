@@ -7,7 +7,7 @@
 {.pragma: callback, cdecl, raises: [], gcsafe.}
 
 import system/ansi_c
-import std/[atomics, locks, options, tables]
+import std/[atomics, locks, sequtils, options, tables]
 import chronicles
 import ./ffi_types, ./cbor_serial
 
@@ -39,10 +39,6 @@ type
     lock*: Lock
     nextId*: uint64 ## Monotonic id source. 0 is reserved as "invalid"; ids start at 1.
     byEvent*: Table[string, seq[FFIEventListener]]
-    wildcard*: seq[FFIEventListener]
-
-const WildcardEventName* = ""
-  ## Empty string registers a wildcard listener that receives every event.
 
 # ---------------------------------------------------------------------------
 # Registry lifecycle and mutation
@@ -56,7 +52,6 @@ proc initEventRegistry*(reg: var FFIEventRegistry) =
   reg.lock.initLock()
   reg.nextId = 0'u64
   reg.byEvent = initTable[string, seq[FFIEventListener]]()
-  reg.wildcard.setLen(0)
 
 proc deinitEventRegistry*(reg: var FFIEventRegistry) =
   ## Mirror of `initEventRegistry`: must be called exactly once, by the
@@ -70,7 +65,6 @@ proc deinitEventRegistry*(reg: var FFIEventRegistry) =
   ## assignment destructor against this thread's heap allocations.
   reg.lock.deinitLock()
   reg.byEvent = default(Table[string, seq[FFIEventListener]])
-  reg.wildcard = @[]
   reg.nextId = 0'u64
 
 proc addEventListener*(
@@ -80,9 +74,10 @@ proc addEventListener*(
     userData: pointer,
 ): uint64 {.raises: [].} =
   ## Registers `callback` for `eventName` and returns the listener's stable
-  ## id (always non-zero on success). `eventName == ""` registers a wildcard
-  ## listener that receives every dispatched event. Returns 0 if `callback`
-  ## is nil — the only documented failure mode.
+  ## id (always non-zero on success). A listener only receives events
+  ## dispatched under its own `eventName` — subscribe to each event
+  ## separately. Returns 0 if `callback` is nil — the only documented
+  ## failure mode.
   if callback.isNil():
     return 0
 
@@ -93,10 +88,7 @@ proc addEventListener*(
     assigned = reg.nextId
     let listener =
       FFIEventListener(id: assigned, callback: callback, userData: userData)
-    if eventName.len == 0:
-      reg.wildcard.add(listener)
-    else:
-      reg.byEvent.mgetOrPut(eventName, @[]).add(listener)
+    reg.byEvent.mgetOrPut(eventName, @[]).add(listener)
   return assigned
 
 proc removeEventListener*(reg: var FFIEventRegistry, id: uint64): bool {.raises: [].} =
@@ -110,54 +102,41 @@ proc removeEventListener*(reg: var FFIEventRegistry, id: uint64): bool {.raises:
   var removed = false
 
   withLock reg.lock:
-    for i in 0 ..< reg.wildcard.len:
-      if reg.wildcard[i].id == id:
-        reg.wildcard.delete(i)
+    var
+      pruneKey = ""
+      prune = false
+    for key, listeners in reg.byEvent.mpairs:
+      let before = listeners.len
+      listeners.keepItIf(it.id != id)
+      if listeners.len < before:
         removed = true
+        if listeners.len == 0:
+          pruneKey = key
+          prune = true
         break
-    if not removed:
-      var emptyKey = ""
-      var prune = false
-      for key, listeners in reg.byEvent.mpairs:
-        var idx = -1
-        for i in 0 ..< listeners.len:
-          if listeners[i].id == id:
-            idx = i
-            break
-        if idx >= 0:
-          listeners.delete(idx)
-          removed = true
-          if listeners.len == 0:
-            emptyKey = key
-            prune = true
-          break
-      if prune:
-        reg.byEvent.del(emptyKey)
+    if prune:
+      reg.byEvent.del(pruneKey)
   return removed
 
 proc removeAllEventListeners*(reg: var FFIEventRegistry) {.raises: [].} =
-  ## Drops every registered listener (per-event and wildcard). Does not
-  ## reset the listener-id counter — subsequent `addEventListener` calls
-  ## still return strictly increasing ids.
+  ## Drops every registered listener. Does not reset the listener-id
+  ## counter — subsequent `addEventListener` calls still return strictly
+  ## increasing ids.
   withLock reg.lock:
-    reg.wildcard.setLen(0)
     reg.byEvent.clear()
 
 proc snapshotListeners*(
     reg: var FFIEventRegistry, eventName: string
 ): seq[FFIEventListener] {.raises: [].} =
-  ## Returns a copy of the listener slice for `eventName`, plus every
-  ## wildcard listener. The copy is what makes re-entrant add/remove from
-  ## inside a handler deadlock-free: dispatch holds the lock only for the
-  ## duration of the copy, then iterates the copy outside the lock.
+  ## Returns a copy of the listener slice for `eventName`. The copy is what
+  ## makes re-entrant add/remove from inside a handler deadlock-free:
+  ## dispatch holds the lock only for the duration of the copy, then
+  ## iterates the copy outside the lock.
   var snap: seq[FFIEventListener] = @[]
   withLock reg.lock:
-    if eventName.len > 0:
-      # `getOrDefault` returns an empty seq when the key is absent —
-      # avoids the raising `[]` operator path.
-      for l in reg.byEvent.getOrDefault(eventName):
-        snap.add(l)
-    for l in reg.wildcard:
+    # `getOrDefault` returns an empty seq when the key is absent —
+    # avoids the raising `[]` operator path.
+    for l in reg.byEvent.getOrDefault(eventName):
       snap.add(l)
   return snap
 
@@ -276,8 +255,8 @@ template withFFIEventDispatch(eventName: string, listeners, body: untyped) =
             )
 
 template dispatchFFIEvent*(eventName: string, body: untyped) =
-  ## Dispatches an FFI event to every listener for `eventName` plus every
-  ## wildcard listener. `body` must yield a `string` or `seq[byte]`.
+  ## Dispatches an FFI event to every listener subscribed to `eventName`.
+  ## `body` must yield a `string` or `seq[byte]`.
   ##
   ## Valid only on the FFI thread (where `ffiCurrentEventRegistry` is
   ## set). Holds `reg.lock` for the entire snapshot + invocation so a

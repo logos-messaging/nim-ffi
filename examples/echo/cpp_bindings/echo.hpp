@@ -1,6 +1,6 @@
 #pragma once
-// Generated bindings require C++20 — the event-listener API uses
-// std::span<const std::uint8_t> for the wildcard callback.
+// Generated bindings require C++20 (designated initializers and other
+// C++20 constructs are used throughout the emitted code).
 // MSVC keeps __cplusplus at 199711L unless /Zc:__cplusplus is passed,
 // so consult _MSVC_LANG when present (it always reflects the active
 // /std:c++XX level).
@@ -14,7 +14,7 @@
 #include <string>
 #include <cstdint>
 #include <chrono>
-#include <stdexcept>
+#include <charconv>
 #include <mutex>
 #include <condition_variable>
 #include <memory>
@@ -24,9 +24,72 @@
 #include <optional>
 #include <type_traits>
 #include <cstring>
+#include <cassert>
 extern "C" {
 #include <tinycbor/cbor.h>
 }
+
+// ============================================================
+// Result<T> — exception-free error channel
+// ============================================================
+// The generated bindings never throw: every fallible entry point (create,
+// instance methods, and their *Async futures) returns a Result<T>. Callers
+// branch on isOk()/isErr() (or the explicit bool conversion) and read
+// value()/error(). This mirrors the Nim side's Result[T, string] and keeps
+// us off C++23's std::expected.
+#ifndef NIM_FFI_RESULT_HPP_INCLUDED
+#define NIM_FFI_RESULT_HPP_INCLUDED
+
+template <typename T>
+class Result {
+    std::optional<T> value_;
+    std::string error_;
+public:
+    static Result<T> ok(T value) {
+        Result<T> r;
+        r.value_ = std::move(value);
+        return r;
+    }
+    static Result<T> err(std::string message) {
+        Result<T> r;
+        r.error_ = std::move(message);
+        return r;
+    }
+    bool isOk() const { return value_.has_value(); }
+    bool isErr() const { return !value_.has_value(); }
+    explicit operator bool() const { return isOk(); }
+    const T& value() const         { assert(value_.has_value() && "Result::value() called on err Result — check isOk() first"); return *value_; }
+    T& value()                     { assert(value_.has_value() && "Result::value() called on err Result — check isOk() first"); return *value_; }
+    const T& operator*() const     { assert(value_.has_value() && "Result::operator*() called on err Result — check isOk() first"); return *value_; }
+    const T* operator->() const    { assert(value_.has_value() && "Result::operator->() called on err Result — check isOk() first"); return &*value_; }
+    T&& take()                     { assert(value_.has_value() && "Result::take() called on err Result — check isOk() first"); return std::move(*value_); }
+    const std::string& error() const { assert(!value_.has_value() && "Result::error() called on ok Result — check isErr() first"); return error_; }
+};
+
+template <>
+class Result<void> {
+    bool ok_ = true;
+    std::string error_;
+public:
+    static Result<void> ok() {
+        Result<void> r;
+        r.ok_ = true;
+        return r;
+    }
+    static Result<void> err(std::string message) {
+        Result<void> r;
+        r.ok_ = false;
+        r.error_ = std::move(message);
+        return r;
+    }
+    Result() = default;
+    bool isOk() const { return ok_; }
+    bool isErr() const { return !ok_; }
+    explicit operator bool() const { return isOk(); }
+    const std::string& error() const { assert(!ok_ && "Result<void>::error() called on ok Result — check isErr() first"); return error_; }
+};
+
+#endif // NIM_FFI_RESULT_HPP_INCLUDED
 
 // ── encode_cbor overloads (primitives + containers) ─────────────────────
 // Per-struct encode_cbor / decode_cbor are emitted by cpp.nim next to each
@@ -159,7 +222,7 @@ inline CborError decode_cbor(CborValue& it, std::optional<T>& out) {
 // ── Public entry points ─────────────────────────────────────────────────
 
 template<typename T>
-inline std::vector<std::uint8_t> encodeCborFFI(const T& value) {
+inline Result<std::vector<std::uint8_t>> encodeCborFFI(const T& value) {
     // Start with a generous 4 KiB buffer; double on overflow until it fits.
     std::vector<std::uint8_t> buf(4096);
     while (true) {
@@ -169,34 +232,34 @@ inline std::vector<std::uint8_t> encodeCborFFI(const T& value) {
         if (err == CborNoError) {
             const size_t used = cbor_encoder_get_buffer_size(&enc, buf.data());
             buf.resize(used);
-            return buf;
+            return Result<std::vector<std::uint8_t>>::ok(std::move(buf));
         }
         if (err == CborErrorOutOfMemory) {
             const size_t extra = cbor_encoder_get_extra_bytes_needed(&enc);
             buf.resize(buf.size() + (extra > 0 ? extra : buf.size()));
             continue;
         }
-        throw std::runtime_error(std::string("FFI CBOR encode failed: ") +
-                                 cbor_error_string(err));
+        return Result<std::vector<std::uint8_t>>::err(
+            std::string("FFI CBOR encode failed: ") + cbor_error_string(err));
     }
 }
 
 template<typename T>
-inline T decodeCborFFI(const std::vector<std::uint8_t>& bytes) {
+inline Result<T> decodeCborFFI(const std::vector<std::uint8_t>& bytes) {
     CborParser parser;
     CborValue it;
     CborError err = cbor_parser_init(bytes.data(), bytes.size(), 0, &parser, &it);
     if (err != CborNoError) {
-        throw std::runtime_error(std::string("FFI CBOR parse init failed: ") +
-                                 cbor_error_string(err));
+        return Result<T>::err(std::string("FFI CBOR parse init failed: ") +
+                              cbor_error_string(err));
     }
     T out{};
     err = decode_cbor(it, out);
     if (err != CborNoError) {
-        throw std::runtime_error(std::string("FFI CBOR decode failed: ") +
-                                 cbor_error_string(err));
+        return Result<T>::err(std::string("FFI CBOR decode failed: ") +
+                              cbor_error_string(err));
     }
-    return out;
+    return Result<T>::ok(std::move(out));
 }
 
 #endif // NIM_FFI_CBOR_HELPERS_HPP_INCLUDED
@@ -384,22 +447,25 @@ inline void ffi_cb_(int ret, const char* msg, size_t len, void* ud) {
     s.cv.notify_one();
 }
 
-inline std::vector<std::uint8_t> ffi_call_(std::function<int(FFICallback, void*)> f,
-                                          std::chrono::milliseconds timeout) {
+inline Result<std::vector<std::uint8_t>> ffi_call_(
+        std::function<int(FFICallback, void*)> f,
+        std::chrono::milliseconds timeout) {
+    using Bytes = std::vector<std::uint8_t>;
     auto state = std::make_shared<FFICallState_>();
     auto* cb_ref = new std::shared_ptr<FFICallState_>(state);
     const int ret = f(ffi_cb_, cb_ref);
     if (ret == 2) {
         delete cb_ref;
-        throw std::runtime_error("RET_MISSING_CALLBACK (internal error)");
+        return Result<Bytes>::err("RET_MISSING_CALLBACK (internal error)");
     }
     std::unique_lock<std::mutex> lock(state->mtx);
     const bool fired = state->cv.wait_for(lock, timeout, [&]{ return state->done; });
     if (!fired)
-        throw std::runtime_error("FFI call timed out after " + std::to_string(timeout.count()) + "ms");
+        return Result<Bytes>::err("FFI call timed out after " +
+                                  std::to_string(timeout.count()) + "ms");
     if (!state->ok)
-        throw std::runtime_error(state->err);
-    return state->bytes;
+        return Result<Bytes>::err(state->err);
+    return Result<Bytes>::ok(std::move(state->bytes));
 }
 
 } // anonymous namespace
@@ -412,23 +478,30 @@ inline std::vector<std::uint8_t> ffi_call_(std::function<int(FFICallback, void*)
 
 class EchoCtx {
 public:
-    static std::unique_ptr<EchoCtx> create(const EchoConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
+    static Result<std::unique_ptr<EchoCtx>> create(const EchoConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
         const auto ffi_req_ = EchoCreateCtorReq{config};
-        const auto ffi_req_bytes_ = encodeCborFFI(ffi_req_);
-        const auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) return Result<std::unique_ptr<EchoCtx>>::err(ffi_enc_.error());
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
             (void)echo_create(ffi_req_bytes_.data(), ffi_req_bytes_.size(), cb, ud);
             return 0;
         }, timeout);
-        const auto addr_str = decodeCborFFI<std::string>(ffi_raw_);
-        try {
-            const auto addr = std::stoull(addr_str);
-            return std::unique_ptr<EchoCtx>(new EchoCtx(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout));
-        } catch (const std::exception&) {
-            throw std::runtime_error("FFI create returned non-numeric address: " + addr_str);
+        if (ffi_raw_.isErr()) return Result<std::unique_ptr<EchoCtx>>::err(ffi_raw_.error());
+        auto ffi_addr_ = decodeCborFFI<std::string>(ffi_raw_.value());
+        if (ffi_addr_.isErr()) return Result<std::unique_ptr<EchoCtx>>::err(ffi_addr_.error());
+        const auto& addr_str = ffi_addr_.value();
+        std::uint64_t addr = 0;
+        const char* addr_begin = addr_str.data();
+        const char* addr_end = addr_begin + addr_str.size();
+        const auto fc_ = std::from_chars(addr_begin, addr_end, addr);
+        if (fc_.ec != std::errc() || fc_.ptr != addr_end) {
+            return Result<std::unique_ptr<EchoCtx>>::err("FFI create returned non-numeric address: " + addr_str);
         }
+        return Result<std::unique_ptr<EchoCtx>>::ok(std::unique_ptr<EchoCtx>(new EchoCtx(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout)));
     }
 
-    static std::future<std::unique_ptr<EchoCtx>> createAsync(const EchoConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
+    static std::future<Result<std::unique_ptr<EchoCtx>>> createAsync(const EchoConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
         return std::async(std::launch::async, [config, timeout]() { return create(config, timeout); });
     }
 
@@ -453,29 +526,35 @@ public:
     EchoCtx(EchoCtx&&) = delete;
     EchoCtx& operator=(EchoCtx&&) = delete;
 
-    ShoutResponse shout(const ShoutRequest& req) const {
+    Result<ShoutResponse> shout(const ShoutRequest& req) const {
         const auto ffi_req_ = EchoShoutReq{req};
-        const auto ffi_req_bytes_ = encodeCborFFI(ffi_req_);
-        const auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) return Result<ShoutResponse>::err(ffi_enc_.error());
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
             return echo_shout(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
         }, timeout_);
-        return decodeCborFFI<ShoutResponse>(ffi_raw_);
+        if (ffi_raw_.isErr()) return Result<ShoutResponse>::err(ffi_raw_.error());
+        return decodeCborFFI<ShoutResponse>(ffi_raw_.value());
     }
 
-    std::future<ShoutResponse> shoutAsync(const ShoutRequest& req) const {
+    std::future<Result<ShoutResponse>> shoutAsync(const ShoutRequest& req) const {
         return std::async(std::launch::async, [this, req]() { return this->shout(req); });
     }
 
-    std::string version() const {
+    Result<std::string> version() const {
         const auto ffi_req_ = EchoVersionReq{};
-        const auto ffi_req_bytes_ = encodeCborFFI(ffi_req_);
-        const auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) return Result<std::string>::err(ffi_enc_.error());
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
             return echo_version(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
         }, timeout_);
-        return decodeCborFFI<std::string>(ffi_raw_);
+        if (ffi_raw_.isErr()) return Result<std::string>::err(ffi_raw_.error());
+        return decodeCborFFI<std::string>(ffi_raw_.value());
     }
 
-    std::future<std::string> versionAsync() const {
+    std::future<Result<std::string>> versionAsync() const {
         return std::async(std::launch::async, [this]() { return this->version(); });
     }
 
