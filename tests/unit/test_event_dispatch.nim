@@ -246,9 +246,11 @@ when not defined(gcRefc):
 
 ## A foreign-thread mutation must not be able to invalidate the
 ## listener's `userData` while an in-flight dispatch is mid-invocation.
-## The dispatch templates hold `reg.lock` for the entire snapshot +
-## invocation, so foreign `removeEventListener` blocks until dispatch
-## returns.
+## Dispatch now runs on the event thread, where `dispatchToListeners`
+## holds `reg.lock` across the snapshot + callback invocation, so a
+## foreign `removeEventListener` blocks until dispatch returns. Driven
+## end-to-end through the pool so the callback runs on the real event
+## thread (the only place dispatch now happens).
 
 type SlowState = object
   entered: Atomic[bool]
@@ -257,53 +259,114 @@ type SlowState = object
 proc slowEventCb(
     retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
-  ## Signal entry, sleep briefly (the window during which the main
-  ## thread must call removeEventListener and block), signal exit.
+  ## Signal entry, sleep (the window during which the main thread must
+  ## call removeEventListener and block), signal exit.
   let st = cast[ptr SlowState](userData)
   st[].entered.store(true)
-  os.sleep(15)
+  os.sleep(100)
   st[].exited.store(true)
-
-type DispatcherArgs = tuple
-  reg: ptr FFIEventRegistry
-  done: ptr Atomic[bool]
-
-proc dispatcherBody(args: DispatcherArgs) {.thread.} =
-  ffiCurrentEventRegistry = args.reg
-  dispatchFFIEvent("evt"):
-    "payload"
-  args.done[].store(true)
 
 suite "registry lock held during invocation":
   test "removeEventListener blocks until in-flight dispatch finishes":
-    var reg: FFIEventRegistry
-    initEventRegistry(reg)
+    var pool: FFIContextPool[TestEvtLib]
+    let ctx = pool.createFFIContext().valueOr:
+      check false
+      return
     defer:
-      deinitEventRegistry(reg)
+      discard pool.destroyFFIContext(ctx)
 
     var st: SlowState
     st.entered.store(false)
     st.exited.store(false)
 
-    let id = addEventListener(reg, "evt", slowEventCb, addr st)
+    let id =
+      addEventListener(ctx[].eventRegistry, "message_sent", slowEventCb, addr st)
     check id != 0'u64
 
-    var done: Atomic[bool]
-    done.store(false)
-    var thr: Thread[DispatcherArgs]
-    createThread(thr, dispatcherBody, (addr reg, addr done))
+    # Emit from the FFI thread; the event thread invokes slowEventCb while
+    # holding reg.lock.
+    var rsp: CallbackData
+    initCallbackData(rsp)
+    defer:
+      deinitCallbackData(rsp)
+    check sendRequestToFFIThread(
+      ctx, EmitCborEventRequest.ffiNewReq(captureCb, addr rsp)
+    )
+      .isOk()
 
-    # Wait until the worker thread is inside slowEventCb.
-    for _ in 0 ..< 200:
+    # Wait until the event thread is inside slowEventCb (mid-sleep).
+    for _ in 0 ..< 500:
       if st.entered.load():
         break
       os.sleep(1)
     check st.entered.load()
     check not st.exited.load()
 
-    # Lock-during-invocation contract: remove blocks until dispatch
-    # finishes; by the time it returns, slowEventCb has set exited=true.
-    check removeEventListener(reg, id)
+    # remove blocks on reg.lock until dispatch finishes; by the time it
+    # returns, slowEventCb has set exited=true.
+    check removeEventListener(ctx[].eventRegistry, id)
     check st.exited.load()
-    joinThread(thr)
-    check done.load()
+
+
+## Because dispatch now runs on the event thread (not the FFI thread), an
+## event callback may itself issue a *synchronous* request without
+## tripping the FFI-thread reentrancy guard or self-deadlocking — the FFI
+## thread is a separate thread that services the nested request.
+
+registerReqFFI(SyncPingRequest, lib: ptr TestEvtLib):
+  proc(): Future[Result[string, string]] {.async.} =
+    return ok("pong")
+
+proc noopCb(
+    retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
+) {.cdecl, gcsafe, raises: [].} =
+  discard
+
+type SyncReqState = object
+  ctx: ptr FFIContext[TestEvtLib]
+  sendOk: Atomic[bool]
+  done: Atomic[bool]
+
+proc syncRequestCb(
+    retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
+) {.cdecl, gcsafe, raises: [].} =
+  ## Runs on the event thread; issues a synchronous request back to the
+  ## (separate) FFI thread and records whether it was accepted.
+  let st = cast[ptr SyncReqState](userData)
+  let res =
+    sendRequestToFFIThread(st[].ctx, SyncPingRequest.ffiNewReq(noopCb, nil))
+  st[].sendOk.store(res.isOk())
+  st[].done.store(true)
+
+suite "event callback may issue a synchronous request":
+  test "sync sendRequestToFFIThread from an event callback succeeds":
+    var pool: FFIContextPool[TestEvtLib]
+    let ctx = pool.createFFIContext().valueOr:
+      check false
+      return
+    defer:
+      discard pool.destroyFFIContext(ctx)
+
+    var st: SyncReqState
+    st.ctx = ctx
+    st.sendOk.store(false)
+    st.done.store(false)
+
+    discard
+      addEventListener(ctx[].eventRegistry, "message_sent", syncRequestCb, addr st)
+
+    var rsp: CallbackData
+    initCallbackData(rsp)
+    defer:
+      deinitCallbackData(rsp)
+    check sendRequestToFFIThread(
+      ctx, EmitCborEventRequest.ffiNewReq(captureCb, addr rsp)
+    )
+      .isOk()
+
+    for _ in 0 ..< 500:
+      if st.done.load():
+        break
+      os.sleep(1)
+    check st.done.load()
+    check st.sendOk.load()

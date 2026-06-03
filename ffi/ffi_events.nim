@@ -232,56 +232,100 @@ var ffiCurrentNotifyEventEnqueued* {.threadvar.}: proc() {.gcsafe, raises: [].}
   ## Hook (not a queue field) so this module doesn't depend on chronos's
   ## ThreadSignalPtr. Nil-safe.
 
-template withFFIEventDispatch(eventName: string, listeners, body: untyped) =
-  ## Resolves the thread-local registry, snapshots listeners under
-  ## `reg.lock`, then runs `body` inside `foreignThreadGc` + try/except.
-  let regPtr = ffiCurrentEventRegistry
-  if regPtr.isNil():
-    chronicles.error eventName & " - event registry not set on this thread"
+proc copyToShared(
+    src: pointer, n: int
+): tuple[data: ptr UncheckedArray[byte], len: int] {.raises: [].} =
+  ## Raw `c_malloc` copy of `n` bytes from `src` — the `string` / `seq[byte]`
+  ## dispatch path. Mirrors `cborEncodeShared`'s ownership contract: the
+  ## returned buffer is the caller's to hand to the queue. Empty -> (nil, 0).
+  if n <= 0 or src.isNil:
+    return (nil, 0)
+  let buf = cast[ptr UncheckedArray[byte]](c_malloc(csize_t(n)))
+  copyMem(buf, src, n)
+  (buf, n)
+
+proc dupSharedCString(name: string): cstring {.raises: [].} =
+  ## NUL-terminated `c_malloc` copy of `name`. The queue takes ownership;
+  ## `freeQueuedEventPayload` frees it once dispatch on the event thread
+  ## returns.
+  let n = name.len
+  let buf = cast[cstring](c_malloc(csize_t(n + 1)))
+  if n > 0:
+    copyMem(buf, unsafeAddr name[0], n)
+  cast[ptr char](cast[uint](buf) + uint(n))[] = '\0'
+  buf
+
+proc enqueueFFIEvent*(
+    name: string, data: ptr UncheckedArray[byte], dataLen: int
+) {.gcsafe, raises: [].} =
+  ## Producer side of the event path. Copies `name` into a `c_malloc`
+  ## cstring, enqueues `(name, data, dataLen)` onto the thread-local event
+  ## queue, and wakes the event thread so it drains and invokes the
+  ## listener callbacks. The FFI thread therefore never runs a listener
+  ## callback itself — a blocked consumer can't stall request processing.
+  ##
+  ## `data` must be a `c_malloc` buffer the queue can adopt (or nil for an
+  ## empty payload). On any path that does not enqueue, this proc frees the
+  ## buffers it was handed. A full queue latches `eventQueueStuck`; recovery
+  ## is destroy+recreate.
+  let qPtr = ffiCurrentEventQueue
+  if qPtr.isNil():
+    chronicles.error "event queue not set on this thread", event = name
+    if not data.isNil:
+      c_free(data)
     return
 
-  withLock regPtr[].lock:
-    let listeners = regPtr[].byEvent.getOrDefault(eventName)
-    if listeners.len == 0:
-      chronicles.debug eventName & " - no listener registered"
-    else:
-      foreignThreadGc:
-        try:
-          body
-        except Exception, CatchableError:
-          notifyListenersErr(
-            listeners,
-            "Exception dispatching " & eventName & ": " & getCurrentExceptionMsg(),
-          )
+  let cname = dupSharedCString(name)
+  if not qPtr[].tryEnqueueEvent(cname, data, dataLen):
+    chronicles.error "event queue full; dropping event, marking stuck", event = name
+    c_free(cast[pointer](cname))
+    if not data.isNil:
+      c_free(data)
+    if not ffiCurrentEventQueueStuck.isNil():
+      ffiCurrentEventQueueStuck[].store(true)
+    return
+
+  if not ffiCurrentNotifyEventEnqueued.isNil():
+    ffiCurrentNotifyEventEnqueued()
 
 template dispatchFFIEvent*(eventName: string, body: untyped) =
-  ## Dispatches an FFI event to every listener subscribed to `eventName`.
+  ## Emits an FFI event to every listener subscribed to `eventName`.
   ## `body` must yield a `string` or `seq[byte]`.
   ##
-  ## Valid only on the FFI thread (where `ffiCurrentEventRegistry` is set).
-  ## Holds `reg.lock` for the entire snapshot + invocation so a concurrent
-  ## `removeEventListener` from a foreign thread blocks until dispatch
-  ## returns. Handlers must not call addEventListener / removeEventListener
-  ## on the same registry (would self-deadlock).
-  withFFIEventDispatch(eventName, listeners):
-    let event = body
-    let dataPtr: pointer =
-      if event.len > 0: unsafeAddr event[0]
-      else: nil
-    notifyListenersOk(listeners, dataPtr, event.len)
+  ## Copies the payload, enqueues it on the thread-local event queue, and
+  ## returns immediately; the event thread drains the queue and invokes the
+  ## callbacks (holding `reg.lock` across snapshot + invocation, so a
+  ## concurrent `removeEventListener` blocks until dispatch returns). Valid
+  ## only where `ffiCurrentEventQueue` is set (the FFI thread). A callback
+  ## must not call addEventListener / removeEventListener on its own
+  ## registry (would self-deadlock against the held `reg.lock`).
+  block:
+    try:
+      let event = body
+      let dataPtr =
+        if event.len > 0: unsafeAddr event[0]
+        else: nil
+      let (data, dataLen) = copyToShared(dataPtr, event.len)
+      enqueueFFIEvent(eventName, data, dataLen)
+    except CatchableError, Exception:
+      chronicles.error eventName & " - failed to enqueue event",
+        err = getCurrentExceptionMsg()
 
 template dispatchFFIEventCbor*(eventName: string, eventPayload: typed) =
   ## Typed CBOR variant of `dispatchFFIEvent`. Wraps `eventPayload` in an
-  ## `EventEnvelope`, CBOR-encodes it into a `c_malloc` buffer once, and
-  ## fans the same buffer out to every registered listener.
+  ## `EventEnvelope`, CBOR-encodes it into a `c_malloc` buffer, and enqueues
+  ## it for the event thread to deliver. Same threading / locking contract
+  ## as `dispatchFFIEvent`.
   ##
   ## NB: parameter is `eventPayload`, not `payload` — Nim's template
   ## substitution would otherwise also rewrite the `payload:` field inside
   ## `EventEnvelope`.
-  withFFIEventDispatch(eventName, listeners):
-    var (data, dataLen) = cborEncodeShared(
-      EventEnvelope[typeof(eventPayload)](eventType: eventName, payload: eventPayload)
-    )
-    defer:
-      cborFreeShared(data)
-    notifyListenersOk(listeners, data, dataLen)
+  block:
+    try:
+      let (data, dataLen) = cborEncodeShared(
+        EventEnvelope[typeof(eventPayload)](eventType: eventName, payload: eventPayload)
+      )
+      enqueueFFIEvent(eventName, data, dataLen)
+    except CatchableError, Exception:
+      chronicles.error eventName & " - failed to encode/enqueue event",
+        err = getCurrentExceptionMsg()
