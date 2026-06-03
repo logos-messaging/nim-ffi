@@ -168,14 +168,18 @@ proc initEventQueue*(q: var EventQueue) {.raises: [].} =
   for i in 0 ..< EventQueueCapacity:
     q.buf[i] = QueuedEvent(name: nil, data: nil, dataLen: 0)
 
+proc freeEventBuffers*(
+    name: cstring, data: ptr UncheckedArray[byte]
+) {.raises: [], gcsafe.} =
+  if not name.isNil():
+    c_free(cast[pointer](name))
+  if not data.isNil():
+    c_free(data)
+
 proc deinitEventQueue*(q: var EventQueue) {.raises: [].} =
   ## Both producer and consumer must have stopped before calling.
   for i in 0 ..< EventQueueCapacity:
-    let e = q.buf[i]
-    if not e.name.isNil:
-      c_free(cast[pointer](e.name))
-    if not e.data.isNil:
-      c_free(e.data)
+    freeEventBuffers(q.buf[i].name, q.buf[i].data)
     q.buf[i] = QueuedEvent(name: nil, data: nil, dataLen: 0)
   q.head = 0
   q.tail = 0
@@ -265,17 +269,11 @@ template enqueueOrMarkStuck(
   let q = ffiCurrentEventQueue
   if q.isNil():
     chronicles.error "event queue not set on this thread", event = eventName
-    if not namePtr.isNil:
-      c_free(cast[pointer](namePtr))
-    if not dataPtr.isNil:
-      c_free(dataPtr)
+    freeEventBuffers(namePtr, dataPtr)
   elif not q[].tryEnqueueEvent(namePtr, dataPtr, dataLen):
     chronicles.error "event queue full; library marked stuck",
       event = eventName, capacity = EventQueueCapacity
-    if not namePtr.isNil:
-      c_free(cast[pointer](namePtr))
-    if not dataPtr.isNil:
-      c_free(dataPtr)
+    freeEventBuffers(namePtr, dataPtr)
     if not ffiCurrentEventQueueStuck.isNil():
       ffiCurrentEventQueueStuck[].store(true)
     if not ffiCurrentNotifyEventEnqueued.isNil():
