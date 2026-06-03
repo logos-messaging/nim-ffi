@@ -45,7 +45,7 @@ proc deriveLibName*(procs: seq[FFIProcMeta]): string =
   let parts = first.split('_')
   if parts.len > 0:
     return parts[0]
-  return "unknown"
+  "unknown"
 
 proc stripLibPrefix*(procName: string, libName: string): string =
   ## Strips the library prefix from a proc name.
@@ -53,7 +53,7 @@ proc stripLibPrefix*(procName: string, libName: string): string =
   let prefix = libName & "_"
   if procName.startsWith(prefix):
     return procName[prefix.len .. ^1]
-  return procName
+  procName
 
 proc reqStructName(p: FFIProcMeta): string =
   ## Mirrors the Nim macro: <CamelCase(procName)>Req or CtorReq for ctors.
@@ -63,9 +63,6 @@ proc reqStructName(p: FFIProcMeta): string =
   else:
     camel & "Req"
 
-# ---------------------------------------------------------------------------
-# File generators
-# ---------------------------------------------------------------------------
 
 proc generateCargoToml*(libName: string): string =
   # `flume` is the unified callback channel (PR #23 Rust review, item 8): one
@@ -149,7 +146,7 @@ fn main() {
     [escapedSrc, libName]
 
 proc generateLibRs*(): string =
-  return """mod ffi;
+  """mod ffi;
 mod types;
 mod api;
 pub use types::*;
@@ -224,7 +221,7 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
   )
 
   lines.add("}")
-  return lines.join("\n") & "\n"
+  lines.join("\n") & "\n"
 
 proc generateTypesRs*(types: seq[FFITypeMeta], procs: seq[FFIProcMeta]): string =
   ## Generates types.rs with Rust structs for all user-declared FFI types and
@@ -270,7 +267,7 @@ proc generateTypesRs*(types: seq[FFITypeMeta], procs: seq[FFIProcMeta]): string 
       lines.add("}")
     lines.add("")
 
-  return lines.join("\n")
+  lines.join("\n")
 
 proc generateApiRs*(
     procs: seq[FFIProcMeta], libName: string, events: seq[FFIEventMeta] = @[]
@@ -783,7 +780,7 @@ proc generateApiRs*(
     lines.add("")
 
   lines.add("}")
-  return lines.join("\n") & "\n"
+  lines.join("\n") & "\n"
 
 proc generateRustCrate*(
     procs: seq[FFIProcMeta],

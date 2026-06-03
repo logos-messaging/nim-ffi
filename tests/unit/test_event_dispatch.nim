@@ -64,7 +64,7 @@ proc callbackBytes(d: var CallbackData): seq[byte] =
   var bytes = newSeq[byte](d.msgLen)
   if d.msgLen > 0:
     copyMem(addr bytes[0], addr d.msg[0], d.msgLen)
-  return bytes
+  bytes
 
 ## A request that dispatches a typed CBOR event from inside the FFI
 ## thread and then returns ok — so the response callback can be used to
@@ -243,9 +243,6 @@ when not defined(gcRefc):
       # actually landed so a silently-broken dispatch loop is caught.
       check evt.called
 
-# ---------------------------------------------------------------------------
-# Lock-during-invocation regression (issue #40 second concern)
-# ---------------------------------------------------------------------------
 
 ## A foreign-thread mutation must not be able to invalidate the
 ## listener's `userData` while an in-flight dispatch is mid-invocation.

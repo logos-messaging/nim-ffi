@@ -26,17 +26,13 @@ type FFIContext*[T] = object
   reqReceivedSignal: ThreadSignalPtr
     # to signal main thread, interfacing with the FFI thread, that FFI thread received the request
   stopSignal: ThreadSignalPtr
-  threadExitSignal: ThreadSignalPtr
-    # fired by ffiThread before exit; bounds destroyFFIContext's wait so
-    # a blocked event loop cannot hang the caller
+  threadExitSignal: ThreadSignalPtr # bounds destroyFFIContext's wait so a blocked loop cannot hang the caller
   eventQueueSignal: ThreadSignalPtr # wakes the event thread on enqueue
   eventThreadExitSignal: ThreadSignalPtr # mirrors threadExitSignal for the event thread
   userData*: pointer
   eventRegistry*: FFIEventRegistry
   eventQueue*: EventQueue
-  ffiHeartbeat*: Atomic[int64]
-    # advanced by the FFI thread each loop iteration; event thread reads it
-    # for liveness
+  ffiHeartbeat*: Atomic[int64] # advanced each FFI-thread loop; event thread reads for liveness
   eventQueueStuck*: Atomic[bool] # sticky overflow flag; recovery is destroy+recreate
   running: Atomic[bool] # To control when the threads are running
   registeredRequests: ptr Table[cstring, FFIRequestProc]
@@ -58,53 +54,53 @@ type NotRespondingEvent* = object
 
 const NotRespondingEventName* = "not_responding"
 
-proc onNotResponding*(ctx: ptr FFIContext) =
-  ## Bypasses the event queue (which may itself be wedged). Cannot reuse
-  ## `dispatchFFIEventCbor`: that template reads `ffiCurrentEventRegistry`,
-  ## a threadvar only set on the FFI thread, but this runs on the event thread.
+proc encodeNotRespondingEvent(): seq[byte] =
+  EventEnvelope[NotRespondingEvent](
+    eventType: NotRespondingEventName, payload: NotRespondingEvent()
+  ).cborEncode()
+
+proc dispatchToListeners[T](
+    ctx: ptr FFIContext[T], eventName: string, data: pointer, dataLen: int
+) =
+  ## Holds reg.lock for the entire snapshot + invocation so concurrent
+  ## add/remove on this registry blocks until dispatch returns.
   withLock ctx[].eventRegistry.lock:
-    let snap = ctx[].eventRegistry.byEvent.getOrDefault(NotRespondingEventName)
-    if snap.len == 0:
-      chronicles.debug "onNotResponding - no listener registered"
+    let listeners = ctx[].eventRegistry.byEvent.getOrDefault(eventName)
+    if listeners.len == 0:
+      chronicles.debug "no listener registered", event = eventName
       return
     foreignThreadGc:
       try:
-        let event = cborEncode(
-          EventEnvelope[NotRespondingEvent](
-            eventType: NotRespondingEventName, payload: NotRespondingEvent()
-          )
-        )
-        for listener in snap:
-          listener.callback(
-            RET_OK,
-            cast[ptr cchar](unsafeAddr event[0]),
-            cast[csize_t](event.len),
-            listener.userData,
-          )
+        notifyListenersOk(listeners, data, dataLen)
       except Exception, CatchableError:
-        let msg =
-          "Exception dispatching " & NotRespondingEventName & ": " &
-          getCurrentExceptionMsg()
-        for listener in snap:
-          listener.callback(
-            RET_ERR,
-            cast[ptr cchar](unsafeAddr msg[0]),
-            cast[csize_t](msg.len),
-            listener.userData,
-          )
+        notifyListenersErr(
+          listeners,
+          "Exception dispatching " & eventName & ": " & getCurrentExceptionMsg(),
+        )
+
+proc onNotResponding*(ctx: ptr FFIContext) =
+  ## Bypasses the event queue (which may itself be wedged) and dispatches
+  ## directly to listeners. Runs on the event thread.
+  let event =
+    try:
+      encodeNotRespondingEvent()
+    except CatchableError as exc:
+      chronicles.error "onNotResponding - encode failed", err = exc.msg
+      return
+  let dataPtr: pointer =
+    if event.len > 0: unsafeAddr event[0]
+    else: nil
+  ctx.dispatchToListeners(NotRespondingEventName, dataPtr, event.len)
 
 proc sendRequestToFFIThread*(
     ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, timeout = InfiniteDuration
 ): Result[void, string] =
-  # Once the event queue overflows, refuse further requests. onNotResponding
-  # is fired by the event thread (not here) to avoid deadlocking against a
-  # back-pressuring listener that holds reg.lock.
+  # Event-queue overflow refuses further requests; the event thread fires onNotResponding to avoid deadlocking on reg.lock here.
   if ctx.eventQueueStuck.load():
     deleteRequest(ffiRequest)
     return err("event queue stuck - library cannot accept new requests")
 
-  # Reentrancy guard: a handler dispatching back through this proc would
-  # wait forever on `reqReceivedSignal` — only this thread can fire it.
+  # Reentrancy guard: only this thread can fire `reqReceivedSignal`, so a handler dispatching back would self-deadlock.
   if onFFIThread:
     deleteRequest(ffiRequest)
     return err(
@@ -143,7 +139,7 @@ proc sendRequestToFFIThread*(
 
   ## Notice that in case of "ok", the deallocShared(req) is performed by the FFI Thread in the
   ## process proc.
-  return ok()
+  ok()
 
 proc processRequest[T](
     request: ptr FFIThreadRequest, ctx: ptr FFIContext[T]
@@ -208,8 +204,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
   defer:
     onFFIThread = false
-    # Signal destroyFFIContext that this thread has exited, so its bounded
-    # wait can unblock and proceed with cleanup.
+    # Unblocks destroyFFIContext's bounded wait so cleanup can proceed.
     let fireRes = ctx.threadExitSignal.fireSync()
     if fireRes.isErr():
       error "failed to fire threadExitSignal on FFI thread exit", err = fireRes.error
@@ -234,8 +229,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
           inc i
 
     while ctx.running.load():
-      # A sync handler blocking the dispatcher freezes this counter; the
-      # event thread reads it to detect a wedged FFI thread.
+      # Freezes if a sync handler blocks the dispatcher; event thread reads to detect wedged FFI thread.
       discard ctx.ffiHeartbeat.fetchAdd(1)
 
       reapCompleted()
@@ -272,86 +266,81 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
   waitFor ffiRun(ctx)
 
+proc freeQueuedEventPayload(qe: QueuedEvent) =
+  if not qe.name.isNil:
+    c_free(cast[pointer](qe.name))
+  if not qe.data.isNil:
+    c_free(qe.data)
+
+proc dispatchQueuedEvent[T](ctx: ptr FFIContext[T], qe: QueuedEvent) =
+  ## Frees `qe`'s c_malloc buffers on exit.
+  defer:
+    freeQueuedEventPayload(qe)
+  ctx.dispatchToListeners($qe.name, qe.data, qe.dataLen)
+
+proc drainEventQueue[T](ctx: ptr FFIContext[T]) =
+  while true:
+    let opt = ctx.eventQueue.tryDequeueEvent()
+    if opt.isNone:
+      break
+    ctx.dispatchQueuedEvent(opt.get())
+
+type HeartbeatMonitor = object
+  startedAt: Moment
+  lastChange: Moment
+  lastValue: int64
+  notifiedStale: bool
+
+proc initHeartbeatMonitor[T](ctx: ptr FFIContext[T]): HeartbeatMonitor =
+  let now = Moment.now()
+  HeartbeatMonitor(
+    startedAt: now,
+    lastChange: now,
+    lastValue: ctx.ffiHeartbeat.load(),
+    notifiedStale: false,
+  )
+
+proc check[T](hb: var HeartbeatMonitor, ctx: ptr FFIContext[T]) =
+  ## Fires onNotResponding once the FFI thread's heartbeat counter stops
+  ## advancing past the stale threshold. Latches until it moves again.
+  if Moment.now() - hb.startedAt <= FFIHeartbeatStartDelay:
+    return
+  let cur = ctx.ffiHeartbeat.load()
+  if cur != hb.lastValue:
+    hb.lastValue = cur
+    hb.lastChange = Moment.now()
+    hb.notifiedStale = false
+  elif not hb.notifiedStale and
+      Moment.now() - hb.lastChange > FFIHeartbeatStaleThreshold:
+    onNotResponding(ctx)
+    hb.notifiedStale = true
+
+proc eventRun[T](ctx: ptr FFIContext[T]) {.async.} =
+  var hb = initHeartbeatMonitor(ctx)
+  var notifiedStuck = false
+
+  while ctx.running.load():
+    # Wake on enqueue or tick — whichever first.
+    discard await ctx.eventQueueSignal.wait().withTimeout(EventThreadTickInterval)
+
+    ctx.drainEventQueue()
+
+    # Fires here (after drain releases reg.lock) — from the FFI thread it'd deadlock on a back-pressuring listener.
+    if not notifiedStuck and ctx.eventQueueStuck.load():
+      onNotResponding(ctx)
+      notifiedStuck = true
+
+    if not ctx.running.load():
+      break
+    hb.check(ctx)
+
 proc eventThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ## Drains the event queue and runs the FFI-thread heartbeat check.
   ## Owns the queued `c_malloc` payloads until dispatch returns.
-
   defer:
     let fireRes = ctx.eventThreadExitSignal.fireSync()
     if fireRes.isErr():
       error "failed to fire eventThreadExitSignal", err = fireRes.error
-
-  let eventRun = proc(ctx: ptr FFIContext[T]) {.async.} =
-    let startedAt = Moment.now()
-    var lastHeartbeat = ctx.ffiHeartbeat.load()
-    var lastHeartbeatChange = Moment.now()
-    var notifiedStale = false
-    var notifiedStuck = false
-
-    while ctx.running.load():
-      # Wake on enqueue or tick — whichever first.
-      discard await ctx.eventQueueSignal.wait().withTimeout(EventThreadTickInterval)
-
-      # Listener fan-out runs under reg.lock — preserves the
-      # lock-during-invocation contract from PR #39 / issue #40.
-      while true:
-        let opt = ctx.eventQueue.tryDequeueEvent()
-        if opt.isNone:
-          break
-        let qe = opt.get()
-        defer:
-          if not qe.name.isNil:
-            c_free(cast[pointer](qe.name))
-          if not qe.data.isNil:
-            c_free(qe.data)
-
-        withLock ctx[].eventRegistry.lock:
-          let snap = ctx[].eventRegistry.byEvent.getOrDefault($qe.name)
-          if snap.len == 0:
-            chronicles.debug "event has no listeners", event = $qe.name
-          else:
-            foreignThreadGc:
-              try:
-                for listener in snap:
-                  listener.callback(
-                    RET_OK,
-                    cast[ptr cchar](qe.data),
-                    cast[csize_t](qe.dataLen),
-                    listener.userData,
-                  )
-              except Exception, CatchableError:
-                let msg =
-                  "Exception dispatching " & $qe.name & ": " & getCurrentExceptionMsg()
-                for listener in snap:
-                  listener.callback(
-                    RET_ERR,
-                    cast[ptr cchar](unsafeAddr msg[0]),
-                    cast[csize_t](msg.len),
-                    listener.userData,
-                  )
-
-      # Overflow notification fires here (after drain releases reg.lock)
-      # rather than from the FFI thread, which would deadlock against an
-      # in-flight back-pressuring listener.
-      if not notifiedStuck and ctx.eventQueueStuck.load():
-        onNotResponding(ctx)
-        notifiedStuck = true
-
-      if not ctx.running.load():
-        break
-      if Moment.now() - startedAt <= FFIHeartbeatStartDelay:
-        continue
-
-      let cur = ctx.ffiHeartbeat.load()
-      if cur != lastHeartbeat:
-        lastHeartbeat = cur
-        lastHeartbeatChange = Moment.now()
-        notifiedStale = false
-      elif not notifiedStale and
-          Moment.now() - lastHeartbeatChange > FFIHeartbeatStaleThreshold:
-        # Latch until the FFI thread proves it's alive again.
-        onNotResponding(ctx)
-        notifiedStale = true
 
   try:
     waitFor eventRun(ctx)
@@ -406,20 +395,19 @@ proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     if not ctx.eventThreadExitSignal.isNil():
       ?ctx.eventThreadExitSignal.close()
       ctx.eventThreadExitSignal = nil
-  return ok()
+  ok()
 
 proc cleanUpResources[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Full cleanup for heap-allocated contexts: closes all resources and frees memory.
   defer:
     freeShared(ctx)
-  return ctx.deinitContextResources()
+  ctx.deinitContextResources()
 
 proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Initialises all resources inside an already-allocated FFIContext slot.
   ## On failure every partially-initialised resource is closed; the caller
   ## is responsible for releasing the slot (freeShared or pool.releaseSlot).
-  # Defensive nil so the deferred cleanup never double-closes if a future
-  # path forgets to clear stale pointers on a reused pool slot.
+  # Defensive nil: deferred cleanup must never double-close stale pointers on a reused pool slot.
   ctx.reqSignal = nil
   ctx.reqReceivedSignal = nil
   ctx.stopSignal = nil
@@ -480,7 +468,7 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     return err("failed to create the event thread: " & getCurrentExceptionMsg())
 
   success = true
-  return ok()
+  ok()
 
 proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   # Error paths intentionally skip onNotResponding: a back-pressuring
@@ -501,7 +489,7 @@ proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     error "failed to signal eventQueueSignal in signalStop", error = evtSignaled.error
   elif evtSignaled.get() == false:
     error "failed to signal eventQueueSignal on time in signalStop"
-  return ok()
+  ok()
 
 ## If the FFI thread's event loop is blocked by a synchronous handler
 ## (e.g. blocking I/O), it cannot process reqSignal in time to exit.
@@ -535,7 +523,7 @@ proc stopAndJoinThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     return err("event thread did not exit in time; leaking ctx to avoid hang")
 
   joinThread(ctx.eventThread)
-  return ok()
+  ok()
 
 proc clearContext[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Stops the FFI context that was created via createFFIContext[T]() (heap).
@@ -543,4 +531,4 @@ proc clearContext[T](ctx: ptr FFIContext[T]): Result[void, string] =
     return err("clearContext: " & $error)
   ctx.cleanUpResources().isOkOr:
     return err("cleanUpResources failed: " & $error)
-  return ok()
+  ok()
