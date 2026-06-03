@@ -236,7 +236,7 @@ template withFFIEventDispatch(eventName: string, listeners, body: untyped) =
     return
 
   withLock regPtr[].lock:
-    let listeners = regPtr[].byEvent.getOrDefault(eventName) & regPtr[].wildcard
+    let listeners = regPtr[].byEvent.getOrDefault(eventName)
     if listeners.len == 0:
       chronicles.debug eventName & " - no listener registered"
     else:

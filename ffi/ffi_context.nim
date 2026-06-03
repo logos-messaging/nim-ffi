@@ -63,9 +63,7 @@ proc onNotResponding*(ctx: ptr FFIContext) =
   ## `dispatchFFIEventCbor`: that template reads `ffiCurrentEventRegistry`,
   ## a threadvar only set on the FFI thread, but this runs on the event thread.
   withLock ctx[].eventRegistry.lock:
-    let snap =
-      ctx[].eventRegistry.byEvent.getOrDefault(NotRespondingEventName) &
-      ctx[].eventRegistry.wildcard
+    let snap = ctx[].eventRegistry.byEvent.getOrDefault(NotRespondingEventName)
     if snap.len == 0:
       chronicles.debug "onNotResponding - no listener registered"
       return
@@ -146,82 +144,6 @@ proc sendRequestToFFIThread*(
   ## Notice that in case of "ok", the deallocShared(req) is performed by the FFI Thread in the
   ## process proc.
   return ok()
-
-type Foo = object
-registerReqFFI(WatchdogReq, foo: ptr Foo):
-  proc(): Future[Result[string, string]] {.async.} =
-    return ok("FFI thread is not blocked")
-
-type JsonNotRespondingEvent = object
-  eventType: string
-
-proc init(T: type JsonNotRespondingEvent): T =
-  return JsonNotRespondingEvent(eventType: "not_responding")
-
-proc `$`(event: JsonNotRespondingEvent): string =
-  $(%*event)
-
-proc onNotResponding*(ctx: ptr FFIContext) =
-  ## Shim: still emits the legacy JSON payload through the registry, so
-  ## existing foreign consumers see no wire-shape change. A follow-up
-  ## PR replaces this with a CBOR `NotRespondingEvent`.
-  ## Mirrors the dispatch templates' lock-during-invocation contract
-  ## (see `ffi_events.nim`).
-  withLock ctx[].eventRegistry.lock:
-    let snap = ctx[].eventRegistry.byEvent.getOrDefault("onNotResponding")
-    if snap.len == 0:
-      chronicles.debug "onNotResponding - no listener registered"
-      return
-    foreignThreadGc:
-      let event = $JsonNotRespondingEvent.init()
-      for listener in snap:
-        listener.callback(
-          RET_OK,
-          cast[ptr cchar](unsafeAddr event[0]),
-          cast[csize_t](len(event)),
-          listener.userData,
-        )
-
-proc watchdogThreadBody(ctx: ptr FFIContext) {.thread.} =
-  ## Watchdog thread that monitors the FFI thread and notifies the library user if it hangs.
-  ## This thread never blocks.
-
-  let watchdogRun = proc(ctx: ptr FFIContext) {.async.} =
-    const WatchdogStartDelay = 10.seconds
-    const WatchdogTimeinterval = 1.seconds
-    const WatchdogTimeout = 20.seconds
-
-    # Give time for the node to be created and up before sending watchdog requests
-    let initialStop = await ctx.stopSignal.wait().withTimeout(WatchdogStartDelay)
-    if initialStop or ctx.running.load == false:
-      return
-
-    while true:
-      let intervalStop = await ctx.stopSignal.wait().withTimeout(WatchdogTimeinterval)
-
-      if intervalStop or ctx.running.load == false:
-        debug "Watchdog thread exiting because FFIContext is not running"
-        break
-
-      let callback = proc(
-          callerRet: cint, msg: ptr cchar, len: csize_t, userData: pointer
-      ) {.cdecl, gcsafe, raises: [].} =
-        discard ## Don't do anything. Just respecting the callback signature.
-      const nilUserData = nil
-
-      trace "Sending watchdog request to FFI thread"
-
-      try:
-        sendRequestToFFIThread(
-          ctx, WatchdogReq.ffiNewReq(callback, nilUserData), WatchdogTimeout
-        ).isOkOr:
-          error "Failed to send watchdog request to FFI thread", error = $error
-          onNotResponding(ctx)
-      except Exception as exc:
-        error "Exception sending watchdog request", exc = exc.msg
-        onNotResponding(ctx)
-
-  waitFor watchdogRun(ctx)
 
 proc processRequest[T](
     request: ptr FFIThreadRequest, ctx: ptr FFIContext[T]
@@ -384,9 +306,7 @@ proc eventThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
             c_free(qe.data)
 
         withLock ctx[].eventRegistry.lock:
-          let snap =
-            ctx[].eventRegistry.byEvent.getOrDefault($qe.name) &
-            ctx[].eventRegistry.wildcard
+          let snap = ctx[].eventRegistry.byEvent.getOrDefault($qe.name)
           if snap.len == 0:
             chronicles.debug "event has no listeners", event = $qe.name
           else:
