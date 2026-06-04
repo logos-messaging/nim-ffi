@@ -1,6 +1,6 @@
 import std/atomics
 import results
-import ./ffi_context
+import ./ffi_context, ./ffi_types
 
 const MaxFFIContexts* = 32
   ## Maximum number of concurrently live FFI contexts when using FFIContextPool.
@@ -12,18 +12,11 @@ type FFIContextPool*[T] = object
   ## and bounds the total number of file descriptors consumed by ThreadSignalPtrs
   ## to at most MaxFFIContexts * 2.
   slots: array[MaxFFIContexts, FFIContext[T]]
-  inUse: array[MaxFFIContexts, Atomic[bool]]
   initialized: array[MaxFFIContexts, Atomic[bool]]
     ## Whether a slot's worker (threads, chronos dispatcher and ThreadSignalPtrs)
     ## has been built. Set on first acquisition and kept set across park/reuse,
     ## so a reacquired slot reuses the same fds instead of allocating a fresh set
     ## every create/destroy cycle. Cleared only by full teardown.
-
-proc releaseSlot[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]) =
-  for i in 0 ..< MaxFFIContexts:
-    if pool.slots[i].addr == ctx:
-      pool.inUse[i].store(false)
-      return
 
 proc createFFIContext*[T](
     pool: var FFIContextPool[T]
@@ -34,44 +27,35 @@ proc createFFIContext*[T](
   ## worker down). This is what keeps fd usage bounded: repeated create/destroy
   ## cycles no longer leak a fresh set of ThreadSignalPtr/dispatcher fds.
   for i in 0 ..< MaxFFIContexts:
-    var expected = false
-    if not pool.inUse[i].compareExchange(expected, true):
-      continue
     let ctx = pool.slots[i].addr
+    if not ctx.tryClaim():
+      continue
     if pool.initialized[i].load():
-      ## Reused slot: worker threads, dispatcher and signals are already alive.
+      ## Reused slot: a prior destroy drained and released it, worker still alive.
+      ## Re-arm the gate and hand it back.
+      ctx.markReacquired()
       return ok(ctx)
     initContextResources(ctx).isOkOr:
-      pool.inUse[i].store(false)
+      ctx.unclaim()
       return err("createFFIContext: initContextResources failed: " & $error)
     pool.initialized[i].store(true)
     return ok(ctx)
   return err("FFI context pool exhausted (max " & $MaxFFIContexts & " contexts)")
 
 proc releaseFFIContext*[T](
-    pool: var FFIContextPool[T], ctx: ptr FFIContext[T]
+    pool: var FFIContextPool[T],
+    ctx: ptr FFIContext[T],
+    callback: FFICallBack,
+    userData: pointer,
 ): Result[void, string] =
-  ## Parks a context for reuse: returns its slot to the pool WITHOUT stopping the
-  ## worker threads, so the next createFFIContext reuses the same fds. This is the
-  ## steady-state cleanup path, called by the generated destructor (ffiDtor);
-  ## destroyFFIContext is only for creation failure and non-pooling callers.
+  ## Parks a context for reuse without stopping its worker, so the next
+  ## createFFIContext reuses the same threads and fds. Steady-state cleanup path
+  ## for the generated destructor; destroyFFIContext is for failure/non-pool use.
   ##
-  ## Runs on the CALLER's thread, not the FFI worker thread, and does NOT itself
-  ## wait for in-flight work to finish. It is safe to park here because the
-  ## framework processes one request at a time (see sendRequestToFFIThread): by
-  ## the time the destructor calls this, the worker has finished the previous
-  ## request and is idle (looping on reqSignal), so there is no handler still
-  ## touching the slot when it is reused.
-  ##
-  ## Clearing callbackState removes the stored C event callback. The
-  ## worker/watchdog threads stay alive after parking, so an event could still
-  ## fire on this slot; with no callback set that event does nothing, instead of
-  ## calling back into a consumer that has already released the context (whose
-  ## user-data pointer may now be freed).
-  ctx.callbackState = default(FFICallbackState)
-  ctx.myLib = nil
-  pool.releaseSlot(ctx)
-  return ok()
+  ## NON-BLOCKING: the FFI thread drains the handlers, frees the lib and releases
+  ## the slot, then fires `callback` (RET_OK drained, RET_ERR stuck). The slot
+  ## returns to the pool from that thread, so a reused slot never carries a straggler.
+  return ctx.requestRecycle(callback, userData)
 
 proc destroyFFIContext*[T](
     pool: var FFIContextPool[T], ctx: ptr FFIContext[T]
@@ -88,7 +72,7 @@ proc destroyFFIContext*[T](
     if pool.slots[i].addr == ctx:
       pool.initialized[i].store(false)
       break
-  pool.releaseSlot(ctx)
+  ctx.unclaim()
   return ok()
 
 proc isValidCtx*[T](pool: var FFIContextPool[T], ctx: pointer): bool =
@@ -99,5 +83,5 @@ proc isValidCtx*[T](pool: var FFIContextPool[T], ctx: pointer): bool =
     return false
   for i in 0 ..< MaxFFIContexts:
     if cast[pointer](pool.slots[i].addr) == ctx:
-      return pool.inUse[i].load()
+      return cast[ptr FFIContext[T]](ctx).isClaimed()
   return false

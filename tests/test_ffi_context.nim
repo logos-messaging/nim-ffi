@@ -421,6 +421,12 @@ proc testlib_create*(
 ): Future[Result[SimpleLib, string]] {.ffiCtor.} =
   return ok(SimpleLib(value: config.initialValue))
 
+# Records the value of the library object the destructor body saw, so a test can
+# confirm the user cleanup body ran with the right lib state before teardown.
+var gDestroyedValue {.threadvar.}: int
+proc testlib_destroy*(lib: SimpleLib) {.ffiDtor.} =
+  gDestroyedValue = lib.value
+
 suite "ffiCtor macro":
   test "creates context and returns pointer via callback":
     var d: CallbackData
@@ -448,6 +454,123 @@ suite "ffiCtor macro":
     check not ctx[].myLib.isNil
     check ctx[].myLib[].value == 42
 
+    check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
+
+proc createSimpleLib(initialValue: int): ptr FFIContext[SimpleLib] =
+  ## Helper: run the generated async ctor and return the live ctx.
+  var d: CallbackData
+  initCallbackData(d)
+  defer:
+    deinitCallbackData(d)
+  let ret =
+    testlib_create(ffiSerialize(SimpleConfig(initialValue: initialValue)).cstring,
+      testCallback, addr d)
+  doAssert not ret.isNil()
+  waitCallback(d)
+  doAssert d.retCode == RET_OK
+  return cast[ptr FFIContext[SimpleLib]](cast[uint](parseBiggestUInt(callbackMsg(d))))
+
+suite "ffiDtor macro (async destroy + reuse)":
+  test "destroy fires RET_OK after teardown, frees myLib, and frees the slot":
+    let ctx = createSimpleLib(5)
+    check not ctx[].myLib.isNil
+    check ctx[].myLib[].value == 5
+
+    var dD: CallbackData
+    initCallbackData(dD)
+    defer:
+      deinitCallbackData(dD)
+
+    # Async destroy: the C return is just "accepted"; the real outcome arrives
+    # via the callback once the FFI thread has finished tearing the lib down.
+    check testlib_destroy(cast[pointer](ctx), testCallback, addr dD) == RET_OK
+    waitCallback(dD)
+    check dD.retCode == RET_OK
+    check gDestroyedValue == 5 # the user cleanup body saw the live lib
+    check ctx[].myLib.isNil() # freed on the FFI thread
+
+    # The slot was freed from the FFI thread, so a fresh create reclaims it.
+    let ctx2 = createSimpleLib(9)
+    check ctx2 == ctx # same slot, reused worker + fds
+    check ctx2[].myLib[].value == 9
+    check SimpleLibFFIPool.destroyFFIContext(ctx2).isOk()
+
+  test "destroy waits for an in-flight request before reporting RET_OK":
+    let ctx = createSimpleLib(1)
+
+    # Dispatch a 500 ms handler and do NOT wait — it is in flight at destroy time.
+    var slow: CallbackData
+    initCallbackData(slow)
+    defer:
+      deinitCallbackData(slow)
+    check sendRequestToFFIThread(ctx, SlowRequest.ffiNewReq(testCallback, addr slow)).isOk()
+
+    var dD: CallbackData
+    initCallbackData(dD)
+    defer:
+      deinitCallbackData(dD)
+    check testlib_destroy(cast[pointer](ctx), testCallback, addr dD) == RET_OK
+    waitCallback(dD)
+    check dD.retCode == RET_OK
+    # Drained: the in-flight handler ran to completion before destroy reported OK.
+    check slow.called
+    check callbackMsg(slow) == "slow-done"
+
+    let ctx2 = createSimpleLib(2)
+    check ctx2 == ctx
+    check SimpleLibFFIPool.destroyFFIContext(ctx2).isOk()
+
+  test "requests are rejected once a destroy closes the gate":
+    let ctx = createSimpleLib(3)
+
+    var dD: CallbackData
+    initCallbackData(dD)
+    defer:
+      deinitCallbackData(dD)
+    check testlib_destroy(cast[pointer](ctx), testCallback, addr dD) == RET_OK
+    waitCallback(dD)
+    check dD.retCode == RET_OK
+
+    # Gate stays closed until the slot is reacquired: a late request must not
+    # dispatch onto a context about to be (or already) reused.
+    var d: CallbackData
+    initCallbackData(d)
+    defer:
+      deinitCallbackData(d)
+    check sendRequestToFFIThread(
+      ctx, SlowRequest.ffiNewReq(testCallback, addr d)
+    ).isErr()
+
+    let ctx2 = createSimpleLib(4)
+    check ctx2 == ctx
+    check SimpleLibFFIPool.destroyFFIContext(ctx2).isOk()
+
+  test "a stuck context is reported as RET_ERR rather than hanging":
+    let ctx = createSimpleLib(8)
+
+    let savedTimeout = RecycleTimeout
+    RecycleTimeout = 150.milliseconds
+    defer:
+      RecycleTimeout = savedTimeout
+
+    # In-flight handler outlasts the (shortened) drain timeout.
+    var slow: CallbackData
+    initCallbackData(slow)
+    defer:
+      deinitCallbackData(slow)
+    check sendRequestToFFIThread(ctx, SlowRequest.ffiNewReq(testCallback, addr slow)).isOk()
+
+    var dD: CallbackData
+    initCallbackData(dD)
+    defer:
+      deinitCallbackData(dD)
+    check testlib_destroy(cast[pointer](ctx), testCallback, addr dD) == RET_OK
+    waitCallback(dD)
+    check dD.retCode == RET_ERR # drain timed out -> ctx reported stuck
+
+    # The stuck slot is leaked (not reused); the handler still finishes on its
+    # own. Wait for it, then fully tear the leaked slot down.
+    waitCallback(slow)
     check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
 
 # ---------------------------------------------------------------------------
@@ -672,13 +795,26 @@ proc countOpenFds(): int =
     except CatchableError:
       return -1
 
+proc releaseAndWait[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]): cint =
+  ## Test helper mirroring how a C consumer destroys a context: kick off the
+  ## (non-blocking) teardown and block on the callback, returning its retCode.
+  ## RET_OK means the lib's in-flight tasks finished and the slot was parked.
+  var d: CallbackData
+  initCallbackData(d)
+  defer:
+    deinitCallbackData(d)
+  if pool.releaseFFIContext(ctx, testCallback, addr d).isErr():
+    return RET_ERR
+  waitCallback(d)
+  return d.retCode
+
 suite "releaseFFIContext (park & reuse)":
   test "park returns the slot and reuses the same live worker":
     var pool: FFIContextPool[TestLib]
     let ctx1 = pool.createFFIContext().valueOr:
       check false
       return
-    check pool.releaseFFIContext(ctx1).isOk()
+    check pool.releaseAndWait(ctx1) == RET_OK
 
     # Reacquire: must be the same array slot, with its worker still running.
     let ctx2 = pool.createFFIContext().valueOr:
@@ -707,7 +843,7 @@ suite "releaseFFIContext (park & reuse)":
     ctx.callbackState.callback = cast[pointer](testCallback)
     ctx.callbackState.userData = cast[pointer](0xDEAD)
 
-    check pool.releaseFFIContext(ctx).isOk()
+    check pool.releaseAndWait(ctx) == RET_OK
     check ctx.callbackState.callback.isNil() # a watchdog tick can't call a freed cb
     check ctx.callbackState.userData.isNil()
     check ctx.myLib.isNil()
@@ -726,7 +862,7 @@ suite "releaseFFIContext (park & reuse)":
         let ctx = pool.createFFIContext().valueOr:
           check false
           return
-        check pool.releaseFFIContext(ctx).isOk()
+        check pool.releaseAndWait(ctx) == RET_OK
 
       let baseline = countOpenFds()
 
@@ -741,7 +877,7 @@ suite "releaseFFIContext (park & reuse)":
         ).isOk()
         waitCallback(d)
         deinitCallbackData(d)
-        check pool.releaseFFIContext(ctx).isOk()
+        check pool.releaseAndWait(ctx) == RET_OK
 
       let afterCycles = countOpenFds()
       # Reuse must not grow fds. Before the fix each cycle leaked ~10 fds (4
