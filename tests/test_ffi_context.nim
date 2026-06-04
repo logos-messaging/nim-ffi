@@ -1,4 +1,4 @@
-import std/[locks, strutils, os]
+import std/[locks, strutils, os, osproc, sequtils]
 import unittest2
 import results
 import ../ffi
@@ -648,3 +648,109 @@ suite "ptr return type in .ffi.":
 
     waitCallback(freeD)
     check freeD.retCode == RET_OK
+
+# ---------------------------------------------------------------------------
+# releaseFFIContext: park & reuse (fd-leak regression)
+# ---------------------------------------------------------------------------
+
+proc countOpenFds(): int =
+  ## Number of open fds for this process, or -1 if not determinable on this
+  ## platform. On Linux we count /proc/self/fd; elsewhere we shell out to lsof
+  ## (skipped if lsof is unavailable, e.g. Windows).
+  when defined(linux):
+    var n = 0
+    for _ in walkDir("/proc/self/fd"):
+      inc n
+    return n
+  else:
+    if findExe("lsof").len == 0:
+      return -1
+    try:
+      let output =
+        execProcess("lsof", args = ["-p", $getCurrentProcessId()], options = {poUsePath})
+      return output.splitLines().countIt(it.len > 0)
+    except CatchableError:
+      return -1
+
+suite "releaseFFIContext (park & reuse)":
+  test "park returns the slot and reuses the same live worker":
+    var pool: FFIContextPool[TestLib]
+    let ctx1 = pool.createFFIContext().valueOr:
+      check false
+      return
+    check pool.releaseFFIContext(ctx1).isOk()
+
+    # Reacquire: must be the same array slot, with its worker still running.
+    let ctx2 = pool.createFFIContext().valueOr:
+      check false
+      return
+    check ctx1 == ctx2
+
+    var d: CallbackData
+    initCallbackData(d)
+    defer:
+      deinitCallbackData(d)
+    check sendRequestToFFIThread(
+      ctx2, PingRequest.ffiNewReq(testCallback, addr d, "reuse".cstring)
+    ).isOk()
+    waitCallback(d)
+    check d.retCode == RET_OK
+    check callbackMsg(d) == "pong:reuse" # reused worker still processes requests
+
+    check pool.destroyFFIContext(ctx2).isOk()
+
+  test "park drops the stale event callback and library pointer":
+    var pool: FFIContextPool[TestLib]
+    let ctx = pool.createFFIContext().valueOr:
+      check false
+      return
+    ctx.callbackState.callback = cast[pointer](testCallback)
+    ctx.callbackState.userData = cast[pointer](0xDEAD)
+
+    check pool.releaseFFIContext(ctx).isOk()
+    check ctx.callbackState.callback.isNil() # a watchdog tick can't call a freed cb
+    check ctx.callbackState.userData.isNil()
+    check ctx.myLib.isNil()
+
+    check pool.destroyFFIContext(ctx).isOk()
+
+  test "fd usage stays bounded across many park/reuse cycles":
+    if countOpenFds() < 0:
+      skip() # no fd-counting facility on this platform
+    else:
+      var pool: FFIContextPool[TestLib]
+
+      # Warm up: the first create builds the slot's worker (its fds are allocated
+      # once here); parking keeps them open for reuse.
+      block:
+        let ctx = pool.createFFIContext().valueOr:
+          check false
+          return
+        check pool.releaseFFIContext(ctx).isOk()
+
+      let baseline = countOpenFds()
+
+      for _ in 0 ..< 20:
+        let ctx = pool.createFFIContext().valueOr:
+          check false
+          return
+        var d: CallbackData
+        initCallbackData(d)
+        check sendRequestToFFIThread(
+          ctx, PingRequest.ffiNewReq(testCallback, addr d, "x".cstring)
+        ).isOk()
+        waitCallback(d)
+        deinitCallbackData(d)
+        check pool.releaseFFIContext(ctx).isOk()
+
+      let afterCycles = countOpenFds()
+      # Reuse must not grow fds. Before the fix each cycle leaked ~10 fds (4
+      # ThreadSignalPtr socketpairs + 2 dispatcher kqueues); the small slack
+      # only tolerates unrelated runtime fd noise, not a per-cycle leak.
+      check afterCycles <= baseline + 5
+
+      # Tear the (still parked) slot's worker down so the test leaves no threads.
+      let last = pool.createFFIContext().valueOr:
+        check false
+        return
+      check pool.destroyFFIContext(last).isOk()
