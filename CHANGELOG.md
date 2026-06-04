@@ -2,30 +2,63 @@
 
 All notable changes to this project are documented in this file.
 
-## [0.2.0] - 2026-05-20
+## [0.2.0] - 2026-06-04
 
-Major release introducing CBOR-based wire format, multi-language binding
-generation (C++, Rust, CDDL), CI hardening with sanitizers, and several
-robustness fixes around context lifetime and memory safety.
+Major release introducing the CBOR-based wire format, CBOR-backed FFI events
+with a multi-listener registry, multi-language binding generation (C++, Rust,
+CDDL), CI hardening with sanitizers, and several robustness fixes around
+context lifetime and memory safety.
 
 ### Added
-- **CBOR serialization** as the FFI wire format ([#23](https://github.com/waku-org/nim-ffi/pull/23)).
+- **CBOR serialization** as the FFI wire format, replacing the previous
+  JSON/string-based `serial.nim`
+  ([#23](https://github.com/logos-messaging/nim-ffi/pull/23)).
+- **CBOR-backed FFI events**: event payloads are now serialized with CBOR
+  ([#39](https://github.com/logos-messaging/nim-ffi/pull/39)).
+- **Multi-listener event registry** (`FFIEventRegistry`) and its wiring into
+  `FFIContext`
+  ([#45](https://github.com/logos-messaging/nim-ffi/pull/45),
+  [#49](https://github.com/logos-messaging/nim-ffi/pull/49)).
+- **Event-listener ABI** with per-event typed listeners
+  ([#50](https://github.com/logos-messaging/nim-ffi/pull/50)).
+- **C++ typed per-event listeners** in the generated bindings
+  ([#51](https://github.com/logos-messaging/nim-ffi/pull/51)).
+- **Rust per-event typed listeners** (`add_on_<x>_listener` + wildcard
+  `add_event_listener`)
+  ([#52](https://github.com/logos-messaging/nim-ffi/pull/52)) and Rust event
+  example bindings/clients
+  ([#53](https://github.com/logos-messaging/nim-ffi/pull/53)).
 - **C++ binding generator** with end-to-end tests driven by CMake/CTest
-  ([#27](https://github.com/waku-org/nim-ffi/pull/27)).
+  ([#27](https://github.com/logos-messaging/nim-ffi/pull/27)), later expanded
+  with multi-context, cross-library, pipeline, and stress tests
+  ([#42](https://github.com/logos-messaging/nim-ffi/pull/42)).
 - **CDDL schema generator** for the FFI types
-  ([#24](https://github.com/waku-org/nim-ffi/pull/24)).
-- **CI pipeline**: first GitHub Actions workflow
-  parallel test
-  execution ([#26](https://github.com/waku-org/nim-ffi/pull/26)), and
+  ([#24](https://github.com/logos-messaging/nim-ffi/pull/24)).
+- **CI pipeline**: parallel test execution
+  ([#26](https://github.com/logos-messaging/nim-ffi/pull/26)),
   AddressSanitizer / UndefinedBehaviorSanitizer / ThreadSanitizer jobs
-  ([#34](https://github.com/waku-org/nim-ffi/pull/34)).
+  ([#34](https://github.com/logos-messaging/nim-ffi/pull/34)), and a
+  cross-platform OS matrix for the C++ e2e suite
+  ([#38](https://github.com/logos-messaging/nim-ffi/pull/38)).
+- CBOR type-coverage tests
+  ([#41](https://github.com/logos-messaging/nim-ffi/pull/41)).
 
 ### Changed
 - Removed the redundant `ffiType` macro; the `ffi` macro is now the single
   authoring entry point
-  ([#22](https://github.com/waku-org/nim-ffi/pull/22)).
+  ([#22](https://github.com/logos-messaging/nim-ffi/pull/22)).
+- Generated C++ avoids move constructors and assignment operators
+  ([#36](https://github.com/logos-messaging/nim-ffi/pull/36)) and no longer
+  throws exceptions across the binding boundary
+  ([#46](https://github.com/logos-messaging/nim-ffi/pull/46)).
+- Removed the wildcard event listener; event dispatch is now strictly
+  per-event ([#70](https://github.com/logos-messaging/nim-ffi/pull/70)).
 
-## [0.1.4] - 2026-06-02
+### Fixed
+- Use-after-free in the event/context lifetime path
+  ([#47](https://github.com/logos-messaging/nim-ffi/pull/47)).
+
+## [0.1.4] - 2026-05-13
 
 [Full changelog](https://github.com/logos-messaging/nim-ffi/compare/v0.1.3...v0.1.4)
 
@@ -36,8 +69,9 @@ robustness fixes around context lifetime and memory safety.
   `ffi/codegen/meta.nim` helpers (#15).
 - Rust example bindings and clients under `examples/nim_timer/` (`rust_bindings`
   and `rust_client`, the latter with a Tokio async variant) (#15).
-- CBOR serialization support via `ffi/serial.nim`, with `tests/test_serial.nim`
-  coverage.
+- JSON/string-based FFI (de)serialization via `ffi/serial.nim`
+  (`ffiSerialize`/`ffiDeserialize`), with `tests/test_serial.nim` coverage.
+  (CBOR replaced this layer later, in 0.2.0.)
 - FFI context pool (`ffi/ffi_context_pool.nim`) using a fixed array of contexts.
 - Test suite expansion: `test_alloc.nim`, `test_ctx_validation.nim`,
   `test_ffi_context.nim`, `test_gc_compat.nim`.
@@ -76,5 +110,5 @@ Initial tagged release.
 - Core `ffi` macro for declaring procs exposed across the FFI boundary.
 - `FFIContext` with a dedicated worker thread, request dispatch, and a
   watchdog with configurable timeout
-  ([#7](https://github.com/waku-org/nim-ffi/pull/7)).
+  ([#7](https://github.com/logos-messaging/nim-ffi/pull/7)).
 - License files updated to comply with Logos licensing requirements.
