@@ -361,7 +361,7 @@ proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
 
 ## If the FFI thread's event loop is blocked by a synchronous handler
 ## (e.g. blocking I/O), it cannot process reqSignal in time to exit.
-## clearContext waits on threadExitSignal up to this bound; on timeout it
+## stopAndJoinThreads waits on threadExitSignal up to this bound; on timeout it
 ## returns err and skips joinThread/cleanup (leaking the thread + ctx slot)
 ## rather than hanging the caller forever.
 const ThreadExitTimeout* = 1500.milliseconds
@@ -384,12 +384,4 @@ proc stopAndJoinThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
 
   joinThread(ctx.ffiThread)
   joinThread(ctx.watchdogThread)
-  return ok()
-
-proc clearContext[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## Stops the FFI context that was created via createFFIContext[T]() (heap).
-  ctx.stopAndJoinThreads().isOkOr:
-    return err("clearContext: " & $error)
-  ctx.cleanUpResources().isOkOr:
-    return err("cleanUpResources failed: " & $error)
   return ok()
