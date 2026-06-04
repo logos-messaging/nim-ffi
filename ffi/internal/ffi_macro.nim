@@ -1565,9 +1565,15 @@ macro ffiDtor*(prc: untyped): untyped =
     ffiBody.add(bodyNode)
 
   let poolIdent = ident($libTypeName & "FFIPool")
+  # Park the slot (releaseFFIContext) instead of tearing it down
+  # (destroyFFIContext) so the next createFFIContext reuses the same worker and
+  # fds — this is what keeps fd usage bounded across create/destroy cycles.
+  # Safe because the framework processes one request at a time
+  # (see sendRequestToFFIThread): by the time this destructor runs the worker is
+  # idle, not mid-request, so parking cannot race an in-flight handler.
   ffiBody.add quote do:
     let `destroyResIdent` =
-      `poolIdent`.destroyFFIContext(cast[ptr FFIContext[`libTypeName`]](ctx))
+      `poolIdent`.releaseFFIContext(cast[ptr FFIContext[`libTypeName`]](ctx))
     if `destroyResIdent`.isErr():
       if not callback.isNil:
         let errStr = "destroy failed: " & $`destroyResIdent`.error

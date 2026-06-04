@@ -52,11 +52,22 @@ proc releaseFFIContext*[T](
     pool: var FFIContextPool[T], ctx: ptr FFIContext[T]
 ): Result[void, string] =
   ## Parks a context for reuse: returns its slot to the pool WITHOUT stopping the
-  ## worker threads, so the next createFFIContext reuses the same fds. The caller
-  ## MUST have already quiesced its library object (e.g. cancelled the object's
-  ## async tasks) on the FFI thread before calling this — the worker keeps
-  ## running. The stale C event callback is dropped so a watchdog tick on the
-  ## parked slot cannot invoke a callback whose user-data may already be freed.
+  ## worker threads, so the next createFFIContext reuses the same fds. This is the
+  ## steady-state cleanup path, called by the generated destructor (ffiDtor);
+  ## destroyFFIContext is only for creation failure and non-pooling callers.
+  ##
+  ## Runs on the CALLER's thread, not the FFI worker thread, and does NOT itself
+  ## wait for in-flight work to finish. It is safe to park here because the
+  ## framework processes one request at a time (see sendRequestToFFIThread): by
+  ## the time the destructor calls this, the worker has finished the previous
+  ## request and is idle (looping on reqSignal), so there is no handler still
+  ## touching the slot when it is reused.
+  ##
+  ## Clearing callbackState removes the stored C event callback. The
+  ## worker/watchdog threads stay alive after parking, so an event could still
+  ## fire on this slot; with no callback set that event does nothing, instead of
+  ## calling back into a consumer that has already released the context (whose
+  ## user-data pointer may now be freed).
   ctx.callbackState = default(FFICallbackState)
   ctx.myLib = nil
   pool.releaseSlot(ctx)
