@@ -6,7 +6,7 @@
 {.pragma: callback, cdecl, raises: [], gcsafe.}
 
 import system/ansi_c
-import std/[atomics, locks, sequtils, options, tables]
+import std/[locks, sequtils, options, tables]
 import chronicles
 import ./ffi_types, ./cbor_serial
 
@@ -203,34 +203,34 @@ proc eventQueueLen*(q: var EventQueue): int {.raises: [], gcsafe.} =
     return q.count
 
 
-proc notifyListenersOk*(
-    listeners: seq[FFIEventListener], data: pointer, dataLen: int
+const emptyListenerPayload: cstring = ""
+  ## Non-nil zero-length buffer handed to listeners when a payload is
+  ## empty, so a consumer doing `std::string(data, len)` / `memcpy` never
+  ## receives a nil pointer (which is UB even at len 0).
+
+proc notifyListeners*(
+    listeners: seq[FFIEventListener], retCode: cint, data: pointer, dataLen: int
 ) =
-  ## Fans out a successful payload to every listener in the snapshot.
+  ## Fans out a payload to every listener in the snapshot. Empty payloads
+  ## are delivered as the non-nil `emptyListenerPayload` sentinel so a
+  ## consumer doing `std::string(data, len)` / `memcpy` never receives nil.
+  let n = max(dataLen, 0)
   let dataPtr =
-    if dataLen > 0: cast[ptr cchar](data)
-    else: nil
+    if n > 0 and not data.isNil(): cast[ptr cchar](data)
+    else: cast[ptr cchar](emptyListenerPayload)
   for listener in listeners:
-    listener.callback(
-      RET_OK, dataPtr, cast[csize_t](dataLen), listener.userData
-    )
+    listener.callback(retCode, dataPtr, cast[csize_t](n), listener.userData)
 
 proc notifyListenersErr*(listeners: seq[FFIEventListener], msg: string) =
-  ## Fans out an error message to every listener in the snapshot.
-  let dataPtr =
-    if msg.len > 0: cast[ptr cchar](unsafeAddr msg[0])
-    else: nil
-  for listener in listeners:
-    listener.callback(
-      RET_ERR, dataPtr, cast[csize_t](msg.len), listener.userData
-    )
+  ## Error fan-out: adapts the message string to `notifyListeners`, which
+  ## supplies the non-nil pointer for the empty-message case.
+  let p =
+    if msg.len > 0: cast[pointer](unsafeAddr msg[0]) else: nil
+  notifyListeners(listeners, RET_ERR, p, msg.len)
 
 var ffiCurrentEventRegistry* {.threadvar.}: ptr FFIEventRegistry
-var ffiCurrentEventQueue* {.threadvar.}: ptr EventQueue
-var ffiCurrentEventQueueStuck* {.threadvar.}: ptr Atomic[bool]
-var ffiCurrentNotifyEventEnqueued* {.threadvar.}: proc() {.gcsafe, raises: [].}
-  ## Hook (not a queue field) so this module doesn't depend on chronos's
-  ## ThreadSignalPtr. Nil-safe.
+  ## Set by the FFI thread at startup so dispatchFFIEvent / dispatchFFIEventCbor
+  ## can find their registry without taking a context pointer per call site.
 
 template withFFIEventDispatch(eventName: string, listeners, body: untyped) =
   ## Resolves the thread-local registry, snapshots listeners under
@@ -266,9 +266,8 @@ template dispatchFFIEvent*(eventName: string, body: untyped) =
   withFFIEventDispatch(eventName, listeners):
     let event = body
     let dataPtr: pointer =
-      if event.len > 0: unsafeAddr event[0]
-      else: nil
-    notifyListenersOk(listeners, dataPtr, event.len)
+      if event.len > 0: unsafeAddr event[0] else: nil
+    notifyListeners(listeners, RET_OK, dataPtr, event.len)
 
 template dispatchFFIEventCbor*(eventName: string, eventPayload: typed) =
   ## Typed CBOR variant of `dispatchFFIEvent`. Wraps `eventPayload` in an
@@ -284,4 +283,4 @@ template dispatchFFIEventCbor*(eventName: string, eventPayload: typed) =
     )
     defer:
       cborFreeShared(data)
-    notifyListenersOk(listeners, data, dataLen)
+    notifyListeners(listeners, RET_OK, data, dataLen)

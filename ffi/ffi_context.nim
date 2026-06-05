@@ -27,13 +27,12 @@ type FFIContext*[T] = object
     # to signal main thread, interfacing with the FFI thread, that FFI thread received the request
   stopSignal: ThreadSignalPtr
   threadExitSignal: ThreadSignalPtr # bounds destroyFFIContext's wait so a blocked loop cannot hang the caller
-  eventQueueSignal: ThreadSignalPtr # wakes the event thread on enqueue
+  eventQueueSignal: ThreadSignalPtr # wakes the event thread on enqueue (used once dispatch is rewired in PR #69)
   eventThreadExitSignal: ThreadSignalPtr # mirrors threadExitSignal for the event thread
   userData*: pointer
   eventRegistry*: FFIEventRegistry
   eventQueue*: EventQueue
   ffiHeartbeat*: Atomic[int64] # advanced each FFI-thread loop; event thread reads for liveness
-  eventQueueStuck*: Atomic[bool] # sticky overflow flag; recovery is destroy+recreate
   running: Atomic[bool] # To control when the threads are running
   registeredRequests: ptr Table[cstring, FFIRequestProc]
     # Pointer to with the registered requests at compile time
@@ -71,7 +70,7 @@ proc dispatchToListeners[T](
       return
     foreignThreadGc:
       try:
-        notifyListenersOk(listeners, data, dataLen)
+        notifyListeners(listeners, RET_OK, data, dataLen)
       except Exception, CatchableError:
         notifyListenersErr(
           listeners,
@@ -88,18 +87,12 @@ proc onNotResponding*(ctx: ptr FFIContext) =
       chronicles.error "onNotResponding - encode failed", err = exc.msg
       return
   let dataPtr: pointer =
-    if event.len > 0: unsafeAddr event[0]
-    else: nil
+    if event.len > 0: unsafeAddr event[0] else: nil
   ctx.dispatchToListeners(NotRespondingEventName, dataPtr, event.len)
 
 proc sendRequestToFFIThread*(
     ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, timeout = InfiniteDuration
 ): Result[void, string] =
-  # Event-queue overflow refuses further requests; the event thread fires onNotResponding to avoid deadlocking on reg.lock here.
-  if ctx.eventQueueStuck.load():
-    deleteRequest(ffiRequest)
-    return err("event queue stuck - library cannot accept new requests")
-
   # Reentrancy guard: only this thread can fire `reqReceivedSignal`, so a handler dispatching back would self-deadlock.
   if onFFIThread:
     deleteRequest(ffiRequest)
@@ -182,22 +175,9 @@ proc processRequest[T](
   except Exception as exc:
     error "Unexpected exception in handleRes", error = exc.msg
 
-var ffiEventQueueSignalPtr {.threadvar.}: ThreadSignalPtr
-  ## Stashed so the hook below has no closure environment.
-
-proc ffiNotifyEventEnqueuedHook() {.gcsafe, raises: [].} =
-  if not ffiEventQueueSignalPtr.isNil():
-    let res = ffiEventQueueSignalPtr.fireSync()
-    if res.isErr():
-      error "failed to fire eventQueueSignal after enqueue", err = res.error
-
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ## FFI thread body that attends library user API requests
   ffiCurrentEventRegistry = addr ctx[].eventRegistry
-  ffiCurrentEventQueue = addr ctx[].eventQueue
-  ffiCurrentEventQueueStuck = addr ctx[].eventQueueStuck
-  ffiEventQueueSignalPtr = ctx.eventQueueSignal
-  ffiCurrentNotifyEventEnqueued = ffiNotifyEventEnqueuedHook
   onFFIThread = true
 
   logging.setupLog(logging.LogLevel.DEBUG, logging.LogFormat.TEXT)
@@ -266,22 +246,19 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
   waitFor ffiRun(ctx)
 
-proc freeQueuedEventPayload(qe: QueuedEvent) =
-  if not qe.name.isNil:
-    c_free(cast[pointer](qe.name))
-  if not qe.data.isNil:
-    c_free(qe.data)
-
 proc dispatchQueuedEvent[T](ctx: ptr FFIContext[T], qe: QueuedEvent) =
   ## Frees `qe`'s c_malloc buffers on exit.
   defer:
-    freeQueuedEventPayload(qe)
+    if not qe.name.isNil():
+      c_free(cast[pointer](qe.name))
+    if not qe.data.isNil():
+      c_free(qe.data)
   ctx.dispatchToListeners($qe.name, qe.data, qe.dataLen)
 
 proc drainEventQueue[T](ctx: ptr FFIContext[T]) =
   while true:
     let opt = ctx.eventQueue.tryDequeueEvent()
-    if opt.isNone:
+    if opt.isNone():
       break
     ctx.dispatchQueuedEvent(opt.get())
 
@@ -291,9 +268,9 @@ type HeartbeatMonitor = object
   lastValue: int64
   notifiedStale: bool
 
-proc initHeartbeatMonitor[T](ctx: ptr FFIContext[T]): HeartbeatMonitor =
+proc init(T: type HeartbeatMonitor, ctx: ptr FFIContext): T =
   let now = Moment.now()
-  HeartbeatMonitor(
+  T(
     startedAt: now,
     lastChange: now,
     lastValue: ctx.ffiHeartbeat.load(),
@@ -316,19 +293,14 @@ proc check[T](hb: var HeartbeatMonitor, ctx: ptr FFIContext[T]) =
     hb.notifiedStale = true
 
 proc eventRun[T](ctx: ptr FFIContext[T]) {.async.} =
-  var hb = initHeartbeatMonitor(ctx)
-  var notifiedStuck = false
+  var hb = HeartbeatMonitor.init(ctx)
 
   while ctx.running.load():
-    # Wake on enqueue or tick — whichever first.
+    # Wake on enqueue or tick — whichever first. The enqueue path lands in PR #69;
+    # until then the wait always times out and we fall through to the heartbeat check.
     discard await ctx.eventQueueSignal.wait().withTimeout(EventThreadTickInterval)
 
     ctx.drainEventQueue()
-
-    # Fires here (after drain releases reg.lock) — from the FFI thread it'd deadlock on a back-pressuring listener.
-    if not notifiedStuck and ctx.eventQueueStuck.load():
-      onNotResponding(ctx)
-      notifiedStuck = true
 
     if not ctx.running.load():
       break
@@ -418,7 +390,6 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   initEventRegistry(ctx[].eventRegistry)
   initEventQueue(ctx[].eventQueue)
   ctx.ffiHeartbeat.store(0)
-  ctx.eventQueueStuck.store(false)
 
   var success = false
   defer:
