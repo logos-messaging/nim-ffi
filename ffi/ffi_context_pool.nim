@@ -3,14 +3,10 @@ import results
 import ./ffi_context
 
 const MaxFFIContexts* = 32
-  ## Maximum number of concurrently live FFI contexts when using FFIContextPool.
-  ## Fds and threads are only consumed for slots that are actually acquired,
-  ## so this value only affects the upfront memory of the pool array.
+  # Only affects upfront pool memory; fds/threads consumed per acquired slot.
 
 type FFIContextPool*[T] = object
-  ## Fixed-size pool of FFI contexts. Avoids dynamic heap allocation per context
-  ## and bounds the total number of file descriptors consumed by ThreadSignalPtrs
-  ## to at most MaxFFIContexts * 2.
+  ## Fixed pool. Bounds ThreadSignalPtr fds at MaxFFIContexts * 2.
   slots: array[MaxFFIContexts, FFIContext[T]]
   inUse: array[MaxFFIContexts, Atomic[bool]]
 
@@ -19,7 +15,7 @@ proc acquireSlot[T](pool: var FFIContextPool[T]): Result[ptr FFIContext[T], stri
     var expected = false
     if pool.inUse[i].compareExchange(expected, true):
       return ok(pool.slots[i].addr)
-  return err("FFI context pool exhausted (max " & $MaxFFIContexts & " contexts)")
+  err("FFI context pool exhausted (max " & $MaxFFIContexts & " contexts)")
 
 proc releaseSlot[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]) =
   for i in 0 ..< MaxFFIContexts:
@@ -30,39 +26,31 @@ proc releaseSlot[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]) =
 proc createFFIContext*[T](
     pool: var FFIContextPool[T]
 ): Result[ptr FFIContext[T], string] =
-  ## Acquires a slot from the fixed pool and initialises it as an FFI context.
-  ## Bounded fd usage: at most MaxFFIContexts * 2 ThreadSignalPtr fds are ever open.
   let ctx = pool.acquireSlot().valueOr:
     return err("createFFIContext: acquireSlot failed: " & $error)
   initContextResources(ctx).isOkOr:
     pool.releaseSlot(ctx)
     return err("createFFIContext: initContextResources failed: " & $error)
-  return ok(ctx)
+  ok(ctx)
 
 proc destroyFFIContext*[T](
     pool: var FFIContextPool[T], ctx: ptr FFIContext[T]
 ): Result[void, string] =
-  ## Stops the FFI context and returns its slot to the pool. If the FFI thread
-  ## is blocked and does not exit in time, the slot is leaked rather than
-  ## reclaimed — closing its resources while the thread is still live would be
-  ## unsafe.
+  ## On thread-exit timeout the slot is leaked — closing live-thread resources is unsafe.
   ctx.stopAndJoinThreads().isOkOr:
     return err("destroyFFIContext(pool): " & $error)
-  # Without this, the next acquisition would re-init an already-initialised
-  # lock (UB) and leak the previous signal fds.
+  # Required: next acquisition would otherwise re-init a live lock (UB).
   let deinitRes = ctx.deinitContextResources()
   pool.releaseSlot(ctx)
   deinitRes.isOkOr:
     return err("destroyFFIContext(pool): " & $error)
-  return ok()
+  ok()
 
 proc isValidCtx*[T](pool: var FFIContextPool[T], ctx: pointer): bool =
-  ## Returns true only if ctx points to one of the pool's slots that is
-  ## currently in use. Rejects nil, offset-invalid, and dangling pointers
-  ## at the API boundary, preventing use-after-free dereferences.
+  ## Rejects nil / offset-invalid / dangling pointers at the API boundary.
   if ctx.isNil():
     return false
   for i in 0 ..< MaxFFIContexts:
     if cast[pointer](pool.slots[i].addr) == ctx:
       return pool.inUse[i].load()
-  return false
+  false
