@@ -518,11 +518,11 @@ proc stopAndJoinThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
 proc requestRecycle*[T](
     ctx: ptr FFIContext[T], callback: FFICallBack, userData: pointer
 ): Result[void, string] =
-  ## Asks the FFI thread to recycle the context and fire `callback` with the
-  ## outcome (RET_OK drained, RET_ERR stuck). NON-BLOCKING.
+  ## Starts ctx recycle process without stopping its worker, so the next
+  ## createFFIContext reuses the same threads and fds. 
   ##
-  ## Order matters: set the callback before flipping to RecyclePending (the flip is
-  ## the trigger), under `lock` to serialise the gate with sendRequestToFFIThread.
+  ## During recycling, the FFI thread drains the handlers, frees the lib and releases
+  ## the context, then fires `callback` (RET_OK drained, RET_ERR stuck).
   ctx.recycleCallback = callback
   ctx.recycleUserData = userData
 

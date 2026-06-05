@@ -45,13 +45,6 @@ proc createFFIContext*[T](
 proc releaseFFIContext*[T](
     ctx: ptr FFIContext[T], callback: FFICallBack, userData: pointer
 ): Result[void, string] =
-  ## Parks a context for reuse without stopping its worker, so the next
-  ## createFFIContext reuses the same threads and fds. Steady-state cleanup path
-  ## for the generated destructor; destroyFFIContext is for failure/non-pool use.
-  ##
-  ## NON-BLOCKING: the FFI thread drains the handlers, frees the lib and releases
-  ## the context, then fires `callback` (RET_OK drained, RET_ERR stuck). The context
-  ## returns to the pool from that thread, so a reused context never carries a straggler.
   return ctx.requestRecycle(callback, userData)
 
 proc destroyFFIContext*[T](
