@@ -129,18 +129,18 @@ suite "FFIContextPool":
       return
     check pool.destroyFFIContext(ctx).isOk()
 
-  test "slot is reused after destroy":
+  test "context is reused after destroy":
     var pool: FFIContextPool[TestLib]
     let ctx1 = pool.createFFIContext().valueOr:
       assert false, "createFFIContext(pool) failed: " & $error
       return
     check pool.destroyFFIContext(ctx1).isOk()
-    # After destroying, the same slot must be available again
+    # After destroying, the same context must be available again
     let ctx2 = pool.createFFIContext().valueOr:
-      assert false, "createFFIContext(pool) failed after slot release: " & $error
+      assert false, "createFFIContext(pool) failed after context release: " & $error
       return
     check pool.destroyFFIContext(ctx2).isOk()
-    check ctx1 == ctx2 # same array slot reused
+    check ctx1 == ctx2 # same context reused
 
   test "pool exhaustion returns error":
     var pool: FFIContextPool[TestLib]
@@ -149,7 +149,7 @@ suite "FFIContextPool":
       ctxs[i] = pool.createFFIContext().valueOr:
         for j in 0 ..< i:
           discard pool.destroyFFIContext(ctxs[j])
-        assert false, "createFFIContext(pool) failed at slot " & $i & ": " & $error
+        assert false, "createFFIContext(pool) failed at context " & $i & ": " & $error
         return
     # Pool is now full — next create must fail
     check pool.createFFIContext().isErr()
@@ -471,7 +471,7 @@ proc createSimpleLib(initialValue: int): ptr FFIContext[SimpleLib] =
   return cast[ptr FFIContext[SimpleLib]](cast[uint](parseBiggestUInt(callbackMsg(d))))
 
 suite "ffiDtor macro (async destroy + reuse)":
-  test "destroy fires RET_OK after teardown, frees myLib, and frees the slot":
+  test "destroy fires RET_OK after teardown, frees myLib, and frees the context":
     let ctx = createSimpleLib(5)
     check not ctx[].myLib.isNil
     check ctx[].myLib[].value == 5
@@ -489,9 +489,9 @@ suite "ffiDtor macro (async destroy + reuse)":
     check gDestroyedValue == 5 # the user cleanup body saw the live lib
     check ctx[].myLib.isNil() # freed on the FFI thread
 
-    # The slot was freed from the FFI thread, so a fresh create reclaims it.
+    # The context was freed from the FFI thread, so a fresh create reclaims it.
     let ctx2 = createSimpleLib(9)
-    check ctx2 == ctx # same slot, reused worker + fds
+    check ctx2 == ctx # same context, reused worker + fds
     check ctx2[].myLib[].value == 9
     check SimpleLibFFIPool.destroyFFIContext(ctx2).isOk()
 
@@ -531,7 +531,7 @@ suite "ffiDtor macro (async destroy + reuse)":
     waitCallback(dD)
     check dD.retCode == RET_OK
 
-    # Gate stays closed until the slot is reacquired: a late request must not
+    # Gate stays closed until the context is reacquired: a late request must not
     # dispatch onto a context about to be (or already) reused.
     var d: CallbackData
     initCallbackData(d)
@@ -568,8 +568,8 @@ suite "ffiDtor macro (async destroy + reuse)":
     waitCallback(dD)
     check dD.retCode == RET_ERR # drain timed out -> ctx reported stuck
 
-    # The stuck slot is leaked (not reused); the handler still finishes on its
-    # own. Wait for it, then fully tear the leaked slot down.
+    # The stuck context is leaked (not reused); the handler still finishes on its
+    # own. Wait for it, then fully tear the leaked context down.
     waitCallback(slow)
     check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
 
@@ -798,7 +798,7 @@ proc countOpenFds(): int =
 proc releaseAndWait[T](ctx: ptr FFIContext[T]): cint =
   ## Test helper mirroring how a C consumer destroys a context: kick off the
   ## (non-blocking) teardown and block on the callback, returning its retCode.
-  ## RET_OK means the lib's in-flight tasks finished and the slot was parked.
+  ## RET_OK means the lib's in-flight tasks finished and the context was parked.
   var d: CallbackData
   initCallbackData(d)
   defer:
@@ -809,14 +809,14 @@ proc releaseAndWait[T](ctx: ptr FFIContext[T]): cint =
   return d.retCode
 
 suite "releaseFFIContext (park & reuse)":
-  test "park returns the slot and reuses the same live worker":
+  test "park returns the context and reuses the same live worker":
     var pool: FFIContextPool[TestLib]
     let ctx1 = pool.createFFIContext().valueOr:
       check false
       return
     check ctx1.releaseAndWait() == RET_OK
 
-    # Reacquire: must be the same array slot, with its worker still running.
+    # Reacquire: must be the same context, with its worker still running.
     let ctx2 = pool.createFFIContext().valueOr:
       check false
       return
@@ -856,7 +856,7 @@ suite "releaseFFIContext (park & reuse)":
     else:
       var pool: FFIContextPool[TestLib]
 
-      # Warm up: the first create builds the slot's worker (its fds are allocated
+      # Warm up: the first create builds the context's worker (its fds are allocated
       # once here); parking keeps them open for reuse.
       block:
         let ctx = pool.createFFIContext().valueOr:
@@ -885,7 +885,7 @@ suite "releaseFFIContext (park & reuse)":
       # only tolerates unrelated runtime fd noise, not a per-cycle leak.
       check afterCycles <= baseline + 5
 
-      # Tear the (still parked) slot's worker down so the test leaves no threads.
+      # Tear the (still parked) context's worker down so the test leaves no threads.
       let last = pool.createFFIContext().valueOr:
         check false
         return

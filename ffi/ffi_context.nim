@@ -14,7 +14,7 @@ type FFICallbackState* = object
 
 type CtxLifecycle {.pure.} = enum
   ## Request-acceptance + recycle handshake for a pooled context, held as an
-  ## Atomic on FFIContext. ("Recycle" = drain the context and return its slot to
+  ## Atomic on FFIContext. ("Recycle" = drain the context and return its context to
   ## the pool for reuse, keeping the worker alive — unlike destroyFFIContext, which
   ## fully tears the threads down.) Invariants:
   ##   * Requests are accepted ONLY in `Active`; the gate in sendRequestToFFIThread
@@ -23,7 +23,7 @@ type CtxLifecycle {.pure.} = enum
   ##       Active         -> RecyclePending   requestRecycle (caller, under `lock`)
   ##       RecyclePending -> Recycling        the FFI loop   (one-shot compareExchange)
   ##       Recycling      -> Active           markReacquired (caller, on reuse)
-  ##     (initContextResources starts a slot in `Active`.)
+  ##     (initContextResources starts a context in `Active`.)
   ##   * The gate stays closed across BOTH RecyclePending and Recycling, so no
   ##     request can dispatch onto a context being recycled or about to be reused.
   ##   * Only the FFI loop makes the RecyclePending -> Recycling move, so the
@@ -61,8 +61,8 @@ type FFIContext*[T] = object
     # RET_OK once drained, RET_ERR if it timed out. Set by requestRecycle.
   recycleUserData: pointer
   inUse: Atomic[bool]
-    # Whether the slot is claimed. createFFIContext claims it (false -> true); the
-    # recycle handler clears it once drained. On the slot so the owning thread can
+    # Whether the context is claimed. createFFIContext claims it (false -> true); the
+    # recycle handler clears it once drained. On the context so the owning thread can
     # release it without reaching into the pool.
   registeredRequests: ptr Table[cstring, FFIRequestProc]
     # Pointer to with the registered requests at compile time
@@ -129,7 +129,7 @@ proc sendRequestToFFIThread*(
     ctx.lock.release()
 
   ## A recycle closes this gate (under the same lock), so a queued or late sender
-  ## bails here instead of dispatching onto a slot about to be reused.
+  ## bails here instead of dispatching onto a context about to be reused.
   if ctx.lifecycle.load() != CtxLifecycle.Active:
     deleteRequest(ffiRequest)
     return err("FFI context is not accepting requests (being recycled)")
@@ -293,7 +293,7 @@ proc recycleContext[T](
     ctx: ptr FFIContext[T], pending: ptr seq[Future[void]]
 ) {.async.} =
   ## Recycle handler, on the FFI thread (requestRecycle already closed the gate):
-  ## drain the in-flight handlers, free the lib object, release the slot for reuse,
+  ## drain the in-flight handlers, free the lib object, release the context for reuse,
   ## and fire the callback with the outcome. Never blocks the caller.
   ##
   ## `pending` is the run loop's seq of handler Futures, by ptr (async procs can't
@@ -306,7 +306,7 @@ proc recycleContext[T](
     naturallyDrained = await allFutures(pending[]).withTimeout(RecycleTimeout)
 
   ## 2. If any are wedged, cancel them and give the cancellations a bounded moment
-  ##    to unwind, so the slot can be reclaimed rather than leaked.
+  ##    to unwind, so the context can be reclaimed rather than leaked.
   var safeToRecycle = naturallyDrained
   if not naturallyDrained:
     for fut in pending[]:
@@ -319,7 +319,7 @@ proc recycleContext[T](
   ctx.recycleCallback = nil
 
   if safeToRecycle:
-    ## Nothing can touch the context now. Free the lib here, then release the slot
+    ## Nothing can touch the context now. Free the lib here, then release the context
     ## BEFORE the callback (the atomic store publishes these writes to whoever
     ## reclaims it) so a caller reacquiring on the callback finds it already free.
     freeLib(ctx)
@@ -361,7 +361,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
     while ctx.running.load():
       ## Recycle requested: claim it (RecyclePending -> Recycling, one-shot) and run
       ## the recycle on this owning thread, then keep looping so the worker stays
-      ## alive for the slot's next reuse.
+      ## alive for the context's next reuse.
       var expected = CtxLifecycle.RecyclePending
       if ctx.lifecycle.compareExchange(expected, CtxLifecycle.Recycling):
         await recycleContext(ctx, addr pending)
@@ -425,9 +425,9 @@ proc cleanUpResources[T](ctx: ptr FFIContext[T]): Result[void, string] =
   return ok()
 
 proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## Initialises all resources inside an already-allocated FFIContext slot.
+  ## Initialises all resources inside an already-allocated FFIContext.
   ## On failure every partially-initialised resource is closed; the caller
-  ## is responsible for releasing the slot (freeShared or pool.releaseSlot).
+  ## is responsible for releasing the context (freeShared or ctx.unclaim()).
   ctx.lock.initLock()
 
   var success = false
@@ -491,7 +491,7 @@ proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
 ## If the FFI thread's event loop is blocked by a synchronous handler
 ## (e.g. blocking I/O), it cannot process reqSignal in time to exit.
 ## stopAndJoinThreads waits on threadExitSignal up to this bound; on timeout it
-## returns err and skips joinThread/cleanup (leaking the thread + ctx slot)
+## returns err and skips joinThread/cleanup (leaking the thread + ctx)
 ## rather than hanging the caller forever.
 const ThreadExitTimeout* = 1500.milliseconds
 
@@ -537,22 +537,22 @@ proc requestRecycle*[T](
   return ok()
 
 proc markReacquired*[T](ctx: ptr FFIContext[T]) =
-  ## Re-arms a recycled context when its slot is reacquired by createFFIContext:
+  ## Re-arms a recycled context when its context is reacquired by createFFIContext:
   ## moves Recycling -> Active (re-opening the gate). The FFI thread's `pending`
   ## seq was already drained and myLib freed by the recycle handler.
   ctx.lifecycle.store(CtxLifecycle.Active)
 
 proc tryClaim*[T](ctx: ptr FFIContext[T]): bool =
-  ## Atomically claim this slot (false -> true). Returns true if we won it, false
-  ## if it was already claimed. Used by createFFIContext to hand out a free slot.
+  ## Atomically claim this context (false -> true). Returns true if we won it, false
+  ## if it was already claimed. Used by createFFIContext to hand out a free context.
   var expected = false
   ctx.inUse.compareExchange(expected, true)
 
 proc unclaim*[T](ctx: ptr FFIContext[T]) =
-  ## Mark the slot free for reuse. Called by the recycle handler on the FFI thread
+  ## Mark the context free for reuse. Called by the recycle handler on the FFI thread
   ## once teardown is done, and on creation failure / full teardown.
   ctx.inUse.store(false)
 
 proc isClaimed*[T](ctx: ptr FFIContext[T]): bool =
-  ## Whether the slot is currently claimed by a consumer.
+  ## Whether the context is currently claimed by a consumer.
   ctx.inUse.load()

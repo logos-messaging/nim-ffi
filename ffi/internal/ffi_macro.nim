@@ -1517,7 +1517,7 @@ macro ffiDtor*(prc: untyped): untyped =
   ## The generated C-exported proc has the signature:
   ##   cint mylibobj_destroy(void* ctx, FfiCallback callback, void* userData)
   ##
-  ## Recycle the slot for reuse to keep fd usage bounded.
+  ## Recycle the context for reuse to keep fd usage bounded.
   ## NON-BLOCKING: returns RET_OK once accepted;
   ## the real outcome arrives via `callback`.
 
