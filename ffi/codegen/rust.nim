@@ -45,7 +45,7 @@ proc deriveLibName*(procs: seq[FFIProcMeta]): string =
   let parts = first.split('_')
   if parts.len > 0:
     return parts[0]
-  "unknown"
+  return "unknown"
 
 proc stripLibPrefix*(procName: string, libName: string): string =
   ## Strips the library prefix from a proc name.
@@ -53,7 +53,7 @@ proc stripLibPrefix*(procName: string, libName: string): string =
   let prefix = libName & "_"
   if procName.startsWith(prefix):
     return procName[prefix.len .. ^1]
-  procName
+  return procName
 
 proc reqStructName(p: FFIProcMeta): string =
   ## Mirrors the Nim macro: <CamelCase(procName)>Req or CtorReq for ctors.
@@ -146,7 +146,7 @@ fn main() {
     [escapedSrc, libName]
 
 proc generateLibRs*(): string =
-  """mod ffi;
+  return """mod ffi;
 mod types;
 mod api;
 pub use types::*;
@@ -221,7 +221,7 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
   )
 
   lines.add("}")
-  lines.join("\n") & "\n"
+  return lines.join("\n") & "\n"
 
 proc generateTypesRs*(types: seq[FFITypeMeta], procs: seq[FFIProcMeta]): string =
   ## Generates types.rs with Rust structs for all user-declared FFI types and
@@ -267,7 +267,7 @@ proc generateTypesRs*(types: seq[FFITypeMeta], procs: seq[FFIProcMeta]): string 
       lines.add("}")
     lines.add("")
 
-  lines.join("\n")
+  return lines.join("\n")
 
 proc generateApiRs*(
     procs: seq[FFIProcMeta], libName: string, events: seq[FFIEventMeta] = @[]
@@ -780,7 +780,7 @@ proc generateApiRs*(
     lines.add("")
 
   lines.add("}")
-  lines.join("\n") & "\n"
+  return lines.join("\n") & "\n"
 
 proc generateRustCrate*(
     procs: seq[FFIProcMeta],

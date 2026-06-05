@@ -178,25 +178,27 @@ proc eventQueueLen*(q: var EventQueue): int {.raises: [], gcsafe.} =
     return q.count
 
 
-proc notifyListenersOk*(
-    listeners: seq[FFIEventListener], data: pointer, dataLen: int
+const emptyListenerPayload: cstring = ""
+  ## Non-nil zero-length buffer handed to listeners when a payload is
+  ## empty, so a consumer doing `std::string(data, len)` / `memcpy` never
+  ## receives a nil pointer (which is UB even at len 0).
+
+proc notifyListeners*(
+    listeners: seq[FFIEventListener], retCode: cint, data: pointer, dataLen: int
 ) =
+  ## Empty payloads go through `emptyListenerPayload` so consumers doing
+  ## `std::string(data, len)` / `memcpy` never see a nil pointer.
+  let n = max(dataLen, 0)
   let dataPtr =
-    if dataLen > 0: cast[ptr cchar](data)
-    else: nil
+    if n > 0 and not data.isNil(): cast[ptr cchar](data)
+    else: cast[ptr cchar](emptyListenerPayload)
   for listener in listeners:
-    listener.callback(
-      RET_OK, dataPtr, cast[csize_t](dataLen), listener.userData
-    )
+    listener.callback(retCode, dataPtr, cast[csize_t](n), listener.userData)
 
 proc notifyListenersErr*(listeners: seq[FFIEventListener], msg: string) =
-  let dataPtr =
-    if msg.len > 0: cast[ptr cchar](unsafeAddr msg[0])
-    else: nil
-  for listener in listeners:
-    listener.callback(
-      RET_ERR, dataPtr, cast[csize_t](msg.len), listener.userData
-    )
+  let p =
+    if msg.len > 0: cast[pointer](unsafeAddr msg[0]) else: nil
+  notifyListeners(listeners, RET_ERR, p, msg.len)
 
 var ffiCurrentEventRegistry* {.threadvar.}: ptr FFIEventRegistry
   # Kept for tests that drive the registry directly.

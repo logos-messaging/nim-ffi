@@ -23,8 +23,10 @@ const
 
 proc genericInnerType(typeName, prefix: string): string =
   if typeName.startsWith(prefix) and typeName.endsWith("]"):
-    return typeName[prefix.len .. typeName.len - 2]
-  ""
+    let start = prefix.len
+    let lastIndex = typeName.len - 2
+    return typeName[start .. lastIndex]
+  return ""
 
 proc nimTypeToCpp*(typeName: string): string =
   let trimmed = typeName.strip()
@@ -54,7 +56,7 @@ proc stripLibPrefixCpp(procName, libName: string): string =
   let prefix = libName & "_"
   if procName.startsWith(prefix):
     return procName[prefix.len .. ^1]
-  procName
+  return procName
 
 proc reqStructName(p: FFIProcMeta): string =
   let camel = snakeToPascalCase(p.procName)
@@ -132,7 +134,7 @@ proc cppBracedInit(structName: string, fieldNames: seq[string]): string =
   ##
   ## Empty `fieldNames` collapses cleanly because `join` on an empty seq
   ## returns "", so the result is the well-formed empty-init `Name{}`.
-  structName & "{" & fieldNames.join(", ") & "}"
+  return structName & "{" & fieldNames.join(", ") & "}"
 
 proc emitEventDispatcher(
     lines: var seq[string], ctxTypeName, libName: string, events: seq[FFIEventMeta]
@@ -573,11 +575,11 @@ proc generateCppHeader*(
   lines.add("};")
   lines.add("")
 
-  lines.join("\n")
+  return lines.join("\n")
 
 proc generateCppCMakeLists*(libName: string, nimSrcRelPath: string): string =
   let src = nimSrcRelPath.replace("\\", "/")
-  CMakeListsTpl.multiReplace(("{{LIB}}", libName), ("{{SRC}}", src))
+  return CMakeListsTpl.multiReplace(("{{LIB}}", libName), ("{{SRC}}", src))
 
 proc generateCppBindings*(
     procs: seq[FFIProcMeta],

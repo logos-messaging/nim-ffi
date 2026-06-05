@@ -57,7 +57,7 @@ proc dispatchToListeners[T](
       return
     foreignThreadGc:
       try:
-        notifyListenersOk(listeners, data, dataLen)
+        notifyListeners(listeners, RET_OK, data, dataLen)
       except Exception, CatchableError:
         notifyListenersErr(
           listeners,
@@ -73,8 +73,7 @@ proc onNotResponding*(ctx: ptr FFIContext) =
       chronicles.error "onNotResponding - encode failed", err = e.msg
       return
   let dataPtr: pointer =
-    if event.len > 0: unsafeAddr event[0]
-    else: nil
+    if event.len > 0: unsafeAddr event[0] else: nil
   ctx.dispatchToListeners(NotRespondingEventName, dataPtr, event.len)
 
 proc sendRequestToFFIThread*(
@@ -229,7 +228,7 @@ proc dispatchQueuedEvent[T](ctx: ptr FFIContext[T], qe: QueuedEvent) =
 proc drainEventQueue[T](ctx: ptr FFIContext[T]) =
   while true:
     let opt = ctx.eventQueue.tryDequeueEvent()
-    if opt.isNone:
+    if opt.isNone():
       break
     ctx.dispatchQueuedEvent(opt.get())
 
@@ -239,9 +238,9 @@ type HeartbeatMonitor = object
   lastValue: int64
   notifiedStale: bool
 
-proc initHeartbeatMonitor[T](ctx: ptr FFIContext[T]): HeartbeatMonitor =
+proc init(T: type HeartbeatMonitor, ctx: ptr FFIContext): T =
   let now = Moment.now()
-  HeartbeatMonitor(
+  T(
     startedAt: now,
     lastChange: now,
     lastValue: ctx.ffiHeartbeat.load(),
@@ -269,10 +268,11 @@ proc check[T](hb: var HeartbeatMonitor, ctx: ptr FFIContext[T]) =
   hb.notifiedStale = true
 
 proc eventRun[T](ctx: ptr FFIContext[T]) {.async.} =
-  var hb = initHeartbeatMonitor(ctx)
+  var hb = HeartbeatMonitor.init(ctx)
   var notifiedStuck = false
 
   while ctx.running.load():
+    # Wake on enqueue or tick — whichever first.
     discard await ctx.eventQueueSignal.wait().withTimeout(EventThreadTickInterval)
 
     ctx.drainEventQueue()
