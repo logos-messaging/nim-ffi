@@ -1511,14 +1511,15 @@ macro ffiDtor*(prc: untyped): untyped =
   ## The body contains any library-level cleanup to run before context teardown.
   ##
   ## Example:
-  ##   proc waku_destroy*(w: Waku) {.ffiDtor.} =
-  ##     w.cleanup()
+  ##   proc mylibobj_destroy*(obj: MyLibObj) {.ffiDtor.} =
+  ##     obj.cleanup()
   ##
   ## The generated C-exported proc has the signature:
-  ##   cint waku_destroy(void* ctx, FfiCallback callback, void* userData)
+  ##   cint mylibobj_destroy(void* ctx, FfiCallback callback, void* userData)
   ##
-  ## It extracts the library value from ctx, runs the body, then calls
-  ## destroyFFIContext to tear down the FFI thread and free the context.
+  ## Recycle the slot for reuse to keep fd usage bounded.
+  ## NON-BLOCKING: returns RET_OK once accepted;
+  ## the real outcome arrives via `callback`.
 
   let procName = prc[0]
   let formalParams = prc[3]
@@ -1528,7 +1529,7 @@ macro ffiDtor*(prc: untyped): untyped =
     error("ffiDtor: proc must have exactly one parameter (w: LibType)")
 
   let libParamName = formalParams[1][0] # e.g. w
-  let libTypeName = formalParams[1][1]  # e.g. Waku
+  let libTypeName = formalParams[1][1]  # e.g. MyLibObj
 
   let procNameStr = block:
     let raw = $procName
@@ -1565,10 +1566,6 @@ macro ffiDtor*(prc: untyped): untyped =
     ffiBody.add(bodyNode)
 
   let poolIdent = ident($libTypeName & "FFIPool")
-  # Hand teardown to the FFI thread (releaseFFIContext -> requestRecycle), recycling
-  # the slot for reuse to keep fd usage bounded. NON-BLOCKING: returns RET_OK once
-  # accepted; the real outcome arrives via `callback`, so callers must wait on it,
-  # not the return code.
   ffiBody.add quote do:
     let `destroyResIdent` = `poolIdent`.releaseFFIContext(
       cast[ptr FFIContext[`libTypeName`]](ctx), callback, userData
