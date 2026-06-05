@@ -307,3 +307,107 @@ suite "registry lock held during invocation":
     check st.exited.load()
     joinThread(thr)
     check done.load()
+
+suite "liveness events":
+  ## `onNotResponding` / `onResponding` bypass the event queue and dispatch
+  ## directly to listeners — the queue itself may be wedged behind the same
+  ## stall they're signalling. These tests pin down the wire shape (event
+  ## name + CBOR-encoded `EventEnvelope[…]`) so a future refactor can't
+  ## silently break consumers polling for the "library hung" signal.
+  test "onNotResponding delivers EventEnvelope[NotRespondingEvent] to subscribers":
+    var pool: FFIContextPool[TestEvtLib]
+    let ctx = pool.createFFIContext().valueOr:
+      check false
+      return
+    defer:
+      discard pool.destroyFFIContext(ctx)
+
+    var evt: CallbackData
+    initCallbackData(evt)
+    defer:
+      deinitCallbackData(evt)
+
+    discard addEventListener(
+      ctx[].eventRegistry, NotRespondingEventName, captureCb, addr evt
+    )
+
+    onNotResponding(ctx)
+
+    waitCallback(evt)
+    check evt.retCode == RET_OK
+    let decoded =
+      cborDecode(callbackBytes(evt), EventEnvelope[NotRespondingEvent])
+    check decoded.isOk()
+    check decoded.value.eventType == NotRespondingEventName
+
+  test "onResponding delivers EventEnvelope[RespondingEvent] to subscribers":
+    var pool: FFIContextPool[TestEvtLib]
+    let ctx = pool.createFFIContext().valueOr:
+      check false
+      return
+    defer:
+      discard pool.destroyFFIContext(ctx)
+
+    var evt: CallbackData
+    initCallbackData(evt)
+    defer:
+      deinitCallbackData(evt)
+
+    discard addEventListener(
+      ctx[].eventRegistry, RespondingEventName, captureCb, addr evt
+    )
+
+    onResponding(ctx)
+
+    waitCallback(evt)
+    check evt.retCode == RET_OK
+    let decoded = cborDecode(callbackBytes(evt), EventEnvelope[RespondingEvent])
+    check decoded.isOk()
+    check decoded.value.eventType == RespondingEventName
+
+  test "liveness events with no subscriber are a no-op":
+    var pool: FFIContextPool[TestEvtLib]
+    let ctx = pool.createFFIContext().valueOr:
+      check false
+      return
+    defer:
+      discard pool.destroyFFIContext(ctx)
+    # No listener registered — must not crash, must not block.
+    onNotResponding(ctx)
+    onResponding(ctx)
+
+suite "event thread drains queued events":
+  ## The event thread wakes every `EventThreadTickInterval` (or on
+  ## `eventQueueSignal`, not exported) and drains `eventQueue` into the
+  ## registered listeners. This test pushes a c_malloc'd payload onto the
+  ## queue from the test thread and waits for the tick-driven drain to
+  ## deliver it — exercises the `tryEnqueueEvent` → `drainEventQueue` →
+  ## `dispatchQueuedEvent` → listener path end-to-end.
+  test "enqueued event is delivered to subscriber within a tick":
+    var pool: FFIContextPool[TestEvtLib]
+    let ctx = pool.createFFIContext().valueOr:
+      check false
+      return
+    defer:
+      discard pool.destroyFFIContext(ctx)
+
+    var evt: CallbackData
+    initCallbackData(evt)
+    defer:
+      deinitCallbackData(evt)
+
+    const QueuedEvtName = "queued_evt"
+    discard addEventListener(
+      ctx[].eventRegistry, QueuedEvtName, captureCb, addr evt
+    )
+
+    # `tryEnqueueEvent` takes ownership of both buffers on success; the
+    # event thread c_frees them after dispatch returns.
+    let nameBuf = alloc(QueuedEvtName)
+    let payload = @[byte 0xDE, 0xAD, 0xBE, 0xEF]
+    var shared = allocSharedSeq(payload)
+    check tryEnqueueEvent(ctx[].eventQueue, nameBuf, shared.data, shared.len)
+
+    waitCallback(evt)
+    check evt.retCode == RET_OK
+    check callbackBytes(evt) == payload
