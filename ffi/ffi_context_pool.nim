@@ -43,10 +43,7 @@ proc createFFIContext*[T](
   return err("FFI context pool exhausted (max " & $MaxFFIContexts & " contexts)")
 
 proc releaseFFIContext*[T](
-    pool: var FFIContextPool[T],
-    ctx: ptr FFIContext[T],
-    callback: FFICallBack,
-    userData: pointer,
+    ctx: ptr FFIContext[T], callback: FFICallBack, userData: pointer
 ): Result[void, string] =
   ## Parks a context for reuse without stopping its worker, so the next
   ## createFFIContext reuses the same threads and fds. Steady-state cleanup path

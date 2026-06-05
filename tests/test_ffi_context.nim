@@ -795,7 +795,7 @@ proc countOpenFds(): int =
     except CatchableError:
       return -1
 
-proc releaseAndWait[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]): cint =
+proc releaseAndWait[T](ctx: ptr FFIContext[T]): cint =
   ## Test helper mirroring how a C consumer destroys a context: kick off the
   ## (non-blocking) teardown and block on the callback, returning its retCode.
   ## RET_OK means the lib's in-flight tasks finished and the slot was parked.
@@ -803,7 +803,7 @@ proc releaseAndWait[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]): cin
   initCallbackData(d)
   defer:
     deinitCallbackData(d)
-  if pool.releaseFFIContext(ctx, testCallback, addr d).isErr():
+  if ctx.releaseFFIContext(testCallback, addr d).isErr():
     return RET_ERR
   waitCallback(d)
   return d.retCode
@@ -814,7 +814,7 @@ suite "releaseFFIContext (park & reuse)":
     let ctx1 = pool.createFFIContext().valueOr:
       check false
       return
-    check pool.releaseAndWait(ctx1) == RET_OK
+    check ctx1.releaseAndWait() == RET_OK
 
     # Reacquire: must be the same array slot, with its worker still running.
     let ctx2 = pool.createFFIContext().valueOr:
@@ -843,7 +843,7 @@ suite "releaseFFIContext (park & reuse)":
     ctx.callbackState.callback = cast[pointer](testCallback)
     ctx.callbackState.userData = cast[pointer](0xDEAD)
 
-    check pool.releaseAndWait(ctx) == RET_OK
+    check ctx.releaseAndWait() == RET_OK
     check ctx.callbackState.callback.isNil() # a watchdog tick can't call a freed cb
     check ctx.callbackState.userData.isNil()
     check ctx.myLib.isNil()
@@ -862,7 +862,7 @@ suite "releaseFFIContext (park & reuse)":
         let ctx = pool.createFFIContext().valueOr:
           check false
           return
-        check pool.releaseAndWait(ctx) == RET_OK
+        check ctx.releaseAndWait() == RET_OK
 
       let baseline = countOpenFds()
 
@@ -877,7 +877,7 @@ suite "releaseFFIContext (park & reuse)":
         ).isOk()
         waitCallback(d)
         deinitCallbackData(d)
-        check pool.releaseAndWait(ctx) == RET_OK
+        check ctx.releaseAndWait() == RET_OK
 
       let afterCycles = countOpenFds()
       # Reuse must not grow fds. Before the fix each cycle leaked ~10 fds (4

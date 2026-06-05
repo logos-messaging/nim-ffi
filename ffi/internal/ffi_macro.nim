@@ -1567,7 +1567,7 @@ macro ffiDtor*(prc: untyped): untyped =
 
   let poolIdent = ident($libTypeName & "FFIPool")
   ffiBody.add quote do:
-    let `destroyResIdent` = `poolIdent`.releaseFFIContext(
+    let `destroyResIdent` = releaseFFIContext(
       cast[ptr FFIContext[`libTypeName`]](ctx), callback, userData
     )
     if `destroyResIdent`.isErr():
