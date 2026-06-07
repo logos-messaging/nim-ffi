@@ -1538,7 +1538,7 @@ macro ffiDtor*(prc: untyped): untyped =
   let exportedProcName =
     if procName.kind == nnkPostfix: procName[1] else: procName
 
-  let destroyResIdent = genSym(nskLet, "destroyRes")
+  let releaseResIdent = genSym(nskLet, "destroyRes")
 
   let ffiBody = newStmtList()
 
@@ -1567,12 +1567,12 @@ macro ffiDtor*(prc: untyped): untyped =
 
   let poolIdent = ident($libTypeName & "FFIPool")
   ffiBody.add quote do:
-    let `destroyResIdent` = releaseFFIContext(
+    let `releaseResIdent` = releaseFFIContext(
       cast[ptr FFIContext[`libTypeName`]](ctx), callback, userData
     )
-    if `destroyResIdent`.isErr():
-      if not callback.isNil:
-        let errStr = "destroy failed: " & $`destroyResIdent`.error
+    if `releaseResIdent`.isErr():
+      if not callback.isNil():
+        let errStr = "release failed: " & $`releaseResIdent`.error
         callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
       return RET_ERR
     return RET_OK
