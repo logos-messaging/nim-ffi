@@ -471,10 +471,14 @@ proc requestRecycle*[T](
   ##
   ## During recycling, the FFI thread drains the handlers, frees the lib and releases
   ## the context, then fires `callback` (RET_OK drained, RET_ERR stuck).
-  ctx.recycleCallback = callback
-  ctx.recycleUserData = userData
 
   ctx.lock.acquire()
+  if ctx.lifecycle.load() != CtxLifecycle.Active:
+    ctx.lock.release()
+    return err("requestRecycle: context is not Active (already recycling)")
+
+  ctx.recycleCallback = callback
+  ctx.recycleUserData = userData
   ctx.lifecycle.store(CtxLifecycle.RecyclePending)
   ctx.lock.release()
 
