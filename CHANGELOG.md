@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.5] - 2026-06-08
+
+[Full changelog](https://github.com/logos-messaging/nim-ffi/compare/v0.1.4...v0.1.5)
+
+### Fixed
+
+- Recycle FFI contexts in the pool instead of tearing them down per cycle,
+  stopping a per-cycle file-descriptor leak (#74).
+
 ## [0.1.4] - 2026-06-02
 
 [Full changelog](https://github.com/logos-messaging/nim-ffi/compare/v0.1.3...v0.1.4)
