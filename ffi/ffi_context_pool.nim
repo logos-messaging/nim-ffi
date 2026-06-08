@@ -1,63 +1,60 @@
 import std/atomics
 import results
-import ./ffi_context
+import ./ffi_context, ./ffi_types
 
 const MaxFFIContexts* = 32
   ## Maximum number of concurrently live FFI contexts when using FFIContextPool.
-  ## Fds and threads are only consumed for slots that are actually acquired,
-  ## so this value only affects the upfront memory of the pool array.
 
 type FFIContextPool*[T] = object
-  ## Fixed-size pool of FFI contexts. Avoids dynamic heap allocation per context
-  ## and bounds the total number of file descriptors consumed by ThreadSignalPtrs
-  ## to at most MaxFFIContexts * 2.
-  slots: array[MaxFFIContexts, FFIContext[T]]
-  inUse: array[MaxFFIContexts, Atomic[bool]]
-
-proc acquireSlot[T](pool: var FFIContextPool[T]): Result[ptr FFIContext[T], string] =
-  for i in 0 ..< MaxFFIContexts:
-    var expected = false
-    if pool.inUse[i].compareExchange(expected, true):
-      return ok(pool.slots[i].addr)
-  return err("FFI context pool exhausted (max " & $MaxFFIContexts & " contexts)")
-
-proc releaseSlot[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]) =
-  for i in 0 ..< MaxFFIContexts:
-    if pool.slots[i].addr == ctx:
-      pool.inUse[i].store(false)
-      return
+  contexts: array[MaxFFIContexts, FFIContext[T]]
+  initialized: array[MaxFFIContexts, Atomic[bool]]
 
 proc createFFIContext*[T](
     pool: var FFIContextPool[T]
 ): Result[ptr FFIContext[T], string] =
-  ## Acquires a slot from the fixed pool and initialises it as an FFI context.
-  ## Bounded fd usage: at most MaxFFIContexts * 2 ThreadSignalPtr fds are ever open.
-  let ctx = pool.acquireSlot().valueOr:
-    return err("createFFIContext: acquireSlot failed: " & $error)
-  initContextResources(ctx).isOkOr:
-    pool.releaseSlot(ctx)
-    return err("createFFIContext: initContextResources failed: " & $error)
-  return ok(ctx)
+  ## Acquires a context from the fixed pool. The context's worker is built once on
+  ## first use and reused on every later acquisition.
+
+  for i in 0 ..< MaxFFIContexts:
+    let ctx = pool.contexts[i].addr
+    if not ctx.tryClaim():
+      continue
+    if pool.initialized[i].load():
+      ## Reused context: a prior destroy drained and released it, worker still alive.
+      ctx.markAsActive()
+      return ok(ctx)
+    initContextResources(ctx).isOkOr:
+      ctx.release()
+      return err("createFFIContext: initContextResources failed: " & $error)
+    pool.initialized[i].store(true)
+    return ok(ctx)
+  return err("FFI context pool exhausted (max " & $MaxFFIContexts & " contexts)")
+
+proc releaseFFIContext*[T](
+    ctx: ptr FFIContext[T], callback: FFICallBack, userData: pointer
+): Result[void, string] =
+  return ctx.requestRecycle(callback, userData)
 
 proc destroyFFIContext*[T](
     pool: var FFIContextPool[T], ctx: ptr FFIContext[T]
 ): Result[void, string] =
-  ## Stops the FFI context and returns its slot to the pool. If the FFI thread
-  ## is blocked and does not exit in time, the slot is leaked rather than
-  ## reclaimed — closing its resources while the thread is still live would be
-  ## unsafe.
+  ## Full teardown: stops/joins the worker threads and returns the context to the
+  ## pool, marking it uninitialised so a later createFFIContext rebuilds it.
   ctx.stopAndJoinThreads().isOkOr:
     return err("destroyFFIContext(pool): " & $error)
-  pool.releaseSlot(ctx)
+  for i in 0 ..< MaxFFIContexts:
+    if pool.contexts[i].addr == ctx:
+      pool.initialized[i].store(false)
+      break
+  ctx.release()
   return ok()
 
 proc isValidCtx*[T](pool: var FFIContextPool[T], ctx: pointer): bool =
-  ## Returns true only if ctx points to one of the pool's slots that is
-  ## currently in use. Rejects nil, offset-invalid, and dangling pointers
-  ## at the API boundary, preventing use-after-free dereferences.
+  ## Returns true only if ctx points to one of the pool's contexts that is
+  ## currently in use.
   if ctx.isNil():
     return false
   for i in 0 ..< MaxFFIContexts:
-    if cast[pointer](pool.slots[i].addr) == ctx:
-      return pool.inUse[i].load()
+    if cast[pointer](pool.contexts[i].addr) == ctx:
+      return cast[ptr FFIContext[T]](ctx).isInUse()
   return false

@@ -2,7 +2,7 @@
 {.pragma: callback, cdecl, raises: [], gcsafe.}
 {.passc: "-fPIC".}
 
-import std/[atomics, locks, json, tables]
+import std/[atomics, locks, json, tables, sequtils]
 import chronicles, chronos, chronos/threadsync, taskpools/channels_spsc_single, results
 import ./ffi_types, ./ffi_thread_request, ./internal/ffi_macro, ./logging
 
@@ -11,6 +11,16 @@ type FFICallbackState* = object
   ## Embedded in FFIContext and referenced from the FFI thread via a thread-local.
   callback*: pointer
   userData*: pointer
+
+type CtxLifecycle {.pure.} = enum
+  ## State machine guarding a pooled FFI context, held as an Atomic on FFIContext.
+  ## Transitions:
+  ##   Active         -> RecyclePending   when ffiDtor is invoked
+  ##   RecyclePending -> Recycling        The process completed the in-flight processes and is ready for lib cleanup and release
+  ##   Recycling      -> Active           When the FFI thread is ready again to attend to requests
+  Active ## accepting and serving requests
+  RecyclePending ## recycle requested; FFI thread loop hasn't claimed it yet
+  Recycling ## FFI loop draining handlers, then frees lib + returns to pool
 
 type FFIContext*[T] = object
   myLib*: ptr T
@@ -33,6 +43,15 @@ type FFIContext*[T] = object
   userData*: pointer
   callbackState*: FFICallbackState
   running: Atomic[bool] # To control when the threads are running
+  lifecycle: Atomic[CtxLifecycle]
+  recycleCallback: FFICallBack
+    # The destructor's callback, fired by the recycle handler with the outcome:
+    # RET_OK once drained, RET_ERR if it timed out. Set by requestRecycle.
+  recycleUserData: pointer
+  inUse: Atomic[bool]
+    # Whether the context is claimed. createFFIContext claims it (false -> true); the
+    # recycle handler clears it once drained. On the context so the owning thread can
+    # release it without reaching into the pool.
   registeredRequests: ptr Table[cstring, FFIRequestProc]
     # Pointer to with the registered requests at compile time
 
@@ -90,14 +109,14 @@ proc sendRequestToFFIThread*(
     ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, timeout = InfiniteDuration
 ): Result[void, string] =
   ctx.lock.acquire()
-  # This lock is only necessary while we use a SP Channel and while the signalling
-  # between threads assumes that there aren't concurrent requests.
-  # Rearchitecting the signaling + migrating to a MP Channel will allow us to receive
-  # requests concurrently and spare us the need of locks
   defer:
     ctx.lock.release()
 
-  ## Sending the request
+  if ctx.lifecycle.load() != CtxLifecycle.Active:
+    deleteRequest(ffiRequest)
+    return err("FFI context is not accepting requests (being recycled)")
+
+  ## Sending the request to the FFI thread
   let sentOk = ctx.reqChannel.trySend(ffiRequest)
   if not sentOk:
     deleteRequest(ffiRequest)
@@ -115,12 +134,8 @@ proc sendRequestToFFIThread*(
   ## wait until the FFI working thread properly received the request
   let res = ctx.reqReceivedSignal.waitSync(timeout)
   if res.isErr():
-    ## Do not free ffiRequest here: the FFI thread was already signaled and
-    ## will process (and free) it.
     return err("Couldn't receive reqReceivedSignal signal")
 
-  ## Notice that in case of "ok", the deallocShared(req) is performed by the FFI Thread in the
-  ## process proc.
   return ok()
 
 type Foo = object
@@ -162,6 +177,9 @@ proc watchdogThreadBody(ctx: ptr FFIContext) {.thread.} =
         debug "Watchdog thread exiting because FFIContext is not running"
         break
 
+      if ctx.lifecycle.load() != CtxLifecycle.Active:
+        continue
+
       let callback = proc(
           callerRet: cint, msg: ptr cchar, len: csize_t, userData: pointer
       ) {.cdecl, gcsafe, raises: [].} =
@@ -192,9 +210,8 @@ proc processRequest[T](
     ## The registeredRequests represents a table defined at compile time.
     ## Then, registeredRequests == Table[reqId, proc-handling-the-request-asynchronously]
 
-  ## Explicit conversion keeps `reqId` alive as the backing string,
-  ## avoiding the implicit string→cstring warning that will become an error.
   let reqIdCs = reqId.cstring
+    # keep `reqId` alive and avoid the implicit string→cstring warning.
 
   let retFut =
     if not ctx[].registeredRequests[].contains(reqIdCs):
@@ -206,18 +223,78 @@ proc processRequest[T](
   let res =
     try:
       await retFut
+    except CancelledError as exc:
+      Result[string, string].err("Request cancelled during destroy: " & exc.msg)
     except AsyncError as exc:
       Result[string, string].err(
         "Async error in processRequest for " & reqId & ": " & exc.msg
       )
 
-  ## handleRes may raise (OOM, GC setup) even though it is rare. Catching here
-  ## keeps the async proc raises:[] compatible. The defer inside handleRes
-  ## guarantees request is freed before the exception propagates.
+  ## handleRes may raise (OOM, GC setup) even though it is rare.
   try:
     handleRes(res, request)
   except Exception as exc:
     error "Unexpected exception in handleRes", error = exc.msg
+
+proc freeLib[T](ctx: ptr FFIContext[T]) {.gcsafe.} =
+  if ctx.myLib.isNil():
+    return
+
+  when not defined(gcRefc):
+    {.cast(gcsafe).}:
+      `=destroy`(ctx.myLib[])
+  else:
+    discard
+  freeShared(ctx.myLib)
+  ctx.myLib = nil
+
+var RecycleTimeout* = 1500.milliseconds
+  ## Upper bound the recycle handler waits for in-flight handlers before it
+  ## cancels them and reports the ctx as stuck. The drain returns as soon as they
+  ## finish, so this only bounds a *stuck* handler. A `var` so tests can shorten it.
+
+proc recycleContext[T](
+    ctx: ptr FFIContext[T], ongoingProcessReq: ptr seq[Future[void]]
+) {.async.} =
+  ## Drain the in-flight handlers, free the lib object, release the context for reuse,
+  ## and fire the callback with the outcome. Never blocks the caller.
+
+  ongoingProcessReq[].keepItIf(not it.finished())
+
+  ## 1. Let the in-flight handlers finish on their own, bounded by RecycleTimeout.
+  var naturallyDrained = ongoingProcessReq[].len == 0
+  if not naturallyDrained:
+    naturallyDrained = await allFutures(ongoingProcessReq[]).withTimeout(RecycleTimeout)
+
+  ## 2. If any are wedged, cancel them and give the cancellations a bounded moment
+  ##    to unwind, so the context can be reclaimed rather than leaked.
+  var safeToRecycle = naturallyDrained
+  if not naturallyDrained:
+    for fut in ongoingProcessReq[]:
+      if not fut.finished():
+        fut.cancelSoon()
+    safeToRecycle = await allFutures(ongoingProcessReq[]).withTimeout(RecycleTimeout)
+
+  let cb = ctx.recycleCallback
+  let ud = ctx.recycleUserData
+  ctx.recycleCallback = nil
+
+  if safeToRecycle:
+    freeLib(ctx)
+    ctx.callbackState = default(FFICallbackState)
+    ongoingProcessReq[].setLen(0)
+    ctx.release()
+
+  if not cb.isNil():
+    foreignThreadGc:
+      let msg =
+        if naturallyDrained:
+          ""
+        else:
+          "recycle: in-flight requests did not finish in time"
+      let cmsg = msg.cstring
+      let retCode = if naturallyDrained: RET_OK else: RET_ERR
+      cb(retCode, unsafeAddr cmsg[0], cast[csize_t](msg.len), ud)
 
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ## FFI thread body that attends library user API requests
@@ -226,18 +303,20 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   logging.setupLog(logging.LogLevel.DEBUG, logging.LogFormat.TEXT)
 
   defer:
-    # Signal destroyFFIContext that this thread has exited, so its bounded
-    # wait can unblock and proceed with cleanup.
     let fireRes = ctx.threadExitSignal.fireSync()
     if fireRes.isErr():
       error "failed to fire threadExitSignal on FFI thread exit", err = fireRes.error
 
   let ffiRun = proc(ctx: ptr FFIContext[T]) {.async.} =
-    var ffiReqHandler: T
-      ## Holds the main library object, i.e., in charge of handling the ffi requests.
-      ## e.g., Waku, LibP2P, SDS, etc.
+
+    var ongoingProcessReq: seq[Future[void]]
 
     while ctx.running.load():
+      var expected = CtxLifecycle.RecyclePending
+      if ctx.lifecycle.compareExchange(expected, CtxLifecycle.Recycling):
+        await recycleContext(ctx, addr ongoingProcessReq)
+        continue
+
       let gotSignal = await ctx.reqSignal.wait().withTimeout(100.milliseconds)
       if not gotSignal:
         continue
@@ -247,11 +326,8 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
       if not ctx.reqChannel.tryRecv(request):
         continue
 
-      if ctx.myLib.isNil():
-        ctx.myLib = addr ffiReqHandler
-
-      ## Handle the request
-      asyncSpawn processRequest(request, ctx)
+      ongoingProcessReq.keepItIf(not it.finished())
+      ongoingProcessReq.add(processRequest(request, ctx))
 
       let fireRes = ctx.reqReceivedSignal.fireSync()
       if fireRes.isErr():
@@ -297,9 +373,9 @@ proc cleanUpResources[T](ctx: ptr FFIContext[T]): Result[void, string] =
   return ok()
 
 proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## Initialises all resources inside an already-allocated FFIContext slot.
+  ## Initialises all resources inside an already-allocated FFIContext.
   ## On failure every partially-initialised resource is closed; the caller
-  ## is responsible for releasing the slot (freeShared or pool.releaseSlot).
+  ## is responsible for releasing the context.
   ctx.lock.initLock()
 
   var success = false
@@ -323,6 +399,7 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
 
   ctx.registeredRequests = addr ffi_types.registeredRequests
 
+  ctx.lifecycle.store(CtxLifecycle.Active)
   ctx.running.store(true)
 
   try:
@@ -361,8 +438,8 @@ proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
 
 ## If the FFI thread's event loop is blocked by a synchronous handler
 ## (e.g. blocking I/O), it cannot process reqSignal in time to exit.
-## clearContext waits on threadExitSignal up to this bound; on timeout it
-## returns err and skips joinThread/cleanup (leaking the thread + ctx slot)
+## stopAndJoinThreads waits on threadExitSignal up to this bound; on timeout it
+## returns err and skips joinThread/cleanup (leaking the thread + ctx)
 ## rather than hanging the caller forever.
 const ThreadExitTimeout* = 1500.milliseconds
 
@@ -386,10 +463,41 @@ proc stopAndJoinThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   joinThread(ctx.watchdogThread)
   return ok()
 
-proc clearContext[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## Stops the FFI context that was created via createFFIContext[T]() (heap).
-  ctx.stopAndJoinThreads().isOkOr:
-    return err("clearContext: " & $error)
-  ctx.cleanUpResources().isOkOr:
-    return err("cleanUpResources failed: " & $error)
+proc requestRecycle*[T](
+    ctx: ptr FFIContext[T], callback: FFICallBack, userData: pointer
+): Result[void, string] =
+  ## Starts ctx recycle process without stopping its worker, so the next
+  ## createFFIContext reuses the same threads and fds. 
+  ##
+  ## During recycling, the FFI thread drains the handlers, frees the lib and releases
+  ## the context, then fires `callback` (RET_OK drained, RET_ERR stuck).
+
+  ctx.lock.acquire()
+  if ctx.lifecycle.load() != CtxLifecycle.Active:
+    ctx.lock.release()
+    return err("requestRecycle: context is not Active (already recycling)")
+
+  ctx.recycleCallback = callback
+  ctx.recycleUserData = userData
+  ctx.lifecycle.store(CtxLifecycle.RecyclePending)
+  ctx.lock.release()
+
+  let fired = ctx.reqSignal.fireSync().valueOr:
+    return err("requestRecycle: failed to signal the FFI thread: " & $error)
+  if not fired:
+    return err("requestRecycle: failed to signal the FFI thread in time")
   return ok()
+
+proc markAsActive*[T](ctx: ptr FFIContext[T]) =
+  ctx.lifecycle.store(CtxLifecycle.Active)
+
+proc tryClaim*[T](ctx: ptr FFIContext[T]): bool =
+  ## Returns true if acquired the contex, false if it was already claimed.
+  var expected = false
+  ctx.inUse.compareExchange(expected, true)
+
+proc release*[T](ctx: ptr FFIContext[T]) =
+  ctx.inUse.store(false)
+
+proc isInUse*[T](ctx: ptr FFIContext[T]): bool =
+  ctx.inUse.load()
