@@ -37,14 +37,13 @@ proc dispatchToListeners[T](
         )
 
 proc emitLivenessEvent[T, P](ctx: ptr FFIContext[T], name: string, payload: P) =
-  ## Encodes a zero-field liveness event (`NotRespondingEvent`,
-  ## `RespondingEvent`) and dispatches it directly to listeners, bypassing
-  ## the event queue (which may itself be wedged). Runs on the event thread.
+  ## Encodes a liveness event and dispatches directly to listeners (bypassing
+  ## the queue, which may be wedged). Runs on the event thread.
   let event =
     try:
       EventEnvelope[P](eventType: name, payload: payload).cborEncode()
-    except CatchableError as exc:
-      chronicles.error "liveness event encode failed", name = name, err = exc.msg
+    except CatchableError as e:
+      chronicles.error "liveness event encode failed", name = name, err = e.msg
       return
   let dataPtr: pointer =
     if event.len > 0: cast[pointer](unsafeAddr event[0])
@@ -55,9 +54,8 @@ proc onNotResponding*(ctx: ptr FFIContext) =
   emitLivenessEvent(ctx, NotRespondingEventName, NotRespondingEvent())
 
 proc onResponding*(ctx: ptr FFIContext) =
-  ## Fired once when the FFI thread's heartbeat starts advancing again
-  ## after a `NotRespondingEvent`. Lets consumers clear any "library
-  ## hung" UI state without polling.
+  ## Fired once when the heartbeat resumes after a NotRespondingEvent.
+  ## Lets consumers clear any "library hung" UI state without polling.
   emitLivenessEvent(ctx, RespondingEventName, RespondingEvent())
 
 proc dispatchQueuedEvent[T](ctx: ptr FFIContext[T], qe: QueuedEvent) =
@@ -89,10 +87,8 @@ proc init(T: type HeartbeatMonitor, ctx: ptr FFIContext): T =
   )
 
 proc check[T](hb: var HeartbeatMonitor, ctx: ptr FFIContext[T]) =
-  ## Fires `onNotResponding` once the FFI thread's heartbeat counter stops
-  ## advancing past the stale threshold, and fires `onResponding` once it
-  ## starts advancing again. Both transitions latch so each is emitted at
-  ## most once per stall episode.
+  ## Fires onNotResponding / onResponding on heartbeat stall / recovery.
+  ## Both transitions latch — each fires at most once per stall episode.
   if Moment.now() - hb.startedAt <= FFIHeartbeatStartDelay:
     return
   let cur = ctx.ffiHeartbeat.load()
@@ -109,7 +105,7 @@ proc check[T](hb: var HeartbeatMonitor, ctx: ptr FFIContext[T]) =
 
 proc eventRun[T](ctx: ptr FFIContext[T]) {.async.} =
   var hb = HeartbeatMonitor.init(ctx)
-  var notifiedStuck = false
+  var notifiedStuck = false # latched forever — eventQueueStuck is sticky terminal.
 
   while ctx.running.load():
     # Wake on enqueue or tick — whichever first.
@@ -136,5 +132,5 @@ proc eventThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
   try:
     waitFor eventRun(ctx)
-  except CatchableError as exc:
-    error "event thread exited with exception", error = exc.msg
+  except CatchableError as e:
+    error "event thread exited with exception", error = e.msg

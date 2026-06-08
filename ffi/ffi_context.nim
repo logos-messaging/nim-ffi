@@ -79,7 +79,7 @@ proc cleanUpResources[T](ctx: ptr FFIContext[T]): Result[void, string] =
 
 template newSignalOrErr(field: untyped, name: string) =
   field = ThreadSignalPtr.new().valueOr:
-    return err("couldn't create " & name & " ThreadSignalPtr: " & $error)
+    return err("couldn't create ThreadSignalPtr: " & name & ": " & $error)
 
 proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## On failure, the deferred cleanup closes partial state; caller releases
@@ -133,22 +133,22 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     return err("failed to create the event thread: " & getCurrentExceptionMsg())
 
   success = true
-  return ok()
+  ok()
 
 proc fireOrErr(sig: ThreadSignalPtr, name: string): Result[void, string] =
   let fired = sig.fireSync().valueOr:
-    return err("error signaling " & name & ": " & $error)
+    return err("error signaling: " & name & ": " & $error)
   if not fired:
-    return err("failed to signal " & name & " on time")
+    return err("failed to signal: " & name & " on time")
   ok()
 
 proc waitExitOrErr(
     sig: ThreadSignalPtr, name: string, timeout: Duration
 ): Result[void, string] =
   let exited = sig.waitSync(timeout).valueOr:
-    return err("error waiting for " & name & " exit: " & $error)
+    return err("error waiting for exit: " & name & ": " & $error)
   if not exited:
-    return err(name & " did not exit in time; leaking ctx to avoid hang")
+    return err("did not exit in time: " & name & " (leaking ctx to avoid hang)")
   ok()
 
 proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
@@ -176,7 +176,7 @@ proc stopAndJoinThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   joinThread(ctx.ffiThread)
   ?ctx.eventThreadExitSignal.waitExitOrErr("event thread", ThreadExitTimeout)
   joinThread(ctx.eventThread)
-  return ok()
+  ok()
 
 proc clearContext[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Stops a heap-allocated FFI context.
@@ -184,4 +184,4 @@ proc clearContext[T](ctx: ptr FFIContext[T]): Result[void, string] =
     return err("clearContext: " & $error)
   ctx.cleanUpResources().isOkOr:
     return err("cleanUpResources failed: " & $error)
-  return ok()
+  ok()

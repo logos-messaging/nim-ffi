@@ -23,15 +23,11 @@ proc sendRequestToFFIThread*(
       "reentrant ffi call: a handler invoked sendRequestToFFIThread on its own context"
     )
 
-  # All async submissions serialise on `ctx.lock` for the full
-  # trySend + fireSync + waitSync sequence because `reqChannel` is
-  # single-producer and `reqReceivedSignal` is shared across callers.
-  # Multi-producer redesign is tracked as PR #23 review item 7.
+  # Serialise the trySend + fireSync + waitSync — reqChannel is SP and reqReceivedSignal is shared.
   ctx.lock.acquire()
   defer:
     ctx.lock.release()
 
-  ## Sending the request
   let sentOk = ctx.reqChannel.trySend(ffiRequest)
   if not sentOk:
     deleteRequest(ffiRequest)
@@ -46,15 +42,12 @@ proc sendRequestToFFIThread*(
     deleteRequest(ffiRequest)
     return err("Couldn't fireSync in time")
 
-  ## wait until the FFI working thread properly received the request
   let res = ctx.reqReceivedSignal.waitSync(timeout)
   if res.isErr():
-    ## Do not free ffiRequest here: the FFI thread was already signaled and
-    ## will process (and free) it.
+    # FFI thread was signaled and owns the request; don't double-free.
     return err("Couldn't receive reqReceivedSignal signal")
 
-  ## Notice that in case of "ok", the deallocShared(req) is performed by the FFI Thread in the
-  ## process proc.
+  # On ok the FFI thread's processRequest deallocShared(req)'s.
   ok()
 
 proc processRequest[T](
@@ -63,40 +56,27 @@ proc processRequest[T](
   ## Invoked within the FFI thread to process a request coming from the FFI API consumer thread.
 
   let reqId = $request[].reqId
-    ## The reqId determines which proc will handle the request.
-    ## The registeredRequests represents a table defined at compile time.
-    ## Then, registeredRequests == Table[reqId, proc-handling-the-request-asynchronously]
-
-  ## Explicit conversion keeps `reqId` alive as the backing string,
-  ## avoiding the implicit string→cstring warning that will become an error.
-  let reqIdCs = reqId.cstring
+  let reqIdCs = reqId.cstring # keeps reqId alive; implicit string→cstring is a warning.
 
   let retFut =
     if not ctx[].registeredRequests[].contains(reqIdCs):
-      ## That shouldn't happen because only registered requests should be sent to the FFI thread.
       nilProcess(request[].reqId)
     else:
       ctx[].registeredRequests[][reqIdCs](cast[pointer](request), ctx)
 
-  ## Catch every catchable exception (including CancelledError raised by
-  ## the shutdown drain in ffiRun) so handleRes — and its `deleteRequest`
-  ## defer — always runs. Otherwise an abandoned in-flight handler would
-  ## leak its request envelope, reqId copy, and CBOR payload.
+  # CatchableError covers CancelledError from the shutdown drain; handleRes must still run.
   let res =
     try:
       await retFut
-    except CatchableError as exc:
+    except CatchableError as e:
       Result[seq[byte], string].err(
-        "Error in processRequest for " & reqId & ": " & exc.msg
+        "Error in processRequest for " & reqId & ": " & e.msg
       )
 
-  ## handleRes may raise (OOM, GC setup) even though it is rare. Catching here
-  ## keeps the async proc raises:[] compatible. The defer inside handleRes
-  ## guarantees request is freed before the exception propagates.
   try:
     handleRes(res, request)
-  except Exception as exc:
-    error "Unexpected exception in handleRes", error = exc.msg
+  except Exception as e:
+    error "Unexpected exception in handleRes", error = e.msg
 
 var ffiEventQueueSignalPtr {.threadvar.}: ThreadSignalPtr
   # Stashed so the hook has no closure env.
@@ -126,23 +106,18 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
       error "failed to fire threadExitSignal on FFI thread exit", err = fireRes.error
 
   let ffiRun = proc(ctx: ptr FFIContext[T]) {.async.} =
-    var ffiReqHandler: T
-      ## Holds the main library object, i.e., in charge of handling the ffi requests.
-      ## e.g., Waku, LibP2P, SDS, etc.
+    var ffiReqHandler: T # main library object (Waku, LibP2P, SDS, …)
 
-    ## In-flight processRequest futures. Tracked so they can be drained on
-    ## shutdown — otherwise destroying the context while a handler is
-    ## awaiting (e.g. sleepAsync) abandons the future and leaks the
-    ## request's envelope/reqId/payload allocations.
+    # Tracked so shutdown can drain them; abandoning a mid-await future leaks the request.
     var pending: seq[Future[void]] = @[]
 
     proc reapCompleted() =
       var i = 0
       while i < pending.len:
-        if pending[i].finished():
-          pending.del(i)
-        else:
+        if not pending[i].finished():
           inc i
+          continue
+        pending.del(i)
 
     while ctx.running.load():
       # Freezes if a sync handler blocks the dispatcher; event thread reads to detect wedged FFI thread.
@@ -154,7 +129,6 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
       if not gotSignal:
         continue
 
-      ## Wait for a request from the ffi consumer thread
       var request: ptr FFIThreadRequest
       if not ctx.reqChannel.tryRecv(request):
         continue
@@ -162,22 +136,18 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
       if ctx.myLib.isNil():
         ctx.myLib = addr ffiReqHandler
 
-      ## Handle the request
       pending.add processRequest(request, ctx)
 
       let fireRes = ctx.reqReceivedSignal.fireSync()
       if fireRes.isErr():
         error "could not fireSync back to requester thread", error = fireRes.error
 
-    ## Drain in-flight handlers so each request's `deleteRequest` runs
-    ## before we exit. Without this, abandoning a future mid-await would
-    ## leak the request allocations (visible to LSan; previously hidden
-    ## because Nim's pool allocator kept the chunks alive in the process).
+    # Drain so each pending handler's deleteRequest defer runs before exit.
     reapCompleted()
     if pending.len > 0:
       try:
         await allFutures(pending)
-      except CatchableError as exc:
-        error "draining pending FFI requests on shutdown raised", error = exc.msg
+      except CatchableError as e:
+        error "draining pending FFI requests on shutdown raised", error = e.msg
 
   waitFor ffiRun(ctx)

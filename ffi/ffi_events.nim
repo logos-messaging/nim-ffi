@@ -36,9 +36,8 @@ proc initEventRegistry*(reg: var FFIEventRegistry) =
   reg.byEvent = initTable[string, seq[FFIEventListener]]()
 
 proc deinitEventRegistry*(reg: var FFIEventRegistry) =
-  ## Mirror of `initEventRegistry`; same single-thread constraint.
-  ## Resets GC fields so pool-slot reuse on another thread doesn't fire
-  ## Nim's hidden assignment dtor against this thread's heap.
+  ## Mirror of `initEventRegistry`; same single-thread constraint. Resets GC
+  ## fields so pool-slot reuse on another thread sees no hidden dtor.
   reg.lock.deinitLock()
   reg.byEvent = default(Table[string, seq[FFIEventListener]])
   reg.nextId = 0'u64
@@ -167,11 +166,11 @@ proc tryDequeueEvent*(q: var EventQueue): Option[QueuedEvent] {.raises: [], gcsa
   withLock q.lock:
     if q.count == 0:
       return none(QueuedEvent)
-    let e = q.buf[q.head]
+    let dequeued = q.buf[q.head]
     q.buf[q.head] = QueuedEvent(name: nil, data: nil, dataLen: 0)
     q.head = (q.head + 1) mod EventQueueCapacity
     q.count.dec()
-    return some(e)
+    return some(dequeued)
 
 proc eventQueueLen*(q: var EventQueue): int {.raises: [], gcsafe.} =
   withLock q.lock:
@@ -179,9 +178,8 @@ proc eventQueueLen*(q: var EventQueue): int {.raises: [], gcsafe.} =
 
 
 const emptyListenerPayload*: cstring = ""
-  ## Non-nil zero-length buffer handed to listeners when a payload is
-  ## empty, so a consumer doing `std::string(data, len)` / `memcpy` never
-  ## receives a nil pointer (which is UB even at len 0).
+  ## Non-nil zero-length buffer handed to listeners when the payload is empty
+  ## (a nil pointer would be UB for consumers doing `memcpy` even at len 0).
 
 proc notifyListeners*(
     listeners: seq[FFIEventListener], retCode: cint, data: pointer, dataLen: int
@@ -221,7 +219,7 @@ template enqueueOrMarkStuck(
     dataLen: int,
 ) =
   ## Takes ownership of `namePtr`/`dataPtr`. On queue-full sets the sticky
-  ## stuck flag and wakes the event thread (firing onNotResponding here
+  ## stuck flag and wakes the event thread (firing onNotResponding from here
   ## would risk deadlock against a back-pressuring listener).
   block enqueueBlock:
     let q = ffiCurrentEventQueue
@@ -242,9 +240,8 @@ template enqueueOrMarkStuck(
       ffiCurrentNotifyEventEnqueued()
 
 template dispatchFFIEvent*(eventName: string, body: untyped) =
-  ## `body` must yield `string` or `seq[byte]`. Runs on the FFI thread —
-  ## encodes into a `c_malloc` buffer and enqueues; the event thread
-  ## fans out to listeners.
+  ## `body` must yield `string` / `seq[byte]`. FFI thread only: encodes into
+  ## a `c_malloc` buffer and enqueues; the event thread fans out to listeners.
   block:
     let evtName: string = eventName
     let bodyVal = body
@@ -257,10 +254,8 @@ template dispatchFFIEvent*(eventName: string, body: untyped) =
     enqueueOrMarkStuck(evtName, namePtr, dataPtr, dataLen)
 
 template dispatchFFIEventCbor*(eventName: string, eventPayload: typed) =
-  ## Typed CBOR variant of `dispatchFFIEvent`.
-  ## Parameter is `eventPayload`, not `payload` — Nim's template
-  ## substitution would otherwise rewrite the `payload:` field inside
-  ## `EventEnvelope`.
+  ## Typed CBOR variant of `dispatchFFIEvent`. The param is `eventPayload`
+  ## (not `payload`) to avoid clobbering `EventEnvelope.payload` substitution.
   block:
     let evtName: string = eventName
     var (dataPtr, dataLen) = cborEncodeShared(

@@ -40,7 +40,7 @@ proc captureCb(
   acquire(d[].lock)
   d[].retCode = retCode
   let n = min(int(len), d[].msg.len)
-  if n > 0 and not msg.isNil:
+  if n > 0 and not msg.isNil():
     copyMem(addr d[].msg[0], msg, n)
   d[].msgLen = n
   d[].called = true
