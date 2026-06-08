@@ -7,9 +7,6 @@ when defined(ffiGenBindings):
   import ../codegen/cpp
   import ../codegen/cddl
 
-# ---------------------------------------------------------------------------
-# String helpers used by multiple macros
-# ---------------------------------------------------------------------------
 
 proc isPtr(typ: NimNode): bool =
   ## True iff `typ` is a `ptr T` type expression — i.e. an `nnkPtrTy` AST node.
@@ -600,9 +597,6 @@ macro ffiRaw*(prc: untyped): untyped =
     echo stmts.repr
   return stmts
 
-# ---------------------------------------------------------------------------
-# ffi macro — primary FFI proc / FFI type registration
-# ---------------------------------------------------------------------------
 
 macro ffi*(prc: untyped): untyped =
   ## Simplified FFI macro — applies to procs or types.
@@ -843,9 +837,6 @@ macro ffi*(prc: untyped): untyped =
     echo stmts.repr
   return stmts
 
-# ---------------------------------------------------------------------------
-# ffiCtor — constructor macro
-# ---------------------------------------------------------------------------
 
 proc buildCtorRequestType(
     reqTypeName: NimNode, paramNames: seq[string], paramTypes: seq[NimNode]
@@ -1257,9 +1248,6 @@ macro ffiCtor*(prc: untyped): untyped =
     echo stmts.repr
   return stmts
 
-# ---------------------------------------------------------------------------
-# ffiDtor — destructor macro
-# ---------------------------------------------------------------------------
 
 macro ffiDtor*(prc: untyped): untyped =
   ## Defines a C-exported destructor that tears down the FFIContext after the
@@ -1373,9 +1361,6 @@ macro ffiDtor*(prc: untyped): untyped =
     echo stmts.repr
   return stmts
 
-# ---------------------------------------------------------------------------
-# ffiEvent — library-initiated typed event
-# ---------------------------------------------------------------------------
 
 macro ffiEvent*(wireName: static[string], prc: untyped): untyped =
   ## Declares a library-initiated event. The annotated proc has an empty
@@ -1467,9 +1452,6 @@ macro ffiEvent*(wireName: static[string], prc: untyped): untyped =
     echo generated.repr
   return generated
 
-# ---------------------------------------------------------------------------
-# genBindings — codegen entry point
-# ---------------------------------------------------------------------------
 
 macro genBindings*(
     outputDir: static[string] = ffiOutputDir, nimSrcRelPath: static[string] = ffiSrcPath

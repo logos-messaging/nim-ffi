@@ -10,12 +10,10 @@ import std/locks
 import unittest2
 import ffi
 
-# ---------------------------------------------------------------------------
 # Tiny helpers — a thread-safe sink each listener writes into so we can
 # assert which callbacks would fire and in what order once dispatch lands.
 # Today only `tagCb`'s presence is exercised; the recorder is also used to
 # make sure listener bookkeeping doesn't accidentally invoke callbacks.
-# ---------------------------------------------------------------------------
 
 type Recorder = object
   lock: Lock
@@ -50,9 +48,6 @@ proc tagCb(
     copyMem(addr payload[0], msg, int(len))
   record(t[].rec[], t[].name, retCode, payload)
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 suite "FFIEventRegistry mutation":
   test "addEventListener assigns monotonically increasing non-zero ids":

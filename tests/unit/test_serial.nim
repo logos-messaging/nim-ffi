@@ -201,12 +201,10 @@ suite "CBOR error handling":
     let res = cborDecode(truncated, string)
     check res.isErr
 
-# ---------------------------------------------------------------------------
 # Regression for PR #23 review item 9: cborEncodeShared writes directly into
 # a c_malloc buffer, letting the FFI thread request take ownership without
 # an intermediate seq[byte] copy. The shared-encoder must produce
 # byte-for-byte the same output as the seq-encoder.
-# ---------------------------------------------------------------------------
 
 import system/ansi_c
 

@@ -324,9 +324,6 @@ suite "sendRequestToFFIThread":
       check d.retCode == RET_OK
       check cborDecode(callbackBytes(d), string).value == "pong:" & msg
 
-# ---------------------------------------------------------------------------
-# ffiCtor / .ffi. macros — exercise the full CBOR transport
-# ---------------------------------------------------------------------------
 
 type SimpleLib = object
   value: int
@@ -375,9 +372,6 @@ suite "ffiCtor macro":
 
     check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
 
-# ---------------------------------------------------------------------------
-# Simplified .ffi. macro integration test
-# ---------------------------------------------------------------------------
 
 type SendConfig {.ffi.} = object
   message: string
@@ -468,10 +462,8 @@ suite "sync-body .ffi. is dispatched on FFI thread":
     check d2.retCode == RET_OK
     check cborDecode(callbackBytes(d2), string).value == "v3"
 
-# ---------------------------------------------------------------------------
 # Nim-native API (no callbacks, no CBOR buffers): the original proc name
 # resolves to the user's declared async signature and is callable directly.
-# ---------------------------------------------------------------------------
 
 suite "Nim-native .ffi. / .ffiCtor. API":
   test "user proc names retain their declared Future[Result[T,string]] shape":
@@ -492,14 +484,12 @@ suite "Nim-native .ffi. / .ffiCtor. API":
     check ctorRes.isOk
     check ctorRes.value.value == 21
 
-# ---------------------------------------------------------------------------
 # Regression for PR #23 review items 1–5: a `.ffi.` body without `await`
 # used to be emitted as an inline-on-foreign-thread fast path, which bypassed
 # `foreignThreadGc`, `ctx.lock`, and chronos's single-thread invariant. The
 # sync fast-path was deleted; this test records `getThreadId()` inside a
 # sync body and asserts the handler runs on the FFI thread, not on the
 # caller's thread.
-# ---------------------------------------------------------------------------
 
 var gRecordedHandlerTid: Atomic[int]
 
@@ -558,13 +548,11 @@ suite "sync-body .ffi. runs on FFI thread (PR #23 regression)":
     # And the callback payload (the recorded tid) matches what the handler stored.
     check cborDecode(callbackBytes(d), int).value == handlerTid
 
-# ---------------------------------------------------------------------------
 # Regression for PR #23 review item 6: reentrancy guard on
 # sendRequestToFFIThread. A handler running on the FFI thread that tries to
 # dispatch back through sendRequestToFFIThread used to self-deadlock waiting
 # on `reqReceivedSignal` (which only the FFI thread can fire). The guard now
 # returns an Err immediately.
-# ---------------------------------------------------------------------------
 
 var gReentrantNestedRes: Channel[string]
 gReentrantNestedRes.open()
