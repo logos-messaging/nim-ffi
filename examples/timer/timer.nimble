@@ -13,8 +13,7 @@ requires "https://github.com/logos-messaging/nim-ffi >= 0.2.0"
 const nimFlags = "--mm:orc -d:chronicles_log_level=WARN"
 
 task build, "Compile the timer library":
-  exec "nim c " & nimFlags &
-    " --app:lib --noMain --nimMainPrefix:libmy_timer timer.nim"
+  exec "nim c " & nimFlags & " --app:lib --noMain --nimMainPrefix:libmy_timer timer.nim"
 
 task genbindings_rust, "Generate Rust bindings for the timer example":
   exec "nim c " & nimFlags & " --app:lib --noMain --nimMainPrefix:libmy_timer" &

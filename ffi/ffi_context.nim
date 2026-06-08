@@ -3,7 +3,11 @@
 import std/[atomics, locks, json, tables]
 import chronicles, chronos, chronos/threadsync, taskpools/channels_spsc_single, results
 import
-  ./ffi_types, ./ffi_events, ./ffi_thread_request, ./internal/ffi_macro, ./logging,
+  ./ffi_types,
+  ./ffi_events,
+  ./ffi_thread_request,
+  ./internal/ffi_macro,
+  ./logging,
   ./cbor_serial
 
 export ffi_events
@@ -268,8 +272,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
       try:
         await allFutures(pending)
       except CatchableError as exc:
-        error "draining pending FFI requests on shutdown raised",
-          error = exc.msg
+        error "draining pending FFI requests on shutdown raised", error = exc.msg
 
   waitFor ffiRun(ctx)
 

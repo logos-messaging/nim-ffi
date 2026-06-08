@@ -1419,8 +1419,10 @@ macro ffiEvent*(wireName: static[string], prc: untyped): untyped =
 
   let payloadTypeNameStr =
     case payloadTypeNode.kind
-    of nnkIdent: $payloadTypeNode
-    else: payloadTypeNode.repr
+    of nnkIdent:
+      $payloadTypeNode
+    else:
+      payloadTypeNode.repr
 
   var userProcName = procName
   if procName.kind == nnkPostfix:
@@ -1428,13 +1430,8 @@ macro ffiEvent*(wireName: static[string], prc: untyped): untyped =
 
   # The generated body: dispatchFFIEventCbor("wire_name", payload).
   let wireNameLit = newStrLitNode(wireName)
-  let dispatchBody = newStmtList(
-    newCall(
-      ident("dispatchFFIEventCbor"),
-      wireNameLit,
-      payloadParamName,
-    )
-  )
+  let dispatchBody =
+    newStmtList(newCall(ident("dispatchFFIEventCbor"), wireNameLit, payloadParamName))
 
   var newParams = newSeq[NimNode]()
   newParams.add(formalParams[0]) # return type (typically empty/void)

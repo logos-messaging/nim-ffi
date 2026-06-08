@@ -158,9 +158,7 @@ var ffiCurrentEventRegistry* {.threadvar.}: ptr FFIEventRegistry
   ## Set by the FFI thread at startup so dispatchFFIEvent / dispatchFFIEventCbor
   ## can find their registry without taking a context pointer per call site.
 
-template withFFIEventDispatch(
-    eventName: string, listeners, body: untyped
-) =
+template withFFIEventDispatch(eventName: string, listeners, body: untyped) =
   ## Shared scaffold for `dispatchFFIEvent` / `dispatchFFIEventCbor`:
   ## resolves the thread-local registry, snapshots listeners under
   ## `reg.lock` into the caller-named `listeners` binding, then runs
@@ -219,9 +217,7 @@ template dispatchFFIEventCbor*(eventName: string, eventPayload: typed) =
   ## also replace the `payload:` field name inside `EventEnvelope`.
   withFFIEventDispatch(eventName, listeners):
     var (data, dataLen) = cborEncodeShared(
-      EventEnvelope[typeof(eventPayload)](
-        eventType: eventName, payload: eventPayload
-      )
+      EventEnvelope[typeof(eventPayload)](eventType: eventName, payload: eventPayload)
     )
     defer:
       cborFreeShared(data)

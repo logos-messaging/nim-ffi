@@ -301,8 +301,14 @@ suite "CBOR boundaries":
       check cborDecode(bytes, uint64).value == v
 
   test "float32 finite values incl. ±FLT_MAX":
-    for v in [float32(0.0), float32(-0.0), float32(1.5), float32(-1.5),
-              float32(3.4028235e38), float32(-3.4028235e38)]:
+    for v in [
+      float32(0.0),
+      float32(-0.0),
+      float32(1.5),
+      float32(-1.5),
+      float32(3.4028235e38),
+      float32(-3.4028235e38),
+    ]:
       let bytes = cborEncode(v)
       check cborDecode(bytes, float32).value == v
 
@@ -410,8 +416,8 @@ suite "CBOR round-trips":
     check back.value == o
 
   test "three-level struct nesting":
-    let d = DeepInner(tag: "outer",
-                     nested: Nested(label: "mid", point: Point(x: 11, y: 22)))
+    let d =
+      DeepInner(tag: "outer", nested: Nested(label: "mid", point: Point(x: 11, y: 22)))
     let bytes = cborEncode(d)
     let back = cborDecode(bytes, DeepInner)
     check back.isOk

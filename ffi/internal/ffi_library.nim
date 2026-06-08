@@ -143,7 +143,11 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
     if isNil(ctx):
       echo `addErr`
       return ret
-    let evtName = if eventName.isNil(): "" else: $eventName
+    let evtName =
+      if eventName.isNil():
+        ""
+      else:
+        $eventName
     ret = addEventListener(ctx[].eventRegistry, evtName, callback, userData)
     return ret
 

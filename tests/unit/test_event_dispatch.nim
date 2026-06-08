@@ -72,8 +72,7 @@ proc callbackBytes(d: var CallbackData): seq[byte] =
 registerReqFFI(EmitCborEventRequest, lib: ptr TestEvtLib):
   proc(): Future[Result[string, string]] {.async.} =
     dispatchFFIEventCbor(
-      "message_sent",
-      MessageSentBody(requestId: "req-1", messageHash: "0xdeadbeef"),
+      "message_sent", MessageSentBody(requestId: "req-1", messageHash: "0xdeadbeef")
     )
     return ok("emitted")
 
@@ -90,16 +89,15 @@ registerReqFFI(EmitRawBytesEventRequest, lib: ptr TestEvtLib):
 ## event so a TSan-instrumented build can confirm `FFIEventRegistry.lock`
 ## serialises the cross-thread mutation against dispatch-time
 ## `snapshotListeners` reads from the FFI thread.
-type SetterArgs = tuple
-  ctx: ptr FFIContext[TestEvtLib]
-  stop: ptr Atomic[bool]
-  target: ptr CallbackData
+type SetterArgs =
+  tuple[
+    ctx: ptr FFIContext[TestEvtLib], stop: ptr Atomic[bool], target: ptr CallbackData
+  ]
 
 proc setterThreadBody(args: SetterArgs) {.thread.} =
   while not args.stop[].load():
-    let id = addEventListener(
-      args.ctx[].eventRegistry, "message_sent", captureCb, args.target
-    )
+    let id =
+      addEventListener(args.ctx[].eventRegistry, "message_sent", captureCb, args.target)
     discard removeEventListener(args.ctx[].eventRegistry, id)
 
 suite "dispatchFFIEventCbor":
@@ -117,9 +115,7 @@ suite "dispatchFFIEventCbor":
       deinitCallbackData(evt)
 
     # Subscribe to the specific event the request below dispatches.
-    discard addEventListener(
-      ctx[].eventRegistry, "message_sent", captureCb, addr evt
-    )
+    discard addEventListener(ctx[].eventRegistry, "message_sent", captureCb, addr evt)
 
     # Trigger the dispatch from the FFI thread; the response callback is
     # ignored (we only care that the request completed so we know the event
@@ -157,9 +153,7 @@ suite "dispatchFFIEvent with seq[byte]":
     defer:
       deinitCallbackData(evt)
 
-    discard addEventListener(
-      ctx[].eventRegistry, "raw_bytes", captureCb, addr evt
-    )
+    discard addEventListener(ctx[].eventRegistry, "raw_bytes", captureCb, addr evt)
 
     var rsp: CallbackData
     initCallbackData(rsp)
@@ -204,9 +198,7 @@ when not defined(gcRefc):
       # target. The setter threads will then repeatedly re-install the same
       # (callback, userData) pair — what matters is the cross-thread write
       # racing the FFI thread's read, not which pair "wins".
-      discard addEventListener(
-        ctx[].eventRegistry, "message_sent", captureCb, addr evt
-      )
+      discard addEventListener(ctx[].eventRegistry, "message_sent", captureCb, addr evt)
 
       const NumSetterThreads = 4
       const NumDispatchIters = 200
@@ -267,9 +259,7 @@ proc slowEventCb(
   os.sleep(15)
   st[].exited.store(true)
 
-type DispatcherArgs = tuple
-  reg: ptr FFIEventRegistry
-  done: ptr Atomic[bool]
+type DispatcherArgs = tuple[reg: ptr FFIEventRegistry, done: ptr Atomic[bool]]
 
 proc dispatcherBody(args: DispatcherArgs) {.thread.} =
   ffiCurrentEventRegistry = args.reg
