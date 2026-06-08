@@ -1253,16 +1253,15 @@ macro ffiDtor*(prc: untyped): untyped =
   ## The body contains any library-level cleanup to run before context teardown.
   ##
   ## Example:
-  ##   proc waku_destroy*(w: Waku) {.ffiDtor.} =
-  ##     w.cleanup()
+  ##   proc mylibobj_destroy*(obj: MyLibObj) {.ffiDtor.} =
+  ##     obj.cleanup()
   ##
   ## The generated C-exported proc has the signature:
-  ##   int waku_destroy(void* ctx)
+  ##   cint mylibobj_destroy(void* ctx, FfiCallback callback, void* userData)
   ##
-  ## It extracts the library value from ctx, runs the body, then calls
-  ## destroyFFIContext to tear down the FFI thread and free the context.
-  ## Returns RET_OK on success, RET_ERR on failure (null/invalid ctx, or
-  ## destroyFFIContext failure).
+  ## Recycle the context for reuse to keep fd usage bounded.
+  ## NON-BLOCKING: returns RET_OK once accepted;
+  ## the real outcome arrives via `callback`.
 
   let procName = prc[0]
   let formalParams = prc[3]
@@ -1271,8 +1270,8 @@ macro ffiDtor*(prc: untyped): untyped =
   if formalParams.len < 2:
     error("ffiDtor: proc must have exactly one parameter (w: LibType)")
 
-  let libParamName = formalParams[1][0]
-  let libTypeName = formalParams[1][1]
+  let libParamName = formalParams[1][0] # e.g. w
+  let libTypeName = formalParams[1][1]  # e.g. MyLibObj
 
   let procNameStr = block:
     let raw = $procName
@@ -1289,7 +1288,7 @@ macro ffiDtor*(prc: untyped): untyped =
   if procName.kind == nnkPostfix:
     cExportProcName = procName[1]
 
-  let destroyResIdent = genSym(nskLet, "destroyRes")
+  let releaseResIdent = genSym(nskLet, "destroyRes")
 
   let ffiBody = newStmtList()
 
@@ -1314,12 +1313,14 @@ macro ffiDtor*(prc: untyped): untyped =
 
   let poolIdent = ident($libTypeName & "FFIPool")
   ffiBody.add quote do:
-    let `destroyResIdent` =
-      `poolIdent`.destroyFFIContext(cast[ptr FFIContext[`libTypeName`]](ctx))
-    if `destroyResIdent`.isErr():
+    let `releaseResIdent` = releaseFFIContext(
+      cast[ptr FFIContext[`libTypeName`]](ctx), callback, userData
+    )
+    if `releaseResIdent`.isErr():
+      if not callback.isNil():
+        let errStr = "release failed: " & $`releaseResIdent`.error
+        callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
       return RET_ERR
-
-  ffiBody.add quote do:
     return RET_OK
 
   let ffiProc = newProc(
