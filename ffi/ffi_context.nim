@@ -133,7 +133,7 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     return err("failed to create the event thread: " & getCurrentExceptionMsg())
 
   success = true
-  ok()
+  return ok()
 
 proc fireOrErr(sig: ThreadSignalPtr, name: string): Result[void, string] =
   let fired = sig.fireSync().valueOr:
@@ -176,7 +176,7 @@ proc stopAndJoinThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   joinThread(ctx.ffiThread)
   ?ctx.eventThreadExitSignal.waitExitOrErr("event thread", ThreadExitTimeout)
   joinThread(ctx.eventThread)
-  ok()
+  return ok()
 
 proc clearContext[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Stops a heap-allocated FFI context.
@@ -184,4 +184,4 @@ proc clearContext[T](ctx: ptr FFIContext[T]): Result[void, string] =
     return err("clearContext: " & $error)
   ctx.cleanUpResources().isOkOr:
     return err("cleanUpResources failed: " & $error)
-  ok()
+  return ok()

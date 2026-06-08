@@ -178,7 +178,7 @@ proc eventQueueLen*(q: var EventQueue): int {.raises: [], gcsafe.} =
     return q.count
 
 
-const emptyListenerPayload: cstring = ""
+const emptyListenerPayload*: cstring = ""
   ## Non-nil zero-length buffer handed to listeners when a payload is
   ## empty, so a consumer doing `std::string(data, len)` / `memcpy` never
   ## receives a nil pointer (which is UB even at len 0).
@@ -197,7 +197,8 @@ proc notifyListeners*(
 
 proc notifyListenersErr*(listeners: seq[FFIEventListener], msg: string) =
   let p =
-    if msg.len > 0: cast[pointer](unsafeAddr msg[0]) else: nil
+    if msg.len > 0: cast[pointer](unsafeAddr msg[0])
+    else: cast[pointer](emptyListenerPayload)
   notifyListeners(listeners, RET_ERR, p, msg.len)
 
 var ffiCurrentEventRegistry* {.threadvar.}: ptr FFIEventRegistry
