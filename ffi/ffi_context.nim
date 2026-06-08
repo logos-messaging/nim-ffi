@@ -106,7 +106,7 @@ proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     if not ctx.eventThreadExitSignal.isNil():
       ?ctx.eventThreadExitSignal.close()
       ctx.eventThreadExitSignal = nil
-  ok()
+  return ok()
 
 proc cleanUpResources[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Full cleanup for heap-allocated contexts: closes all resources and frees memory.
@@ -178,7 +178,7 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     return err("failed to create the event thread: " & getCurrentExceptionMsg())
 
   success = true
-  ok()
+  return ok()
 
 proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   # Error paths intentionally skip onNotResponding: a back-pressuring
@@ -199,7 +199,7 @@ proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     error "failed to signal eventQueueSignal in signalStop", error = evtSignaled.error
   elif evtSignaled.get() == false:
     error "failed to signal eventQueueSignal on time in signalStop"
-  ok()
+  return ok()
 
 ## If the FFI thread's event loop is blocked by a synchronous handler
 ## (e.g. blocking I/O), it cannot process reqSignal in time to exit.
@@ -233,7 +233,7 @@ proc stopAndJoinThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     return err("event thread did not exit in time; leaking ctx to avoid hang")
 
   joinThread(ctx.eventThread)
-  ok()
+  return ok()
 
 proc clearContext[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Stops the FFI context that was created via createFFIContext[T]() (heap).
@@ -241,4 +241,4 @@ proc clearContext[T](ctx: ptr FFIContext[T]): Result[void, string] =
     return err("clearContext: " & $error)
   ctx.cleanUpResources().isOkOr:
     return err("cleanUpResources failed: " & $error)
-  ok()
+  return ok()
