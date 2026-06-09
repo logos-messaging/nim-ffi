@@ -32,13 +32,16 @@ type FFIContext*[T] = object
   reqReceivedSignal: ThreadSignalPtr
     # to signal main thread, interfacing with the FFI thread, that FFI thread received the request
   stopSignal: ThreadSignalPtr
-  threadExitSignal: ThreadSignalPtr # bounds destroyFFIContext's wait so a blocked loop cannot hang the caller
-  eventQueueSignal: ThreadSignalPtr # wakes the event thread on enqueue (used once dispatch is rewired in PR #69)
+  threadExitSignal: ThreadSignalPtr
+    # bounds destroyFFIContext's wait so a blocked loop cannot hang the caller
+  eventQueueSignal: ThreadSignalPtr
+    # wakes the event thread on enqueue (used once dispatch is rewired in PR #69)
   eventThreadExitSignal: ThreadSignalPtr # mirrors threadExitSignal for the event thread
   userData*: pointer
   eventRegistry*: FFIEventRegistry
   eventQueue*: EventQueue
-  ffiHeartbeat*: Atomic[int64] # advanced each FFI-thread loop; event thread reads for liveness
+  ffiHeartbeat*: Atomic[int64]
+    # advanced each FFI-thread loop; event thread reads for liveness
   running: Atomic[bool] # To control when the threads are running
   registeredRequests: ptr Table[cstring, FFIRequestProc]
     # Pointer to with the registered requests at compile time

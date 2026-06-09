@@ -235,7 +235,6 @@ when not defined(gcRefc):
       # actually landed so a silently-broken dispatch loop is caught.
       check evt.called
 
-
 ## A foreign-thread mutation must not be able to invalidate the
 ## listener's `userData` while an in-flight dispatch is mid-invocation.
 ## The dispatch templates hold `reg.lock` for the entire snapshot +
@@ -317,16 +316,14 @@ suite "liveness events":
     defer:
       deinitCallbackData(evt)
 
-    discard addEventListener(
-      ctx[].eventRegistry, NotRespondingEventName, captureCb, addr evt
-    )
+    discard
+      addEventListener(ctx[].eventRegistry, NotRespondingEventName, captureCb, addr evt)
 
     onNotResponding(ctx)
 
     waitCallback(evt)
     check evt.retCode == RET_OK
-    let decoded =
-      cborDecode(callbackBytes(evt), EventEnvelope[NotRespondingEvent])
+    let decoded = cborDecode(callbackBytes(evt), EventEnvelope[NotRespondingEvent])
     check decoded.isOk()
     check decoded.value.eventType == NotRespondingEventName
 
@@ -343,9 +340,8 @@ suite "liveness events":
     defer:
       deinitCallbackData(evt)
 
-    discard addEventListener(
-      ctx[].eventRegistry, RespondingEventName, captureCb, addr evt
-    )
+    discard
+      addEventListener(ctx[].eventRegistry, RespondingEventName, captureCb, addr evt)
 
     onResponding(ctx)
 
@@ -387,9 +383,7 @@ suite "event thread drains queued events":
       deinitCallbackData(evt)
 
     const QueuedEvtName = "queued_evt"
-    discard addEventListener(
-      ctx[].eventRegistry, QueuedEvtName, captureCb, addr evt
-    )
+    discard addEventListener(ctx[].eventRegistry, QueuedEvtName, captureCb, addr evt)
 
     # `tryEnqueueEvent` takes ownership of both buffers on success; the
     # event thread c_frees them after dispatch returns.

@@ -10,14 +10,12 @@ import std/[locks, sequtils, options, tables]
 import chronicles
 import ./ffi_types, ./cbor_serial
 
-
 type EventEnvelope*[T] = object
   ## Standard wire shape for CBOR-encoded FFI events:
   ##   { eventType: tstr, payload: <T> }
   ## Pair with `dispatchFFIEventCbor` (or call `cborEncode` directly).
   eventType*: string
   payload*: T
-
 
 type
   FFIEventListener* = object
@@ -32,7 +30,6 @@ type
     lock*: Lock
     nextId*: uint64 ## Monotonic id source. 0 is reserved as "invalid"; ids start at 1.
     byEvent*: Table[string, seq[FFIEventListener]]
-
 
 proc initEventRegistry*(reg: var FFIEventRegistry) =
   ## Must be called exactly once on the owning thread before the registry
@@ -129,7 +126,6 @@ proc snapshotListeners*(
       listeners.add(l)
   listeners
 
-
 const EventQueueCapacity* = 1024
   ## ~24 KiB per context. Sustained backlog at this depth means a
   ## listener is wedged — what the stuck flag exists to surface.
@@ -202,7 +198,6 @@ proc eventQueueLen*(q: var EventQueue): int {.raises: [], gcsafe.} =
   withLock q.lock:
     return q.count
 
-
 const emptyListenerPayload*: cstring = ""
   ## Non-nil zero-length buffer handed to listeners when a payload is
   ## empty, so a consumer doing `std::string(data, len)` / `memcpy` never
@@ -216,8 +211,10 @@ proc notifyListeners*(
   ## consumer doing `std::string(data, len)` / `memcpy` never receives nil.
   let n = max(dataLen, 0)
   let dataPtr =
-    if n > 0 and not data.isNil(): cast[ptr cchar](data)
-    else: cast[ptr cchar](emptyListenerPayload)
+    if n > 0 and not data.isNil():
+      cast[ptr cchar](data)
+    else:
+      cast[ptr cchar](emptyListenerPayload)
   for listener in listeners:
     listener.callback(retCode, dataPtr, cast[csize_t](n), listener.userData)
 
@@ -225,8 +222,10 @@ proc notifyListenersErr*(listeners: seq[FFIEventListener], msg: string) =
   ## Error fan-out: adapts the message string to `notifyListeners`, which
   ## supplies the non-nil pointer for the empty-message case.
   let p =
-    if msg.len > 0: cast[pointer](unsafeAddr msg[0])
-    else: cast[pointer](emptyListenerPayload)
+    if msg.len > 0:
+      cast[pointer](unsafeAddr msg[0])
+    else:
+      cast[pointer](emptyListenerPayload)
   notifyListeners(listeners, RET_ERR, p, msg.len)
 
 var ffiCurrentEventRegistry* {.threadvar.}: ptr FFIEventRegistry
@@ -269,8 +268,10 @@ template dispatchFFIEvent*(eventName: string, body: untyped) =
   withFFIEventDispatch(eventName, listeners):
     let event = body
     let dataPtr: pointer =
-      if event.len > 0: cast[pointer](unsafeAddr event[0])
-      else: cast[pointer](emptyListenerPayload)
+      if event.len > 0:
+        cast[pointer](unsafeAddr event[0])
+      else:
+        cast[pointer](emptyListenerPayload)
     notifyListeners(listeners, RET_OK, dataPtr, event.len)
 
 template dispatchFFIEventCbor*(eventName: string, eventPayload: typed) =

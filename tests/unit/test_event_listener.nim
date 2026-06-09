@@ -48,7 +48,6 @@ proc tagCb(
     copyMem(addr payload[0], msg, int(len))
   record(t[].rec[], t[].name, retCode, payload)
 
-
 suite "FFIEventRegistry mutation":
   test "addEventListener assigns monotonically increasing non-zero ids":
     var reg: FFIEventRegistry

@@ -63,7 +63,6 @@ proc reqStructName(p: FFIProcMeta): string =
   else:
     camel & "Req"
 
-
 proc generateCargoToml*(libName: string): string =
   # `flume` is the unified callback channel (PR #23 Rust review, item 8): one
   # primitive that supports both `recv_timeout` (blocking trampoline) and
