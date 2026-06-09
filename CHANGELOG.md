@@ -22,47 +22,93 @@ All notable changes to this project are documented in this file.
   `sendRequestToFFIThread` calls with `event queue stuck - library
   cannot accept new requests`.
 
-## [0.2.0] - 2026-05-20
+## [0.2.0] - 2026-06-04
 
-Major release introducing CBOR-based wire format, multi-language binding
-generation (C++, Rust, CDDL), CI hardening with sanitizers, and several
-robustness fixes around context lifetime and memory safety.
+Major release introducing the CBOR-based wire format, CBOR-backed FFI events
+with a multi-listener registry, multi-language binding generation (C++, Rust,
+CDDL), CI hardening with sanitizers, and several robustness fixes around
+context lifetime and memory safety.
 
 ### Added
-- **CBOR serialization** as the FFI wire format ([#23](https://github.com/waku-org/nim-ffi/pull/23)).
+- **CBOR serialization** as the FFI wire format, replacing the previous
+  JSON/string-based `serial.nim`
+  ([#23](https://github.com/logos-messaging/nim-ffi/pull/23)).
+- **CBOR-backed FFI events**: event payloads are now serialized with CBOR
+  ([#39](https://github.com/logos-messaging/nim-ffi/pull/39)).
+- **Multi-listener event registry** (`FFIEventRegistry`) and its wiring into
+  `FFIContext`
+  ([#45](https://github.com/logos-messaging/nim-ffi/pull/45),
+  [#49](https://github.com/logos-messaging/nim-ffi/pull/49)).
+- **Event-listener ABI** with per-event typed listeners
+  ([#50](https://github.com/logos-messaging/nim-ffi/pull/50)).
+- **C++ typed per-event listeners** in the generated bindings
+  ([#51](https://github.com/logos-messaging/nim-ffi/pull/51)).
+- **Rust per-event typed listeners** (`add_on_<x>_listener` + wildcard
+  `add_event_listener`)
+  ([#52](https://github.com/logos-messaging/nim-ffi/pull/52)) and Rust event
+  example bindings/clients
+  ([#53](https://github.com/logos-messaging/nim-ffi/pull/53)).
 - **C++ binding generator** with end-to-end tests driven by CMake/CTest
-  ([#15](https://github.com/waku-org/nim-ffi/pull/15),
-  [#27](https://github.com/waku-org/nim-ffi/pull/27)).
-- **Rust binding generator** for simplified FFI authoring
-  ([#15](https://github.com/waku-org/nim-ffi/pull/15)).
+  ([#27](https://github.com/logos-messaging/nim-ffi/pull/27)), later expanded
+  with multi-context, cross-library, pipeline, and stress tests
+  ([#42](https://github.com/logos-messaging/nim-ffi/pull/42)).
 - **CDDL schema generator** for the FFI types
-  ([#24](https://github.com/waku-org/nim-ffi/pull/24)).
-- **CI pipeline**: first GitHub Actions workflow
-  ([#12](https://github.com/waku-org/nim-ffi/pull/12)), parallel test
-  execution ([#26](https://github.com/waku-org/nim-ffi/pull/26)), and
+  ([#24](https://github.com/logos-messaging/nim-ffi/pull/24)).
+- **CI pipeline**: parallel test execution
+  ([#26](https://github.com/logos-messaging/nim-ffi/pull/26)),
   AddressSanitizer / UndefinedBehaviorSanitizer / ThreadSanitizer jobs
-  ([#34](https://github.com/waku-org/nim-ffi/pull/34)).
-- Tests run under both `--mm:orc` and `--mm:refc`
-  ([#20](https://github.com/waku-org/nim-ffi/pull/20)).
+  ([#34](https://github.com/logos-messaging/nim-ffi/pull/34)), and a
+  cross-platform OS matrix for the C++ e2e suite
+  ([#38](https://github.com/logos-messaging/nim-ffi/pull/38)).
+- CBOR type-coverage tests
+  ([#41](https://github.com/logos-messaging/nim-ffi/pull/41)).
 
 ### Changed
-- FFI contexts now use a **fixed-size array** instead of dynamically allocated
-  slots, so creating many contexts no longer exhausts file descriptors
-  ([#14](https://github.com/waku-org/nim-ffi/pull/14)).
 - Removed the redundant `ffiType` macro; the `ffi` macro is now the single
   authoring entry point
-  ([#22](https://github.com/waku-org/nim-ffi/pull/22)).
-- Dropped `CatchableError` usage in favour of more specific exception types
-  ([#19](https://github.com/waku-org/nim-ffi/pull/19)).
+  ([#22](https://github.com/logos-messaging/nim-ffi/pull/22)).
+- Generated C++ avoids move constructors and assignment operators
+  ([#36](https://github.com/logos-messaging/nim-ffi/pull/36)) and no longer
+  throws exceptions across the binding boundary
+  ([#46](https://github.com/logos-messaging/nim-ffi/pull/46)).
+- Removed the wildcard event listener; event dispatch is now strictly
+  per-event ([#70](https://github.com/logos-messaging/nim-ffi/pull/70)).
 
 ### Fixed
-- Context buffer overflow when handling large payloads
-  ([#21](https://github.com/waku-org/nim-ffi/pull/21)).
-- Several memory leaks in request dispatch, context creation/destruction,
-  and `handleRes` under ARC/ORC; tightened lock initialization and resource
-  cleanup ([#11](https://github.com/waku-org/nim-ffi/pull/11)).
-- macOS dylibs are now built with a relocatable `install_name` instead of
-  hard-coded paths ([#8](https://github.com/waku-org/nim-ffi/pull/8)).
+- Use-after-free in the event/context lifetime path
+  ([#47](https://github.com/logos-messaging/nim-ffi/pull/47)).
+
+## [0.1.4] - 2026-05-13
+
+[Full changelog](https://github.com/logos-messaging/nim-ffi/compare/v0.1.3...v0.1.4)
+
+### Added
+
+- Simplified FFI authoring with auto-generated C++ and Rust language bindings,
+  including new `ffi/codegen/cpp.nim`, `ffi/codegen/rust.nim` and shared
+  `ffi/codegen/meta.nim` helpers (#15).
+- Rust example bindings and clients under `examples/nim_timer/` (`rust_bindings`
+  and `rust_client`, the latter with a Tokio async variant) (#15).
+- JSON/string-based FFI (de)serialization via `ffi/serial.nim`
+  (`ffiSerialize`/`ffiDeserialize`), with `tests/test_serial.nim` coverage.
+  (CBOR replaced this layer later, in 0.2.0.)
+- FFI context pool (`ffi/ffi_context_pool.nim`) using a fixed array of contexts.
+- Test suite expansion: `test_alloc.nim`, `test_ctx_validation.nim`,
+  `test_ffi_context.nim`, `test_gc_compat.nim`.
+- Continuous integration pipeline (#12).
+
+### Fixed
+
+- Context buffer overflow (#21).
+- Use a fixed array of contexts to avoid consuming all file descriptors (#14).
+- Memory leaks (#11).
+- Add `install_name` for macOS shared libraries (#8).
+
+### Changed
+
+- Run tests with the `refc` garbage collector (#20).
+- Remove `CatchableError` usage (#19).
+- Update license files to comply with Logos licensing requirements.
 
 ## [0.1.3] - 2026-01-23
 
@@ -84,5 +130,5 @@ Initial tagged release.
 - Core `ffi` macro for declaring procs exposed across the FFI boundary.
 - `FFIContext` with a dedicated worker thread, request dispatch, and a
   watchdog with configurable timeout
-  ([#7](https://github.com/waku-org/nim-ffi/pull/7)).
+  ([#7](https://github.com/logos-messaging/nim-ffi/pull/7)).
 - License files updated to comply with Logos licensing requirements.
