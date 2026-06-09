@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Changed
+- User event callbacks now run on a dedicated event thread fed by a
+  bounded SPSC queue (default capacity 1024), so a slow listener can no
+  longer block the FFI thread or concurrent `add_event_listener` /
+  `remove_event_listener` calls
+  ([#6](https://github.com/logos-messaging/nim-ffi/issues/6)).
+- Replaced the dedicated watchdog thread with a heartbeat check that
+  runs on the event thread. The FFI thread advances an atomic heartbeat
+  each loop iteration; if it stalls for more than 1s past the start-up
+  grace window, the event thread emits the `not_responding` event.
+
+### Added
+- Queue-overflow handling: when the bounded event queue is full, the
+  library sets a sticky "stuck" flag, logs an error, fires
+  `not_responding` from the event thread, and rejects subsequent
+  `sendRequestToFFIThread` calls with `event queue stuck - library
+  cannot accept new requests`.
+
 ## [0.2.0] - 2026-06-04
 
 Major release introducing the CBOR-based wire format, CBOR-backed FFI events
