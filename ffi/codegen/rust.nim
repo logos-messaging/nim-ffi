@@ -63,9 +63,6 @@ proc reqStructName(p: FFIProcMeta): string =
   else:
     camel & "Req"
 
-# ---------------------------------------------------------------------------
-# File generators
-# ---------------------------------------------------------------------------
 
 proc generateCargoToml*(libName: string): string =
   # `flume` is the unified callback channel (PR #23 Rust review, item 8): one
