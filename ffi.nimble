@@ -1,6 +1,6 @@
 # ffi.nimble
 
-version = "0.1.5"
+version = "0.1.6"
 author = "Institute of Free Technology"
 description = "FFI framework with custom header generation"
 license = "MIT or Apache License 2.0"
@@ -13,8 +13,8 @@ requires "chronicles"
 requires "taskpools"
 requires "cbor_serialization"
 
-const nimFlagsOrc = "--mm:orc -d:chronicles_log_level=WARN"
-const nimFlagsRefc = "--mm:refc -d:chronicles_log_level=WARN"
+const nimFlagsOrc = "--mm:orc -d:chronicles_log_level=WARN -d:ffiAllowSignalHandler"
+const nimFlagsRefc = "--mm:refc -d:chronicles_log_level=WARN -d:ffiAllowSignalHandler"
 
 import std/[algorithm, os, strutils]
 
