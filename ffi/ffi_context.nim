@@ -2,6 +2,19 @@
 {.pragma: callback, cdecl, raises: [], gcsafe.}
 {.passc: "-fPIC".}
 
+# Embedded in a foreign host (Go/Rust/...) the host must own OS signal handling;
+# Nim installing its own handlers clobbers it (e.g. Go's SIGSEGV -> sigpanic).
+# Enforce -d:noSignalHandler; standalone Nim binaries opt out via -d:ffiAllowSignalHandler.
+when not defined(noSignalHandler) and not defined(ffiAllowSignalHandler):
+  {.
+    error:
+      "nim-ffi: missing required compile flag. If this library is embedded in a " &
+      "host process (Go/Rust/...), build with -d:noSignalHandler so the host keeps " &
+      "ownership of OS signal handlers (it needs SIGSEGV for crash recovery, stack " &
+      "growth and preemption). If instead this is a standalone Nim program that owns " &
+      "its own process, build with -d:ffiAllowSignalHandler."
+  .}
+
 import std/[atomics, locks, json, tables, sequtils]
 import chronicles, chronos, chronos/threadsync, taskpools/channels_spsc_single, results
 import ./ffi_types, ./ffi_thread_request, ./internal/ffi_macro, ./logging

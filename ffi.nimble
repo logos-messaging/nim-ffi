@@ -1,6 +1,6 @@
 # ffi.nimble
 
-version = "0.1.5"
+version = "0.1.6"
 author = "Institute of Free Technology"
 description = "FFI framework with custom header generation"
 license = "MIT or Apache License 2.0"
@@ -12,8 +12,8 @@ requires "chronos"
 requires "chronicles"
 requires "taskpools"
 
-const nimFlagsOrc = "--mm:orc -d:chronicles_log_level=WARN"
-const nimFlagsRefc = "--mm:refc -d:chronicles_log_level=WARN"
+const nimFlagsOrc = "--mm:orc -d:chronicles_log_level=WARN -d:ffiAllowSignalHandler"
+const nimFlagsRefc = "--mm:refc -d:chronicles_log_level=WARN -d:ffiAllowSignalHandler"
 
 task buildffi, "Compile the library":
   exec "nim c " & nimFlagsOrc & " --app:lib --noMain ffi.nim"
