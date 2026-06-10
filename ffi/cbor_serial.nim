@@ -35,7 +35,6 @@ export cbor_serialization, options, results
 const CborNullByte*: byte = 0xf6'u8
   ## CBOR encoding of `null` — used as the wire sentinel for empty OK payloads.
 
-
 proc cborEncode*[T](x: T): seq[byte] =
   ## CBOR-encode any cbor_serialization-supported type (plus `pointer` / `ptr T`
   ## via our custom writers) into a fresh `seq[byte]`.

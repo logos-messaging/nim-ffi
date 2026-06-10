@@ -63,7 +63,6 @@ proc reqStructName(p: FFIProcMeta): string =
   else:
     camel & "Req"
 
-
 proc generateCargoToml*(libName: string): string =
   # `flume` is the unified callback channel (PR #23 Rust review, item 8): one
   # primitive that supports both `recv_timeout` (blocking trampoline) and
@@ -458,9 +457,7 @@ proc generateApiRs*(
       let handlerStruct = capitalizeFirstLetter(ev.nimProcName) & "Handler"
       let trampolineName = camelToSnakeCase(ev.nimProcName) & "_trampoline"
       lines.add("struct $1 {" % [handlerStruct])
-      lines.add(
-        "    f: Box<dyn Fn(&$1) + Send + Sync>," % [ev.payloadTypeName]
-      )
+      lines.add("    f: Box<dyn Fn(&$1) + Send + Sync>," % [ev.payloadTypeName])
       lines.add("}")
       lines.add("")
       lines.add("unsafe extern \"C\" fn $1(" % [trampolineName])
@@ -472,9 +469,7 @@ proc generateApiRs*(
       lines.add("    let h = &*(ud as *const $1);" % [handlerStruct])
       lines.add("    let bytes = slice::from_raw_parts(msg as *const u8, len);")
       lines.add("    #[derive(serde::Deserialize)]")
-      lines.add(
-        "    struct Envelope { payload: $1 }" % [ev.payloadTypeName]
-      )
+      lines.add("    struct Envelope { payload: $1 }" % [ev.payloadTypeName])
       lines.add(
         "    if let Ok(env) = ciborium::de::from_reader::<Envelope, _>(bytes) {"
       )
@@ -597,7 +592,9 @@ proc generateApiRs*(
       "        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;"
     )
     if events.len > 0:
-      lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })")
+      lines.add(
+        "        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })"
+      )
     else:
       lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout })")
     lines.add("    }")
@@ -623,7 +620,9 @@ proc generateApiRs*(
       "        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;"
     )
     if events.len > 0:
-      lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })")
+      lines.add(
+        "        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })"
+      )
     else:
       lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout })")
     lines.add("    }")
@@ -666,19 +665,16 @@ proc generateApiRs*(
           [ev.wireName]
       )
       lines.add("    /// passed to `remove_event_listener` to unregister.")
-      lines.add(
-        "    pub fn $1<F>(&self, handler: F) -> ListenerHandle" % [methodName]
-      )
-      lines.add(
-        "    where F: Fn(&$1) + Send + Sync + 'static," % [ev.payloadTypeName]
-      )
+      lines.add("    pub fn $1<F>(&self, handler: F) -> ListenerHandle" % [methodName])
+      lines.add("    where F: Fn(&$1) + Send + Sync + 'static," % [ev.payloadTypeName])
       lines.add("    {")
       lines.add(
         "        let owned: Box<$1> = Box::new($1 { f: Box::new(handler) });" %
           [handlerStruct]
       )
-      lines.add("        let raw = &*owned as *const $1 as *mut c_void;" %
-        [handlerStruct])
+      lines.add(
+        "        let raw = &*owned as *const $1 as *mut c_void;" % [handlerStruct]
+      )
       lines.add(
         "        self.add_listener_inner(b\"$1\\0\".as_ptr() as *const c_char, $2, raw, owned)" %
           [ev.wireName, trampolineName]
@@ -688,20 +684,15 @@ proc generateApiRs*(
 
     # Remove by handle. Drops the Box (and the user's closure) after the
     # C ABI confirms the listener has been unregistered.
-    lines.add(
-      "    /// Remove a previously-registered listener by handle. Returns true"
-    )
-    lines.add(
-      "    /// if the listener existed and was removed; false otherwise."
-    )
+    lines.add("    /// Remove a previously-registered listener by handle. Returns true")
+    lines.add("    /// if the listener existed and was removed; false otherwise.")
     lines.add(
       "    pub fn remove_event_listener(&self, handle: ListenerHandle) -> bool {"
     )
     lines.add("        if handle.id == 0 { return false; }")
     lines.add("        let rc = unsafe {")
     lines.add(
-      "            ffi::$1_remove_event_listener(self.ptr, handle.id)" %
-        [libName]
+      "            ffi::$1_remove_event_listener(self.ptr, handle.id)" % [libName]
     )
     lines.add("        };")
     lines.add("        self.listeners.lock().unwrap().remove(&handle.id);")

@@ -130,9 +130,8 @@ suite "event delivery is asynchronous":
     setupCallbackData(rsp)
 
     withPool(ctx):
-      discard addEventListener(
-        ctx[].eventRegistry, "latch", captureThreadIdCb, addr evt
-      )
+      discard
+        addEventListener(ctx[].eventRegistry, "latch", captureThreadIdCb, addr evt)
 
       check sendRequestToFFIThread(
         ctx, CaptureFfiTidRequest.ffiNewReq(captureCb, addr rsp)
@@ -164,9 +163,7 @@ suite "FFI thread independence":
     setupCallbackData(rsp)
 
     withPool(ctx):
-      discard addEventListener(
-        ctx[].eventRegistry, "latch", slowSleepCb, nil
-      )
+      discard addEventListener(ctx[].eventRegistry, "latch", slowSleepCb, nil)
 
       check sendRequestToFFIThread(
         ctx, EmitLatchEvent.ffiNewReq(captureCb, addr rsp, 0)
@@ -178,8 +175,7 @@ suite "FFI thread independence":
       # chronos's `Moment` — std/times exports a `milliseconds` that
       # shadows chronos's at this generic-instantiation site.
       let started = Moment.now()
-      check sendRequestToFFIThread(ctx, PingEvent.ffiNewReq(captureCb, addr rsp))
-        .isOk()
+      check sendRequestToFFIThread(ctx, PingEvent.ffiNewReq(captureCb, addr rsp)).isOk()
       waitCallback(rsp)
       let elapsed = Moment.now() - started
 
@@ -212,8 +208,7 @@ when not defined(gcRefc):
       # Wedge long enough to cross at least one tick boundary.
       gBlockingEnabled.store(true)
       let wedgeMs =
-        (EventThreadTickInterval + FFIHeartbeatStaleThreshold).milliseconds.int +
-          1500
+        (EventThreadTickInterval + FFIHeartbeatStaleThreshold).milliseconds.int + 1500
       check sendRequestToFFIThread(
         ctx, BlockingRequest.ffiNewReq(captureCb, addr rsp, wedgeMs)
       )
@@ -277,9 +272,7 @@ suite "queue overflow":
     setupCallbackData(rejected)
 
     withPool(ctx):
-      discard addEventListener(
-        ctx[].eventRegistry, "latch", backpressureCb, addr bp
-      )
+      discard addEventListener(ctx[].eventRegistry, "latch", backpressureCb, addr bp)
       discard addEventListener(
         ctx[].eventRegistry, NotRespondingEventName, captureCb, addr notif
       )

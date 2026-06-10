@@ -324,7 +324,6 @@ suite "sendRequestToFFIThread":
       check d.retCode == RET_OK
       check cborDecode(callbackBytes(d), string).value == "pong:" & msg
 
-
 type SimpleLib = object
   value: int
 
@@ -371,7 +370,6 @@ suite "ffiCtor macro":
     check ctx[].myLib[].value == 42
 
     check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
-
 
 type SendConfig {.ffi.} = object
   message: string

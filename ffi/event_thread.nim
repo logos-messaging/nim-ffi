@@ -46,8 +46,10 @@ proc emitLivenessEvent[T, P](ctx: ptr FFIContext[T], name: string, payload: P) =
       chronicles.error "liveness event encode failed", name = name, err = e.msg
       return
   let dataPtr: pointer =
-    if event.len > 0: cast[pointer](unsafeAddr event[0])
-    else: cast[pointer](emptyListenerPayload)
+    if event.len > 0:
+      cast[pointer](unsafeAddr event[0])
+    else:
+      cast[pointer](emptyListenerPayload)
   ctx.dispatchToListeners(name, dataPtr, event.len)
 
 proc onNotResponding*(ctx: ptr FFIContext) =
@@ -98,8 +100,7 @@ proc check[T](hb: var HeartbeatMonitor, ctx: ptr FFIContext[T]) =
     hb.lastValue = cur
     hb.lastChange = Moment.now()
     hb.notifiedStale = false
-  elif not hb.notifiedStale and
-      Moment.now() - hb.lastChange > FFIHeartbeatStaleThreshold:
+  elif not hb.notifiedStale and Moment.now() - hb.lastChange > FFIHeartbeatStaleThreshold:
     onNotResponding(ctx)
     hb.notifiedStale = true
 

@@ -7,7 +7,6 @@ when defined(ffiGenBindings):
   import ../codegen/cpp
   import ../codegen/cddl
 
-
 proc isPtr(typ: NimNode): bool =
   ## True iff `typ` is a `ptr T` type expression — i.e. an `nnkPtrTy` AST node.
   ## Used by the binding-generator metadata path to flag pointer-typed params
@@ -597,7 +596,6 @@ macro ffiRaw*(prc: untyped): untyped =
     echo stmts.repr
   return stmts
 
-
 macro ffi*(prc: untyped): untyped =
   ## Simplified FFI macro — applies to procs or types.
   ##
@@ -836,7 +834,6 @@ macro ffi*(prc: untyped): untyped =
   when defined(ffiDumpMacros):
     echo stmts.repr
   return stmts
-
 
 proc buildCtorRequestType(
     reqTypeName: NimNode, paramNames: seq[string], paramTypes: seq[NimNode]
@@ -1248,7 +1245,6 @@ macro ffiCtor*(prc: untyped): untyped =
     echo stmts.repr
   return stmts
 
-
 macro ffiDtor*(prc: untyped): untyped =
   ## Defines a C-exported destructor that tears down the FFIContext after the
   ## body runs.
@@ -1361,7 +1357,6 @@ macro ffiDtor*(prc: untyped): untyped =
     echo stmts.repr
   return stmts
 
-
 macro ffiEvent*(wireName: static[string], prc: untyped): untyped =
   ## Declares a library-initiated event. The annotated proc has an empty
   ## body — the macro fills it with a `dispatchFFIEventCbor` call so the
@@ -1404,8 +1399,10 @@ macro ffiEvent*(wireName: static[string], prc: untyped): untyped =
 
   let payloadTypeNameStr =
     case payloadTypeNode.kind
-    of nnkIdent: $payloadTypeNode
-    else: payloadTypeNode.repr
+    of nnkIdent:
+      $payloadTypeNode
+    else:
+      payloadTypeNode.repr
 
   var userProcName = procName
   if procName.kind == nnkPostfix:
@@ -1413,13 +1410,8 @@ macro ffiEvent*(wireName: static[string], prc: untyped): untyped =
 
   # The generated body: dispatchFFIEventCbor("wire_name", payload).
   let wireNameLit = newStrLitNode(wireName)
-  let dispatchBody = newStmtList(
-    newCall(
-      ident("dispatchFFIEventCbor"),
-      wireNameLit,
-      payloadParamName,
-    )
-  )
+  let dispatchBody =
+    newStmtList(newCall(ident("dispatchFFIEventCbor"), wireNameLit, payloadParamName))
 
   var newParams = newSeq[NimNode]()
   newParams.add(formalParams[0]) # return type (typically empty/void)
@@ -1451,7 +1443,6 @@ macro ffiEvent*(wireName: static[string], prc: untyped): untyped =
   when defined(ffiDumpMacros):
     echo generated.repr
   return generated
-
 
 macro genBindings*(
     outputDir: static[string] = ffiOutputDir, nimSrcRelPath: static[string] = ffiSrcPath

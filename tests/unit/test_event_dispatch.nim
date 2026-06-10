@@ -79,8 +79,7 @@ template withPool(ctxIdent: untyped, body: untyped) =
 registerReqFFI(EmitCborEventRequest, lib: ptr TestEvtLib):
   proc(): Future[Result[string, string]] {.async.} =
     dispatchFFIEventCbor(
-      "message_sent",
-      MessageSentBody(requestId: "req-1", messageHash: "0xdeadbeef"),
+      "message_sent", MessageSentBody(requestId: "req-1", messageHash: "0xdeadbeef")
     )
     return ok("emitted")
 
@@ -91,16 +90,15 @@ registerReqFFI(EmitRawBytesEventRequest, lib: ptr TestEvtLib):
     return ok("emitted")
 
 # Add/remove worker for the registry-race regression test.
-type SetterArgs = tuple
-  ctx: ptr FFIContext[TestEvtLib]
-  stop: ptr Atomic[bool]
-  target: ptr CallbackData
+type SetterArgs =
+  tuple[
+    ctx: ptr FFIContext[TestEvtLib], stop: ptr Atomic[bool], target: ptr CallbackData
+  ]
 
 proc setterThreadBody(args: SetterArgs) {.thread.} =
   while not args.stop[].load():
-    let id = addEventListener(
-      args.ctx[].eventRegistry, "message_sent", captureCb, args.target
-    )
+    let id =
+      addEventListener(args.ctx[].eventRegistry, "message_sent", captureCb, args.target)
     discard removeEventListener(args.ctx[].eventRegistry, id)
 
 suite "dispatchFFIEventCbor":
@@ -111,9 +109,7 @@ suite "dispatchFFIEventCbor":
     setupCallbackData(rsp)
 
     withPool(ctx):
-      discard addEventListener(
-        ctx[].eventRegistry, "message_sent", captureCb, addr evt
-      )
+      discard addEventListener(ctx[].eventRegistry, "message_sent", captureCb, addr evt)
 
       check sendRequestToFFIThread(
         ctx, EmitCborEventRequest.ffiNewReq(captureCb, addr rsp)
@@ -135,9 +131,7 @@ suite "dispatchFFIEvent with seq[byte]":
     setupCallbackData(rsp)
 
     withPool(ctx):
-      discard addEventListener(
-        ctx[].eventRegistry, "raw_bytes", captureCb, addr evt
-      )
+      discard addEventListener(ctx[].eventRegistry, "raw_bytes", captureCb, addr evt)
 
       check sendRequestToFFIThread(
         ctx, EmitRawBytesEventRequest.ffiNewReq(captureCb, addr rsp)
@@ -161,9 +155,8 @@ when not defined(gcRefc):
 
       withPool(ctx):
         # Seed an initial listener so the first dispatch has a target.
-        discard addEventListener(
-          ctx[].eventRegistry, "message_sent", captureCb, addr evt
-        )
+        discard
+          addEventListener(ctx[].eventRegistry, "message_sent", captureCb, addr evt)
 
         const NumSetterThreads = 4
         const NumDispatchIters = 200
@@ -209,9 +202,8 @@ suite "registry lock held during invocation":
       st.entered.store(false)
       st.exited.store(false)
 
-      let id = addEventListener(
-        ctx[].eventRegistry, "message_sent", slowEventCb, addr st
-      )
+      let id =
+        addEventListener(ctx[].eventRegistry, "message_sent", slowEventCb, addr st)
       check id != 0'u64
 
       check sendRequestToFFIThread(
@@ -250,8 +242,7 @@ suite "liveness events":
 
       waitCallback(evt)
       check evt.retCode == RET_OK
-      let decoded =
-        cborDecode(callbackBytes(evt), EventEnvelope[NotRespondingEvent])
+      let decoded = cborDecode(callbackBytes(evt), EventEnvelope[NotRespondingEvent])
       check decoded.isOk()
       check decoded.value.eventType == NotRespondingEventName
 
@@ -259,9 +250,8 @@ suite "liveness events":
     setupCallbackData(evt)
 
     withPool(ctx):
-      discard addEventListener(
-        ctx[].eventRegistry, RespondingEventName, captureCb, addr evt
-      )
+      discard
+        addEventListener(ctx[].eventRegistry, RespondingEventName, captureCb, addr evt)
 
       onResponding(ctx)
 
@@ -289,9 +279,7 @@ suite "event thread drains queued events":
 
     withPool(ctx):
       const QueuedEvtName = "queued_evt"
-      discard addEventListener(
-        ctx[].eventRegistry, QueuedEvtName, captureCb, addr evt
-      )
+      discard addEventListener(ctx[].eventRegistry, QueuedEvtName, captureCb, addr evt)
 
       # `tryEnqueueEvent` takes ownership of both buffers on success; the
       # event thread c_frees them after dispatch returns.

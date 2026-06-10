@@ -56,17 +56,12 @@ proc sanFlags(san: string): string =
   of "none", "":
     ""
   of "asan-ubsan":
-    " --passC:-fsanitize=address,undefined" &
-    " --passC:-fno-sanitize-recover=all" &
-    " --passC:-fno-omit-frame-pointer" &
-    " --passC:-g" &
-    " --passL:-fsanitize=address,undefined"
+    " --passC:-fsanitize=address,undefined" & " --passC:-fno-sanitize-recover=all" &
+      " --passC:-fno-omit-frame-pointer" & " --passC:-g" &
+      " --passL:-fsanitize=address,undefined"
   of "tsan":
-    " --passC:-fsanitize=thread" &
-    " --passC:-fno-omit-frame-pointer" &
-    " --passC:-g" &
-    " --passC:-O1" &
-    " --passL:-fsanitize=thread"
+    " --passC:-fsanitize=thread" & " --passC:-fno-omit-frame-pointer" & " --passC:-g" &
+      " --passC:-O1" & " --passL:-fsanitize=thread"
   else:
     raise newException(ValueError, "unknown NIM_FFI_SAN: " & san)
 
@@ -95,17 +90,24 @@ task test_cpp_e2e, "Build and run the C++ end-to-end tests for the timer example
   runOrQuit "nimble genbindings_cpp"
   runOrQuit "nimble genbindings_cpp_echo"
   runOrQuit "cmake -S tests/e2e/cpp -B tests/e2e/cpp/build"
-  runOrQuit "cmake --build tests/e2e/cpp/build"
-  runOrQuit "ctest --test-dir tests/e2e/cpp/build --output-on-failure"
+  runOrQuit "cmake --build tests/e2e/cpp/build --config Debug"
+  # `-C Debug` is required on Windows multi-config generators because
+  # gtest_discover_tests(PRE_TEST) loads per-config include files; harmless on
+  # single-config generators (Make/Ninja) on Linux/macOS.
+  runOrQuit "ctest --test-dir tests/e2e/cpp/build --output-on-failure -C Debug"
 
-task test_sanitized, "Run all unit tests under a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
+task test_sanitized,
+  "Run all unit tests under a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
   let san = getEnv("NIM_FFI_SAN", "none")
-  let mm  = getEnv("NIM_FFI_MM",  "")
+  let mm = getEnv("NIM_FFI_MM", "")
   let extra = sanFlags(san)
   let modes =
-    if mm == "orc": @[nimFlagsOrc]
-    elif mm == "refc": @[nimFlagsRefc]
-    else: @[nimFlagsOrc, nimFlagsRefc]
+    if mm == "orc":
+      @[nimFlagsOrc]
+    elif mm == "refc":
+      @[nimFlagsRefc]
+    else:
+      @[nimFlagsOrc, nimFlagsRefc]
   if san == "tsan":
     let suppPath = thisDir() & "/tsan.supp"
     let existing = getEnv("TSAN_OPTIONS")
@@ -117,82 +119,67 @@ task test_sanitized, "Run all unit tests under a sanitizer (NIM_FFI_SAN) and mm 
     for t in unitTests:
       exec "nim c -r " & flags & extra & " tests/unit/" & t & ".nim"
 
-task test_cpp_e2e_sanitized, "Build and run the C++ e2e tests with a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
-  let mm  = getEnv("NIM_FFI_MM",  "orc")
+task test_cpp_e2e_sanitized,
+  "Build and run the C++ e2e tests with a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
+  let mm = getEnv("NIM_FFI_MM", "orc")
   let san = getEnv("NIM_FFI_SAN", "none")
   runOrQuit "nimble genbindings_cpp"
   runOrQuit "nimble genbindings_cpp_echo"
-  runOrQuit "cmake -S tests/e2e/cpp -B tests/e2e/cpp/build" &
-       " -DNIM_FFI_MM=" & mm &
-       " -DNIM_FFI_SANITIZER=" & san
-  runOrQuit "cmake --build tests/e2e/cpp/build -j"
-  runOrQuit "ctest --test-dir tests/e2e/cpp/build --output-on-failure"
+  runOrQuit "cmake -S tests/e2e/cpp -B tests/e2e/cpp/build" & " -DNIM_FFI_MM=" & mm &
+    " -DNIM_FFI_SANITIZER=" & san
+  runOrQuit "cmake --build tests/e2e/cpp/build --config Debug -j"
+  runOrQuit "ctest --test-dir tests/e2e/cpp/build --output-on-failure -C Debug"
 
 task genbindings_example, "Generate Rust bindings for the timer example":
-  exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libmy_timer -d:ffiGenBindings -o:/dev/null examples/timer/timer.nim"
-  exec "nim c " & nimFlagsRefc & " --app:lib --noMain --nimMainPrefix:libmy_timer -d:ffiGenBindings -o:/dev/null examples/timer/timer.nim"
+  exec "nim c " & nimFlagsOrc &
+    " --app:lib --noMain --nimMainPrefix:libmy_timer -d:ffiGenBindings -o:/dev/null examples/timer/timer.nim"
+  exec "nim c " & nimFlagsRefc &
+    " --app:lib --noMain --nimMainPrefix:libmy_timer -d:ffiGenBindings -o:/dev/null examples/timer/timer.nim"
 
 task genbindings_rust, "Generate Rust bindings for the timer example":
-  exec "nim c " & nimFlagsOrc &
-    " --app:lib --noMain --nimMainPrefix:libmy_timer" &
+  exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
     " -d:ffiGenBindings -d:targetLang=rust" &
-    " -d:ffiOutputDir=examples/timer/rust_bindings" &
-    " -d:ffiSrcPath=../timer.nim" &
+    " -d:ffiOutputDir=examples/timer/rust_bindings" & " -d:ffiSrcPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
-  exec "nim c " & nimFlagsRefc &
-    " --app:lib --noMain --nimMainPrefix:libmy_timer" &
+  exec "nim c " & nimFlagsRefc & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
     " -d:ffiGenBindings -d:targetLang=rust" &
-    " -d:ffiOutputDir=examples/timer/rust_bindings" &
-    " -d:ffiSrcPath=../timer.nim" &
+    " -d:ffiOutputDir=examples/timer/rust_bindings" & " -d:ffiSrcPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
 
 task genbindings_cddl, "Generate CDDL schema for the timer example":
-  exec "nim c " & nimFlagsOrc &
-    " --app:lib --noMain --nimMainPrefix:libtimer" &
+  exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libtimer" &
     " -d:ffiGenBindings -d:targetLang=cddl" &
-    " -d:ffiOutputDir=examples/timer/cddl_bindings" &
-    " -d:ffiSrcPath=../timer.nim" &
+    " -d:ffiOutputDir=examples/timer/cddl_bindings" & " -d:ffiSrcPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
 
 task genbindings_cpp, "Generate C++ bindings for the timer example":
-  exec "nim c " & nimFlagsOrc &
-    " --app:lib --noMain --nimMainPrefix:libmy_timer" &
+  exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
     " -d:ffiGenBindings -d:targetLang=cpp" &
-    " -d:ffiOutputDir=examples/timer/cpp_bindings" &
-    " -d:ffiSrcPath=../timer.nim" &
+    " -d:ffiOutputDir=examples/timer/cpp_bindings" & " -d:ffiSrcPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
-  exec "nim c " & nimFlagsRefc &
-    " --app:lib --noMain --nimMainPrefix:libmy_timer" &
+  exec "nim c " & nimFlagsRefc & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
     " -d:ffiGenBindings -d:targetLang=cpp" &
-    " -d:ffiOutputDir=examples/timer/cpp_bindings" &
-    " -d:ffiSrcPath=../timer.nim" &
+    " -d:ffiOutputDir=examples/timer/cpp_bindings" & " -d:ffiSrcPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
 
 task genbindings_cpp_echo, "Generate C++ bindings for the echo example":
-  exec "nim c " & nimFlagsOrc &
-    " --app:lib --noMain --nimMainPrefix:libecho" &
+  exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libecho" &
     " -d:ffiGenBindings -d:targetLang=cpp" &
-    " -d:ffiOutputDir=examples/echo/cpp_bindings" &
-    " -d:ffiSrcPath=../echo.nim" &
+    " -d:ffiOutputDir=examples/echo/cpp_bindings" & " -d:ffiSrcPath=../echo.nim" &
     " -o:/dev/null examples/echo/echo.nim"
-  exec "nim c " & nimFlagsRefc &
-    " --app:lib --noMain --nimMainPrefix:libecho" &
+  exec "nim c " & nimFlagsRefc & " --app:lib --noMain --nimMainPrefix:libecho" &
     " -d:ffiGenBindings -d:targetLang=cpp" &
-    " -d:ffiOutputDir=examples/echo/cpp_bindings" &
-    " -d:ffiSrcPath=../echo.nim" &
+    " -d:ffiOutputDir=examples/echo/cpp_bindings" & " -d:ffiSrcPath=../echo.nim" &
     " -o:/dev/null examples/echo/echo.nim"
 
 task check_bindings_rust, "Verify checked-in Rust bindings match Nim source":
   exec "nimble genbindings_rust"
-  exec "git diff --exit-code --" &
-    " examples/timer/rust_bindings/Cargo.toml" &
-    " examples/timer/rust_bindings/build.rs" &
-    " examples/timer/rust_bindings/src"
+  exec "git diff --exit-code --" & " examples/timer/rust_bindings/Cargo.toml" &
+    " examples/timer/rust_bindings/build.rs" & " examples/timer/rust_bindings/src"
 
 task check_bindings_cpp, "Verify checked-in C++ bindings match Nim source":
   exec "nimble genbindings_cpp"
-  exec "git diff --exit-code --" &
-    " examples/timer/cpp_bindings/my_timer.hpp" &
+  exec "git diff --exit-code --" & " examples/timer/cpp_bindings/my_timer.hpp" &
     " examples/timer/cpp_bindings/CMakeLists.txt"
 
 task check_bindings, "Verify all checked-in example bindings match Nim source":

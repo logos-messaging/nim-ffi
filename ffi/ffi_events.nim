@@ -9,12 +9,9 @@ import std/[atomics, locks, sequtils, options, tables]
 import chronicles
 import ./ffi_types, ./cbor_serial, ./alloc
 
-
-type EventEnvelope*[T] = object
-  ## CBOR wire shape: { eventType: tstr, payload: <T> }.
+type EventEnvelope*[T] = object ## CBOR wire shape: { eventType: tstr, payload: <T> }.
   eventType*: string
   payload*: T
-
 
 type
   FFIEventListener* = object
@@ -26,7 +23,6 @@ type
     lock*: Lock
     nextId*: uint64 # 0 is reserved as "invalid"; ids start at 1.
     byEvent*: Table[string, seq[FFIEventListener]]
-
 
 proc initEventRegistry*(reg: var FFIEventRegistry) =
   ## Must run once on the owning thread before sharing — `initLock` on a
@@ -103,7 +99,6 @@ proc snapshotListeners*(
       listeners.add(l)
   listeners
 
-
 const EventQueueCapacity* = 1024
   # Sustained backlog at this depth means a listener is wedged.
 
@@ -115,8 +110,7 @@ type
     data*: ptr UncheckedArray[byte]
     dataLen*: int
 
-  EventQueue* = object
-    # SPSC ring; plain lock since ops are short and uncontended.
+  EventQueue* = object # SPSC ring; plain lock since ops are short and uncontended.
     lock*: Lock
     head*: int
     tail*: int
@@ -176,7 +170,6 @@ proc eventQueueLen*(q: var EventQueue): int {.raises: [], gcsafe.} =
   withLock q.lock:
     return q.count
 
-
 const emptyListenerPayload*: cstring = ""
   ## Non-nil zero-length buffer handed to listeners when the payload is empty
   ## (a nil pointer would be UB for consumers doing `memcpy` even at len 0).
@@ -188,15 +181,19 @@ proc notifyListeners*(
   ## `std::string(data, len)` / `memcpy` never see a nil pointer.
   let n = max(dataLen, 0)
   let dataPtr =
-    if n > 0 and not data.isNil(): cast[ptr cchar](data)
-    else: cast[ptr cchar](emptyListenerPayload)
+    if n > 0 and not data.isNil():
+      cast[ptr cchar](data)
+    else:
+      cast[ptr cchar](emptyListenerPayload)
   for listener in listeners:
     listener.callback(retCode, dataPtr, cast[csize_t](n), listener.userData)
 
 proc notifyListenersErr*(listeners: seq[FFIEventListener], msg: string) =
   let p =
-    if msg.len > 0: cast[pointer](unsafeAddr msg[0])
-    else: cast[pointer](emptyListenerPayload)
+    if msg.len > 0:
+      cast[pointer](unsafeAddr msg[0])
+    else:
+      cast[pointer](emptyListenerPayload)
   notifyListeners(listeners, RET_ERR, p, msg.len)
 
 var ffiCurrentEventRegistry* {.threadvar.}: ptr FFIEventRegistry
@@ -213,10 +210,7 @@ var ffiCurrentNotifyEventEnqueued* {.threadvar.}: proc() {.gcsafe, raises: [].}
   # Nil-safe; tick-driven tests leave it unset.
 
 template enqueueOrMarkStuck(
-    eventName: string,
-    namePtr: cstring,
-    dataPtr: ptr UncheckedArray[byte],
-    dataLen: int,
+    eventName: string, namePtr: cstring, dataPtr: ptr UncheckedArray[byte], dataLen: int
 ) =
   ## Takes ownership of `namePtr`/`dataPtr`. On queue-full sets the sticky
   ## stuck flag and wakes the event thread (firing onNotResponding from here

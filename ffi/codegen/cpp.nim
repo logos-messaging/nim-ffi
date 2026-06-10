@@ -158,7 +158,9 @@ proc emitEventDispatcher(
   ## until `removeEventListener` removes it.
   if events.len == 0:
     return
-  lines.add("    // ── Event listener API ──────────────────────────────────")
+  lines.add(
+    "    // ── Event listener API ──────────────────────────────────"
+  )
   lines.add("    struct ListenerHandle { std::uint64_t id = 0; };")
   lines.add("")
   # Per-event typed registration helpers.
@@ -174,9 +176,7 @@ proc emitEventDispatcher(
         [ev.payloadTypeName]
     )
     lines.add("        auto* raw = owned.get();")
-    lines.add(
-      "        const auto id = $1_add_event_listener(" % [libName]
-    )
+    lines.add("        const auto id = $1_add_event_listener(" % [libName])
     lines.add(
       "            ptr_, \"$1\", &$2::typedTrampoline<$3>, raw);" %
         [ev.wireName, ctxTypeName, ev.payloadTypeName]
@@ -197,9 +197,7 @@ proc emitEventDispatcher(
   lines.add("    }")
   lines.add("")
 
-proc emitEventTrampoline(
-    lines: var seq[string], events: seq[FFIEventMeta]
-) =
+proc emitEventTrampoline(lines: var seq[string], events: seq[FFIEventMeta]) =
   ## Private listener machinery for the public API emitted by
   ## `emitEventDispatcher`:
   ##
@@ -217,12 +215,16 @@ proc emitEventTrampoline(
   lines.add("    template <class T>")
   lines.add("    struct TypedListener : ListenerBase {")
   lines.add("        std::function<void(const T&)> fn;")
-  lines.add("        explicit TypedListener(std::function<void(const T&)> f) : fn(std::move(f)) {}")
+  lines.add(
+    "        explicit TypedListener(std::function<void(const T&)> f) : fn(std::move(f)) {}"
+  )
   lines.add("    };")
   lines.add("")
   # Typed trampoline — one instantiation per payload type, all sharing a body.
   lines.add("    template <class T>")
-  lines.add("    static void typedTrampoline(int ret, const char* msg, std::size_t len, void* ud) {")
+  lines.add(
+    "    static void typedTrampoline(int ret, const char* msg, std::size_t len, void* ud) {"
+  )
   lines.add("        if (!ud || ret != 0 || !msg || len == 0) return;")
   lines.add("        auto* listener = static_cast<TypedListener<T>*>(ud);")
   lines.add("        if (!listener->fn) return;")
@@ -236,9 +238,7 @@ proc emitEventTrampoline(
     "        if (cbor_value_map_find_value(&it, \"payload\", &payloadField) != CborNoError) return;"
   )
   lines.add("        T payload{};")
-  lines.add(
-    "        if (decode_cbor(payloadField, payload) != CborNoError) return;"
-  )
+  lines.add("        if (decode_cbor(payloadField, payload) != CborNoError) return;")
   lines.add("        listener->fn(payload);")
   lines.add("    }")
   lines.add("")
@@ -416,12 +416,12 @@ proc generateCppHeader*(
     # itself (see ContextRuleOf5Tpl) and hand out ownership through a
     # smart pointer that callers can move, store in containers, etc.
     let createRet = "Result<std::unique_ptr<$1>>" % [ctxTypeName]
-    lines.add(
-      "    static $1 create($2) {" % [createRet, ctorParamsWithTimeout]
-    )
+    lines.add("    static $1 create($2) {" % [createRet, ctorParamsWithTimeout])
     lines.add("        const auto ffi_req_ = $1;" % [reqInit])
     lines.add("        auto ffi_enc_ = encodeCborFFI(ffi_req_);")
-    lines.add("        if (ffi_enc_.isErr()) return $1::err(ffi_enc_.error());" % [createRet])
+    lines.add(
+      "        if (ffi_enc_.isErr()) return $1::err(ffi_enc_.error());" % [createRet]
+    )
     lines.add("        const auto& ffi_req_bytes_ = ffi_enc_.value();")
     lines.add("        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {")
     lines.add(
@@ -430,9 +430,13 @@ proc generateCppHeader*(
     )
     lines.add("            return 0;")
     lines.add("        }, timeout);")
-    lines.add("        if (ffi_raw_.isErr()) return $1::err(ffi_raw_.error());" % [createRet])
+    lines.add(
+      "        if (ffi_raw_.isErr()) return $1::err(ffi_raw_.error());" % [createRet]
+    )
     lines.add("        auto ffi_addr_ = decodeCborFFI<std::string>(ffi_raw_.value());")
-    lines.add("        if (ffi_addr_.isErr()) return $1::err(ffi_addr_.error());" % [createRet])
+    lines.add(
+      "        if (ffi_addr_.isErr()) return $1::err(ffi_addr_.error());" % [createRet]
+    )
     lines.add("        const auto& addr_str = ffi_addr_.value();")
     # Parse the ctx address without exceptions: std::stoull would throw on a
     # non-numeric payload, so use std::from_chars and surface the failure as
@@ -515,7 +519,9 @@ proc generateCppHeader*(
     lines.add("    $1 $2($3) const {" % [methRet, methodName, methParamsStr])
     lines.add("        const auto ffi_req_ = $1;" % [reqInit])
     lines.add("        auto ffi_enc_ = encodeCborFFI(ffi_req_);")
-    lines.add("        if (ffi_enc_.isErr()) return $1::err(ffi_enc_.error());" % [methRet])
+    lines.add(
+      "        if (ffi_enc_.isErr()) return $1::err(ffi_enc_.error());" % [methRet]
+    )
     lines.add("        const auto& ffi_req_bytes_ = ffi_enc_.value();")
     lines.add("        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {")
     lines.add(
@@ -523,7 +529,9 @@ proc generateCppHeader*(
         [m.procName]
     )
     lines.add("        }, timeout_);")
-    lines.add("        if (ffi_raw_.isErr()) return $1::err(ffi_raw_.error());" % [methRet])
+    lines.add(
+      "        if (ffi_raw_.isErr()) return $1::err(ffi_raw_.error());" % [methRet]
+    )
     lines.add("        return decodeCborFFI<$1>(ffi_raw_.value());" % [retCppType])
     lines.add("    }")
     lines.add("")
@@ -533,8 +541,7 @@ proc generateCppHeader*(
     # parse as invoking the `schedule` parameter).
     if methParamsStr.len > 0:
       lines.add(
-        "    std::future<$1> $2Async($3) const {" %
-          [methRet, methodName, methParamsStr]
+        "    std::future<$1> $2Async($3) const {" % [methRet, methodName, methParamsStr]
       )
       lines.add(
         "        return std::async(std::launch::async, [this, $1]() { return this->$2($3); });" %
@@ -591,7 +598,6 @@ proc generateCppBindings*(
 ) =
   createDir(outputDir)
   writeFile(
-    outputDir / (libName & ".hpp"),
-    generateCppHeader(procs, types, libName, events),
+    outputDir / (libName & ".hpp"), generateCppHeader(procs, types, libName, events)
   )
   writeFile(outputDir / "CMakeLists.txt", generateCppCMakeLists(libName, nimSrcRelPath))

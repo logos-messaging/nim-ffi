@@ -22,14 +22,16 @@ type FFIContext*[T] = object
   reqReceivedSignal: ThreadSignalPtr
   stopSignal: ThreadSignalPtr
   threadExitSignal: ThreadSignalPtr
-  eventQueueSignal: ThreadSignalPtr
-  eventThreadExitSignal: ThreadSignalPtr
+    # bounds destroyFFIContext's wait so a blocked loop cannot hang the caller
+  eventQueueSignal: ThreadSignalPtr # wakes the event thread on enqueue
+  eventThreadExitSignal: ThreadSignalPtr # mirrors threadExitSignal for the event thread
   userData*: pointer
   eventRegistry*: FFIEventRegistry
   eventQueue*: EventQueue
-  ffiHeartbeat*: Atomic[int64] # advanced each FFI-thread loop; event thread reads for liveness
+  ffiHeartbeat*: Atomic[int64]
+    # advanced each FFI-thread loop; event thread reads for liveness
   eventQueueStuck*: Atomic[bool] # sticky overflow flag
-  running: Atomic[bool]
+  running: Atomic[bool] # To control when the threads are running
   registeredRequests: ptr Table[cstring, FFIRequestProc]
 
 var onFFIThread* {.threadvar.}: bool

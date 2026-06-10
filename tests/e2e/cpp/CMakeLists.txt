@@ -81,9 +81,18 @@ elseif(NIM_FFI_SANITIZER STREQUAL "tsan")
         "TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:history_size=7")
 endif()
 
+# Discover at test time, not build time: a POST_BUILD discovery run launches the
+# freshly-linked exe while Windows Defender is still scanning it (and its staged
+# DLLs), which routinely overran the default 5s timeout on CI. PRE_TEST defers
+# enumeration to `ctest`, and the bumped timeout absorbs first-launch scan delays.
 include(GoogleTest)
 if(_san_test_env)
-    gtest_discover_tests(timer_e2e_tests PROPERTIES ENVIRONMENT "${_san_test_env}")
+    gtest_discover_tests(timer_e2e_tests
+        DISCOVERY_MODE PRE_TEST
+        DISCOVERY_TIMEOUT 120
+        PROPERTIES ENVIRONMENT "${_san_test_env}")
 else()
-    gtest_discover_tests(timer_e2e_tests)
+    gtest_discover_tests(timer_e2e_tests
+        DISCOVERY_MODE PRE_TEST
+        DISCOVERY_TIMEOUT 120)
 endif()
