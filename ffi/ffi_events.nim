@@ -233,6 +233,7 @@ template enqueueOrMarkStuck(
     if not ffiCurrentNotifyEventEnqueued.isNil():
       ffiCurrentNotifyEventEnqueued()
 
+template dispatchFFIEvent*(eventName: string, body: untyped) =
   ## `body` must yield `string` / `seq[byte]`. FFI thread only: encodes into
   ## a `c_malloc` buffer and enqueues; the event thread fans out to listeners.
   block:

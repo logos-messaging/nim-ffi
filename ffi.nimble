@@ -90,8 +90,11 @@ task test_cpp_e2e, "Build and run the C++ end-to-end tests for the timer example
   runOrQuit "nimble genbindings_cpp"
   runOrQuit "nimble genbindings_cpp_echo"
   runOrQuit "cmake -S tests/e2e/cpp -B tests/e2e/cpp/build"
-  runOrQuit "cmake --build tests/e2e/cpp/build"
-  runOrQuit "ctest --test-dir tests/e2e/cpp/build --output-on-failure"
+  runOrQuit "cmake --build tests/e2e/cpp/build --config Debug"
+  # `-C Debug` is required on Windows multi-config generators because
+  # gtest_discover_tests(PRE_TEST) loads per-config include files; harmless on
+  # single-config generators (Make/Ninja) on Linux/macOS.
+  runOrQuit "ctest --test-dir tests/e2e/cpp/build --output-on-failure -C Debug"
 
 task test_sanitized,
   "Run all unit tests under a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
@@ -124,8 +127,8 @@ task test_cpp_e2e_sanitized,
   runOrQuit "nimble genbindings_cpp_echo"
   runOrQuit "cmake -S tests/e2e/cpp -B tests/e2e/cpp/build" & " -DNIM_FFI_MM=" & mm &
     " -DNIM_FFI_SANITIZER=" & san
-  runOrQuit "cmake --build tests/e2e/cpp/build -j"
-  runOrQuit "ctest --test-dir tests/e2e/cpp/build --output-on-failure"
+  runOrQuit "cmake --build tests/e2e/cpp/build --config Debug -j"
+  runOrQuit "ctest --test-dir tests/e2e/cpp/build --output-on-failure -C Debug"
 
 task genbindings_example, "Generate Rust bindings for the timer example":
   exec "nim c " & nimFlagsOrc &

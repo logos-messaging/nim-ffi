@@ -56,7 +56,8 @@ proc processRequest[T](
   ## Invoked within the FFI thread to process a request coming from the FFI API consumer thread.
 
   let reqId = $request[].reqId
-  let reqIdCs = reqId.cstring # keeps reqId alive; implicit string→cstring is a warning.
+  let reqIdCs = reqId.cstring
+    # keeps reqId alive; implicit string→cstring is a warning.
 
   let retFut =
     if not ctx[].registeredRequests[].contains(reqIdCs):
