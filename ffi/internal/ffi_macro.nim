@@ -750,6 +750,14 @@ macro ffi*(prc: untyped): untyped =
 
     let ffiBody = newStmtList()
 
+    # Set up the calling (foreign) thread's GC before any Nim allocation in
+    # this wrapper (e.g. `$reqTypeName` below). Without it a foreign thread
+    # with no Nim heap segfaults in the allocator under GC pressure. `ffiRaw`
+    # already does this; the `.ffi.` path must too.
+    ffiBody.add quote do:
+      when declared(initializeLibrary):
+        initializeLibrary()
+
     ffiBody.add quote do:
       if callback.isNil:
         return RET_MISSING_CALLBACK
@@ -1246,22 +1254,25 @@ macro ffiCtor*(prc: untyped): untyped =
   return stmts
 
 macro ffiDtor*(prc: untyped): untyped =
-  ## Defines a C-exported destructor that tears down the FFIContext after the
-  ## body runs.
+  ## Defines a C-exported destructor that RECYCLES the FFIContext after the
+  ## body runs — it parks the context for reuse instead of tearing down its
+  ## worker threads, because chronos never frees a dispatcher's kqueue fd, so a
+  ## thread-per-context teardown would leak fds unboundedly.
   ##
   ## The annotated proc must have exactly one parameter of the library type.
-  ## The body contains any library-level cleanup to run before context teardown.
+  ## The body contains any library-level cleanup to run before recycle.
   ##
   ## Example:
-  ##   proc mylibobj_destroy*(obj: MyLibObj) {.ffiDtor.} =
-  ##     obj.cleanup()
+  ##   proc waku_destroy*(w: Waku) {.ffiDtor.} =
+  ##     w.cleanup()
   ##
   ## The generated C-exported proc has the signature:
-  ##   cint mylibobj_destroy(void* ctx, FfiCallback callback, void* userData)
+  ##   int waku_destroy(void* ctx, FfiCallback callback, void* userData)
   ##
-  ## Recycle the context for reuse to keep fd usage bounded.
-  ## NON-BLOCKING: returns RET_OK once accepted;
-  ## the real outcome arrives via `callback`.
+  ## NON-BLOCKING: it runs the body, requests recycle, and returns RET_OK once
+  ## accepted; the real outcome (RET_OK drained / RET_ERR stuck) arrives via
+  ## `callback`. Returns RET_ERR synchronously only for a null/invalid ctx or a
+  ## rejected recycle request.
 
   let procName = prc[0]
   let formalParams = prc[3]
@@ -1270,8 +1281,8 @@ macro ffiDtor*(prc: untyped): untyped =
   if formalParams.len < 2:
     error("ffiDtor: proc must have exactly one parameter (w: LibType)")
 
-  let libParamName = formalParams[1][0] # e.g. w
-  let libTypeName = formalParams[1][1]  # e.g. MyLibObj
+  let libParamName = formalParams[1][0]
+  let libTypeName = formalParams[1][1]
 
   let procNameStr = block:
     let raw = $procName
@@ -1288,7 +1299,7 @@ macro ffiDtor*(prc: untyped): untyped =
   if procName.kind == nnkPostfix:
     cExportProcName = procName[1]
 
-  let releaseResIdent = genSym(nskLet, "destroyRes")
+  let releaseResIdent = genSym(nskLet, "releaseRes")
 
   let ffiBody = newStmtList()
 
@@ -1298,6 +1309,9 @@ macro ffiDtor*(prc: untyped): untyped =
 
   ffiBody.add quote do:
     if ctx.isNil or cast[ptr FFIContext[`libTypeName`]](ctx)[].myLib.isNil:
+      if not callback.isNil:
+        let errStr = "destroy: invalid context"
+        callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
       return RET_ERR
 
   ffiBody.add quote do:
@@ -1311,21 +1325,28 @@ macro ffiDtor*(prc: untyped): untyped =
   if not isNoop:
     ffiBody.add(bodyNode)
 
-  let poolIdent = ident($libTypeName & "FFIPool")
   ffiBody.add quote do:
-    let `releaseResIdent` = releaseFFIContext(
-      cast[ptr FFIContext[`libTypeName`]](ctx), callback, userData
-    )
+    # Recycle (park) the context for reuse instead of tearing down its threads.
+    # The callback fires from the recycle handler once drained.
+    let `releaseResIdent` =
+      releaseFFIContext(cast[ptr FFIContext[`libTypeName`]](ctx), callback, userData)
     if `releaseResIdent`.isErr():
-      if not callback.isNil():
-        let errStr = "release failed: " & $`releaseResIdent`.error
+      if not callback.isNil:
+        let errStr = "destroy: " & `releaseResIdent`.error
         callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
       return RET_ERR
     return RET_OK
 
+  let poolIdent = ident($libTypeName & "FFIPool")
+
   let ffiProc = newProc(
     name = postfix(cExportProcName, "*"),
-    params = @[ident("cint"), newIdentDefs(ident("ctx"), ident("pointer"))],
+    params = @[
+      ident("cint"),
+      newIdentDefs(ident("ctx"), ident("pointer")),
+      newIdentDefs(ident("callback"), ident("FFICallBack")),
+      newIdentDefs(ident("userData"), ident("pointer")),
+    ],
     body = ffiBody,
     pragmas = newTree(
       nnkPragma,

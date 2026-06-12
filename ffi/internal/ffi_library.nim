@@ -139,6 +139,12 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
   let addName = libraryName & "_add_event_listener"
   let addErr = "error: invalid context in " & addName
   let addBody = quote:
+    # Sets up the calling (foreign) thread's GC before any Nim allocation
+    # below ($eventName / registry table+seq ops). Request entry procs do the
+    # same; without it a foreign thread with no Nim heap segfaults in the
+    # allocator under GC pressure.
+    when declared(initializeLibrary):
+      initializeLibrary()
     var ret: uint64 = 0
     if isNil(ctx):
       echo `addErr`
@@ -173,6 +179,10 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
   let removeName = libraryName & "_remove_event_listener"
   let removeErr = "error: invalid context in " & removeName
   let removeBody = quote:
+    # See add_event_listener: removeEventListener mutates the registry's
+    # GC-allocated table/seqs, so the calling foreign thread needs a GC.
+    when declared(initializeLibrary):
+      initializeLibrary()
     var ret: cint = 1
     if isNil(ctx):
       echo `removeErr`

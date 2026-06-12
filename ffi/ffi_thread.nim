@@ -28,6 +28,13 @@ proc sendRequestToFFIThread*(
   defer:
     ctx.lock.release()
 
+  # Reject once recycling has been requested: the slot is being drained/parked
+  # and its handler table/lib are about to be torn down. requestRecycle flips
+  # this under the same lock, so the check is race-free.
+  if ctx.lifecycle.load() != CtxLifecycle.Active:
+    deleteRequest(ffiRequest)
+    return err("FFI context is not accepting requests (being recycled)")
+
   let sentOk = ctx.reqChannel.trySend(ffiRequest)
   if not sentOk:
     deleteRequest(ffiRequest)
@@ -42,10 +49,15 @@ proc sendRequestToFFIThread*(
     deleteRequest(ffiRequest)
     return err("Couldn't fireSync in time")
 
+  # The request is now owned by the FFI thread: it has been queued and the FFI
+  # thread signaled, so it WILL be received, processed, and answered through the
+  # callback via handleRes. The waitSync below only confirms prompt receipt; its
+  # failure (e.g. EINVAL/EINTR under load or signal teardown) must NOT be
+  # surfaced as an error, or the caller would fire the callback a SECOND time
+  # while handleRes also fires it — a double callback onto a freed response.
   let res = ctx.reqReceivedSignal.waitSync(timeout)
   if res.isErr():
-    # FFI thread was signaled and owns the request; don't double-free.
-    return err("Couldn't receive reqReceivedSignal signal")
+    return ok()
 
   # On ok the FFI thread's processRequest deallocShared(req)'s.
   ok()
@@ -78,6 +90,75 @@ proc processRequest[T](
     handleRes(res, request)
   except Exception as e:
     error "Unexpected exception in handleRes", error = e.msg
+
+proc freeLib[T](ctx: ptr FFIContext[T]) {.gcsafe.} =
+  ## Frees the createShared'd library object built by the ctor. Logical resource
+  ## cleanup is the destructor body's job; this only releases the Nim storage.
+  if ctx.myLib.isNil():
+    return
+  when not defined(gcRefc):
+    {.cast(gcsafe).}:
+      `=destroy`(ctx.myLib[])
+  else:
+    discard
+  freeShared(ctx.myLib)
+  ctx.myLib = nil
+
+var RecycleTimeout* = 1500.milliseconds
+  ## Upper bound the recycle handler waits for in-flight handlers before it
+  ## cancels them and reports the ctx as stuck. Returns as soon as they finish,
+  ## so this only bounds a *stuck* handler. A `var` so tests can shorten it.
+
+proc recycleContext[T](
+    ctx: ptr FFIContext[T], ongoingProcessReq: ptr seq[Future[void]]
+) {.async.} =
+  ## Runs on the FFI thread. Drains in-flight handlers, frees the lib, clears the
+  ## per-context event state, releases the slot for reuse, and fires the recycle
+  ## callback. The worker threads (and their kqueue fds) stay alive for reuse.
+  ongoingProcessReq[].keepItIf(not it.finished())
+
+  ## 1. Let in-flight handlers finish on their own, bounded by RecycleTimeout.
+  var naturallyDrained = ongoingProcessReq[].len == 0
+  if not naturallyDrained:
+    naturallyDrained = await allFutures(ongoingProcessReq[]).withTimeout(RecycleTimeout)
+
+  ## 2. If any are wedged, cancel them and give the cancellations a bounded moment.
+  var safeToRecycle = naturallyDrained
+  if not naturallyDrained:
+    for fut in ongoingProcessReq[]:
+      if not fut.finished():
+        fut.cancelSoon()
+    safeToRecycle = await allFutures(ongoingProcessReq[]).withTimeout(RecycleTimeout)
+
+  let cb = ctx.recycleCallback
+  let ud = ctx.recycleUserData
+  ctx.recycleCallback = nil
+
+  if safeToRecycle:
+    freeLib(ctx)
+    # Reset per-context event state so a reused slot starts clean: drop listeners
+    # and drain/free any queued events so they aren't delivered to the next owner.
+    removeAllEventListeners(ctx[].eventRegistry)
+    while true:
+      let opt = ctx.eventQueue.tryDequeueEvent()
+      if opt.isNone():
+        break
+      let qe = opt.get()
+      freeEventBuffers(qe.name, qe.data)
+    ctx.eventQueueStuck.store(false)
+    ongoingProcessReq[].setLen(0)
+    ctx.release()
+
+  if not cb.isNil():
+    foreignThreadGc:
+      let msg =
+        if naturallyDrained:
+          ""
+        else:
+          "recycle: in-flight requests did not finish in time"
+      let cmsg = msg.cstring
+      let retCode = if naturallyDrained: RET_OK else: RET_ERR
+      cb(retCode, unsafeAddr cmsg[0], cast[csize_t](msg.len), ud)
 
 var ffiEventQueueSignalPtr {.threadvar.}: ThreadSignalPtr
   # Stashed so the hook has no closure env.
@@ -121,6 +202,14 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
         pending.del(i)
 
     while ctx.running.load():
+      # A destructor requested recycle: drain + free + park this slot for reuse,
+      # keeping the threads (and their kqueue fds) alive. Claim it atomically so
+      # only this loop runs the recycle.
+      var expectedRecycle = CtxLifecycle.RecyclePending
+      if ctx.lifecycle.compareExchange(expectedRecycle, CtxLifecycle.Recycling):
+        await recycleContext(ctx, addr pending)
+        continue
+
       # Freezes if a sync handler blocks the dispatcher; event thread reads to detect wedged FFI thread.
       discard ctx.ffiHeartbeat.fetchAdd(1)
 

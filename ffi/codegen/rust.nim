@@ -128,6 +128,7 @@ fn main() {
     cmd.arg("c")
         .arg("--mm:orc")
         .arg("-d:chronicles_log_level=WARN")
+        .arg("-d:noSignalHandler")
         .arg("--app:lib")
         .arg("--noMain")
         .arg(format!("--nimMainPrefix:lib$2"))

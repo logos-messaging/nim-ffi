@@ -58,6 +58,7 @@ add_custom_command(
     COMMAND "${NIM_EXECUTABLE}" c
                 --mm:orc
                 -d:chronicles_log_level=WARN
+                -d:noSignalHandler
                 --app:lib
                 --noMain
                 "--nimMainPrefix:lib{{LIB}}"
