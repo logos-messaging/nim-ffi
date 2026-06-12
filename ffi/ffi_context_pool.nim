@@ -50,11 +50,19 @@ proc destroyFFIContext*[T](
   ## for process/pool shutdown — normal destruction uses releaseFFIContext.
   ctx.stopAndJoinThreads().isOkOr:
     return err("destroyFFIContext(pool): " & $error)
+  # Close the ThreadSignalPtr fds and deinit the lock + event registry/queue
+  # BEFORE the slot is marked for rebuild. createFFIContext's rebuild path reruns
+  # initContextResources (initLock / initEventRegistry / initEventQueue + fresh
+  # signals); skipping deinit here would re-init still-live locks (UB) and orphan
+  # the old fds — the very leak this teardown exists to prevent.
+  let deinitRes = ctx.deinitContextResources()
   for i in 0 ..< MaxFFIContexts:
     if pool.contexts[i].addr == ctx:
       pool.initialized[i].store(false)
       break
   ctx.release()
+  deinitRes.isOkOr:
+    return err("destroyFFIContext(pool): " & $error)
   return ok()
 
 proc isValidCtx*[T](pool: var FFIContextPool[T], ctx: pointer): bool =
