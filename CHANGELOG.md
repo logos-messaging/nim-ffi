@@ -4,38 +4,12 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-### Changed
-- Enforce `-d:noSignalHandler` at compile time: the build now fails with an
-  actionable message unless the consumer sets `-d:noSignalHandler` (libraries
-  embedded in a foreign host such as Go/Rust) or `-d:ffiAllowSignalHandler`
-  (standalone Nim binaries). Prevents the Nim runtime from installing its own
-  OS signal handlers and clobbering the host's — the cause of a real status-go
-  regression.
-- User event callbacks now run on a dedicated event thread fed by a
-  bounded SPSC queue (default capacity 1024), so a slow listener can no
-  longer block the FFI thread or concurrent `add_event_listener` /
-  `remove_event_listener` calls
-  ([#6](https://github.com/logos-messaging/nim-ffi/issues/6)).
-- Replaced the dedicated watchdog thread with a heartbeat check that
-  runs on the event thread. The FFI thread advances an atomic heartbeat
-  each loop iteration; if it stalls for more than 1s past the start-up
-  grace window, the event thread emits the `not_responding` event.
-
 ### Added
 - Queue-overflow handling: when the bounded event queue is full, the
   library sets a sticky "stuck" flag, logs an error, fires
   `not_responding` from the event thread, and rejects subsequent
   `sendRequestToFFIThread` calls with `event queue stuck - library
   cannot accept new requests`.
-
-## [0.2.0] - 2026-06-04
-
-Major release introducing the CBOR-based wire format, CBOR-backed FFI events
-with a multi-listener registry, multi-language binding generation (C++, Rust,
-CDDL), CI hardening with sanitizers, and several robustness fixes around
-context lifetime and memory safety.
-
-### Added
 - **CBOR serialization** as the FFI wire format, replacing the previous
   JSON/string-based `serial.nim`
   ([#23](https://github.com/logos-messaging/nim-ffi/pull/23)).
@@ -70,6 +44,21 @@ context lifetime and memory safety.
   ([#41](https://github.com/logos-messaging/nim-ffi/pull/41)).
 
 ### Changed
+- Enforce `-d:noSignalHandler` at compile time: the build now fails with an
+  actionable message unless the consumer sets `-d:noSignalHandler` (libraries
+  embedded in a foreign host such as Go/Rust) or `-d:ffiAllowSignalHandler`
+  (standalone Nim binaries). Prevents the Nim runtime from installing its own
+  OS signal handlers and clobbering the host's — the cause of a real status-go
+  regression.
+- User event callbacks now run on a dedicated event thread fed by a
+  bounded SPSC queue (default capacity 1024), so a slow listener can no
+  longer block the FFI thread or concurrent `add_event_listener` /
+  `remove_event_listener` calls
+  ([#6](https://github.com/logos-messaging/nim-ffi/issues/6)).
+- Replaced the dedicated watchdog thread with a heartbeat check that
+  runs on the event thread. The FFI thread advances an atomic heartbeat
+  each loop iteration; if it stalls for more than 1s past the start-up
+  grace window, the event thread emits the `not_responding` event.
 - Removed the redundant `ffiType` macro; the `ffi` macro is now the single
   authoring entry point
   ([#22](https://github.com/logos-messaging/nim-ffi/pull/22)).
@@ -97,7 +86,7 @@ context lifetime and memory safety.
   and `rust_client`, the latter with a Tokio async variant) (#15).
 - JSON/string-based FFI (de)serialization via `ffi/serial.nim`
   (`ffiSerialize`/`ffiDeserialize`), with `tests/test_serial.nim` coverage.
-  (CBOR replaced this layer later, in 0.2.0.)
+  (CBOR replaced this layer later.)
 - FFI context pool (`ffi/ffi_context_pool.nim`) using a fixed array of contexts.
 - Test suite expansion: `test_alloc.nim`, `test_ctx_validation.nim`,
   `test_ffi_context.nim`, `test_gc_compat.nim`.

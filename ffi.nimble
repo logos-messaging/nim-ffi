@@ -1,6 +1,6 @@
 # ffi.nimble
 
-version = "0.2.0"
+version = "0.1.4"
 author = "Institute of Free Technology"
 description = "FFI framework with custom header generation"
 license = "MIT or Apache License 2.0"
