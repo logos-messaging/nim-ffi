@@ -8,9 +8,15 @@
 
 import std/[atomics, locks, options, tables]
 import chronicles, chronos, chronos/threadsync, taskpools/channels_spsc_single, results
-import ./ffi_types, ./ffi_events, ./ffi_thread_request, ./logging, ./cbor_serial
+import
+  ./ffi_types,
+  ./ffi_events,
+  ./ffi_handles,
+  ./ffi_thread_request,
+  ./logging,
+  ./cbor_serial
 
-export ffi_events
+export ffi_events, ffi_handles
 
 type FFIContext*[T] = object
   myLib*: ptr T # main library object (Waku, LibP2P, SDS, …)
@@ -27,6 +33,7 @@ type FFIContext*[T] = object
   eventThreadExitSignal: ThreadSignalPtr # mirrors threadExitSignal for the event thread
   userData*: pointer
   eventRegistry*: FFIEventRegistry
+  handles*: FFIHandleRegistry # live {.ffiHandle.} objects, keyed by uint64 id
   eventQueue*: EventQueue
   ffiHeartbeat*: Atomic[int64]
     # advanced each FFI-thread loop; event thread reads for liveness
@@ -57,6 +64,7 @@ proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## fields are nil'd after close so re-init on the same slot is safe.
   ctx.lock.deinitLock()
   deinitEventRegistry(ctx[].eventRegistry)
+  deinitHandleRegistry(ctx[].handles)
   deinitEventQueue(ctx[].eventQueue)
   when defined(gcRefc):
     # ThreadSignalPtr.close() under refc traps in safeUnregisterAndCloseFd
@@ -95,6 +103,7 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ctx.eventThreadExitSignal = nil
   ctx.lock.initLock()
   initEventRegistry(ctx[].eventRegistry)
+  initHandleRegistry(ctx[].handles)
   initEventQueue(ctx[].eventQueue)
   ctx.ffiHeartbeat.store(0)
   ctx.eventQueueStuck.store(false)

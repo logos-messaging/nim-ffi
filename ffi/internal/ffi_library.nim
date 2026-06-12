@@ -121,10 +121,18 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
   ## `libType` is the Nim type of the main library object, used to type
   ## the `ctx: ptr FFIContext[libType]` parameter. See
   ## `examples/timer/timer.nim` for a working call site.
+  currentLibType = $libType # so handle-receiver `.ffi.` procs can resolve the pool
+
   var stmts = newStmtList()
 
   # Emit the base bootstrap (pragmas, linker flags, NimMain, initializeLibrary)
   stmts.add(newCall(ident("declareLibraryBase"), newStrLitNode(libraryName)))
+
+  # The pool the generated wrappers validate against; ffiCtor/ffiDtor guard alike.
+  let poolIdent = ident($libType & "FFIPool")
+  stmts.add quote do:
+    when not declared(`poolIdent`):
+      var `poolIdent`*: FFIContextPool[`libType`]
 
   let ctxType = nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), libType))
   let cdeclExportPragma = newTree(

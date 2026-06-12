@@ -299,7 +299,7 @@ proc generateCppHeader*(
     lines.add("struct $1 {" % [reqName])
     for ep in p.extraParams:
       let cppType =
-        if ep.isPtr:
+        if ep.ridesAsPtr():
           CppPtrType
         else:
           nimTypeToCpp(ep.typeName)
@@ -308,7 +308,7 @@ proc generateCppHeader*(
     var fields: seq[(string, string)] = @[]
     for ep in p.extraParams:
       let cppType =
-        if ep.isPtr:
+        if ep.ridesAsPtr():
           CppPtrType
         else:
           nimTypeToCpp(ep.typeName)
@@ -388,7 +388,7 @@ proc generateCppHeader*(
     var epNames: seq[string] = @[]
     for ep in ctor.extraParams:
       let cppType =
-        if ep.isPtr:
+        if ep.ridesAsPtr():
           CppPtrType
         else:
           nimTypeToCpp(ep.typeName)
@@ -492,7 +492,7 @@ proc generateCppHeader*(
   for m in methods:
     let methodName = stripLibPrefixCpp(m.procName, libName)
     let retCppType =
-      if m.returnIsPtr:
+      if m.returnRidesAsPtr():
         CppPtrType
       else:
         nimTypeToCpp(m.returnTypeName)
@@ -502,7 +502,7 @@ proc generateCppHeader*(
     var methParamNames: seq[string] = @[]
     for ep in m.extraParams:
       let cppType =
-        if ep.isPtr:
+        if ep.ridesAsPtr():
           CppPtrType
         else:
           nimTypeToCpp(ep.typeName)

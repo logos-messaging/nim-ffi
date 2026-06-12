@@ -6,6 +6,7 @@ type
     name*: string # Nim param name, e.g. "req"
     typeName*: string # Nim type name, e.g. "EchoRequest"
     isPtr*: bool # true if the type is `ptr T`
+    isHandle*: bool # true if the type is an {.ffiHandle.} type (wire form uint64)
 
   FFIKind* {.pure.} = enum
     FFI
@@ -20,6 +21,7 @@ type
     extraParams*: seq[FFIParamMeta] # all params except the lib param
     returnTypeName*: string # e.g. "EchoResponse", "string", "pointer"
     returnIsPtr*: bool # true if return type is ptr T
+    returnIsHandle*: bool # true if return type is an {.ffiHandle.} type
 
   FFIFieldMeta* = object
     name*: string # e.g. "delayMs"
@@ -45,6 +47,24 @@ var ffiProcRegistry* {.compileTime.}: seq[FFIProcMeta]
 var ffiTypeRegistry* {.compileTime.}: seq[FFITypeMeta]
 var ffiEventRegistry* {.compileTime.}: seq[FFIEventMeta]
 var currentLibName* {.compileTime.}: string
+
+# Lib type name (set by declareLibrary) so handle-receiver procs resolve the pool.
+var currentLibType* {.compileTime.}: string
+
+# Names of types marked `{.ffiHandle.}` (wire form uint64).
+var ffiHandleTypeNames* {.compileTime.}: seq[string]
+
+proc isFFIHandleTypeName*(name: string): bool {.compileTime.} =
+  name in ffiHandleTypeNames
+
+proc ridesAsPtr*(ep: FFIParamMeta): bool =
+  ## True if the param crosses the wire as an opaque uint64 — a raw `ptr` or an
+  ## `{.ffiHandle.}` id. Both share the codegen pointer type.
+  ep.isPtr or ep.isHandle
+
+proc returnRidesAsPtr*(p: FFIProcMeta): bool =
+  ## True if the return crosses the wire as an opaque uint64 (raw `ptr` or handle).
+  p.returnIsPtr or p.returnIsHandle
 
 # Target language for binding generation; override with -d:targetLang=cpp
 const targetLang* {.strdefine.} = "rust"

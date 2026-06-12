@@ -92,7 +92,7 @@ proc emitObjectFields(t: FFITypeMeta): string =
 proc emitReqFields(p: FFIProcMeta): string =
   var fields: seq[tuple[name: string, typeName: string, isPtr: bool]] = @[]
   for ep in p.extraParams:
-    fields.add((name: ep.name, typeName: ep.typeName, isPtr: ep.isPtr))
+    fields.add((name: ep.name, typeName: ep.typeName, isPtr: ep.ridesAsPtr()))
   emitMap(fields)
 
 proc responseRule(p: FFIProcMeta): string =
@@ -106,7 +106,7 @@ proc responseRule(p: FFIProcMeta): string =
     # The dtor has no meaningful payload — handleRes sends a CBOR null sentinel.
     "nil"
   of FFIKind.FFI:
-    if p.returnIsPtr:
+    if p.returnRidesAsPtr():
       "uint"
     else:
       nimTypeToCddl(p.returnTypeName)
