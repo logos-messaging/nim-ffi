@@ -207,6 +207,8 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
       lines.add("    pub fn $1($2) -> *mut c_void;" % [p.procName, params.join(", ")])
     of FFIKind.DTOR:
       params.add("ctx: *mut c_void")
+      params.add("callback: FFICallback")
+      params.add("user_data: *mut c_void")
       lines.add("    pub fn $1($2) -> c_int;" % [p.procName, params.join(", ")])
 
   # Listener-registration ABI — emitted on the Nim side by `declareLibrary`,
@@ -531,7 +533,14 @@ proc generateApiRs*(
     lines.add("impl Drop for $1 {" % [ctxTypeName])
     lines.add("    fn drop(&mut self) {")
     lines.add("        if !self.ptr.is_null() {")
-    lines.add("            unsafe { ffi::$1(self.ptr); }" % [dtorProcName])
+    # `<lib>_destroy` is non-blocking at the C ABI: it parks the context for
+    # reuse and reports the outcome via the callback. Block until that callback
+    # fires so the pool slot is fully drained and parked before this handle goes
+    # away — otherwise rapid create/destroy churn could outrun the recycle and
+    # exhaust the pool. The recycle outcome is best-effort on drop, so discard it.
+    lines.add("            let _ = ffi_call_sync(self.timeout, |cb, ud| unsafe {")
+    lines.add("                ffi::$1(self.ptr, cb, ud)" % [dtorProcName])
+    lines.add("            });")
     lines.add("            self.ptr = std::ptr::null_mut();")
     lines.add("        }")
     # `listeners` is dropped automatically after this body returns. By

@@ -141,7 +141,9 @@ unsafe impl Sync for MyTimerCtx {}
 impl Drop for MyTimerCtx {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
-            unsafe { ffi::my_timer_destroy(self.ptr); }
+            let _ = ffi_call_sync(self.timeout, |cb, ud| unsafe {
+                ffi::my_timer_destroy(self.ptr, cb, ud)
+            });
             self.ptr = std::ptr::null_mut();
         }
     }

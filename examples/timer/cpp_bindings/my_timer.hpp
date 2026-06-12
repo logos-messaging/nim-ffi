@@ -706,7 +706,7 @@ int my_timer_echo(void* ctx, FFICallback callback, void* user_data, const uint8_
 int my_timer_version(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int my_timer_complex(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int my_timer_schedule(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
-int my_timer_destroy(void* ctx);
+int my_timer_destroy(void* ctx, FFICallback callback, void* user_data);
 uint64_t my_timer_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
 int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
 } // extern "C"
@@ -816,7 +816,14 @@ public:
     // context.
     ~MyTimerCtx() {
         if (ptr_) {
-            my_timer_destroy(ptr_);
+            // `my_timer_destroy` is non-blocking at the C ABI: it parks the
+            // context for reuse and reports the outcome via the callback. Block
+            // here until that callback fires so the pool slot is fully drained
+            // and parked before this object goes away — otherwise a rapid
+            // create/destroy churn could outrun the recycle and exhaust the pool.
+            (void)ffi_call_([this](FFICallback cb, void* ud) {
+                return my_timer_destroy(ptr_, cb, ud);
+            }, timeout_);
             ptr_ = nullptr;
         }
     }

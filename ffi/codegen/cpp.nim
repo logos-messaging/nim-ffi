@@ -339,7 +339,9 @@ proc generateCppHeader*(
           [p.procName]
       )
     of FFIKind.DTOR:
-      lines.add("int $1(void* ctx);" % [p.procName])
+      lines.add(
+        "int $1(void* ctx, FFICallback callback, void* user_data);" % [p.procName]
+      )
   # `declareLibrary` always exports the listener-registration ABI. Declare
   # it here so the typed event-handler wiring below can call into it.
   lines.add(
@@ -570,8 +572,8 @@ proc generateCppHeader*(
   lines.add("    std::chrono::milliseconds timeout_;")
   if events.len > 0:
     # One owning entry per live listener, keyed by id. Destroyed after
-    # the destructor body runs `<lib>_destroy(ptr_)`, by which point the
-    # FFI side has joined its threads so no callback is mid-flight.
+    # the destructor blocks on `<lib>_destroy`'s recycle callback, by which
+    # point the FFI side has drained/parked the slot so no callback is mid-flight.
     lines.add(
       "    std::unordered_map<std::uint64_t, std::unique_ptr<ListenerBase>> listeners_;"
     )
