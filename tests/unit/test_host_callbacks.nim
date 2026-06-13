@@ -105,3 +105,69 @@ suite "FFIPendingTable":
     check r.ret == RET_ERR
     check bytesToStr(r.bytes) == "context shutting down"
     check tbl.pendingCount == 0
+
+# `pushCompletion` takes the raw (msg, len) a host hands across the C ABI.
+proc pushStr(q: var FFICompletionQueue, token: uint64, ret: cint, s: string) =
+  if s.len == 0:
+    pushCompletion(q, token, ret, nil, 0)
+  else:
+    pushCompletion(q, token, ret, cast[ptr cchar](unsafeAddr s[0]), csize_t(s.len))
+
+suite "FFICompletionQueue":
+  test "drain resolves pending futures by token, in FIFO order":
+    var tbl: FFIPendingTable
+    var q: FFICompletionQueue
+    initPendingTable(tbl)
+    initCompletionQueue(q)
+    defer:
+      deinitPendingTable(tbl)
+      deinitCompletionQueue(q)
+
+    let a = newPending(tbl) # token 1
+    let b = newPending(tbl) # token 2
+    pushStr(q, a.token, RET_OK, "alpha")
+    pushStr(q, b.token, RET_ERR, "boom")
+
+    check drainCompletions(q, tbl) == 2
+    check bytesToStr(waitFor(a.fut).bytes) == "alpha"
+    check waitFor(a.fut).ret == RET_OK
+    check bytesToStr(waitFor(b.fut).bytes) == "boom"
+    check waitFor(b.fut).ret == RET_ERR
+    check tbl.pendingCount == 0
+
+  test "empty payload and empty queue drain cleanly":
+    var tbl: FFIPendingTable
+    var q: FFICompletionQueue
+    initPendingTable(tbl)
+    initCompletionQueue(q)
+    defer:
+      deinitPendingTable(tbl)
+      deinitCompletionQueue(q)
+    check drainCompletions(q, tbl) == 0 # nothing queued
+    let p = newPending(tbl)
+    pushStr(q, p.token, RET_OK, "") # empty (nil buf) payload
+    check drainCompletions(q, tbl) == 1
+    check waitFor(p.fut).bytes.len == 0
+
+  test "completion for an unknown token is drained and dropped":
+    var tbl: FFIPendingTable
+    var q: FFICompletionQueue
+    initPendingTable(tbl)
+    initCompletionQueue(q)
+    defer:
+      deinitPendingTable(tbl)
+      deinitCompletionQueue(q)
+    pushStr(q, 999'u64, RET_OK, "orphan") # no pending future for this token
+    check drainCompletions(q, tbl) == 1 # drained (and its buffer freed)
+
+  test "deinit frees still-queued nodes without draining":
+    var tbl: FFIPendingTable
+    var q: FFICompletionQueue
+    initPendingTable(tbl)
+    initCompletionQueue(q)
+    let p = newPending(tbl)
+    pushStr(q, p.token, RET_OK, "leftover")
+    failAllPending(tbl, "shutdown") # the future is settled separately
+    deinitPendingTable(tbl)
+    deinitCompletionQueue(q) # must free the queued node, no leak/crash
+    check waitFor(p.fut).ret == RET_ERR

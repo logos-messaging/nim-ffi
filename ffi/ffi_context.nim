@@ -3,10 +3,10 @@
 import std/[atomics, locks, json, tables]
 import chronicles, chronos, chronos/threadsync, taskpools/channels_spsc_single, results
 import
-  ./ffi_types, ./ffi_events, ./ffi_thread_request, ./internal/ffi_macro, ./logging,
-  ./cbor_serial
+  ./ffi_types, ./ffi_events, ./ffi_host, ./ffi_thread_request,
+  ./internal/ffi_macro, ./logging, ./cbor_serial
 
-export ffi_events
+export ffi_events, ffi_host
 
 type FFIContext*[T] = object
   myLib*: ptr T
@@ -28,6 +28,12 @@ type FFIContext*[T] = object
     # blocked event loop cannot hang the caller forever
   userData*: pointer
   eventRegistry*: FFIEventRegistry
+  hostRegistry*: FFIHostRegistry
+    # host-provided functions a {.ffiHost.} proc dispatches to (roadmap #1)
+  pendingTable*: FFIPendingTable
+    # in-flight {.ffiHost.} calls: token -> the chronos Future being awaited
+  completionQueue: FFICompletionQueue
+    # host answers parked from any thread, drained + completed on the FFI thread
   running: Atomic[bool] # To control when the threads are running
   registeredRequests: ptr Table[cstring, FFIRequestProc]
     # Pointer to with the registered requests at compile time
@@ -85,6 +91,17 @@ proc sendRequestToFFIThread*(
   ## Notice that in case of "ok", the deallocShared(req) is performed by the FFI Thread in the
   ## process proc.
   return ok()
+
+proc completeHostCall*[T](
+    ctx: ptr FFIContext[T], token: uint64, ret: cint, msg: ptr cchar, len: csize_t
+) {.raises: [].} =
+  ## Backs `<lib>_host_complete`: the host delivers a `{.ffiHost.}` answer by
+  ## token. Callable from ANY thread — it only parks the result (GC-free) and
+  ## wakes the FFI loop via the existing `reqSignal`; the future is completed on
+  ## the FFI thread when the loop drains the queue. A token with no pending call
+  ## (late / double completion) is drained and dropped, never a crash.
+  pushCompletion(ctx[].completionQueue, token, ret, msg, len)
+  discard ctx.reqSignal.fireSync()
 
 type Foo = object
 registerReqFFI(WatchdogReq, foo: ptr Foo):
@@ -242,6 +259,12 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
       reapCompleted()
 
       let gotSignal = await ctx.reqSignal.wait().withTimeout(100.milliseconds)
+
+      ## Drain host-call answers every iteration (reqSignal is fired by
+      ## completeHostCall too): completing each awaited Future here, on the loop
+      ## thread, satisfies chronos's single-thread invariant.
+      drainCompletions(ctx[].completionQueue, ctx[].pendingTable)
+
       if not gotSignal:
         continue
 
@@ -264,6 +287,12 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
     ## before we exit. Without this, abandoning a future mid-await would
     ## leak the request allocations (visible to LSan; previously hidden
     ## because Nim's pool allocator kept the chunks alive in the process).
+    ##
+    ## Fail every outstanding {.ffiHost.} call first: a handler awaiting a host
+    ## answer that never arrives would otherwise make `allFutures(pending)` hang
+    ## forever. Then drain any answer that raced in during shutdown.
+    failAllPending(ctx[].pendingTable, "FFIContext shutting down")
+    drainCompletions(ctx[].completionQueue, ctx[].pendingTable)
     reapCompleted()
     if pending.len > 0:
       try:
@@ -280,6 +309,9 @@ proc cleanUpResources[T](ctx: ptr FFIContext[T]): Result[void, string] =
     freeShared(ctx)
   ctx.lock.deinitLock()
   deinitEventRegistry(ctx[].eventRegistry)
+  deinitHostRegistry(ctx[].hostRegistry)
+  deinitPendingTable(ctx[].pendingTable)
+  deinitCompletionQueue(ctx[].completionQueue)
   when defined(gcRefc):
     ## ThreadSignalPtr.close() is intentionally skipped under --mm:refc.
     ##
@@ -318,6 +350,9 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## is responsible for releasing the slot (freeShared or pool.releaseSlot).
   ctx.lock.initLock()
   initEventRegistry(ctx[].eventRegistry)
+  initHostRegistry(ctx[].hostRegistry)
+  initPendingTable(ctx[].pendingTable)
+  initCompletionQueue(ctx[].completionQueue)
 
   var success = false
   defer:

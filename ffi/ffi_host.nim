@@ -19,7 +19,7 @@
 
 import std/[locks, tables]
 import chronos
-import ./ffi_types
+import ./ffi_types, ./alloc
 
 # ---------------------------------------------------------------------------
 # Host function pointer
@@ -171,3 +171,96 @@ proc pendingCount*(tbl: var FFIPendingTable): int {.raises: [].} =
   withLock tbl.lock:
     n = tbl.pending.len
   return n
+
+# ---------------------------------------------------------------------------
+# Cross-thread completion queue
+# ---------------------------------------------------------------------------
+#
+# `<lib>_host_complete` runs on the host's thread, but a chronos `Future` can
+# only be completed on the FFI (event-loop) thread. So the host's answer is
+# parked here and drained on the FFI thread. The producer side is **GC-free** —
+# node and payload are `c_malloc`'d (ffiCMalloc / ffiCAllocArray) so no Nim GC
+# runs on the foreign thread — mirroring how the rest of the boundary allocates.
+
+type
+  CompletionNode = object
+    token: uint64
+    ret: cint
+    buf: ptr UncheckedArray[byte] ## c_malloc'd copy of the host payload (or nil)
+    bufLen: int
+    next: ptr CompletionNode
+
+  FFICompletionQueue* = object
+    lock: Lock
+    head: ptr CompletionNode
+    tail: ptr CompletionNode
+
+proc initCompletionQueue*(q: var FFICompletionQueue) =
+  q.lock.initLock()
+  q.head = nil
+  q.tail = nil
+
+proc pushCompletion*(
+    q: var FFICompletionQueue, token: uint64, ret: cint, msg: ptr cchar, len: csize_t
+) {.raises: [].} =
+  ## Enqueue one host answer. Safe to call from **any** thread; allocates only
+  ## via c_malloc so it never touches the Nim GC on a foreign thread. The FFI
+  ## thread copies the payload into a `seq[byte]` and frees the node on drain.
+  let node = ffiCMalloc(CompletionNode)
+  node.token = token
+  node.ret = ret
+  node.bufLen = int(len)
+  node.next = nil
+  if len > 0'u and not msg.isNil():
+    node.buf = ffiCAllocArray(byte, int(len))
+    copyMem(node.buf, msg, int(len))
+  else:
+    node.buf = nil
+  withLock q.lock:
+    if q.tail.isNil():
+      q.head = node
+    else:
+      q.tail.next = node
+    q.tail = node
+
+proc drainCompletions*(
+    q: var FFICompletionQueue, tbl: var FFIPendingTable
+): int {.discardable.} =
+  ## FFI-thread only. Detaches the whole queue, then for each entry resolves the
+  ## pending future by token (copying the payload into GC memory here, on the FFI
+  ## thread) and frees the c_malloc'd node. Returns the number drained.
+  var head: ptr CompletionNode = nil
+  withLock q.lock:
+    head = q.head
+    q.head = nil
+    q.tail = nil
+
+  var n = 0
+  while not head.isNil():
+    let node = head
+    head = node.next
+    var b = newSeq[byte](node.bufLen)
+    if node.bufLen > 0:
+      copyMem(addr b[0], node.buf, node.bufLen)
+    discard completePending(tbl, node.token, HostResult(ret: node.ret, bytes: b))
+    if not node.buf.isNil():
+      ffiCFree(node.buf)
+    ffiCFree(node)
+    inc n
+  return n
+
+proc deinitCompletionQueue*(q: var FFICompletionQueue) =
+  ## Frees any still-queued nodes (their futures are handled separately by
+  ## `failAllPending` on teardown) and releases the lock.
+  var head: ptr CompletionNode = nil
+  withLock q.lock:
+    head = q.head
+    q.head = nil
+    q.tail = nil
+  while not head.isNil():
+    let node = head
+    head = node.next
+    if not node.buf.isNil():
+      ffiCFree(node.buf)
+    ffiCFree(node)
+  q.lock.deinitLock()
