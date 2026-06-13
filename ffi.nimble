@@ -172,6 +172,17 @@ task genbindings_go, "Generate Go (cgo) bindings for the timer example":
   if findExe("gofmt").len > 0:
     exec "gofmt -w examples/timer/go_bindings/my_timer.go"
 
+task genbindings_kotlin, "Generate the Kotlin/JNI wrapper for the Android timer example":
+  # Emits src/main/kotlin/.../MyTimerNode.kt + jni/my_timer_jni.c over the native
+  # C ABI. The C headers the shim includes come from `nimble genbindings_c`; run
+  # that too if the library's types or procs changed.
+  exec "nim c " & nimFlagsOrc &
+    " --app:lib --noMain --nimMainPrefix:libmy_timer" &
+    " -d:ffiGenBindings -d:targetLang=kotlin" &
+    " -d:ffiOutputDir=examples/timer/android" &
+    " -d:ffiSrcPath=../timer.nim" &
+    " -o:/dev/null examples/timer/timer.nim"
+
 task genbindings_cddl, "Generate CDDL schema for the timer example":
   exec "nim c " & nimFlagsOrc &
     " --app:lib --noMain --nimMainPrefix:libtimer" &
