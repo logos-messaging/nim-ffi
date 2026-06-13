@@ -40,10 +40,24 @@ type
     libName*: string
     payloadTypeName*: string
 
+  FFIHostMeta* = object
+    ## Host-provided function declared with `{.ffiHost.}` — the host implements
+    ## it and a `{.ffi.}` handler awaits it. `wireName` is the snake_case name
+    ## the host registers under. First slice: one `string` arg, `string` return;
+    ## `argName`/`argTypeName`/`returnTypeName` carry the shape so generators can
+    ## emit a typed wrapper.
+    wireName*: string
+    nimProcName*: string
+    libName*: string
+    argName*: string
+    argTypeName*: string
+    returnTypeName*: string
+
 # Compile-time registries populated by the macros
 var ffiProcRegistry* {.compileTime.}: seq[FFIProcMeta]
 var ffiTypeRegistry* {.compileTime.}: seq[FFITypeMeta]
 var ffiEventRegistry* {.compileTime.}: seq[FFIEventMeta]
+var ffiHostRegistry* {.compileTime.}: seq[FFIHostMeta]
 var currentLibName* {.compileTime.}: string
 
 # Target language for binding generation; override with -d:targetLang=cpp

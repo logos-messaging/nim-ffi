@@ -1982,7 +1982,21 @@ macro ffiHost*(prc: untyped): untyped =
     block:
       let raw = $procName
       if raw.endsWith("*"): raw[0 ..^ 2] else: raw
-  let wireNameLit = newStrLitNode(camelToSnakeCase(procNameStr))
+  let wireName = camelToSnakeCase(procNameStr)
+  let wireNameLit = newStrLitNode(wireName)
+
+  # Record metadata so the per-language generators can emit an idiomatic wrapper
+  # (register a closure + a trampoline that answers via <lib>_host_complete).
+  ffiHostRegistry.add(
+    FFIHostMeta(
+      wireName: wireName,
+      nimProcName: procNameStr,
+      libName: currentLibName,
+      argName: $argName,
+      argTypeName: "string",
+      returnTypeName: "string",
+    )
+  )
 
   # The generated async body: resolve the thread-local host context, look up the
   # registered fn, allocate a pending token, invoke the host with the raw request
@@ -2088,7 +2102,7 @@ macro genBindings*(
     of "go":
       generateGoBindings(
         ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
-        ffiEventRegistry,
+        ffiEventRegistry, ffiHostRegistry,
       )
     else:
       error(
