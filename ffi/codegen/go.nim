@@ -334,6 +334,7 @@ proc generateGoFile*(
     types: seq[FFITypeMeta],
     libName: string,
     events: seq[FFIEventMeta] = @[],
+    hosts: seq[FFIHostMeta] = @[],
 ): string =
   let nodeType = capitalizeFirstLetter(libName) & "Node"
   let respT = capitalizeFirstLetter(libName) & "Resp"
@@ -370,6 +371,25 @@ proc generateGoFile*(
   L.add(
     "extern void " & libName & "GoEvent(int ret, char* msg, size_t len, void* userData);"
   )
+  # Host callbacks ({.ffiHost.}): a single exported Go trampoline backs every
+  # registered host fn; the static helper hands its address to register_host_fn
+  # (cgo drops const, so the forward decl uses char*).
+  if hosts.len > 0:
+    L.add(
+      "extern void " & libName &
+        "HostTrampoline(uint64_t callId, char* req, size_t reqLen, void* userData);"
+    )
+    L.add(
+      "static int " & libName &
+        "RegisterHost(void* ctx, const char* name, void* ud) {"
+    )
+    # cgo exports the trampoline with `char*` (it drops const); cast to FFIHostFn
+    # so the function-pointer types match.
+    L.add(
+      "  return " & libName & "_register_host_fn(ctx, name, (FFIHostFn)" & libName &
+        "HostTrampoline, ud);"
+    )
+    L.add("}")
   # One exported Go result callback per struct-returning proc (it reads the typed
   # return POD in-callback). Forward-declared here so cgo's `char*` shape matches.
   for p in procs:
@@ -559,6 +579,63 @@ proc generateGoFile*(
   L.add("}")
   L.add("")
 
+  # ---- host callbacks ({.ffiHost.}) ----------------------------------------
+  # One exported trampoline serves all host fns; the cgo.Handle in userData
+  # selects which Go closure. The closure runs on a fresh goroutine so the FFI
+  # thread is never blocked (the non-blocking contract), then answers by callId.
+  if hosts.len > 0:
+    L.add("type hostEntry struct {")
+    L.add("\tctx unsafe.Pointer")
+    L.add("\tfn  func(string) (string, error)")
+    L.add("}")
+    L.add("")
+    L.add("//export " & libName & "HostTrampoline")
+    L.add(
+      "func " & libName &
+        "HostTrampoline(callId C.uint64_t, req *C.char, reqLen C.size_t, userData unsafe.Pointer) {"
+    )
+    L.add("\te := cgo.Handle(uintptr(userData)).Value().(hostEntry)")
+    L.add("\treqStr := C.GoStringN(req, C.int(reqLen))")
+    L.add("\tgo func() {")
+    L.add("\t\tres, err := e.fn(reqStr)")
+    L.add("\t\tif err != nil {")
+    L.add("\t\t\tmsg := err.Error()")
+    L.add("\t\t\tcmsg := C.CString(msg)")
+    L.add(
+      "\t\t\tC." & libName &
+        "_host_complete(e.ctx, callId, C.int(C.RET_ERR), cmsg, C.size_t(len(msg)))"
+    )
+    L.add("\t\t\tC.free(unsafe.Pointer(cmsg))")
+    L.add("\t\t} else {")
+    L.add("\t\t\tcmsg := C.CString(res)")
+    L.add(
+      "\t\t\tC." & libName &
+        "_host_complete(e.ctx, callId, C.int(C.RET_OK), cmsg, C.size_t(len(res)))"
+    )
+    L.add("\t\t\tC.free(unsafe.Pointer(cmsg))")
+    L.add("\t\t}")
+    L.add("\t}()")
+    L.add("}")
+    L.add("")
+    for h in hosts:
+      let setName = "Set" & capitalizeFirstLetter(h.nimProcName)
+      L.add(
+        "// " & setName & " registers the host implementation of the '" & h.wireName &
+          "' {.ffiHost.} call."
+      )
+      L.add(
+        "func (n *" & nodeType & ") " & setName &
+          "(fn func(string) (string, error)) {"
+      )
+      L.add("\thandle := cgo.NewHandle(hostEntry{ctx: n.ctx, fn: fn})")
+      L.add("\tcname := C.CString(\"" & h.wireName & "\")")
+      L.add(
+        "\tC." & libName & "RegisterHost(n.ctx, cname, unsafe.Pointer(handle))"
+      )
+      L.add("\tC.free(unsafe.Pointer(cname))")
+      L.add("}")
+      L.add("")
+
   # ---- constructor ---------------------------------------------------------
   if haveCtor:
     let (goParams, conv, callArgs) = goParamConv(ctor.extraParams, types)
@@ -690,9 +767,11 @@ proc generateGoBindings*(
     outputDir: string,
     nimSrcRelPath: string,
     events: seq[FFIEventMeta] = @[],
+    hosts: seq[FFIHostMeta] = @[],
 ) =
   writeFile(
-    outputDir / (libName & ".go"), generateGoFile(procs, types, libName, events)
+    outputDir / (libName & ".go"),
+    generateGoFile(procs, types, libName, events, hosts),
   )
   # cgo `#include "<lib>.h"` resolves against this package directory, so emit the
   # native C header here too — the Go package is then self-contained (just stage

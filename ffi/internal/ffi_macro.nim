@@ -1925,6 +1925,122 @@ macro ffiEvent*(wireName: static[string], prc: untyped): untyped =
   return withPods
 
 # ---------------------------------------------------------------------------
+# ffiHost — host-provided functions the Nim side can await (roadmap #1)
+# ---------------------------------------------------------------------------
+
+macro ffiHost*(prc: untyped): untyped =
+  ## Declares a function the *host* implements, which a `{.ffi.}` handler can
+  ## call and `await` (the inverse of `{.ffi.}`). The annotated proc has an empty
+  ## body; the macro fills it with the dispatch: look up the host's registered
+  ## implementation, hand it the marshaled request + a callId, and await the
+  ## answer the host delivers (via `<lib>_host_complete`) on the FFI thread.
+  ##
+  ## First slice — raw (zero-serialization) ABI, exactly one `string` parameter,
+  ## returning `Future[Result[string, string]]`:
+  ##
+  ##   proc fetchToken(key: string): Future[Result[string, string]] {.ffiHost.}
+  ##
+  ##   # ...then from inside any {.ffi.} handler:
+  ##   let tok = (await fetchToken("session")).valueOr:
+  ##     return err("host lookup failed: " & error)
+  ##
+  ## Struct params/returns and the `{.ffiHost: cbor.}` format arg are follow-ups
+  ## (see docs/design-host-callbacks.md and docs/design-abi-format.md).
+
+  if prc.kind notin {nnkProcDef, nnkFuncDef}:
+    error("ffiHost must be applied to a proc declaration")
+
+  let procName = prc[0]
+  let formalParams = prc[3]
+
+  if formalParams.len != 2:
+    error(
+      "ffiHost (first pass) supports exactly one `string` parameter; got " &
+        $(formalParams.len - 1)
+    )
+
+  let paramDef = formalParams[1]
+  let argName = paramDef[0]
+  if paramDef[1].kind != nnkIdent or $paramDef[1] != "string":
+    error("ffiHost (first pass) parameter must be `string`, got: " & paramDef[1].repr)
+
+  let retTypeNode = formalParams[0]
+  if retTypeNode.kind != nnkBracketExpr or $retTypeNode[0] != "Future":
+    error(
+      "ffiHost return type must be Future[Result[string, string]], got: " &
+        retTypeNode.repr
+    )
+  let resultInner = retTypeNode[1]
+  if resultInner.kind != nnkBracketExpr or $resultInner[0] != "Result" or
+      $resultInner[1] != "string":
+    error(
+      "ffiHost (first pass) return type must be Future[Result[string, string]], got: " &
+        retTypeNode.repr
+    )
+
+  let procNameStr =
+    block:
+      let raw = $procName
+      if raw.endsWith("*"): raw[0 ..^ 2] else: raw
+  let wireName = camelToSnakeCase(procNameStr)
+  let wireNameLit = newStrLitNode(wireName)
+
+  # Record metadata so the per-language generators can emit an idiomatic wrapper
+  # (register a closure + a trampoline that answers via <lib>_host_complete).
+  ffiHostRegistry.add(
+    FFIHostMeta(
+      wireName: wireName,
+      nimProcName: procNameStr,
+      libName: currentLibName,
+      argName: $argName,
+      argTypeName: "string",
+      returnTypeName: "string",
+    )
+  )
+
+  # The generated async body: resolve the thread-local host context, look up the
+  # registered fn, allocate a pending callId, invoke the host with the raw request
+  # bytes, and await the answer. The host fn is called synchronously here (before
+  # the await) while `argName` is still alive, honouring the "req valid only for
+  # the call" contract.
+  let body = quote do:
+    let ffiReg = ffiCurrentHostRegistry
+    let ffiTbl = ffiCurrentPendingTable
+    if ffiReg.isNil() or ffiTbl.isNil():
+      return err("ffiHost " & `wireNameLit` & ": no host context on this thread")
+    let ffiHit = lookupHostFn(ffiReg[], `wireNameLit`)
+    if not ffiHit.found:
+      return err("ffiHost: host fn '" & `wireNameLit` & "' not registered")
+    let (ffiCallId, ffiFut) = newPending(ffiTbl[])
+    if `argName`.len > 0:
+      ffiHit.fn(
+        ffiCallId, cast[ptr cchar](unsafeAddr `argName`[0]), csize_t(`argName`.len),
+        ffiHit.userData,
+      )
+    else:
+      ffiHit.fn(ffiCallId, nil, 0, ffiHit.userData)
+    let ffiRes = await ffiFut
+    if ffiRes.ret != RET_OK:
+      return err(resultText(ffiRes))
+    return ok(resultText(ffiRes))
+
+  var newParams = newSeq[NimNode]()
+  newParams.add(formalParams[0])
+  newParams.add(paramDef)
+
+  let generated = newProc(
+    name = procName,
+    params = newParams,
+    body = body,
+    procType = prc.kind,
+    pragmas = newTree(nnkPragma, ident("async")),
+  )
+
+  when defined(ffiDumpMacros):
+    echo generated.repr
+  return generated
+
+# ---------------------------------------------------------------------------
 # genBindings — codegen entry point
 # ---------------------------------------------------------------------------
 
@@ -1986,7 +2102,7 @@ macro genBindings*(
     of "go":
       generateGoBindings(
         ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
-        ffiEventRegistry,
+        ffiEventRegistry, ffiHostRegistry,
       )
     else:
       error(
