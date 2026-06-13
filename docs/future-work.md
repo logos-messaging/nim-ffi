@@ -46,6 +46,13 @@ Export `<lib>_abi_descriptor()` returning the schema (CBOR/JSON) so a host can
 validate compatibility at load time. Addresses the deferred CBOR wire-versioning
 concern.
 
+## Cross-cutting decisions
+
+- **ABI format selection** ([design-abi-format.md](design-abi-format.md)) — per-proc
+  pragma arg `{.ffi: raw.}` / `{.ffi: cbor.}` (default native/`raw`), with a
+  library-wide `declareLibrary(defaultAbiFormat = …)` override. Global compile
+  flag discarded. Applies to `{.ffiHost.}` too. Direction decided, design only.
+
 ## Adjacent / parallel tracks (already discussed elsewhere)
 
 - **seq/Option + multi-struct param marshaling parity** for the Swift (#59) and
