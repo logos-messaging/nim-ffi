@@ -11,7 +11,7 @@ import org.junit.runner.RunWith
 class TimerNodeTest {
     @Test
     fun createVersionEcho() {
-        TimerNode("android-demo").use { node ->
+        MyTimerNode("android-demo").use { node ->
             assertEquals("nim-timer v0.1.0", node.version())
             val r = node.echo("hello from Kotlin", delayMs = 2)
             assertEquals("hello from Kotlin", r.echoed)
