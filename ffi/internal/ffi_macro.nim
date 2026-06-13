@@ -9,6 +9,7 @@ when defined(ffiGenBindings):
   import ../codegen/cddl
   import ../codegen/c
   import ../codegen/go
+  import ../codegen/swift
 
 # ---------------------------------------------------------------------------
 # String helpers used by multiple macros
@@ -1988,10 +1989,15 @@ macro genBindings*(
         ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
         ffiEventRegistry,
       )
+    of "swift":
+      generateSwiftBindings(
+        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
+        ffiEventRegistry,
+      )
     else:
       error(
         "genBindings: unknown targetLang '" & lang &
-          "'. Use 'c', 'go', 'rust', 'cpp', or 'cddl'."
+          "'. Use 'c', 'go', 'swift', 'rust', 'cpp', or 'cddl'."
       )
 
   return newEmptyNode()

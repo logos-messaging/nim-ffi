@@ -160,6 +160,17 @@ task genbindings_c, "Generate C bindings for the timer example":
     " -d:ffiSrcPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
 
+task genbindings_swift, "Generate the Swift wrapper for the iOS timer example":
+  # Emits Sources/MyTimer/MyTimer.swift over the native C ABI. The C headers it
+  # imports (cheaders/) come from `nimble genbindings_c`; run that too if the
+  # library's types or procs changed.
+  exec "nim c " & nimFlagsOrc &
+    " --app:lib --noMain --nimMainPrefix:libmy_timer" &
+    " -d:ffiGenBindings -d:targetLang=swift" &
+    " -d:ffiOutputDir=examples/timer/ios/Sources/MyTimer" &
+    " -d:ffiSrcPath=../timer.nim" &
+    " -o:/dev/null examples/timer/timer.nim"
+
 task genbindings_go, "Generate Go (cgo) bindings for the timer example":
   exec "nim c " & nimFlagsOrc &
     " --app:lib --noMain --nimMainPrefix:libmy_timer" &
