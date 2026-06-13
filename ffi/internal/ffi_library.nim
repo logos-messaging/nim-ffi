@@ -189,4 +189,64 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
     )
   )
 
+  # --- {libraryName}_register_host_fn -------------------------------------
+  # Registers the host's implementation of a {.ffiHost.} proc, keyed by its
+  # snake_case wire name. Returns 0 on success, non-zero on a nil ctx / nil fn.
+  let registerName = libraryName & "_register_host_fn"
+  let registerErr = "error: invalid context in " & registerName
+  let registerBody = quote:
+    var ret: cint = 1
+    if isNil(ctx):
+      echo `registerErr`
+      return ret
+    let resolvedName = if hostFnName.isNil(): "" else: $hostFnName
+    if registerHostFn(ctx[].hostRegistry, resolvedName, fn, userData):
+      ret = 0
+    return ret
+
+  stmts.add(
+    newProc(
+      name = ident(registerName),
+      params = @[
+        ident("cint"),
+        newIdentDefs(ident("ctx"), ctxType),
+        newIdentDefs(ident("hostFnName"), ident("cstring")),
+        newIdentDefs(ident("fn"), ident("FFIHostFn")),
+        newIdentDefs(ident("userData"), ident("pointer")),
+      ],
+      body = registerBody,
+      pragmas = cdeclExportPragma,
+    )
+  )
+
+  # --- {libraryName}_host_complete ----------------------------------------
+  # The host delivers a {.ffiHost.} answer by token. Callable from ANY thread —
+  # it parks the result and wakes the FFI loop, which completes the awaited
+  # future. `retCode` (not `ret`) avoids colliding with chronos templates under
+  # quote injection, like `listenerId` above.
+  let completeName = libraryName & "_host_complete"
+  let completeErr = "error: invalid context in " & completeName
+  let completeBody = quote:
+    if isNil(ctx):
+      echo `completeErr`
+      return cint(1)
+    completeHostCall(ctx, token, retCode, msg, msgLen)
+    return cint(0)
+
+  stmts.add(
+    newProc(
+      name = ident(completeName),
+      params = @[
+        ident("cint"),
+        newIdentDefs(ident("ctx"), ctxType),
+        newIdentDefs(ident("token"), ident("uint64")),
+        newIdentDefs(ident("retCode"), ident("cint")),
+        newIdentDefs(ident("msg"), nnkPtrTy.newTree(ident("cchar"))),
+        newIdentDefs(ident("msgLen"), ident("csize_t")),
+      ],
+      body = completeBody,
+      pragmas = cdeclExportPragma,
+    )
+  )
+
   return stmts
