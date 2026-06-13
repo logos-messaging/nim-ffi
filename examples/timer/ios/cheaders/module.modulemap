@@ -1,0 +1,5 @@
+module CMyTimer {
+    header "my_timer.h"
+    header "my_timer_cbor.h"
+    export *
+}

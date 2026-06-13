@@ -1,0 +1,4 @@
+/MyTimer.xcframework/
+/.build-slices/
+/.build/
+*.o
