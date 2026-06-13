@@ -3,7 +3,7 @@ import XCTest
 
 final class MyTimerTests: XCTestCase {
     func testCreateVersionEcho() throws {
-        let node = try TimerNode(name: "ios-demo")
+        let node = try MyTimerNode(name: "ios-demo")
 
         XCTAssertEqual(try node.version(), "nim-timer v0.1.0")
 
@@ -13,7 +13,7 @@ final class MyTimerTests: XCTestCase {
     }
 
     func testManyEchoes() throws {
-        let node = try TimerNode(name: "loop")
+        let node = try MyTimerNode(name: "loop")
         for i in 0..<200 {
             let r = try node.echo("m\(i)")
             XCTAssertEqual(r.echoed, "m\(i)")
