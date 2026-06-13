@@ -10,7 +10,7 @@ package host_demo
 #include <pthread.h>
 
 extern void host_demoGoEvent(int ret, char* msg, size_t len, void* userData);
-extern void host_demoHostTrampoline(uint64_t token, char* req, size_t reqLen, void* userData);
+extern void host_demoHostTrampoline(uint64_t callId, char* req, size_t reqLen, void* userData);
 static int host_demoRegisterHost(void* ctx, const char* name, void* ud) {
   return host_demo_register_host_fn(ctx, name, (FFIHostFn)host_demoHostTrampoline, ud);
 }
@@ -117,7 +117,7 @@ type hostEntry struct {
 }
 
 //export host_demoHostTrampoline
-func host_demoHostTrampoline(token C.uint64_t, req *C.char, reqLen C.size_t, userData unsafe.Pointer) {
+func host_demoHostTrampoline(callId C.uint64_t, req *C.char, reqLen C.size_t, userData unsafe.Pointer) {
 	e := cgo.Handle(uintptr(userData)).Value().(hostEntry)
 	reqStr := C.GoStringN(req, C.int(reqLen))
 	go func() {
@@ -125,11 +125,11 @@ func host_demoHostTrampoline(token C.uint64_t, req *C.char, reqLen C.size_t, use
 		if err != nil {
 			msg := err.Error()
 			cmsg := C.CString(msg)
-			C.host_demo_host_complete(e.ctx, token, C.int(C.RET_ERR), cmsg, C.size_t(len(msg)))
+			C.host_demo_host_complete(e.ctx, callId, C.int(C.RET_ERR), cmsg, C.size_t(len(msg)))
 			C.free(unsafe.Pointer(cmsg))
 		} else {
 			cmsg := C.CString(res)
-			C.host_demo_host_complete(e.ctx, token, C.int(C.RET_OK), cmsg, C.size_t(len(res)))
+			C.host_demo_host_complete(e.ctx, callId, C.int(C.RET_OK), cmsg, C.size_t(len(res)))
 			C.free(unsafe.Pointer(cmsg))
 		}
 	}()

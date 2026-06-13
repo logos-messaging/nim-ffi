@@ -220,7 +220,7 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
   )
 
   # --- {libraryName}_host_complete ----------------------------------------
-  # The host delivers a {.ffiHost.} answer by token. Callable from ANY thread —
+  # The host delivers a {.ffiHost.} answer by callId. Callable from ANY thread —
   # it parks the result and wakes the FFI loop, which completes the awaited
   # future. `retCode` (not `ret`) avoids colliding with chronos templates under
   # quote injection, like `listenerId` above.
@@ -230,7 +230,7 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
     if isNil(ctx):
       echo `completeErr`
       return cint(1)
-    completeHostCall(ctx, token, retCode, msg, msgLen)
+    completeHostCall(ctx, callId, retCode, msg, msgLen)
     return cint(0)
 
   stmts.add(
@@ -239,7 +239,7 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
       params = @[
         ident("cint"),
         newIdentDefs(ident("ctx"), ctxType),
-        newIdentDefs(ident("token"), ident("uint64")),
+        newIdentDefs(ident("callId"), ident("uint64")),
         newIdentDefs(ident("retCode"), ident("cint")),
         newIdentDefs(ident("msg"), nnkPtrTy.newTree(ident("cchar"))),
         newIdentDefs(ident("msgLen"), ident("csize_t")),

@@ -8,9 +8,9 @@
 ## 1. `FFIHostRegistry` — maps a wire name (e.g. "fetch_profile") to the host's
 ##    registered function pointer + userData. A missing entry is a normal,
 ##    non-fatal outcome (the imported proc resolves to an error), never a crash.
-## 2. `FFIPendingTable` — maps a monotonic `token` to the chronos `Future` an
+## 2. `FFIPendingTable` — maps a monotonic `callId` to the chronos `Future` an
 ##    awaiting `{.ffiHost.}` proc is blocked on. The host answers later (on any
-##    thread) by `token`; the FFI thread drains and completes the future.
+##    thread) by `callId`; the FFI thread drains and completes the future.
 ##
 ## Both structures are lock-guarded so a host thread (registering / completing)
 ## and the FFI thread (looking up / completing) can touch them concurrently.
@@ -26,14 +26,14 @@ import ./ffi_types, ./alloc
 # ---------------------------------------------------------------------------
 
 type FFIHostFn* = proc(
-  token: uint64, req: ptr cchar, reqLen: csize_t, userData: pointer
+  callId: uint64, req: ptr cchar, reqLen: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].}
   ## A host-implemented function. `req`/`reqLen` carry the marshaled request
   ## (valid only for the duration of the call — the host copies what it needs).
-  ## The host answers asynchronously via `<lib>_host_complete(ctx, token, …)`.
+  ## The host answers asynchronously via `<lib>_host_complete(ctx, callId, …)`.
 
 type HostResult* = object
-  ## The raw outcome the host delivered for one token: a return code plus the
+  ## The raw outcome the host delivered for one callId: a return code plus the
   ## response bytes (native POD or CBOR — decoded by the awaiting proc).
   ret*: cint
   bytes*: seq[byte]
@@ -118,7 +118,7 @@ proc clearHostFns*(reg: var FFIHostRegistry) {.raises: [].} =
 
 type FFIPendingTable* = object
   lock: Lock
-  nextToken: uint64 ## Monotonic; 0 is reserved as "invalid", tokens start at 1.
+  nextCallId: uint64 ## Monotonic; 0 is reserved as "invalid", callIds start at 1.
   pending: Table[uint64, Future[HostResult]]
 
 # Set by the FFI thread at startup (see ffi_context.ffiThreadBody) so the body a
@@ -129,39 +129,39 @@ var ffiCurrentPendingTable* {.threadvar.}: ptr FFIPendingTable
 
 proc initPendingTable*(tbl: var FFIPendingTable) =
   tbl.lock.initLock()
-  tbl.nextToken = 0'u64
+  tbl.nextCallId = 0'u64
   tbl.pending = initTable[uint64, Future[HostResult]]()
 
 proc deinitPendingTable*(tbl: var FFIPendingTable) =
   tbl.lock.deinitLock()
   tbl.pending = default(Table[uint64, Future[HostResult]])
-  tbl.nextToken = 0'u64
+  tbl.nextCallId = 0'u64
 
 proc newPending*(
     tbl: var FFIPendingTable
-): tuple[token: uint64, fut: Future[HostResult]] =
-  ## Allocates a token and registers a fresh, uncompleted future under it. The
-  ## `{.ffiHost.}` proc awaits the returned future; the host answers by token.
+): tuple[callId: uint64, fut: Future[HostResult]] =
+  ## Allocates a callId and registers a fresh, uncompleted future under it. The
+  ## `{.ffiHost.}` proc awaits the returned future; the host answers by callId.
   let fut = newFuture[HostResult]("ffiHostCall")
   var assigned: uint64 = 0
   withLock tbl.lock:
-    tbl.nextToken.inc()
-    assigned = tbl.nextToken
+    tbl.nextCallId.inc()
+    assigned = tbl.nextCallId
     tbl.pending[assigned] = fut
   return (assigned, fut)
 
 proc completePending*(
-    tbl: var FFIPendingTable, token: uint64, res: HostResult
+    tbl: var FFIPendingTable, callId: uint64, res: HostResult
 ): bool =
-  ## Completes and removes the future for `token`. Returns false for an unknown
-  ## or already-completed token — a late / double completion is dropped, not a
+  ## Completes and removes the future for `callId`. Returns false for an unknown
+  ## or already-completed callId — a late / double completion is dropped, not a
   ## crash. MUST be called on the FFI (event-loop) thread: it touches the
   ## chronos future.
   var fut: Future[HostResult] = nil
   withLock tbl.lock:
-    if tbl.pending.hasKey(token):
-      fut = tbl.pending.getOrDefault(token)
-      tbl.pending.del(token)
+    if tbl.pending.hasKey(callId):
+      fut = tbl.pending.getOrDefault(callId)
+      tbl.pending.del(callId)
   if fut.isNil() or fut.finished():
     return false
   fut.complete(res)
@@ -198,7 +198,7 @@ proc pendingCount*(tbl: var FFIPendingTable): int {.raises: [].} =
 
 type
   CompletionNode = object
-    token: uint64
+    callId: uint64
     ret: cint
     buf: ptr UncheckedArray[byte] ## c_malloc'd copy of the host payload (or nil)
     bufLen: int
@@ -215,13 +215,13 @@ proc initCompletionQueue*(q: var FFICompletionQueue) =
   q.tail = nil
 
 proc pushCompletion*(
-    q: var FFICompletionQueue, token: uint64, ret: cint, msg: ptr cchar, len: csize_t
+    q: var FFICompletionQueue, callId: uint64, ret: cint, msg: ptr cchar, len: csize_t
 ) {.raises: [].} =
   ## Enqueue one host answer. Safe to call from **any** thread; allocates only
   ## via c_malloc so it never touches the Nim GC on a foreign thread. The FFI
   ## thread copies the payload into a `seq[byte]` and frees the node on drain.
   let node = ffiCMalloc(CompletionNode)
-  node.token = token
+  node.callId = callId
   node.ret = ret
   node.bufLen = int(len)
   node.next = nil
@@ -241,7 +241,7 @@ proc drainCompletions*(
     q: var FFICompletionQueue, tbl: var FFIPendingTable
 ): int {.discardable.} =
   ## FFI-thread only. Detaches the whole queue, then for each entry resolves the
-  ## pending future by token (copying the payload into GC memory here, on the FFI
+  ## pending future by callId (copying the payload into GC memory here, on the FFI
   ## thread) and frees the c_malloc'd node. Returns the number drained.
   var head: ptr CompletionNode = nil
   withLock q.lock:
@@ -256,7 +256,7 @@ proc drainCompletions*(
     var b = newSeq[byte](node.bufLen)
     if node.bufLen > 0:
       copyMem(addr b[0], node.buf, node.bufLen)
-    discard completePending(tbl, node.token, HostResult(ret: node.ret, bytes: b))
+    discard completePending(tbl, node.callId, HostResult(ret: node.ret, bytes: b))
     if not node.buf.isNil():
       ffiCFree(node.buf)
     ffiCFree(node)

@@ -35,31 +35,31 @@ registerReqFFI(HostCallRequest, lib: ptr TestLib):
 
 # --- the host, answering on a worker thread --------------------------------
 # The host fn runs on the FFI thread, so it must NOT block: it copies the
-# request and hands (token, key) to a worker via a channel, then returns. The
+# request and hands (callId, key) to a worker via a channel, then returns. The
 # worker answers later through the exported <lib>_host_complete.
-var gHostJobs: Channel[tuple[token: uint64, key: string]]
+var gHostJobs: Channel[tuple[callId: uint64, key: string]]
 var gCtx: Atomic[pointer]
 
 proc lookupHostFnImpl(
-    token: uint64, req: ptr cchar, reqLen: csize_t, userData: pointer
+    callId: uint64, req: ptr cchar, reqLen: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
   var key = newString(int(reqLen))
   if reqLen > 0'u:
     copyMem(addr key[0], req, int(reqLen))
   try:
-    gHostJobs.send((token: token, key: key))
+    gHostJobs.send((callId: callId, key: key))
   except Exception:
     discard
 
 proc hostWorker(_: pointer) {.thread.} =
   while true:
     let job = gHostJobs.recv()
-    if job.token == 0'u64: # sentinel: shut down
+    if job.callId == 0'u64: # sentinel: shut down
       break
     let answer = "reply:" & job.key
     completeHostCall(
       cast[ptr FFIContext[TestLib]](gCtx.load()),
-      job.token,
+      job.callId,
       RET_OK,
       cast[ptr cchar](unsafeAddr answer[0]),
       csize_t(answer.len),
@@ -129,7 +129,7 @@ suite "ffiHost end-to-end (cross-thread)":
     check cborDecode(callbackBytes(d), string).value == "got:reply:session"
 
     # Shut the worker down, then tear the context down.
-    gHostJobs.send((token: 0'u64, key: ""))
+    gHostJobs.send((callId: 0'u64, key: ""))
     joinThread(worker)
     d.cond.deinitCond()
     d.lock.deinitLock()

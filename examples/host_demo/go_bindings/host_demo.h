@@ -46,10 +46,10 @@ int host_demo_remove_event_listener(void *ctx, uint64_t listenerId);
 // --- host callbacks ({.ffiHost.}) — host-implemented functions --------
 #ifndef NIM_FFI_HOST_FN_T
 #define NIM_FFI_HOST_FN_T
-typedef void (*FFIHostFn)(uint64_t token, const char *req, size_t reqLen, void *userData);
+typedef void (*FFIHostFn)(uint64_t callId, const char *req, size_t reqLen, void *userData);
 #endif
 int host_demo_register_host_fn(void *ctx, const char *name, FFIHostFn fn, void *userData);
-int host_demo_host_complete(void *ctx, uint64_t token, int ret, const char *msg, size_t len);
+int host_demo_host_complete(void *ctx, uint64_t callId, int ret, const char *msg, size_t len);
 
 #ifdef __cplusplus
 } // extern "C"

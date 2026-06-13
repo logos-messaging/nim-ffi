@@ -31,7 +31,7 @@ type FFIContext*[T] = object
   hostRegistry*: FFIHostRegistry
     # host-provided functions a {.ffiHost.} proc dispatches to (roadmap #1)
   pendingTable*: FFIPendingTable
-    # in-flight {.ffiHost.} calls: token -> the chronos Future being awaited
+    # in-flight {.ffiHost.} calls: callId -> the chronos Future being awaited
   completionQueue: FFICompletionQueue
     # host answers parked from any thread, drained + completed on the FFI thread
   running: Atomic[bool] # To control when the threads are running
@@ -93,14 +93,14 @@ proc sendRequestToFFIThread*(
   return ok()
 
 proc completeHostCall*[T](
-    ctx: ptr FFIContext[T], token: uint64, ret: cint, msg: ptr cchar, len: csize_t
+    ctx: ptr FFIContext[T], callId: uint64, ret: cint, msg: ptr cchar, len: csize_t
 ) {.raises: [].} =
   ## Backs `<lib>_host_complete`: the host delivers a `{.ffiHost.}` answer by
-  ## token. Callable from ANY thread — it only parks the result (GC-free) and
+  ## callId. Callable from ANY thread — it only parks the result (GC-free) and
   ## wakes the FFI loop via the existing `reqSignal`; the future is completed on
-  ## the FFI thread when the loop drains the queue. A token with no pending call
+  ## the FFI thread when the loop drains the queue. A callId with no pending call
   ## (late / double completion) is drained and dropped, never a crash.
-  pushCompletion(ctx[].completionQueue, token, ret, msg, len)
+  pushCompletion(ctx[].completionQueue, callId, ret, msg, len)
   discard ctx.reqSignal.fireSync()
 
 type Foo = object

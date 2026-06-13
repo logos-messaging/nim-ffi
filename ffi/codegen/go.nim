@@ -377,7 +377,7 @@ proc generateGoFile*(
   if hosts.len > 0:
     L.add(
       "extern void " & libName &
-        "HostTrampoline(uint64_t token, char* req, size_t reqLen, void* userData);"
+        "HostTrampoline(uint64_t callId, char* req, size_t reqLen, void* userData);"
     )
     L.add(
       "static int " & libName &
@@ -582,7 +582,7 @@ proc generateGoFile*(
   # ---- host callbacks ({.ffiHost.}) ----------------------------------------
   # One exported trampoline serves all host fns; the cgo.Handle in userData
   # selects which Go closure. The closure runs on a fresh goroutine so the FFI
-  # thread is never blocked (the non-blocking contract), then answers by token.
+  # thread is never blocked (the non-blocking contract), then answers by callId.
   if hosts.len > 0:
     L.add("type hostEntry struct {")
     L.add("\tctx unsafe.Pointer")
@@ -592,7 +592,7 @@ proc generateGoFile*(
     L.add("//export " & libName & "HostTrampoline")
     L.add(
       "func " & libName &
-        "HostTrampoline(token C.uint64_t, req *C.char, reqLen C.size_t, userData unsafe.Pointer) {"
+        "HostTrampoline(callId C.uint64_t, req *C.char, reqLen C.size_t, userData unsafe.Pointer) {"
     )
     L.add("\te := cgo.Handle(uintptr(userData)).Value().(hostEntry)")
     L.add("\treqStr := C.GoStringN(req, C.int(reqLen))")
@@ -603,14 +603,14 @@ proc generateGoFile*(
     L.add("\t\t\tcmsg := C.CString(msg)")
     L.add(
       "\t\t\tC." & libName &
-        "_host_complete(e.ctx, token, C.int(C.RET_ERR), cmsg, C.size_t(len(msg)))"
+        "_host_complete(e.ctx, callId, C.int(C.RET_ERR), cmsg, C.size_t(len(msg)))"
     )
     L.add("\t\t\tC.free(unsafe.Pointer(cmsg))")
     L.add("\t\t} else {")
     L.add("\t\t\tcmsg := C.CString(res)")
     L.add(
       "\t\t\tC." & libName &
-        "_host_complete(e.ctx, token, C.int(C.RET_OK), cmsg, C.size_t(len(res)))"
+        "_host_complete(e.ctx, callId, C.int(C.RET_OK), cmsg, C.size_t(len(res)))"
     )
     L.add("\t\t\tC.free(unsafe.Pointer(cmsg))")
     L.add("\t\t}")

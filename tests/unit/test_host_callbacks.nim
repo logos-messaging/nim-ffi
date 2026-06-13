@@ -3,7 +3,7 @@
 ## (see docs/design-host-callbacks.md).
 ##
 ## These exercise the data structures directly: no FFI thread, no macro, no
-## completion bridge. They pin down registration, lookup, token allocation, and
+## completion bridge. They pin down registration, lookup, callId allocation, and
 ## future completion semantics in isolation.
 
 import std/locks
@@ -14,7 +14,7 @@ import ffi
 # A host fn does nothing here — we only assert it round-trips through the
 # registry. `userData` carries a tag we read back to prove identity.
 proc noopHostFn(
-    token: uint64, req: ptr cchar, reqLen: csize_t, userData: pointer
+    callId: uint64, req: ptr cchar, reqLen: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
   discard
 
@@ -58,15 +58,15 @@ suite "FFIHostRegistry":
     check not lookupHostFn(reg, "b").found
 
 suite "FFIPendingTable":
-  test "tokens are monotonic and start at 1":
+  test "callIds are monotonic and start at 1":
     var tbl: FFIPendingTable
     initPendingTable(tbl)
     defer:
       deinitPendingTable(tbl)
     let a = newPending(tbl)
     let b = newPending(tbl)
-    check a.token == 1'u64
-    check b.token == 2'u64
+    check a.callId == 1'u64
+    check b.callId == 2'u64
     check tbl.pendingCount == 2
 
   test "completePending resolves the awaiting future and removes it":
@@ -75,7 +75,7 @@ suite "FFIPendingTable":
     defer:
       deinitPendingTable(tbl)
     let p = newPending(tbl)
-    check completePending(tbl, p.token, okResult(@[byte 1, 2, 3]))
+    check completePending(tbl, p.callId, okResult(@[byte 1, 2, 3]))
     check p.fut.finished()
     check waitFor(p.fut).ret == RET_OK
     check waitFor(p.fut).bytes == @[byte 1, 2, 3]
@@ -88,8 +88,8 @@ suite "FFIPendingTable":
       deinitPendingTable(tbl)
     check not completePending(tbl, 999'u64, okResult(@[]))
     let p = newPending(tbl)
-    check completePending(tbl, p.token, okResult(@[]))
-    check not completePending(tbl, p.token, okResult(@[])) # second time: dropped
+    check completePending(tbl, p.callId, okResult(@[]))
+    check not completePending(tbl, p.callId, okResult(@[])) # second time: dropped
 
   test "failAllPending errors every outstanding future":
     var tbl: FFIPendingTable
@@ -107,14 +107,14 @@ suite "FFIPendingTable":
     check tbl.pendingCount == 0
 
 # `pushCompletion` takes the raw (msg, len) a host hands across the C ABI.
-proc pushStr(q: var FFICompletionQueue, token: uint64, ret: cint, s: string) =
+proc pushStr(q: var FFICompletionQueue, callId: uint64, ret: cint, s: string) =
   if s.len == 0:
-    pushCompletion(q, token, ret, nil, 0)
+    pushCompletion(q, callId, ret, nil, 0)
   else:
-    pushCompletion(q, token, ret, cast[ptr cchar](unsafeAddr s[0]), csize_t(s.len))
+    pushCompletion(q, callId, ret, cast[ptr cchar](unsafeAddr s[0]), csize_t(s.len))
 
 suite "FFICompletionQueue":
-  test "drain resolves pending futures by token, in FIFO order":
+  test "drain resolves pending futures by callId, in FIFO order":
     var tbl: FFIPendingTable
     var q: FFICompletionQueue
     initPendingTable(tbl)
@@ -123,10 +123,10 @@ suite "FFICompletionQueue":
       deinitPendingTable(tbl)
       deinitCompletionQueue(q)
 
-    let a = newPending(tbl) # token 1
-    let b = newPending(tbl) # token 2
-    pushStr(q, a.token, RET_OK, "alpha")
-    pushStr(q, b.token, RET_ERR, "boom")
+    let a = newPending(tbl) # callId 1
+    let b = newPending(tbl) # callId 2
+    pushStr(q, a.callId, RET_OK, "alpha")
+    pushStr(q, b.callId, RET_ERR, "boom")
 
     check drainCompletions(q, tbl) == 2
     check bytesToStr(waitFor(a.fut).bytes) == "alpha"
@@ -145,11 +145,11 @@ suite "FFICompletionQueue":
       deinitCompletionQueue(q)
     check drainCompletions(q, tbl) == 0 # nothing queued
     let p = newPending(tbl)
-    pushStr(q, p.token, RET_OK, "") # empty (nil buf) payload
+    pushStr(q, p.callId, RET_OK, "") # empty (nil buf) payload
     check drainCompletions(q, tbl) == 1
     check waitFor(p.fut).bytes.len == 0
 
-  test "completion for an unknown token is drained and dropped":
+  test "completion for an unknown callId is drained and dropped":
     var tbl: FFIPendingTable
     var q: FFICompletionQueue
     initPendingTable(tbl)
@@ -157,7 +157,7 @@ suite "FFICompletionQueue":
     defer:
       deinitPendingTable(tbl)
       deinitCompletionQueue(q)
-    pushStr(q, 999'u64, RET_OK, "orphan") # no pending future for this token
+    pushStr(q, 999'u64, RET_OK, "orphan") # no pending future for this callId
     check drainCompletions(q, tbl) == 1 # drained (and its buffer freed)
 
   test "deinit frees still-queued nodes without draining":
@@ -166,7 +166,7 @@ suite "FFICompletionQueue":
     initPendingTable(tbl)
     initCompletionQueue(q)
     let p = newPending(tbl)
-    pushStr(q, p.token, RET_OK, "leftover")
+    pushStr(q, p.callId, RET_OK, "leftover")
     failAllPending(tbl, "shutdown") # the future is settled separately
     deinitPendingTable(tbl)
     deinitCompletionQueue(q) # must free the queued node, no leak/crash

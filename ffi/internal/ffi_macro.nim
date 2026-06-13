@@ -1932,7 +1932,7 @@ macro ffiHost*(prc: untyped): untyped =
   ## Declares a function the *host* implements, which a `{.ffi.}` handler can
   ## call and `await` (the inverse of `{.ffi.}`). The annotated proc has an empty
   ## body; the macro fills it with the dispatch: look up the host's registered
-  ## implementation, hand it the marshaled request + a token, and await the
+  ## implementation, hand it the marshaled request + a callId, and await the
   ## answer the host delivers (via `<lib>_host_complete`) on the FFI thread.
   ##
   ## First slice — raw (zero-serialization) ABI, exactly one `string` parameter,
@@ -1999,7 +1999,7 @@ macro ffiHost*(prc: untyped): untyped =
   )
 
   # The generated async body: resolve the thread-local host context, look up the
-  # registered fn, allocate a pending token, invoke the host with the raw request
+  # registered fn, allocate a pending callId, invoke the host with the raw request
   # bytes, and await the answer. The host fn is called synchronously here (before
   # the await) while `argName` is still alive, honouring the "req valid only for
   # the call" contract.
@@ -2011,14 +2011,14 @@ macro ffiHost*(prc: untyped): untyped =
     let ffiHit = lookupHostFn(ffiReg[], `wireNameLit`)
     if not ffiHit.found:
       return err("ffiHost: host fn '" & `wireNameLit` & "' not registered")
-    let (ffiTok, ffiFut) = newPending(ffiTbl[])
+    let (ffiCallId, ffiFut) = newPending(ffiTbl[])
     if `argName`.len > 0:
       ffiHit.fn(
-        ffiTok, cast[ptr cchar](unsafeAddr `argName`[0]), csize_t(`argName`.len),
+        ffiCallId, cast[ptr cchar](unsafeAddr `argName`[0]), csize_t(`argName`.len),
         ffiHit.userData,
       )
     else:
-      ffiHit.fn(ffiTok, nil, 0, ffiHit.userData)
+      ffiHit.fn(ffiCallId, nil, 0, ffiHit.userData)
     let ffiRes = await ffiFut
     if ffiRes.ret != RET_OK:
       return err(resultText(ffiRes))

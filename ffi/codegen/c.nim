@@ -177,7 +177,7 @@ proc generateCHeader*(
   lines.add("")
 
   # Host callbacks ({.ffiHost.}): the host registers an implementation, the
-  # library invokes it with a token + raw request, and the host answers by token
+  # library invokes it with a callId + raw request, and the host answers by callId
   # (from any thread) via host_complete. Always exported, like the event ABI.
   lines.add(
     "// --- host callbacks ({.ffiHost.}) — host-implemented functions --------"
@@ -185,7 +185,7 @@ proc generateCHeader*(
   lines.add("#ifndef NIM_FFI_HOST_FN_T")
   lines.add("#define NIM_FFI_HOST_FN_T")
   lines.add(
-    "typedef void (*FFIHostFn)(uint64_t token, const char *req, size_t reqLen, void *userData);"
+    "typedef void (*FFIHostFn)(uint64_t callId, const char *req, size_t reqLen, void *userData);"
   )
   lines.add("#endif")
   lines.add(
@@ -194,7 +194,7 @@ proc generateCHeader*(
   )
   lines.add(
     "int " & libName &
-      "_host_complete(void *ctx, uint64_t token, int ret, const char *msg, size_t len);"
+      "_host_complete(void *ctx, uint64_t callId, int ret, const char *msg, size_t len);"
   )
   lines.add("")
   lines.add("#ifdef __cplusplus")
