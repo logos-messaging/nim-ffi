@@ -41,6 +41,14 @@ type HostResult* = object
 proc okResult*(bytes: seq[byte]): HostResult =
   return HostResult(ret: RET_OK, bytes: bytes)
 
+proc resultText*(res: HostResult): string =
+  ## The payload bytes as a string — used by the raw `{.ffiHost.}` path for both
+  ## the success value (string return) and the error text.
+  var s = newString(res.bytes.len)
+  if res.bytes.len > 0:
+    copyMem(addr s[0], unsafeAddr res.bytes[0], res.bytes.len)
+  return s
+
 proc errResult*(msg: string): HostResult =
   var b = newSeq[byte](msg.len)
   if msg.len > 0:
@@ -112,6 +120,12 @@ type FFIPendingTable* = object
   lock: Lock
   nextToken: uint64 ## Monotonic; 0 is reserved as "invalid", tokens start at 1.
   pending: Table[uint64, Future[HostResult]]
+
+# Set by the FFI thread at startup (see ffi_context.ffiThreadBody) so the body a
+# `{.ffiHost.}` macro generates can reach its context's host registry + pending
+# table without threading a ctx pointer through the user's signature.
+var ffiCurrentHostRegistry* {.threadvar.}: ptr FFIHostRegistry
+var ffiCurrentPendingTable* {.threadvar.}: ptr FFIPendingTable
 
 proc initPendingTable*(tbl: var FFIPendingTable) =
   tbl.lock.initLock()

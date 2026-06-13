@@ -224,6 +224,8 @@ proc processRequest[T](
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ## FFI thread body that attends library user API requests
   ffiCurrentEventRegistry = addr ctx[].eventRegistry
+  ffiCurrentHostRegistry = addr ctx[].hostRegistry
+  ffiCurrentPendingTable = addr ctx[].pendingTable
   onFFIThread = true
 
   logging.setupLog(logging.LogLevel.DEBUG, logging.LogFormat.TEXT)
