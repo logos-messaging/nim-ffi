@@ -83,7 +83,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: tests/e2e/cpp/build/_deps
-          key: ${{ runner.os }}-${{ runner.arch }}-cpp-e2e-deps-${{ inputs.sanitizer }}-${{ hashFiles('tests/e2e/cpp/CMakeLists.txt') }}
+          # ImageVersion busts the cache when the toolchain bumps.
+          key: ${{ runner.os }}-${{ runner.arch }}-cpp-e2e-deps-${{ inputs.sanitizer }}-${{ env.ImageVersion }}-${{ hashFiles('tests/e2e/cpp/CMakeLists.txt') }}
 
       - name: Run unit tests (${{ inputs.sanitizer }})
         run: nimble test_sanitized -y
