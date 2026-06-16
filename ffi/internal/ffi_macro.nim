@@ -123,12 +123,11 @@ proc unpackHandleField*(
 ): NimNode =
   ## Reconstitutes a handle param from its wire `uint64` via the ctx registry,
   ## returning `RET_ERR` (Result.err) on a stale/forged/wrong-type id.
-  let errMsg = "invalid or stale ffiHandle for parameter '" & $fieldIdent & "'"
+  let errPrefix = "ffiHandle for parameter '" & $fieldIdent & "': "
   quote:
     let `fieldIdent` = block:
-      let ffiH = `ctxIdent`[].handles.lookup(`decodedIdent`.`fieldIdent`, $`userType`)
-      if ffiH.isNil():
-        return err(`errMsg`)
+      let ffiH = `ctxIdent`[].handles.lookup(`decodedIdent`.`fieldIdent`, $`userType`).valueOr:
+        return err(`errPrefix` & error)
       cast[`userType`](ffiH)
 
 proc cExportedParams(ctxType: NimNode): seq[NimNode] =
@@ -431,7 +430,7 @@ proc addNewRequestToRegistry(reqTypeName, reqHandler: NimNode): NimNode =
       return ok(newSeq[byte]())
     elif typeof(`typedResIdent`.value) is FFIHandleRoot:
       return ok(
-        cborEncode(
+        encodeHandle(
           `handlerCtxIdent`[].handles.register(
             `typedResIdent`.value, $typeof(`typedResIdent`.value)
           )

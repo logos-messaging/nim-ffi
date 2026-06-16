@@ -4,6 +4,8 @@
 ## FFI-thread-only access, so no locking.
 
 import std/tables
+import results
+import ./cbor_serial
 
 type
   FFIHandleRoot* = ref object of RootObj
@@ -36,20 +38,29 @@ proc register*(
 
 proc lookup*(
     reg: var FFIHandleRegistry, handle: uint64, typeName: string
-): FFIHandleRoot =
-  ## Live ref for `handle`, or nil if absent or registered under another type.
+): Result[FFIHandleRoot, string] =
+  ## Live ref for `handle`; err if absent or registered under another type.
   let entry = reg.byHandle.getOrDefault(handle)
-  if entry.obj.isNil() or entry.typeName != typeName:
-    return nil
-  entry.obj
+  if entry.obj.isNil():
+    return err("no ffiHandle with id " & $handle)
+  if entry.typeName != typeName:
+    return err(
+      "ffiHandle " & $handle & " has type '" & entry.typeName & "', expected '" &
+        typeName & "'"
+    )
+  ok(entry.obj)
 
 proc release*(reg: var FFIHandleRegistry, handle: uint64): bool {.discardable.} =
   ## Drops the entry; true iff it existed.
   if not reg.byHandle.hasKey(handle):
     return false
   reg.byHandle.del(handle)
-  true
+  return true
 
 proc releaseAll*(reg: var FFIHandleRegistry) =
   ## Drops every entry. Must run on the FFI thread that allocated the refs.
   reg.byHandle.clear()
+
+proc encodeHandle*(id: uint64): seq[byte] =
+  ## Wire-form bytes for a handle id. Single ABI seam for future format changes.
+  cborEncode(id)
