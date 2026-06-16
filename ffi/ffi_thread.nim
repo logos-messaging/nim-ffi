@@ -101,6 +101,8 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
   defer:
     onFFIThread = false
+    # Free handle refs on the FFI thread that allocated them (refc heap is thread-local).
+    ctx[].handles.releaseAll()
     # Unblocks destroyFFIContext's bounded wait so cleanup can proceed.
     let fireRes = ctx.threadExitSignal.fireSync()
     if fireRes.isErr():

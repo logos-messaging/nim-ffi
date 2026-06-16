@@ -133,7 +133,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: tests/e2e/cpp/build/_deps
-          key: ${{ runner.os }}-cpp-e2e-deps-${{ hashFiles('tests/e2e/cpp/CMakeLists.txt') }}
+          # ImageVersion busts the cache when the toolchain (e.g. MSVC) bumps.
+          key: ${{ runner.os }}-cpp-e2e-deps-${{ env.ImageVersion }}-${{ hashFiles('tests/e2e/cpp/CMakeLists.txt') }}
 
       - name: Run C++ e2e tests
         shell: bash

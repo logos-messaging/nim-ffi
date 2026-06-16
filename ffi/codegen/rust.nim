@@ -256,7 +256,7 @@ proc generateTypesRs*(types: seq[FFITypeMeta], procs: seq[FFIProcMeta]): string 
       for ep in p.extraParams:
         let snake = camelToSnakeCase(ep.name)
         let rustType =
-          if ep.isPtr:
+          if ep.ridesAsPtr():
             RustPtrType
           else:
             nimTypeToRust(ep.typeName)
@@ -550,7 +550,7 @@ proc generateApiRs*(
     for ep in ctor.extraParams:
       let snake = camelToSnakeCase(ep.name)
       let rustType =
-        if ep.isPtr:
+        if ep.ridesAsPtr():
           RustPtrType
         else:
           nimTypeToRust(ep.typeName)
@@ -711,7 +711,7 @@ proc generateApiRs*(
     for ep in m.extraParams:
       let snake = camelToSnakeCase(ep.name)
       let rustType =
-        if ep.isPtr:
+        if ep.ridesAsPtr():
           RustPtrType
         else:
           nimTypeToRust(ep.typeName)
@@ -729,7 +729,7 @@ proc generateApiRs*(
       else:
         reqName & " {}"
 
-    let retTypeForApi = if m.returnIsPtr: RustPtrType else: retRustType
+    let retTypeForApi = if m.returnRidesAsPtr(): RustPtrType else: retRustType
 
     # -- blocking method --
     lines.add(

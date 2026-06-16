@@ -82,13 +82,18 @@ proc nimTypeNameRepr(typ: NimNode): string =
   else:
     typ.repr
 
+proc isHandleType(typ: NimNode): bool =
+  ## True iff `typ` is an `{.ffiHandle.}` type — its wire form is `uint64`.
+  typ.kind == nnkIdent and isFFIHandleTypeName($typ)
+
 proc storageType(typ: NimNode): NimNode =
-  ## Returns the in-Req-struct storage type for a user-declared param type.
-  ## `cstring` is stored as `string` for trivial CBOR transport; everything
-  ## else is stored as the user typed it.
+  ## In-Req-struct storage type. `cstring` rides as `string`; an {.ffiHandle.}
+  ## type rides as its `uint64` id; everything else as-is.
   if typ.kind == nnkIdent and $typ == "cstring":
     return ident("string")
-  return typ
+  if isHandleType(typ):
+    return ident("uint64")
+  typ
 
 proc unpackReqField*(fieldIdent, userType, decodedIdent: NimNode): NimNode =
   ## Emits AST for unpacking one field from a CBOR-decoded Req struct into a
@@ -112,6 +117,18 @@ proc unpackReqField*(fieldIdent, userType, decodedIdent: NimNode): NimNode =
   let castExpr = newDotExpr(fieldAccess, ident("cstring"))
   return
     nnkLetSection.newTree(nnkIdentDefs.newTree(fieldIdent, ident("cstring"), castExpr))
+
+proc unpackHandleField*(
+    fieldIdent, userType, ctxIdent, decodedIdent: NimNode
+): NimNode =
+  ## Reconstitutes a handle param from its wire `uint64` via the ctx registry,
+  ## returning `RET_ERR` (Result.err) on a stale/forged/wrong-type id.
+  let errPrefix = "ffiHandle for parameter '" & $fieldIdent & "': "
+  quote:
+    let `fieldIdent` = block:
+      let ffiH = `ctxIdent`[].handles.lookup(`decodedIdent`.`fieldIdent`, $`userType`).valueOr:
+        return err(`errPrefix` & error)
+      cast[`userType`](ffiH)
 
 proc cExportedParams(ctxType: NimNode): seq[NimNode] =
   ## Standard parameter list for the C-exported wrapper of a .ffi. proc:
@@ -239,9 +256,12 @@ proc buildFFINewReqProc(reqTypeName, body: NimNode): NimNode =
   formalParams.add(newIdentDefs(ident("callback"), ident("FFICallBack")))
   formalParams.add(newIdentDefs(ident("userData"), ident("pointer")))
 
-  # User-typed lambda params (kept as-is so callers see their original signature)
+  # Handle params travel as their uint64 id; others keep the user's type.
   let procParams = procNode[3]
   for p in procParams[1 .. ^1]:
+    if isHandleType(p[1]):
+      formalParams.add(newIdentDefs(p[0], ident("uint64")))
+      continue
     formalParams.add(p)
 
   let retType = newNimNode(nnkPtrTy)
@@ -345,6 +365,9 @@ proc buildProcessFFIRequestProc(reqTypeName, reqHandler, body: NimNode): NimNode
 
   # Unpack each field as a local typed as the user's original param type.
   for p in procParams[1 ..^ 1]:
+    if isHandleType(p[1]):
+      newBody.add unpackHandleField(p[0], p[1], reqHandler[0], decodedIdent)
+      continue
     newBody.add unpackReqField(p[0], p[1], decodedIdent)
 
   newBody.add(bodyNode)
@@ -385,16 +408,19 @@ proc addNewRequestToRegistry(reqTypeName, reqHandler: NimNode): NimNode =
     else:
       error "Second argument must be a typed parameter, e.g. waku: ptr Waku"
 
-  let castedHandler = newTree(nnkCast, rhsType, ident("reqHandler"))
+  let handlerCtxIdent = genSym(nskLet, "handlerCtx")
 
   let callExpr = newCall(
-    newDotExpr(reqTypeName, ident("processFFIRequest")), ident("request"), castedHandler
+    newDotExpr(reqTypeName, ident("processFFIRequest")),
+    ident("request"),
+    handlerCtxIdent,
   )
 
   let typedResIdent = genSym(nskLet, "typedRes")
 
   var newBody = newStmtList()
   newBody.add quote do:
+    let `handlerCtxIdent` = cast[`rhsType`](reqHandler)
     let `typedResIdent` = await `callExpr`
     if `typedResIdent`.isErr:
       return err(`typedResIdent`.error)
@@ -402,6 +428,14 @@ proc addNewRequestToRegistry(reqTypeName, reqHandler: NimNode): NimNode =
       return ok(`typedResIdent`.value)
     elif typeof(`typedResIdent`.value) is void:
       return ok(newSeq[byte]())
+    elif typeof(`typedResIdent`.value) is FFIHandleRoot:
+      return ok(
+        encodeHandle(
+          `handlerCtxIdent`[].handles.register(
+            `typedResIdent`.value, $typeof(`typedResIdent`.value)
+          )
+        )
+      )
     else:
       return ok(cborEncode(`typedResIdent`.value))
 
@@ -596,6 +630,40 @@ macro ffiRaw*(prc: untyped): untyped =
     echo stmts.repr
   return stmts
 
+macro ffiHandle*(prc: untyped): untyped =
+  ## Marks a `ref object` as an opaque FFI handle. Its wire form is a `uint64`
+  ## id; the live object stays in the per-ctx handle registry and never crosses.
+  ##
+  ##   type Kernel {.ffiHandle.} = ref object
+  ##     ...
+  if prc.kind != nnkTypeDef:
+    error("`.ffiHandle.` must be applied to a type definition")
+
+  var clean = prc.copyNimTree()
+  if clean[0].kind == nnkPragmaExpr:
+    clean[0] = clean[0][0]
+
+  let typeName =
+    if clean[0].kind == nnkPostfix:
+      clean[0][1]
+    else:
+      clean[0]
+
+  let refTy = clean[2]
+  if refTy.kind != nnkRefTy or refTy[0].kind != nnkObjectTy:
+    error("`.ffiHandle.` type " & $typeName & " must be a `ref object`")
+  let objTy = refTy[0]
+  if objTy[1].kind != nnkEmpty:
+    error("`.ffiHandle.` type " & $typeName & " must not already inherit a base")
+  # Inherit the registry's storable base so handle refs share one static type.
+  objTy[1] = nnkOfInherit.newTree(ident("FFIHandleRoot"))
+
+  ffiHandleTypeNames.add($typeName)
+
+  when defined(ffiDumpMacros):
+    echo clean.repr
+  return clean
+
 macro ffi*(prc: untyped): untyped =
   ## Simplified FFI macro — applies to procs or types.
   ##
@@ -631,8 +699,20 @@ macro ffi*(prc: untyped): untyped =
     error("`.ffi.` procs require at least 1 parameter (the library type)")
 
   let firstParam = formalParams[1]
-  let libParamName = firstParam[0]
-  let libTypeName = firstParam[1]
+  let recvName = firstParam[0]
+  let recvType = firstParam[1]
+  let firstIsHandle = isHandleType(recvType)
+  if firstIsHandle and currentLibType.len == 0:
+    error(
+      "`.ffi.` proc " & $procName & " has an {.ffiHandle.} receiver but no " &
+        "library is declared; call declareLibrary(name, LibType) first"
+    )
+  # A handle receiver carries no library type, so fall back to the declared one.
+  let libTypeName =
+    if firstIsHandle:
+      ident(currentLibType)
+    else:
+      recvType
 
   let retTypeNode = formalParams[0]
   if retTypeNode.kind == nnkEmpty:
@@ -654,9 +734,11 @@ macro ffi*(prc: untyped): untyped =
   let resultRetType = resultInner[1]
   rejectRawPtrType(resultRetType, "`.ffi.` proc " & $procName & " return type")
 
+  # A handle receiver rides the wire; a value-type lib receiver binds to ctx.myLib.
   var extraParamNames: seq[string] = @[]
   var extraParamTypes: seq[NimNode] = @[]
-  for i in 2 ..< formalParams.len:
+  let wireStart = if firstIsHandle: 1 else: 2
+  for i in wireStart ..< formalParams.len:
     let p = formalParams[i]
     for j in 0 ..< p.len - 2:
       rejectRawPtrType(p[^2], "`.ffi.` proc " & $procName & " parameter " & $p[j])
@@ -687,12 +769,14 @@ macro ffi*(prc: untyped): untyped =
     nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), libTypeName))
 
   proc buildAsyncHelperProc(): NimNode =
-    ## proc <userProcName>*(lib: LibType, extras...): Future[Result[T, string]] {.async.} = <body>
+    ## Reproduces the user's exact signature so it stays callable from Nim.
     var helperParams = newSeq[NimNode]()
     helperParams.add(retTypeNode)
-    helperParams.add(newIdentDefs(libParamName, libTypeName))
-    for i in 0 ..< extraParamNames.len:
-      helperParams.add(newIdentDefs(ident(extraParamNames[i]), extraParamTypes[i]))
+    helperParams.add(newIdentDefs(recvName, recvType))
+    for i in 2 ..< formalParams.len:
+      let p = formalParams[i]
+      for j in 0 ..< p.len - 2:
+        helperParams.add(newIdentDefs(p[j], p[^2]))
     newProc(
       name = postfix(userProcName, "*"),
       params = helperParams,
@@ -719,9 +803,10 @@ macro ffi*(prc: untyped): untyped =
     for i in 0 ..< extraParamNames.len:
       lambdaParams.add(newIdentDefs(ident(extraParamNames[i]), extraParamTypes[i]))
 
-    let ctxMyLib = newDotExpr(newTree(nnkDerefExpr, ctxHandlerName), ident("myLib"))
-    let libValDeref = newTree(nnkDerefExpr, ctxMyLib)
-    let helperCall = newTree(nnkCall, userProcName, libValDeref)
+    let helperCall = newTree(nnkCall, userProcName)
+    if not firstIsHandle:
+      let ctxMyLib = newDotExpr(newTree(nnkDerefExpr, ctxHandlerName), ident("myLib"))
+      helperCall.add(newTree(nnkDerefExpr, ctxMyLib))
     for name in extraParamNames:
       helperCall.add(ident(name))
 
@@ -800,16 +885,20 @@ macro ffi*(prc: untyped): untyped =
       for i in 0 ..< extraParamNames.len:
         let ptype = extraParamTypes[i]
         let isPointer = isPtr(ptype)
+        let handle = isHandleType(ptype)
         let tn =
           if isPointer:
             nimTypeNameRepr(ptype[0])
           else:
             nimTypeNameRepr(ptype)
         ffiExtraParams.add(
-          FFIParamMeta(name: extraParamNames[i], typeName: tn, isPtr: isPointer)
+          FFIParamMeta(
+            name: extraParamNames[i], typeName: tn, isPtr: isPointer, isHandle: handle
+          )
         )
       let retTypeInner = resultInner[1]
       let retIsPtr = isPtr(retTypeInner)
+      let retIsHandle = isHandleType(retTypeInner)
       let retTn =
         if retIsPtr:
           nimTypeNameRepr(retTypeInner[0])
@@ -824,6 +913,7 @@ macro ffi*(prc: untyped): untyped =
           extraParams: ffiExtraParams,
           returnTypeName: retTn,
           returnIsPtr: retIsPtr,
+          returnIsHandle: retIsHandle,
         )
       )
 
