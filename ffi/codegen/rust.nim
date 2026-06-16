@@ -729,8 +729,7 @@ proc generateApiRs*(
       else:
         reqName & " {}"
 
-    let retTypeForApi =
-      if m.returnRidesAsPtr(): RustPtrType else: retRustType
+    let retTypeForApi = if m.returnRidesAsPtr(): RustPtrType else: retRustType
 
     # -- blocking method --
     lines.add(
