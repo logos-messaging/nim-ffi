@@ -209,6 +209,73 @@ jobs:
       nim-versions:   ${{ needs.versions.outputs.nim-versions }}
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
+  ipc:
+    # In-library CBOR serve over a socket — must build and round-trip on all
+    # three platforms (TCP is the portable transport). fail-fast:false keeps
+    # Linux/macOS results visible if Windows trips on the dylib link.
+    needs: versions
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15, windows-latest]
+        include:
+          - os: ubuntu-22.04
+            label: Linux
+          - os: macos-15
+            label: macOS
+          - os: windows-latest
+            label: Windows
+    runs-on: ${{ matrix.os }}
+    name: IPC round-trip · ${{ matrix.label }}
+    env:
+      NIMBLE_VERSION: ${{ needs.versions.outputs.nimble }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: "2.2.4"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Nimble ${{ env.NIMBLE_VERSION }}
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$PATH"
+          fi
+          cd /tmp && nimble install "nimble@${{ env.NIMBLE_VERSION }}" -y
+          echo "$HOME/.nimble/bin" >> $GITHUB_PATH
+
+      - name: Cache nimble deps
+        id: cache-nimbledeps
+        uses: actions/cache@v4
+        with:
+          path: |
+            nimbledeps/
+            nimble.paths
+          key: ${{ runner.os }}-nimbledeps-2.2.4-${{ hashFiles('*.nimble') }}
+          restore-keys: |
+            ${{ runner.os }}-nimbledeps-2.2.4-
+            ${{ runner.os }}-nimbledeps-
+
+      - name: Install nimble deps
+        if: steps.cache-nimbledeps.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+          fi
+          nimble setup --localdeps -y
+
+      - name: IPC round-trip
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+          fi
+          nimble test_ipc -y
+
   auto-assign:
     name: Auto-assign PR author
     if: github.event_name == 'pull_request' && github.event.action == 'opened'

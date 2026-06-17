@@ -1,0 +1,6 @@
+/serve_host
+/client
+/libmy_timer.dylib
+/libmy_timer.so
+/libmy_timer.dll
+*.exe
