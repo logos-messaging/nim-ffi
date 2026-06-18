@@ -53,10 +53,13 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
   )
   res.add(procDef)
 
-  # Create: var initialized: Atomic[bool]
+  # Create: var initialized, initDone: Atomic[bool]
+  # `initialized` elects the single thread that runs NimMain; `initDone` signals
+  # that NimMain has finished so concurrent first-time callers can safely proceed.
   let atomicType = nnkBracketExpr.newTree(ident("Atomic"), ident("bool"))
   let varStmt = nnkVarSection.newTree(
-    nnkIdentDefs.newTree(ident("initialized"), atomicType, newEmptyNode())
+    nnkIdentDefs.newTree(ident("initialized"), atomicType, newEmptyNode()),
+    nnkIdentDefs.newTree(ident("initDone"), atomicType, newEmptyNode()),
   )
   res.add(varStmt)
 
@@ -80,6 +83,13 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
         ## Being `<yourprefix>` the value given in the optional
         ## compilation flag --nimMainPrefix:yourprefix
         `nimMainName`()
+        initDone.store(true)
+      else:
+        ## Another thread won the election and is running (or has run) NimMain.
+        ## Block until it finishes: proceeding now would race a half-initialized
+        ## Nim runtime/GC and corrupt the heap on concurrent first-time calls.
+        while not initDone.load():
+          discard
       when declared(setupForeignThreadGc):
         setupForeignThreadGc()
       when declared(nimGC_setStackBottom):
