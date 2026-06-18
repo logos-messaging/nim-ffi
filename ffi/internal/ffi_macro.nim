@@ -234,12 +234,18 @@ proc buildFfiNewReqProc(reqTypeName, body: NimNode): NimNode =
           `reqObjIdent`[].`fieldNameIdent` = `fieldNameIdent`
       )
 
-  # FFIThreadRequest.init using fnv1aHash32
+  # The request id is the type name. Use the compile-time string literal (same
+  # value as `$T`, and as the registry key in addNewRequestToRegistry) rather
+  # than `$T`, which allocates a GC string on the *calling* thread — under a
+  # foreign host (Go) those are transient/concurrent OS threads where running
+  # Nim's GC corrupts memory. `cstring(<literal>)` points at static data.
+  let reqNameLit = newLit(
+    if reqTypeName.kind == nnkPostfix: $reqTypeName[1] else: $reqTypeName
+  )
   newBody.add(
     quote do:
-      let typeStr = $T
       var ret =
-        FFIThreadRequest.init(callback, userData, typeStr.cstring, `reqObjIdent`)
+        FFIThreadRequest.init(callback, userData, cstring(`reqNameLit`), `reqObjIdent`)
       proc destroyContent(content: pointer) {.nimcall.} =
         ffiDeleteReq(cast[ptr `reqTypeName`](content))
 
@@ -1113,9 +1119,14 @@ proc buildCtorFfiNewReqProc(reqTypeName: NimNode, paramNames: seq[string]): NimN
     newBody.add quote do:
       `reqObjIdent`[].`fieldName` = `fieldName`.alloc()
 
+  # Compile-time type-name literal instead of `$T` — `$T` allocates a GC string
+  # on the calling thread, which corrupts memory under a foreign host (Go) whose
+  # callers are transient/concurrent OS threads. See buildFfiNewReqProc.
+  let reqNameLit = newLit(
+    if reqTypeName.kind == nnkPostfix: $reqTypeName[1] else: $reqTypeName
+  )
   newBody.add quote do:
-    let typeStr = $T
-    var ret = FFIThreadRequest.init(callback, userData, typeStr.cstring, `reqObjIdent`)
+    var ret = FFIThreadRequest.init(callback, userData, cstring(`reqNameLit`), `reqObjIdent`)
     proc destroyContent(content: pointer) {.nimcall.} =
       ffiDeleteReq(cast[ptr `reqTypeName`](content))
 
