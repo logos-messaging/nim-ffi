@@ -38,6 +38,11 @@ type CtxLifecycle {.pure.} = enum
 type FFIContext*[T] = object
   myLib*: ptr T
     # main library object (e.g., Waku, LibP2P, SDS,  the one to be exposed as a library)
+  myLibRefd: bool
+    # refc only: whether we hold a GC_ref on myLib[]. myLib lives in non-GC
+    # shared memory, so a GC-managed lib object stored there is invisible to
+    # refc's cycle collector and gets reclaimed mid-use under sustained load.
+    # Pinned in processRequest, released in freeLib. Unused under orc/arc.
   ffiThread: Thread[(ptr FFIContext[T])]
     # represents the main FFI thread in charge of attending API consumer actions
   watchdogThread: Thread[(ptr FFIContext[T])]
@@ -243,6 +248,15 @@ proc processRequest[T](
         "Async error in processRequest for " & reqId & ": " & exc.msg
       )
 
+  # Pin the lib object as a GC root once a handler has installed it. Under refc
+  # myLib lives in non-GC shared memory, invisible to the cycle collector, so it
+  # gets reclaimed mid-operation under sustained load. orc tracks it precisely.
+  when defined(gcRefc):
+    when T is ref:
+      if not ctx.myLibRefd and not ctx.myLib.isNil():
+        GC_ref(ctx.myLib[])
+        ctx.myLibRefd = true
+
   ## handleRes may raise (OOM, GC setup) even though it is rare.
   try:
     handleRes(res, request)
@@ -254,10 +268,16 @@ proc freeLib[T](ctx: ptr FFIContext[T]) {.gcsafe.} =
     return
 
   when not defined(gcRefc):
-    {.cast(gcsafe).}:
-      `=destroy`(ctx.myLib[])
+    try:
+      {.cast(gcsafe).}:
+        `=destroy`(ctx.myLib[])
+    except Exception:
+      discard
   else:
-    discard
+    when T is ref:
+      if ctx.myLibRefd:
+        GC_unref(ctx.myLib[])
+        ctx.myLibRefd = false
   freeShared(ctx.myLib)
   ctx.myLib = nil
 
