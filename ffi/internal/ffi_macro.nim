@@ -291,14 +291,13 @@ proc buildFFINewReqProc(reqTypeName, body: NimNode): NimNode =
           `reqObjIdent`.`fieldName` = `fieldName`
       )
 
+  let reqNameLit =
+    newLit(if reqTypeName.kind == nnkPostfix: $reqTypeName[1] else: $reqTypeName)
   newBody.add(
     quote do:
-      let typeStr = $T
-      # Encode directly into shared memory and hand ownership to the request,
-      # avoiding the seq[byte] → allocShared+copyMem second copy.
       let (sharedData, sharedLen) = cborEncodeShared(`reqObjIdent`)
       return FFIThreadRequest.initFromOwnedShared(
-        callback, userData, typeStr.cstring, sharedData, sharedLen
+        callback, userData, cstring(`reqNameLit`), sharedData, sharedLen
       )
   )
 
@@ -848,10 +847,11 @@ macro ffi*(prc: untyped): untyped =
 
     # Build the FFIThreadRequest payload directly from the incoming bytes.
     let reqPtrIdent = genSym(nskLet, "reqPtr")
+    let reqNameLit =
+      newLit(if reqTypeName.kind == nnkPostfix: $reqTypeName[1] else: $reqTypeName)
     ffiBody.add quote do:
-      let typeStr = $`reqTypeName`
       let `reqPtrIdent` = FFIThreadRequest.initFromPtr(
-        callback, userData, typeStr.cstring, reqCbor, int(reqCborLen)
+        callback, userData, cstring(`reqNameLit`), reqCbor, int(reqCborLen)
       )
 
     let sendResIdent = genSym(nskLet, "sendRes")
@@ -969,11 +969,12 @@ proc buildCtorFFINewReqProc(reqTypeName: NimNode, paramNames: seq[string]): NimN
   let retType = newTree(nnkPtrTy, ident("FFIThreadRequest"))
   formalParams = @[retType] & formalParams
 
+  let reqNameLit =
+    newLit(if reqTypeName.kind == nnkPostfix: $reqTypeName[1] else: $reqTypeName)
   var newBody = newStmtList()
   newBody.add quote do:
-    let typeStr = $T
     return FFIThreadRequest.initFromPtr(
-      callback, userData, typeStr.cstring, reqCbor, int(reqCborLen)
+      callback, userData, cstring(`reqNameLit`), reqCbor, int(reqCborLen)
     )
 
   let newReqProc = newProc(
@@ -1068,9 +1069,19 @@ proc buildCtorProcessFFIRequestProc(
       return err($error)
 
   let myLibIdent = newDotExpr(newTree(nnkDerefExpr, ctxIdent), ident("myLib"))
+  let myLibOwnedIdent =
+    newDotExpr(newTree(nnkDerefExpr, ctxIdent), ident("myLibOwned"))
+  let myLibRefdIdent = newDotExpr(newTree(nnkDerefExpr, ctxIdent), ident("myLibRefd"))
   newBody.add quote do:
     `myLibIdent` = createShared(`libTypeName`)
     `myLibIdent`[] = `libValIdent`
+    `myLibOwnedIdent` = true
+    # Root the ref lib under refc: it lives only via this ptr in non-GC
+    # createShared memory, invisible to the cycle collector. freeLib unroots it.
+    when defined(gcRefc):
+      when `libTypeName` is ref:
+        GC_ref(`myLibIdent`[])
+        `myLibRefdIdent` = true
 
   newBody.add quote do:
     return ok($cast[uint](`ctxIdent`))
@@ -1405,7 +1416,7 @@ macro ffiDtor*(prc: untyped): untyped =
   let poolIdent = ident($libTypeName & "FFIPool")
   ffiBody.add quote do:
     let `destroyResIdent` =
-      `poolIdent`.destroyFFIContext(cast[ptr FFIContext[`libTypeName`]](ctx))
+      `poolIdent`.recycleFFIContext(cast[ptr FFIContext[`libTypeName`]](ctx))
     if `destroyResIdent`.isErr():
       return RET_ERR
 
