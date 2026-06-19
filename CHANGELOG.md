@@ -4,8 +4,15 @@
 
 [Full changelog](https://github.com/logos-messaging/nim-ffi/compare/v0.1.4...v0.1.5)
 
+### Added
+
+- Compile-time guard that requires consumers to build with
+  `-d:noSignalHandler`, failing the build with an actionable message so the
+  Nim runtime never clobbers the foreign host's signal handling.
+
 ### Fixed
 
+- Foreign-host (Go) concurrency crashes (#83).
 - Recycle FFI contexts in the pool instead of tearing them down per cycle,
   stopping a per-cycle file-descriptor leak (#74).
 
