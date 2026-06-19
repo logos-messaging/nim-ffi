@@ -13,37 +13,43 @@ type
     StaticCtxReady
 
   FFIContextPool*[T] = object
-    ## Fixed pool of FFI contexts, plus the one `{.ffiStatic.}` context.
-    # Each live context holds 5 ThreadSignalPtrs — one fd each on Linux, two (a
-    # socketpair) elsewhere. Under refc a destroyed context cannot close them
-    # (see `deinitContextResources`), so churn leaks fds unbounded.
-    slots: array[MaxFFIContexts, FFIContext[T]]
-    inUse: array[MaxFFIContexts, Atomic[bool]]
+    ## Fixed pool of FFI contexts, plus the one `{.ffiStatic.}` context. Each
+    ## slot's worker + event threads and signal fds are built once (on first
+    ## use) and reused across create/recycle cycles — recycle keeps them alive,
+    ## so repeated create/destroy does not churn fds. Bounds ThreadSignalPtr fds
+    ## at MaxFFIContexts * (signals per ctx).
+    contexts: array[MaxFFIContexts, FFIContext[T]]
+    initialized: array[MaxFFIContexts, Atomic[bool]]
     staticCtx: Atomic[pointer]
     staticState: Atomic[StaticCtxState]
 
-proc acquireSlot[T](pool: var FFIContextPool[T]): Result[ptr FFIContext[T], string] =
-  for i in 0 ..< MaxFFIContexts:
-    var expected = false
-    if pool.inUse[i].compareExchange(expected, true):
-      return ok(pool.slots[i].addr)
-  err("FFI context pool exhausted (max " & $MaxFFIContexts & " contexts)")
-
 proc releaseSlot[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]) =
+  ## Full-teardown release: the slot must be rebuilt before it serves again.
   for i in 0 ..< MaxFFIContexts:
-    if pool.slots[i].addr == ctx:
-      pool.inUse[i].store(false)
-      return
+    if pool.contexts[i].addr == ctx:
+      pool.initialized[i].store(false)
+      break
+  ctx.release()
 
 proc createFFIContext*[T](
     pool: var FFIContextPool[T]
 ): Result[ptr FFIContext[T], string] =
-  let ctx = pool.acquireSlot().valueOr:
-    return err("createFFIContext: acquireSlot failed: " & $error)
-  initContextResources(ctx).isOkOr:
-    pool.releaseSlot(ctx)
-    return err("createFFIContext: initContextResources failed: " & $error)
-  ok(ctx)
+  ## Acquires a context from the fixed pool. A slot's worker is built once on
+  ## first use and reused (markAsActive) on every later acquisition.
+  for i in 0 ..< MaxFFIContexts:
+    let ctx = pool.contexts[i].addr
+    if not ctx.tryClaim():
+      continue
+    if pool.initialized[i].load():
+      # Reused slot: a prior recycle drained and released it; worker still alive.
+      ctx.markAsActive()
+      return ok(ctx)
+    initContextResources(ctx).isOkOr:
+      ctx.release()
+      return err("createFFIContext: initContextResources failed: " & $error)
+    pool.initialized[i].store(true)
+    return ok(ctx)
+  err("FFI context pool exhausted (max " & $MaxFFIContexts & " contexts)")
 
 proc isStaticCtx[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]): bool =
   ## True while `ctx` is the pool's static context, including mid-teardown.
@@ -51,16 +57,29 @@ proc isStaticCtx[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]): bool =
   # pointer covers `Destroying` too.
   pool.staticCtx.load() == cast[pointer](ctx)
 
+proc recycleFFIContext*[T](
+    pool: var FFIContextPool[T], ctx: ptr FFIContext[T]
+): Result[void, string] =
+  ## Normal teardown: drains in-flight handlers, frees the lib and returns the
+  ## slot to the pool WITHOUT stopping its threads, so a later createFFIContext
+  ## reuses them. Synchronous (waits for the FFI thread to finish draining).
+  # Recycling it would release the slot while `staticState` still points at it.
+  if pool.isStaticCtx(ctx):
+    return err("recycleFFIContext(pool): the {.ffiStatic.} context outlives every ctx")
+  ctx.requestRecycle()
+
 proc destroyFFIContext*[T](
     pool: var FFIContextPool[T], ctx: ptr FFIContext[T]
 ): Result[void, string] =
-  ## On thread-exit timeout the slot is leaked; closing live-thread resources is unsafe.
+  ## Full teardown: stops/joins the threads and frees resources, marking the slot
+  ## uninitialised so a later createFFIContext rebuilds it; normal cleanup uses
+  ## recycleFFIContext. On thread-exit timeout the slot is leaked; closing
+  ## live-thread resources is unsafe.
   # Destroying it would release the slot while `staticState` still points at it.
   if pool.isStaticCtx(ctx):
     return err("destroyFFIContext(pool): the {.ffiStatic.} context outlives every ctx")
   ctx.stopAndJoinThreads().isOkOr:
     return err("destroyFFIContext(pool): " & $error)
-  # Required: next acquisition would otherwise re-init a live lock (UB).
   let deinitRes = ctx.deinitContextResources()
   pool.releaseSlot(ctx)
   deinitRes.isOkOr:
@@ -118,6 +137,6 @@ proc isValidCtx*[T](pool: var FFIContextPool[T], ctx: pointer): bool =
   if ctx.isNil():
     return false
   for i in 0 ..< MaxFFIContexts:
-    if cast[pointer](pool.slots[i].addr) == ctx:
-      return pool.inUse[i].load()
+    if cast[pointer](pool.contexts[i].addr) == ctx:
+      return cast[ptr FFIContext[T]](ctx).isInUse()
   false

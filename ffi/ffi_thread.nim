@@ -16,6 +16,10 @@ proc sendRequestToFFIThread*(
       "reentrant ffi call: a handler invoked sendRequestToFFIThread on its own context"
     )
 
+  if ctx.lifecycle.load() != CtxLifecycle.Active:
+    deleteRequest(ffiRequest)
+    return err("FFI context is not accepting requests (being recycled)")
+
   # Wake only when the push found the queue empty: waking per submit kills scaling, and a skipped wake just waits the consumer's 100ms poll.
   let shouldWake = ctx.reqQueueBank.pushRequest(ffiRequest)
 
@@ -81,6 +85,56 @@ proc processRequest[T](
     handleRes(res, request)
   except Exception as e:
     error "Unexpected exception in handleRes", error = e.msg
+
+const RecycleTimeout = 1500.milliseconds
+  ## Bounds how long the recycle handler waits for in-flight handlers before it
+  ## cancels them, so a wedged handler cannot block reuse forever.
+
+proc freeLib[T](ctx: ptr FFIContext[T]) {.gcsafe.} =
+  ## Releases the library object the ctor stored in ctx.myLib. Only owned libs
+  ## (createShared'd by a ctor) are freed; the worker's stack fallback is not.
+  if not ctx.myLibOwned or ctx.myLib.isNil():
+    ctx.myLib = nil
+    return
+  when not defined(gcRefc):
+    try:
+      {.cast(gcsafe).}:
+        `=destroy`(ctx.myLib[])
+    except Exception:
+      discard
+  else:
+    when T is ref:
+      if ctx.myLibRefd:
+        GC_unref(ctx.myLib[])
+        ctx.myLibRefd = false
+  freeShared(ctx.myLib)
+  ctx.myLib = nil
+  ctx.myLibOwned = false
+
+proc recycleContext[T](
+    ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]
+) {.async.} =
+  ## Drain in-flight handlers, free the lib, clear listeners and release the
+  ## slot — all WITHOUT stopping the worker/event threads, so the next
+  ## createFFIContext reuses them (no fd churn). Then fire recycleDoneSignal.
+  ongoing[].keepItIf(not it.finished())
+  var drained = ongoing[].len == 0
+  if not drained:
+    drained = await allFutures(ongoing[]).withTimeout(RecycleTimeout)
+  if not drained:
+    for fut in ongoing[]:
+      if not fut.finished():
+        fut.cancelSoon()
+    drained = await allFutures(ongoing[]).withTimeout(RecycleTimeout)
+
+  freeLib(ctx)
+  clearListeners(ctx[].eventRegistry)
+  ongoing[].setLen(0)
+  ctx.release()
+
+  let fireRes = ctx.recycleDoneSignal.fireSync()
+  if fireRes.isErr():
+    error "failed to fire recycleDoneSignal", err = fireRes.error
 
 var ffiEventQueueSignalPtr {.threadvar.}: ThreadSignalPtr
   # Stashed so the hook has no closure env.
@@ -151,6 +205,13 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
     while ctx.running.load():
       ctx.proveAlive()
+
+      # Recycle requested by the ffiDtor: drain + free lib + release the slot,
+      # keeping this thread alive for the next createFFIContext to reuse.
+      var expected = CtxLifecycle.RecyclePending
+      if ctx.lifecycle.compareExchange(expected, CtxLifecycle.Recycling):
+        await recycleContext(ctx, addr pending)
+        continue
 
       cleanFinishedRequests()
 
