@@ -6,7 +6,7 @@
 
 {.passc: "-fPIC".}
 
-import std/[atomics, locks, options, tables]
+import std/[atomics, locks, options, sequtils, tables]
 import chronicles, chronos, chronos/threadsync, taskpools/channels_spsc_single, results
 import
   ./ffi_types,
@@ -18,8 +18,30 @@ import
 
 export ffi_events, ffi_handles
 
+type CtxLifecycle* {.pure.} = enum
+  ## State machine guarding a pooled FFI context (Atomic on FFIContext).
+  ##   Active         -> RecyclePending   when the ffiDtor requests recycle
+  ##   RecyclePending -> Recycling        FFI loop claimed it, draining handlers
+  ##   Recycling      -> Active           createFFIContext reuses the slot
+  Active
+  RecyclePending
+  Recycling
+
 type FFIContext*[T] = object
   myLib*: ptr T # main library object (Waku, LibP2P, SDS, …)
+  myLibRefd*: bool
+    # refc only: true once myLib[] (a ref) has been GC_ref'd to root it against
+    # the cycle collector. Balanced by GC_unref in freeLib.
+  myLibOwned*: bool
+    # true once a ctor stored a createShared'd lib into myLib (vs the worker's
+    # stack fallback). freeLib only frees/destroys owned libs.
+  inUse*: Atomic[bool]
+    # Whether this pooled context is claimed. The recycle handler clears it on
+    # the FFI thread so the slot returns to the pool without recreating threads.
+  lifecycle*: Atomic[CtxLifecycle]
+  recycleDoneSignal: ThreadSignalPtr
+    # fired by the recycle handler once the lib is freed and the slot released;
+    # the synchronous recycleFFIContext caller waits on it.
   ffiThread: Thread[(ptr FFIContext[T])]
   eventThread: Thread[(ptr FFIContext[T])]
   lock: Lock
@@ -47,6 +69,9 @@ var onFFIThread* {.threadvar.}: bool
 const git_version* {.strdefine.} = "n/a"
 
 const
+  RecycleWaitTimeout* = 5.seconds
+    ## Caller-side bound for synchronous recycle; the FFI-thread drain itself is
+    ## bounded by RecycleTimeout, so this only guards against a wedged worker.
   EventThreadTickInterval* = 1.seconds
   FFIHeartbeatStartDelay* = 10.seconds # grace window for library startup
   FFIHeartbeatStaleThreshold* = 1.seconds
@@ -70,7 +95,7 @@ proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     # ThreadSignalPtr.close() under refc traps in safeUnregisterAndCloseFd
     # → newDispatcher → rawNewObj → signal-handler re-entry (process hangs).
     # See tests/test_ffi_context.nim "destroyFFIContext refc workaround".
-    # Fd leak is bounded — destroy runs once per process lifetime.
+    # Fd leak is bounded — with the recycle pool, full destroy is rare.
     discard
   else:
     closeAndNil(ctx.reqSignal)
@@ -79,6 +104,7 @@ proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     closeAndNil(ctx.threadExitSignal)
     closeAndNil(ctx.eventQueueSignal)
     closeAndNil(ctx.eventThreadExitSignal)
+    closeAndNil(ctx.recycleDoneSignal)
   ok()
 
 proc cleanUpResources[T](ctx: ptr FFIContext[T]): Result[void, string] =
@@ -101,6 +127,10 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ctx.threadExitSignal = nil
   ctx.eventQueueSignal = nil
   ctx.eventThreadExitSignal = nil
+  ctx.recycleDoneSignal = nil
+  ctx.myLibOwned = false
+  ctx.myLibRefd = false
+  ctx.lifecycle.store(CtxLifecycle.Active)
   ctx.lock.initLock()
   initEventRegistry(ctx[].eventRegistry)
   initHandleRegistry(ctx[].handles)
@@ -121,6 +151,7 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   newSignalOrErr(ctx.threadExitSignal, "threadExitSignal")
   newSignalOrErr(ctx.eventQueueSignal, "eventQueueSignal")
   newSignalOrErr(ctx.eventThreadExitSignal, "eventThreadExitSignal")
+  newSignalOrErr(ctx.recycleDoneSignal, "recycleDoneSignal")
 
   ctx.registeredRequests = addr ffi_types.registeredRequests
 
@@ -171,6 +202,43 @@ proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   # Non-fatal: event thread sees running==false on the next tick anyway.
   ctx.eventQueueSignal.fireOrErr("eventQueueSignal").isOkOr:
     error "failed to signal eventQueueSignal in signalStop", error = error
+  ok()
+
+proc tryClaim*[T](ctx: ptr FFIContext[T]): bool =
+  ## Atomically claim a free pooled context (false -> true).
+  var expected = false
+  ctx.inUse.compareExchange(expected, true)
+
+proc release*[T](ctx: ptr FFIContext[T]) =
+  ctx.inUse.store(false)
+
+proc isInUse*[T](ctx: ptr FFIContext[T]): bool =
+  ctx.inUse.load()
+
+proc markAsActive*[T](ctx: ptr FFIContext[T]) =
+  ## Reused context: its worker threads are still alive; re-arm for requests.
+  ctx.lifecycle.store(CtxLifecycle.Active)
+
+proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
+  ## Ask the FFI thread to drain, free the lib and release the slot, WITHOUT
+  ## stopping its worker/event threads, so the next createFFIContext reuses them.
+  ## Synchronous: waits on recycleDoneSignal. No fd churn -> no select() limit.
+  ctx.lock.acquire()
+  if ctx.lifecycle.load() != CtxLifecycle.Active:
+    ctx.lock.release()
+    return err("requestRecycle: context is not Active (already recycling)")
+  ctx.lifecycle.store(CtxLifecycle.RecyclePending)
+  ctx.lock.release()
+
+  let fired = ctx.reqSignal.fireSync().valueOr:
+    return err("requestRecycle: failed to signal the FFI thread: " & $error)
+  if not fired:
+    return err("requestRecycle: failed to signal the FFI thread in time")
+
+  let done = ctx.recycleDoneSignal.waitSync(RecycleWaitTimeout).valueOr:
+    return err("requestRecycle: failed waiting for recycle: " & $error)
+  if not done:
+    return err("requestRecycle: recycle did not complete in time")
   ok()
 
 ## Bound on how long clearContext waits for the FFI thread to exit before
