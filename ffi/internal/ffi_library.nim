@@ -26,10 +26,8 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
   ## Generate {.passc: "-fPIC".}
   res.add nnkPragma.newTree(nnkExprColonExpr.newTree(ident"passc", newLit("-fPIC")))
 
-  # The soname / install_name only make sense for an actual shared library and
-  # break a plain-executable link (fatally so on macOS: `-install_name` requires
-  # `-dynamiclib`). Emit them only when building `--app:lib` so that declaring a
-  # library is safe in unit tests that compile the FFI code as an executable.
+  # soname / install_name only apply to a shared library and break an executable
+  # link (fatally on macOS), so emit them only under `--app:lib`.
   if compileOption("app", "lib"):
     when defined(linux):
       ## Generates {.passl: "-Wl,-soname,libwaku.so".} (considering libraryName=="waku", for example)
@@ -131,9 +129,8 @@ macro declareLibrary*(
   ## the `ctx: ptr FFIContext[libType]` parameter. See
   ## `examples/timer/timer.nim` for a working call site.
   ##
-  ## `defaultABIFormat` selects the wire format inherited by every `{.ffi.}`,
-  ## `{.ffiEvent.}`, `{.ffiCtor.}`, ... in this library — `"cbor"` (default) or
-  ## `"c"`. Individual annotations override it with an `"abi = ..."` spec.
+  ## `defaultABIFormat` (`"cbor"` default, or `"c"`) is the wire format every
+  ## annotation inherits unless it overrides with an `"abi = ..."` spec.
   currentLibType = $libType # so handle-receiver `.ffi.` procs can resolve the pool
 
   let (abiOk, abiFmt) = parseABIFormatName(defaultABIFormat)

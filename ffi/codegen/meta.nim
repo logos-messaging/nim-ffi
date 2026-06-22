@@ -5,8 +5,8 @@ import std/strutils
 
 type
   ABIFormat* {.pure.} = enum
-    ## Wire format for an FFI payload. `Cbor` is wired end-to-end; `C` (flat
-    ## C-struct) is recognized but gated by the macros until its codegen lands.
+    ## Wire format for an FFI payload. Only `Cbor` is wired end-to-end; `C`
+    ## (flat C-struct) has a type codec but no proc-dispatch path yet.
     Cbor = "cbor"
     C = "c"
 
@@ -63,8 +63,8 @@ var libraryDeclared* {.compileTime.}: bool = false
 var currentDefaultABIFormat* {.compileTime.}: ABIFormat = ABIFormat.Cbor
 
 proc abiCodegenImplemented*(fmt: ABIFormat): bool =
-  ## Whether `fmt` has a working end-to-end proc-dispatch path. Only `Cbor` does
-  ## today; this is the single seam a future PR flips when `c` dispatch lands.
+  ## Whether `fmt` has a working proc-dispatch path. Only `Cbor` does today; the
+  ## seam a future PR flips once the `c` dispatch path is wired.
   fmt == ABIFormat.Cbor
 
 proc parseABIFormatName*(name: string): tuple[ok: bool, fmt: ABIFormat] =
