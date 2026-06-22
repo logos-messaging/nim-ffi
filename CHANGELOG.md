@@ -14,8 +14,27 @@ All notable changes to this project are documented in this file.
   runs on the event thread. The FFI thread advances an atomic heartbeat
   each loop iteration; if it stalls for more than 1s past the start-up
   grace window, the event thread emits the `not_responding` event.
+- `declareLibrary` no longer emits the shared-library `soname` /
+  `install_name` linker flags when building as an executable (`--app:lib`
+  guard), so FFI code can be unit-tested as a plain binary — fatal on macOS,
+  where `-install_name` requires `-dynamiclib`.
 
 ### Added
+- Per-interaction ABI-format annotations: `declareLibrary` now takes an
+  optional `defaultABIFormat` (`"cbor"` default, or `"c"`) that every
+  `{.ffi.}` / `{.ffiCtor.}` / `{.ffiDtor.}` / `{.ffiRaw.}` / `{.ffiEvent.}`
+  inherits, and each annotation can override it with an `"abi = c"` /
+  `"abi = cbor"` spec (e.g. `{.ffi: "abi = cbor".}`). `declareLibrary` is now
+  required before any FFI annotation
+  ([#78](https://github.com/logos-messaging/nim-ffi/issues/78)).
+- `c` (flat C-struct) ABI **codec**: every `{.ffi: "abi = c".}` type gets a
+  `<T>_CWire` companion plus `cwirePack` / `cwireUnpack` / `cwireFree`, covering
+  scalars, strings, `seq`, `Option`, `seq[byte]`, and nested `{.ffi.}` structs.
+  The `c` ABI proc-dispatch path and the foreign (C++/Rust) generators are still
+  pending, so `c` is rejected on proc/ctor/dtor/event annotations for now.
+- `tests/bench/bench_codec.nim` (+ `nimble bench_codec`): a single-process
+  microbenchmark comparing the `cbor` and `c` codecs across payload shapes,
+  isolating codec cost from the (identical) thread/callback round-trip.
 - Queue-overflow handling: when the bounded event queue is full, the
   library sets a sticky "stuck" flag, logs an error, fires
   `not_responding` from the event thread, and rejects subsequent

@@ -327,6 +327,11 @@ suite "sendRequestToFFIThread":
 type SimpleLib = object
   value: int
 
+# Stub the dylib NimMain importc that declareLibrary emits (this links as a plain exe).
+{.emit: "void libtestlibNimMain(void) {}".}
+
+declareLibrary("testlib", SimpleLib)
+
 type SimpleConfig {.ffi.} = object
   initialValue: int
 

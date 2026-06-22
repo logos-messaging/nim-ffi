@@ -12,6 +12,11 @@ import ffi
 type Counter = object
   start: int
 
+# Stub the dylib NimMain importc that declareLibrary emits (this links as a plain exe).
+{.emit: "void libcounterlibNimMain(void) {}".}
+
+declareLibrary("counterlib", Counter)
+
 type CounterConfig {.ffi.} = object
   initial: int
 

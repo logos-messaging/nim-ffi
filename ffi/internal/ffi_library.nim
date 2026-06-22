@@ -26,22 +26,27 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
   ## Generate {.passc: "-fPIC".}
   res.add nnkPragma.newTree(nnkExprColonExpr.newTree(ident"passc", newLit("-fPIC")))
 
-  when defined(linux):
-    ## Generates {.passl: "-Wl,-soname,libwaku.so".} (considering libraryName=="waku", for example)
-    let soName = fmt"-Wl,-soname,lib{libraryName}.so"
-    res.add(
-      newNimNode(nnkPragma).add(
-        nnkExprColonExpr.newTree(ident"passl", newStrLitNode(soName))
+  # The soname / install_name only make sense for an actual shared library and
+  # break a plain-executable link (fatally so on macOS: `-install_name` requires
+  # `-dynamiclib`). Emit them only when building `--app:lib` so that declaring a
+  # library is safe in unit tests that compile the FFI code as an executable.
+  if compileOption("app", "lib"):
+    when defined(linux):
+      ## Generates {.passl: "-Wl,-soname,libwaku.so".} (considering libraryName=="waku", for example)
+      let soName = fmt"-Wl,-soname,lib{libraryName}.so"
+      res.add(
+        newNimNode(nnkPragma).add(
+          nnkExprColonExpr.newTree(ident"passl", newStrLitNode(soName))
+        )
       )
-    )
-  elif defined(macosx):
-    ## Generates {.passl: "-install_name @rpath/libwaku.dylib".}
-    let installName = fmt"-install_name @rpath/lib{libraryName}.dylib"
-    res.add(
-      newNimNode(nnkPragma).add(
-        nnkExprColonExpr.newTree(ident"passl", newStrLitNode(installName))
+    elif defined(macosx):
+      ## Generates {.passl: "-install_name @rpath/libwaku.dylib".}
+      let installName = fmt"-install_name @rpath/lib{libraryName}.dylib"
+      res.add(
+        newNimNode(nnkPragma).add(
+          nnkExprColonExpr.newTree(ident"passl", newStrLitNode(installName))
+        )
       )
-    )
   ## proc lib{libraryName}NimMain() {.importc.}
   let libNimMainName = ident(fmt"lib{libraryName}NimMain")
   let importcPragma = nnkPragma.newTree(ident"importc")
@@ -107,7 +112,11 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
 
   return res
 
-macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
+macro declareLibrary*(
+    libraryName: static[string],
+    libType: untyped,
+    defaultABIFormat: static[string] = "cbor",
+): untyped =
   ## Declares a library with the given name and emits the C-exported event
   ## ABI on its `FFIContext`:
   ##
@@ -121,7 +130,20 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
   ## `libType` is the Nim type of the main library object, used to type
   ## the `ctx: ptr FFIContext[libType]` parameter. See
   ## `examples/timer/timer.nim` for a working call site.
+  ##
+  ## `defaultABIFormat` selects the wire format inherited by every `{.ffi.}`,
+  ## `{.ffiEvent.}`, `{.ffiCtor.}`, ... in this library — `"cbor"` (default) or
+  ## `"c"`. Individual annotations override it with an `"abi = ..."` spec.
   currentLibType = $libType # so handle-receiver `.ffi.` procs can resolve the pool
+
+  let (abiOk, abiFmt) = parseABIFormatName(defaultABIFormat)
+  if not abiOk:
+    error(
+      "declareLibrary: unknown defaultABIFormat '" & defaultABIFormat &
+        "'; valid values are \"c\" and \"cbor\""
+    )
+  currentDefaultABIFormat = abiFmt
+  libraryDeclared = true
 
   var stmts = newStmtList()
 
