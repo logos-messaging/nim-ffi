@@ -85,6 +85,11 @@ task test_serial, "Run CBOR codec unit tests":
   exec "nim c -r " & nimFlagsOrc & " tests/unit/test_serial.nim"
   exec "nim c -r " & nimFlagsRefc & " tests/unit/test_serial.nim"
 
+task bench_codec, "Microbenchmark: cbor vs c (cwire) wire-format codecs":
+  # Built with -d:danger so the numbers reflect optimized codegen, not the
+  # debug build. Not part of `test` — timing is a measurement, not a gate.
+  exec "nim c -r " & nimFlagsOrc & " -d:danger tests/bench/bench_codec.nim"
+
 task test_cpp_e2e, "Build and run the C++ end-to-end tests for the timer example":
   # Regenerate the C++ bindings so the suite always runs against fresh codegen.
   runOrQuit "nimble genbindings_cpp"
