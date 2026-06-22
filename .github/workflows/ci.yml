@@ -80,6 +80,18 @@ jobs:
       nim-versions:   ${{ needs.versions.outputs.nim-versions }}
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
+  c-wire:
+    # The `c`-ABI cwire codec is layout-/allocator-sensitive (malloc/free, flat
+    # struct packing, allocShared for seq/Option), so cover it across the full
+    # OS matrix, not just Linux.
+    name: C Wire Codec
+    needs: versions
+    uses: ./.github/workflows/test.yml
+    with:
+      test: test_c_wire
+      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
+      nimble-version: ${{ needs.versions.outputs.nimble }}
+
   cpp-e2e:
     # Codegen output doesn't vary with mm, so we matrix over OS and Nim only.
     # Windows runs MSVC by default and may surface codegen tweaks needed in
