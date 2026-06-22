@@ -1,28 +1,11 @@
-## Nim-level microbenchmark comparing the two FFI wire-format codecs across a
-## range of payload shapes (scalars, strings, seqs, Options, nested structs,
-## byte blobs):
-##
-##   - CBOR path:  `cborEncode(req)` + `cborDecode(bytes, T)` — self-describing
-##                 bytes over `seq[byte]`, the codec the `cbor` ABI uses on
-##                 every boundary crossing.
-##   - cwire path: `cwirePack(dst, src)` + `cwireUnpack(src)` + `cwireFree(dst)`
-##                 — flat C-struct shared-memory packing, the codec the `c` ABI
-##                 uses on every boundary crossing.
-##
-## Both paths are timed in the same process on the same payloads, so the
-## numbers isolate codec cost (no thread hop, no callback dispatch, no
-## chronos work).
-##
-## The payload types are annotated `{.ffi: "abi = c".}` so the `c`-ABI cwire
-## companion procs (`*_CWire`, `cwirePack`, `cwireUnpack`, `cwireFree`) are
-## emitted; `genBindings()` at file end flushes them. The CBOR codec is generic
-## and always available, so both can be timed on the same types.
+## Microbenchmark comparing the `cbor` (cborEncode/Decode) and `c` (cwire
+## pack/unpack/free) codecs on identical payloads in one process, so the
+## numbers isolate codec cost from the thread/callback round-trip.
 
 import std/[monotimes, options, os, strformat, strutils, times]
 import ../../ffi
 
-# ── Payload types — mirror the timer example so the e2e and microbenches
-# stay structurally comparable. -------------------------------------------
+# Payload types mirror the timer example so e2e and bench stay comparable.
 
 type EchoRequest {.ffi: "abi = c".} = object
   message: string
@@ -43,22 +26,13 @@ type ComplexResponse {.ffi: "abi = c".} = object
   itemCount: int
   hasNote: bool
 
-# Single-field byte-blob type — mirrors WakuMessage.payload, codex Block.data,
-# and pubsub message bodies. The size sweep below is the one suggested by
-# real consumers' wire caps: 100 B (control / RPC envelopes), 1 KiB (typical
-# chat), 10 KiB (fat pubsub / encrypted blob), 64 KiB (codex block), and
-# 150 KiB (DefaultMaxWakuMessageSize). 1 MiB (libp2p pubsub max) is left
-# out of the default sweep to keep iteration counts reasonable; pass it
-# as a CLI arg to opt in.
+# Byte-blob type for the payload-size sweep below.
 type BytesPayload {.ffi: "abi = c".} = object
   payload: seq[byte]
 
-# `genBindings()` here triggers the deferred cwire emission for every
-# {.ffi.} type above. With `-d:ffiGenBindings` unset it does NOT write any
-# header files — it only flushes runtime companion procs into the binary.
+# Flushes the cwire companions for the types above (no header files emitted
+# unless -d:ffiGenBindings).
 genBindings()
-
-# ── Benchmark harness -----------------------------------------------------
 
 const Iterations = 200_000
 
@@ -204,13 +178,7 @@ when isMainModule:
   benchResponseDirection()
   benchComplexPayload()
 
-  # Payload-size sweep — sizes drawn from real consumers:
-  #   100 B   — RPC / control envelopes
-  #   1 KiB   — typical encrypted chat message
-  #   10 KiB  — fat pubsub message / encrypted blob
-  #   64 KiB  — codex Block.data default
-  #   150 KiB — Waku's DefaultMaxWakuMessageSize
-  #   1 MiB   — libp2p pubsub maxMessageSize (off by default; opt-in)
+  # Payload-size sweep across real-consumer wire caps (1 MiB is opt-in).
   echo "═══ Payload-size sweep (BytesPayload.payload = seq[byte]) ═════════"
   echo ""
   benchBytesAtSize(100, 200_000)

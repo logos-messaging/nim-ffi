@@ -5,10 +5,8 @@ import std/strutils
 
 type
   ABIFormat* {.pure.} = enum
-    ## Wire format used to marshal an FFI interaction's payload across the
-    ## boundary. `Cbor` is the only format wired end-to-end today; `C` (a flat
-    ## C-struct ABI) is recognized so the annotation surface is complete, and
-    ## is gated by the macros until its codegen lands.
+    ## Wire format for an FFI payload. `Cbor` is wired end-to-end; `C` (flat
+    ## C-struct) is recognized but gated by the macros until its codegen lands.
     Cbor = "cbor"
     C = "c"
 
@@ -44,11 +42,8 @@ type
     abiFormat*: ABIFormat # wire format for this type (default Cbor)
 
   FFIEventMeta* = object
-    ## Library-initiated event declared with `{.ffiEvent: "wire_name".}`.
-    ## `wireName` is the literal string the foreign side dispatches on
-    ## (it appears in the CBOR `eventType` field, verbatim — no case
-    ## conversion). `payloadTypeName` is the Nim type of the single
-    ## payload parameter.
+    ## Library-initiated event from `{.ffiEvent: "wire_name".}`. `wireName` is
+    ## the verbatim CBOR `eventType` string the foreign side dispatches on.
     wireName*: string
     nimProcName*: string
     libName*: string
@@ -61,27 +56,20 @@ var ffiTypeRegistry* {.compileTime.}: seq[FFITypeMeta]
 var ffiEventRegistry* {.compileTime.}: seq[FFIEventMeta]
 var currentLibName* {.compileTime.}: string
 
-# Set to true by `declareLibrary`. The FFI annotation macros require it so the
-# library name, type and default ABI format are always established first.
+# Set by `declareLibrary`; the FFI annotations require it (name/type/default ABI).
 var libraryDeclared* {.compileTime.}: bool = false
 
-# Library-wide default ABI format, set by `declareLibrary(defaultABIFormat = ...)`.
-# Each {.ffi.}/{.ffiEvent.}/... annotation inherits this unless it overrides
-# with an `"abi = c"` / `"abi = cbor"` spec.
+# Library-wide default ABI, inherited by each annotation unless it overrides.
 var currentDefaultABIFormat* {.compileTime.}: ABIFormat = ABIFormat.Cbor
 
 proc abiCodegenImplemented*(fmt: ABIFormat): bool =
-  ## Whether `fmt` has a working end-to-end FFI *proc-dispatch* path (request
-  ## marshalling through the FFI thread + reply). Only `Cbor` does today; the
-  ## `C` codec exists (the `<T>_CWire` companions for `{.ffi: "abi = c".}`
-  ## types), but its proc/ctor/dtor/event wiring is still pending, so the
-  ## proc-form macros refuse it. This single predicate is the seam a future PR
-  ## flips when the `c` dispatch path is wired.
+  ## Whether `fmt` has a working end-to-end proc-dispatch path. Only `Cbor` does
+  ## today; this is the single seam a future PR flips when `c` dispatch lands.
   fmt == ABIFormat.Cbor
 
 proc parseABIFormatName*(name: string): tuple[ok: bool, fmt: ABIFormat] =
-  ## Maps a bare format name (`"c"` / `"cbor"`, case-insensitive) to an
-  ## `ABIFormat`. `ok` is false for anything else.
+  ## Bare format name (`"c"`/`"cbor"`, case-insensitive) → `ABIFormat`;
+  ## `ok` is false otherwise.
   case name.strip().toLowerAscii()
   of "cbor":
     (true, ABIFormat.Cbor)
@@ -91,11 +79,8 @@ proc parseABIFormatName*(name: string): tuple[ok: bool, fmt: ABIFormat] =
     (false, ABIFormat.Cbor)
 
 proc parseAbiSpec*(spec: string): tuple[ok: bool, fmt: ABIFormat, err: string] =
-  ## Parses an `"abi = <format>"` override string into an `ABIFormat`.
-  ## Whitespace around the `=` and the format name is tolerated and the
-  ## comparison is case-insensitive. Returns `ok = false` with a human-readable
-  ## `err` when the grammar or the format name is wrong, so callers can surface
-  ## it via a compile-time `error`.
+  ## Parse an `"abi = <format>"` override (whitespace/case tolerant). On bad
+  ## grammar or format, returns `ok = false` with a human-readable `err`.
   let parts = spec.split('=')
   if parts.len != 2 or parts[0].strip().toLowerAscii() != "abi":
     return (

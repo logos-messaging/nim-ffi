@@ -1,36 +1,11 @@
-## Compile-time helpers used by `ffi_macro.nim` for the `c` (flat C-struct)
-## ABI — i.e. for `{.ffi: "abi = c".}` types.
-##
-## For every such {.ffi.} object type T (and every per-proc Req/Resp) we
-## generate a parallel `T_CWire` Nim object whose field layout matches a flat
-## C struct:
-##   - `string` → `cstring`
-##   - `seq[T]` → two adjacent fields `<name>_items: ptr UncheckedArray[T_w]`
-##     and `<name>_len: int`
-##   - `Option[T]`/`Maybe[T]` → `<name>: ptr T_w` (nil = none)
-##   - Nested {.ffi.} object T → field of type `T_CWire` (by value)
-##   - POD → unchanged
-##
-## Alongside each `_CWire` we emit three runtime procs:
-##   - `cwirePack(dst: var T_CWire, src: T)`   — allocates shared cstrings
-##   - `cwireUnpack(src: T_CWire): T`          — copies back into Nim heap
-##   - `cwireFree(dst: var T_CWire)`           — releases shared cstrings
-##
-## Wire structs live in `allocShared` memory so they can travel from the
-## C caller's thread through the FFI channel without crossing GC boundaries.
+## Compile-time helpers for the `c` (flat C-struct) ABI of `{.ffi: "abi = c".}`
+## types. Each gets a `T_CWire` companion (string→cstring, seq→items+len pair,
+## Option→ptr, nested ffi type→its `_CWire`, POD as-is) plus runtime
+## `cwirePack` / `cwireUnpack` / `cwireFree`. Wire structs live in `allocShared`
+## memory so they cross the FFI thread channel without touching either GC heap.
 
 import std/macros
 import ../codegen/meta
-
-# Which types get a cwire companion is decided per-annotation (`abi == C`) by
-# the callers (the `{.ffi.}` type macro registers the abi; `genBindings` flushes
-# the companions for every `abiFormat == C` type). The builders below therefore
-# emit unconditionally when invoked — there is no global mode switch.
-
-# ---------------------------------------------------------------------------
-# Compile-time registry of known ffi-type names → used to recognise nested
-# user types so the wire form can use their `_CWire` companion.
-# ---------------------------------------------------------------------------
 
 proc isKnownFFIType(name: string): bool {.compileTime.} =
   for t in ffiTypeRegistry:
@@ -38,17 +13,11 @@ proc isKnownFFIType(name: string): bool {.compileTime.} =
       return true
   false
 
-# Tracks which cwire companion types have already been emitted this
-# compilation. A `{.ffi.}` type-pragma can only return a TypeDef (no multi-stmt
-# expansion), so the companions are emitted out-of-band by `genBindings()`,
-# which dedupes against this tracker.
 var emittedCWireTypes* {.compileTime.}: seq[string]
 
 proc isCWireEmitted*(typeName: string): bool {.compileTime.} =
-  ## Linear scan over the emission tracker. Written as an indexed loop to
-  ## sidestep a Nim 2.2 compile-time VM quirk where repeated `for x in
-  ## seq` reads of a freshly-mutated `{.compileTime.}` seq can return
-  ## stale results within a single macro expansion.
+  ## Indexed loop, not `for x in seq`: a Nim 2.2 compile-time VM quirk returns
+  ## stale reads of a freshly-mutated `{.compileTime.}` seq within one expansion.
   var found = false
   for i in 0 ..< emittedCWireTypes.len:
     if emittedCWireTypes[i] == typeName:
@@ -60,13 +29,7 @@ proc markCWireEmitted*(typeName: string) {.compileTime.} =
   if not isCWireEmitted(typeName):
     emittedCWireTypes.add(typeName)
 
-# ---------------------------------------------------------------------------
-# Type-level helpers
-# ---------------------------------------------------------------------------
-
 proc cwireTypeName*(userTypeName: string): string =
-  ## Companion-type naming convention. Kept stable so generated tests can
-  ## reach in by name.
   userTypeName & "_CWire"
 
 proc isStringType(t: NimNode): bool =
@@ -83,13 +46,11 @@ proc isNestedFFIType(t: NimNode): bool =
   t.kind == nnkIdent and isKnownFFIType($t)
 
 proc wireFieldType(userType: NimNode): NimNode =
-  ## Map a user field type AST → its wire-form AST.
-  ## Note: `seq` is not handled here because it must split into two physical
-  ## fields; the caller uses `wireFieldsFor` for that case.
+  ## User field type AST → wire-form AST. `seq` is handled by `wireFieldsFor`,
+  ## which must split it into two physical fields.
   if isStringType(userType):
     return ident("cstring")
   if isOptionType(userType):
-    # Option[T] becomes `ptr <wireOf T>` (nil = none).
     let inner = userType[1]
     let innerWire =
       if isNestedFFIType(inner):
@@ -102,9 +63,7 @@ proc wireFieldType(userType: NimNode): NimNode =
   userType
 
 proc wireFieldsFor*(fieldName: string, fieldType: NimNode): seq[NimNode] =
-  ## Build the IdentDefs (one or two) that represent `fieldName: fieldType`
-  ## in the wire object. Empty pragma + empty default so the result drops
-  ## directly into a `nnkRecList`.
+  ## The IdentDefs (one, or two for `seq`) for `fieldName` in the wire object.
   if isSeqType(fieldType):
     let elem = fieldType[1]
     let elemWire =
@@ -124,9 +83,8 @@ proc wireFieldsFor*(fieldName: string, fieldType: NimNode): seq[NimNode] =
 proc buildCWireTypeDef*(
     userTypeName: string, fieldNames: seq[string], fieldTypes: seq[NimNode]
 ): NimNode =
-  ## Build the bare `nnkTypeDef` (no enclosing TypeSection) for the wire
-  ## companion of `userTypeName`. Callers splice the result into whichever
-  ## TypeSection makes sense at the call site.
+  ## Bare `nnkTypeDef` for the wire companion; the caller splices it into a
+  ## TypeSection.
   let wireName = ident(cwireTypeName(userTypeName))
   var fields: seq[NimNode] = @[]
   for i in 0 ..< fieldNames.len:
@@ -142,14 +100,8 @@ proc buildCWireTypeDef*(
   let objTy = newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), recList)
   newTree(nnkTypeDef, postfix(wireName, "*"), newEmptyNode(), objTy)
 
-# ---------------------------------------------------------------------------
-# Conversion procs (cwirePack / cwireUnpack / cwireFree)
-# ---------------------------------------------------------------------------
-
 proc emitElemPack(dstElem, srcElem, elemType: NimNode): NimNode =
-  ## Single-element pack used inside the seq/Option emitters. Mirrors the
-  ## field-level rules: cstring for `string`, recursive `cwirePack` for
-  ## nested ffi types, direct copy for POD.
+  ## Single-element pack for the seq/Option emitters.
   if isStringType(elemType):
     return newAssignment(dstElem, newCall(ident("cwireAllocStr"), srcElem))
   if isNestedFFIType(elemType):
@@ -171,9 +123,8 @@ proc emitElemFree(elemAccess, elemType: NimNode): NimNode =
   newEmptyNode()
 
 proc emitPackStmt(dstObj, srcObj, fieldNameIdent, userType: NimNode): seq[NimNode] =
-  ## AST stmts that populate `dstObj.<field>` from `srcObj.<field>` according
-  ## to the field's natural-Nim type, allocating shared-memory cstrings and
-  ## arrays as needed. Multi-statement for seq/Option.
+  ## Stmts populating `dstObj.<field>` from `srcObj.<field>`, allocating shared
+  ## cstrings/arrays as needed. Multi-statement for seq/Option.
   var stmts: seq[NimNode] = @[]
   let srcAccess = newDotExpr(srcObj, fieldNameIdent)
   let dstAccess = newDotExpr(dstObj, fieldNameIdent)
@@ -239,21 +190,18 @@ proc emitPackStmt(dstObj, srcObj, fieldNameIdent, userType: NimNode): seq[NimNod
         `dstAccess` = nil
     return stmts
 
-  # POD: direct copy.
   stmts.add(newAssignment(dstAccess, srcAccess))
   stmts
 
 proc emitUnpackStmt(
     resultObj, srcObj, fieldNameIdent, userType: NimNode
 ): seq[NimNode] =
-  ## AST stmts that fill `resultObj.<field>` from `srcObj.<field>`.
   var stmts: seq[NimNode] = @[]
   let srcAccess = newDotExpr(srcObj, fieldNameIdent)
   let dstAccess = newDotExpr(resultObj, fieldNameIdent)
 
   if isStringType(userType):
-    # `$cstring` copies into Nim-managed memory.
-    let dollar = newCall(ident("$"), srcAccess)
+    let dollar = newCall(ident("$"), srcAccess) # copies into Nim-managed memory
     stmts.add(newAssignment(dstAccess, dollar))
     return stmts
 
@@ -341,19 +289,16 @@ proc emitFreeStmt(dstObj, fieldNameIdent, userType: NimNode): seq[NimNode] =
         `dstAccess` = nil
     return stmts
 
-  # POD: nothing to free.
   stmts
 
 proc buildCWireProcs*(
     userTypeName: string, fieldNames: seq[string], fieldTypes: seq[NimNode]
 ): seq[NimNode] =
-  ## Generate cwirePack / cwireUnpack / cwireFree procs for `userTypeName`.
-  ## All three are public (`*`) so the macro-expanded shim in the user's
-  ## module can call them across module boundaries.
+  ## Generate public `cwirePack` / `cwireUnpack` / `cwireFree` (+ a pointer
+  ## thunk) for `userTypeName`, callable across module boundaries.
   let userName = ident(userTypeName)
   let wireName = ident(cwireTypeName(userTypeName))
 
-  # --- cwirePack(dst: var T_CWire, src: T) ---
   let packDst = ident("dst")
   let packSrc = ident("src")
   var packBody = newStmtList()
@@ -374,7 +319,6 @@ proc buildCWireProcs*(
     body = packBody,
   )
 
-  # --- cwireUnpack(src: T_CWire): T ---
   let unpSrc = ident("src")
   let unpRes = ident("res")
   var unpBody = newStmtList()
@@ -392,7 +336,6 @@ proc buildCWireProcs*(
     body = unpBody,
   )
 
-  # --- cwireFree(dst: var T_CWire) ---
   let freeDst = ident("dst")
   var freeBody = newStmtList()
   for i in 0 ..< fieldNames.len:
@@ -408,9 +351,8 @@ proc buildCWireProcs*(
     body = freeBody,
   )
 
-  # --- cwireFreePtr_<T>(p: pointer) — pointer-typed thunk used by the
-  # shim's CleanupProc slot. Named (not anonymous) so it can be picked up
-  # by `nimcall` ABI which forbids closures.
+  # Pointer-typed thunk for the shim's CleanupProc slot — named, since `nimcall`
+  # forbids closures.
   let thunkName = ident("cwireFreePtr_" & userTypeName)
   let thunkP = ident("p")
   let thunkBody = newStmtList()
@@ -435,10 +377,8 @@ proc buildCWireProcs*(
 proc collectNestedFFITypes*(
     fieldTypes: seq[NimNode], deps: var seq[string]
 ) {.compileTime.} =
-  ## Append the *names* of any nested ffi types referenced by `fieldTypes`
-  ## to `deps` (deduped). Recognises bare ident refs as well as one level
-  ## of `seq[X]` / `Option[X]` / `Maybe[X]`. Used by the macro to schedule
-  ## cwire emission for the right types before referencing them.
+  ## Append (deduped) the names of nested ffi types in `fieldTypes`, including
+  ## one level of `seq[X]` / `Option[X]` / `Maybe[X]`.
   for t in fieldTypes:
     if isNestedFFIType(t):
       let n = $t
@@ -454,8 +394,7 @@ proc collectNestedFFITypes*(
 proc fieldInfoForType(
     typeName: string
 ): tuple[names: seq[string], types: seq[NimNode]] {.compileTime.} =
-  ## Look up an ffi type's fields from the compile-time registry and parse
-  ## each field's recorded type back into a NimNode AST.
+  ## Field names + parsed type ASTs for an ffi type, from the registry.
   var info: tuple[names: seq[string], types: seq[NimNode]]
   for tm in ffiTypeRegistry:
     if tm.name == typeName:
@@ -466,16 +405,13 @@ proc fieldInfoForType(
   error("ensureCWireFor: ffi type '" & typeName & "' not in registry")
 
 proc ensureCWireFor*(typeName: string, sink: NimNode) {.compileTime.} =
-  ## Idempotent: if `typeName`'s cwire companion has not yet been emitted,
-  ## append its TypeSection and conversion procs to `sink` (an nnkStmtList),
-  ## recursing into nested ffi types first so the result is self-contained.
-  ## Called by `genBindings()` to flush a companion for every `abi = c` type.
+  ## Idempotently append `typeName`'s wire TypeSection + conversion procs to
+  ## `sink`, recursing into nested ffi types first. Called by `genBindings()`.
   if isCWireEmitted(typeName):
     return
 
   let info = fieldInfoForType(typeName)
 
-  # Emit dependencies first.
   var deps: seq[string] = @[]
   collectNestedFFITypes(info.types, deps)
   for dep in deps:

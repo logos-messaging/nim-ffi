@@ -1,13 +1,6 @@
-## Tests for the per-interaction ABI-format annotation mechanism (issue #78):
-## `declareLibrary(defaultABIFormat = ...)` sets the library-wide wire format,
-## and each `{.ffi.}` / `{.ffiCtor.}` / `{.ffiEvent.}` ... annotation inherits it
-## unless it overrides with an `"abi = c"` / `"abi = cbor"` spec. The resolved
-## format is recorded on the codegen registry entries.
-##
-## The registry assertions run in `static:` blocks: the macros populate the
-## compile-time registries during expansion, so a failed `doAssert` aborts the
-## build before the binary is produced. The pure parsing helpers are exercised
-## at runtime with unittest2.
+## ABI-format annotation mechanism (issue #78): inherited default + per-spec
+## override, recorded on the registry. `static:` blocks assert the registry at
+## compile time; the parsing helpers run at runtime with unittest2.
 
 import std/strutils
 import unittest2

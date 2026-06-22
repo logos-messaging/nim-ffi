@@ -9,9 +9,8 @@ when defined(ffiGenBindings):
   import ../codegen/cddl
 
 proc requireLibraryDeclared(where: string) {.compileTime.} =
-  ## Enforces that `declareLibrary(...)` ran before this annotation. It is the
-  ## call that records the library name/type and the default ABI format every
-  ## FFI interaction inherits, so the annotations are meaningless without it.
+  ## Enforce that `declareLibrary(...)` (which records name/type/default-ABI)
+  ## ran before this annotation.
   if not libraryDeclared:
     error(
       where & ": declareLibrary(name, LibType[, defaultABIFormat]) must be " &
@@ -19,11 +18,8 @@ proc requireLibraryDeclared(where: string) {.compileTime.} =
     )
 
 proc resolveABIFormat(abiSpecs: seq[NimNode]): ABIFormat {.compileTime.} =
-  ## Resolves the ABI format for one FFI annotation from its optional pragma
-  ## arguments. Each argument must be a string literal of the form `"abi = c"`
-  ## or `"abi = cbor"`; the last one wins. With no override, the library's
-  ## `declareLibrary(defaultABIFormat = ...)` value is inherited. Malformed
-  ## specs or unknown formats abort compilation with a clear message.
+  ## Resolve one annotation's ABI from its optional `"abi = ..."` string specs
+  ## (last wins), inheriting the library default when absent.
   var fmt = currentDefaultABIFormat
   for spec in abiSpecs:
     if spec.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
@@ -34,14 +30,11 @@ proc resolveABIFormat(abiSpecs: seq[NimNode]): ABIFormat {.compileTime.} =
     if not parsed.ok:
       error(parsed.err)
     fmt = parsed.fmt
-  return fmt
+  fmt
 
 proc gateABIFormat(fmt: ABIFormat, where: string) {.compileTime.} =
-  ## Stops compilation when an FFI annotation selects an ABI format whose
-  ## codegen is not yet wired. `Cbor` is the only format that currently emits
-  ## working marshalling on both sides; `C` is recognized by the annotation
-  ## surface but gated here until its path lands, so a request for it fails
-  ## loudly instead of silently producing CBOR bindings mislabeled as C.
+  ## Abort if the selected ABI's codegen isn't wired yet (only `Cbor` is), so a
+  ## `c` request fails loudly instead of emitting CBOR mislabeled as C.
   if not abiCodegenImplemented(fmt):
     error(
       where & ": ABI format '" & $fmt & "' is recognized but not yet implemented; " &
@@ -689,10 +682,8 @@ macro ffiHandle*(args: varargs[untyped]): untyped =
   ##   type Kernel {.ffiHandle.} = ref object
   ##     ...
   ##
-  ## An optional `"abi = ..."` spec is accepted for surface parity with the
-  ## other FFI annotations (`{.ffiHandle: "abi = cbor".}`), but a handle always
-  ## rides the wire as its opaque `uint64` id — abi-agnostic — so the spec is
-  ## only validated, never gated.
+  ## An optional `"abi = ..."` spec is accepted for surface parity but only
+  ## validated — a handle always rides as an abi-agnostic `uint64` id.
   requireLibraryDeclared("`.ffiHandle.`")
   let prc = args[^1]
   discard resolveABIFormat(args[0 ..^ 2])

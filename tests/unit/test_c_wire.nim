@@ -1,13 +1,6 @@
-## Round-trip correctness for the `c` (flat C-struct) ABI codec.
-##
-## Each `{.ffi: "abi = c".}` type gets a `<T>_CWire` companion plus
-## `cwirePack` / `cwireUnpack` / `cwireFree`. This test asserts that
-## `cwireUnpack(cwirePack(x)) == x` across the supported field shapes —
-## scalars, strings, `seq`, `Option`, nested {.ffi.} structs — including the
-## empty/none edge cases that the cstring/pointer encoding has to handle.
-##
-## `genBindings()` flushes the cwire companions for every abi=c type declared
-## above it (a type-pragma macro can't splice them in at the type site).
+## `cwireUnpack(cwirePack(x)) == x` for the `c` codec across scalars, strings,
+## seq, Option, nested structs, and the empty/none edge cases. `genBindings()`
+## flushes the cwire companions (a type-pragma can't splice them in).
 
 import std/options
 import unittest2
