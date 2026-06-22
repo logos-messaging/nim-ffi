@@ -2,7 +2,6 @@ import std/[macros, tables, strutils]
 import chronos
 import ../ffi_types
 import ../codegen/[meta, string_helpers]
-import ./c_macro_helpers
 when defined(ffiGenBindings):
   import ../codegen/rust
   import ../codegen/cpp
@@ -746,10 +745,9 @@ macro ffi*(args: varargs[untyped]): untyped =
 
   # A `{.ffi.}` value type is a passive data definition (it can stand alone, so
   # it does not require a declared library). `cbor` serialization rides the
-  # generic overloads; for `c` the flat-struct `_CWire` companion is emitted by
-  # `genBindings()` (a type-pragma macro can only return a TypeDef, so the
-  # companion can't be spliced in here). Both abis are valid on a type.
+  # generic overloads; `c` is recognized but gated until its codec lands.
   if prc.kind == nnkTypeDef:
+    gateABIFormat(abiFormat, "`.ffi.` type")
     var cleanTypeDef = prc.copyNimTree()
     if cleanTypeDef[0].kind == nnkPragmaExpr:
       cleanTypeDef[0] = cleanTypeDef[0][0]
@@ -1692,16 +1690,4 @@ macro genBindings*(
         "genBindings: unknown targetLang '" & lang & "'. Use 'rust', 'cpp', or 'cddl'."
       )
 
-  # Flush the flat-struct `_CWire` companions for every `abi = c` type. A
-  # type-pragma macro can only return a TypeDef, so the companions can't be
-  # emitted at the type site; they are materialised here (and recursively for
-  # any nested {.ffi.} type a c-abi type references). Independent of
-  # -d:ffiGenBindings: the companions are runtime code, not generated files.
-  var cwireFlush = newStmtList()
-  for tm in ffiTypeRegistry:
-    if tm.abiFormat == ABIFormat.C:
-      ensureCWireFor(tm.name, cwireFlush)
-
-  when defined(ffiDumpMacros):
-    echo cwireFlush.repr
-  return cwireFlush
+  return newEmptyNode()

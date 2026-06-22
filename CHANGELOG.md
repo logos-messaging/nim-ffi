@@ -25,13 +25,9 @@ All notable changes to this project are documented in this file.
   `{.ffi.}` / `{.ffiCtor.}` / `{.ffiDtor.}` / `{.ffiRaw.}` / `{.ffiEvent.}`
   inherits, and each annotation can override it with an `"abi = c"` /
   `"abi = cbor"` spec (e.g. `{.ffi: "abi = cbor".}`). `declareLibrary` is now
-  required before any FFI annotation
+  required before any FFI annotation. `c` is parsed and recorded but gated
+  until its codec lands; only `cbor` currently generates working bindings
   ([#78](https://github.com/logos-messaging/nim-ffi/issues/78)).
-- `c` (flat C-struct) ABI **codec**: every `{.ffi: "abi = c".}` type gets a
-  `<T>_CWire` companion plus `cwirePack` / `cwireUnpack` / `cwireFree`, covering
-  scalars, strings, `seq`, `Option`, `seq[byte]`, and nested `{.ffi.}` structs.
-  The `c` ABI proc-dispatch path and the foreign (C++/Rust) generators are still
-  pending, so `c` is rejected on proc/ctor/dtor/event annotations for now.
 - Queue-overflow handling: when the bounded event queue is full, the
   library sets a sticky "stuck" flag, logs an error, fires
   `not_responding` from the event thread, and rejects subsequent

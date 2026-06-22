@@ -94,8 +94,7 @@ suite "ABI format parsing":
 suite "ABI proc-dispatch readiness (why c is still gated on procs)":
   test "cbor proc-dispatch is wired; c proc-dispatch is gated":
     # This predicate is what the proc-form macros consult: `cbor` is wired
-    # end-to-end, while `c`'s proc-dispatch path is still pending (its codec —
-    # the cwire companions — already works; see test_c_wire). It is the single
-    # seam a future PR flips when the c dispatch path lands.
+    # end-to-end, while `c` is recognized but gated pending its codec. It is the
+    # single seam a future PR flips when the c codec and dispatch path land.
     check abiCodegenImplemented(ABIFormat.Cbor)
     check not abiCodegenImplemented(ABIFormat.C)
