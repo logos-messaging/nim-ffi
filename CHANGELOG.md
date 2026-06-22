@@ -32,9 +32,6 @@ All notable changes to this project are documented in this file.
   scalars, strings, `seq`, `Option`, `seq[byte]`, and nested `{.ffi.}` structs.
   The `c` ABI proc-dispatch path and the foreign (C++/Rust) generators are still
   pending, so `c` is rejected on proc/ctor/dtor/event annotations for now.
-- `tests/bench/bench_codec.nim` (+ `nimble bench_codec`): a single-process
-  microbenchmark comparing the `cbor` and `c` codecs across payload shapes,
-  isolating codec cost from the (identical) thread/callback round-trip.
 - Queue-overflow handling: when the bounded event queue is full, the
   library sets a sticky "stuck" flag, logs an error, fires
   `not_responding` from the event thread, and rejects subsequent
