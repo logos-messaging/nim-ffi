@@ -26,12 +26,12 @@ proc cwireAllocStr*(s: string): cstring =
   ## `cstring` owned by the caller — pair with `cwireFreeStr`. Empty input
   ## produces a 1-byte buffer holding only the terminator (so the C side
   ## never sees a NULL when the user supplied "").
-  return alloc.alloc(s)
+  alloc.alloc(s)
 
 proc cwireFreeStr*(s: cstring) {.inline.} =
   ## Idempotent free for a cstring obtained from `cwireAllocStr`. Must match
   ## that allocator (`malloc`/`free`), so it routes through `alloc.dealloc`,
   ## not `deallocShared`. `nil` is a no-op so the generated cwireFree procs
   ## can call this on every field without tracking which were ever assigned.
-  if not s.isNil:
+  if not s.isNil():
     alloc.dealloc(s)

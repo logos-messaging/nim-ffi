@@ -110,7 +110,7 @@ proc parseAbiSpec*(spec: string): tuple[ok: bool, fmt: ABIFormat, err: string] =
       ABIFormat.Cbor,
       "unknown ABI format '" & parts[1].strip() & "'; valid values are `c` and `cbor`",
     )
-  return (true, fmt, "")
+  (true, fmt, "")
 
 # Lib type name (set by declareLibrary) so handle-receiver procs resolve the pool.
 var currentLibType* {.compileTime.}: string

@@ -48,6 +48,13 @@ proc abitest_echo*(
 # Event with an explicit ABI override passed after the wire name.
 proc abitest_pinged*(p: Pinged) {.ffiEvent("on_pinged", "abi = cbor").}
 
+# Handles accept the spec for surface parity; the wire form stays uint64.
+type PlainHandle {.ffiHandle.} = ref object
+  v: int
+
+type AbiHandle {.ffiHandle: "abi = cbor".} = ref object
+  v: int
+
 # Both the inherited-default and the explicit-override annotations must record
 # the resolved format on their registry entries.
 static:

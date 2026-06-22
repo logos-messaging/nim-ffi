@@ -682,13 +682,20 @@ macro ffiRaw*(args: varargs[untyped]): untyped =
     echo stmts.repr
   return stmts
 
-macro ffiHandle*(prc: untyped): untyped =
+macro ffiHandle*(args: varargs[untyped]): untyped =
   ## Marks a `ref object` as an opaque FFI handle. Its wire form is a `uint64`
   ## id; the live object stays in the per-ctx handle registry and never crosses.
   ##
   ##   type Kernel {.ffiHandle.} = ref object
   ##     ...
+  ##
+  ## An optional `"abi = ..."` spec is accepted for surface parity with the
+  ## other FFI annotations (`{.ffiHandle: "abi = cbor".}`), but a handle always
+  ## rides the wire as its opaque `uint64` id — abi-agnostic — so the spec is
+  ## only validated, never gated.
   requireLibraryDeclared("`.ffiHandle.`")
+  let prc = args[^1]
+  discard resolveABIFormat(args[0 ..^ 2])
   if prc.kind != nnkTypeDef:
     error("`.ffiHandle.` must be applied to a type definition")
 
