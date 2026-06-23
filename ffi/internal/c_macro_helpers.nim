@@ -10,12 +10,10 @@ var emittedCWireTypes {.compileTime.}: seq[string]
 proc isCWireEmitted(typeName: string): bool {.compileTime.} =
   ## Indexed scan: works around a Nim 2.2 compile-time VM quirk where `for x in
   ## seq` over a freshly-mutated `{.compileTime.}` seq goes stale.
-  var found = false
   for i in 0 ..< emittedCWireTypes.len:
     if emittedCWireTypes[i] == typeName:
-      found = true
-      break
-  found
+      return true
+  false
 
 proc markCWireEmitted(typeName: string) {.compileTime.} =
   if not isCWireEmitted(typeName):
@@ -27,6 +25,27 @@ proc cwireTypeName(userTypeName: string): string =
 
 proc isStringType(t: NimNode): bool =
   t.kind == nnkIdent and ($t == "string" or $t == "cstring")
+
+const cWireSupportedTypes = [
+  "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32",
+  "uint64", "float", "float32", "float64", "bool", "char", "byte", "string", "cstring",
+]
+
+proc assertCWireFieldSupported(
+    typeName, fieldName: string, fieldType: NimNode
+) {.compileTime.} =
+  ## Gate the `abi = c` whitelist: the flat C codec handles only fixed-width
+  ## scalars, `bool`, `char`/`byte`, and `string`. Composite types (`seq[T]`,
+  ## `Opt[T]`, nested objects, ...) must use `abi = cbor`, which supports every
+  ## type. Future PRs widen this list as the codec grows.
+  if fieldType.kind == nnkIdent and $fieldType in cWireSupportedTypes:
+    return
+  error(
+    "ffi 'abi = c' type '" & typeName & "': field '" & fieldName & "' of type '" &
+      repr(fieldType) &
+      "' is not supported by the flat C codec (supported: scalars, bool, char, " &
+      "string). Use 'abi = cbor' for composite types."
+  )
 
 proc wireFieldType(userType: NimNode): NimNode =
   ## Map a user field type AST → its wire-form AST: `string` → `cstring`,
@@ -172,6 +191,8 @@ proc ensureCWireFor(typeName: string, sink: NimNode) {.compileTime.} =
     return
   markCWireEmitted(typeName)
   let info = fieldInfoForType(typeName)
+  for i in 0 ..< info.names.len:
+    assertCWireFieldSupported(typeName, info.names[i], info.types[i])
   let section = newNimNode(nnkTypeSection)
   section.add(buildCWireTypeDef(typeName, info.names, info.types))
   sink.add(section)
