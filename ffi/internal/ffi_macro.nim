@@ -42,6 +42,13 @@ proc gateABIFormat(fmt: ABIFormat, where: string) {.compileTime.} =
         $fmt
     )
 
+proc gateFFITypeABIFormat(fmt: ABIFormat, where: string) {.compileTime.} =
+  ## Type annotations only register metadata. `cbor` uses the generic CBOR
+  ## overloads, while `c` emits its flat `_CWire` companion from `genBindings()`.
+  case fmt
+  of ABIFormat.Cbor, ABIFormat.C:
+    discard
+
 proc isPtr(typ: NimNode): bool =
   ## True iff `typ` is a `ptr T` type expression — i.e. an `nnkPtrTy` AST node.
   ## Used by the binding-generator metadata path to flag pointer-typed params
@@ -748,7 +755,7 @@ macro ffi*(args: varargs[untyped]): untyped =
   # emitted later by `genBindings()`, since a type-pragma macro can only return
   # a TypeDef; `cbor` rides the generic overloads. Both abis are valid here.
   if prc.kind == nnkTypeDef:
-    gateABIFormat(abiFormat, "`.ffi.` type")
+    gateFFITypeABIFormat(abiFormat, "`.ffi.` type")
     var cleanTypeDef = prc.copyNimTree()
     if cleanTypeDef[0].kind == nnkPragmaExpr:
       cleanTypeDef[0] = cleanTypeDef[0][0]
