@@ -10,7 +10,10 @@ type Maybe[T] = Option[T]
 type MyTimer = object
   name: string # set at creation time, read back in each response
 
-declareLibrary("my_timer", MyTimer)
+# `defaultABIFormat` selects the wire format every {.ffi.} / {.ffiEvent.} / ...
+# in this library inherits; "cbor" is the default and can be overridden per
+# annotation with an `"abi = ..."` spec.
+declareLibrary("my_timer", MyTimer, defaultABIFormat = "cbor")
 
 type TimerConfig {.ffi.} = object
   name: string

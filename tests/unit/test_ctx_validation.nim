@@ -5,6 +5,11 @@ import ffi
 
 type TestLib = object
 
+# Stub the dylib NimMain importc that declareLibrary emits (this links as a plain exe).
+{.emit: "void libctxvaltestNimMain(void) {}".}
+
+declareLibrary("ctxvaltest", TestLib)
+
 type CtxValidationConfig {.ffi.} = object
   initialValue: int
 

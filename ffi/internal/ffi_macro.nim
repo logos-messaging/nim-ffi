@@ -7,6 +7,40 @@ when defined(ffiGenBindings):
   import ../codegen/cpp
   import ../codegen/cddl
 
+proc requireLibraryDeclared(where: string) {.compileTime.} =
+  ## Enforce that `declareLibrary(...)` (which records name/type/default-ABI)
+  ## ran before this annotation.
+  if not libraryDeclared:
+    error(
+      where &
+        ": declareLibrary(name, LibType[, defaultABIFormat]) must be called before any FFI annotation"
+    )
+
+proc resolveABIFormat(abiSpecs: seq[NimNode]): ABIFormat {.compileTime.} =
+  ## Resolve one annotation's ABI from its optional `"abi = ..."` string specs
+  ## (last wins), inheriting the library default when absent.
+  var fmt = currentDefaultABIFormat
+  for spec in abiSpecs:
+    if spec.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+      error(
+        "FFI ABI override must be a string literal like \"abi = c\", got: " & spec.repr
+      )
+    let parsed = parseAbiSpec($spec)
+    if not parsed.ok:
+      error(parsed.err)
+    fmt = parsed.fmt
+  fmt
+
+proc gateABIFormat(fmt: ABIFormat, where: string) {.compileTime.} =
+  ## Abort if the selected ABI's codegen isn't wired yet (only `Cbor` is), so a
+  ## `c` request fails loudly instead of emitting CBOR mislabeled as C.
+  if not abiCodegenImplemented(fmt):
+    error(
+      where &
+        ": ABI format is recognized but not yet implemented (only 'cbor' currently generates working bindings): " &
+        $fmt
+    )
+
 proc isPtr(typ: NimNode): bool =
   ## True iff `typ` is a `ptr T` type expression — i.e. an `nnkPtrTy` AST node.
   ## Used by the binding-generator metadata path to flag pointer-typed params
@@ -37,7 +71,9 @@ proc rejectRawPtrType(typ: NimNode, where: string) =
         "(only the ctx handle, managed by the framework, may be a pointer)"
     )
 
-proc registerFFITypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
+proc registerFFITypeInfo(
+    typeDef: NimNode, abiFormat: ABIFormat
+): NimNode {.compileTime.} =
   ## Registers the type in ffiTypeRegistry for binding generation and returns
   ## the clean typeDef. Serialization is handled by the generic overloads in
   ## cbor_serial.nim.
@@ -68,7 +104,9 @@ proc registerFFITypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
           for i in 0 ..< identDef.len - 2:
             fieldMetas.add(FFIFieldMeta(name: $identDef[i], typeName: fieldTypeName))
 
-  ffiTypeRegistry.add(FFITypeMeta(name: typeNameStr, fields: fieldMetas))
+  ffiTypeRegistry.add(
+    FFITypeMeta(name: typeNameStr, fields: fieldMetas, abiFormat: abiFormat)
+  )
   return typeDef
 
 proc nimTypeNameRepr(typ: NimNode): string =
@@ -529,7 +567,7 @@ macro processReq*(
     echo blockExpr.repr
   return blockExpr
 
-macro ffiRaw*(prc: untyped): untyped =
+macro ffiRaw*(args: varargs[untyped]): untyped =
   ## Defines an FFI-exported proc that registers a request handler to be executed
   ## asynchronously in the FFI thread.
   ##
@@ -547,11 +585,18 @@ macro ffiRaw*(prc: untyped): untyped =
   ## Then, additional parameters may be defined as needed, after these first
   ## three, always considering that only no-GC'ed (or C-like) types are allowed.
   ##
+  ## The wire format follows the library default and can be overridden with
+  ## `{.ffiRaw: "abi = c".}` / `{.ffiRaw: "abi = cbor".}`.
+  ##
   ## e.g.:
   ##   proc waku_version(
   ##       ctx: ptr FFIContext[Waku], callback: FFICallBack, userData: pointer
   ##   ) {.ffiRaw.} =
   ##     return ok(WakuNodeVersionString)
+
+  requireLibraryDeclared("`.ffiRaw.`")
+  let prc = args[^1]
+  gateABIFormat(resolveABIFormat(args[0 ..^ 2]), "`.ffiRaw.` proc")
 
   let procName = prc[0]
   let formalParams = prc[3]
@@ -630,12 +675,18 @@ macro ffiRaw*(prc: untyped): untyped =
     echo stmts.repr
   return stmts
 
-macro ffiHandle*(prc: untyped): untyped =
+macro ffiHandle*(args: varargs[untyped]): untyped =
   ## Marks a `ref object` as an opaque FFI handle. Its wire form is a `uint64`
   ## id; the live object stays in the per-ctx handle registry and never crosses.
   ##
   ##   type Kernel {.ffiHandle.} = ref object
   ##     ...
+  ##
+  ## An optional `"abi = ..."` spec is accepted for surface parity but only
+  ## validated — a handle always rides as an abi-agnostic `uint64` id.
+  requireLibraryDeclared("`.ffiHandle.`")
+  let prc = args[^1]
+  discard resolveABIFormat(args[0 ..^ 2])
   if prc.kind != nnkTypeDef:
     error("`.ffiHandle.` must be applied to a type definition")
 
@@ -664,7 +715,7 @@ macro ffiHandle*(prc: untyped): untyped =
     echo clean.repr
   return clean
 
-macro ffi*(prc: untyped): untyped =
+macro ffi*(args: varargs[untyped]): untyped =
   ## Simplified FFI macro — applies to procs or types.
   ##
   ## On a type: `type Foo {.ffi.} = object` registers Foo for binding generation
@@ -676,6 +727,9 @@ macro ffi*(prc: untyped): untyped =
   ## userData in its signature — the macro generates a C-exported wrapper that
   ## takes one CBOR-encoded buffer as the call payload and fires the callback.
   ##
+  ## The wire format defaults to the library's `defaultABIFormat` and can be
+  ## overridden per annotation with `{.ffi: "abi = c".}` / `{.ffi: "abi = cbor".}`.
+  ##
   ## Example (type):
   ##   type EchoRequest {.ffi.} = object
   ##     message: string
@@ -685,11 +739,23 @@ macro ffi*(prc: untyped): untyped =
   ##   proc mylib_send*(w: MyLib, cfg: SendConfig): Future[Result[string, string]] {.ffi.} =
   ##     return ok("done")
 
+  # The annotated node is always the last vararg; any leading args are ABI
+  # override specs (`"abi = ..."`).
+  let prc = args[^1]
+  let abiFormat = resolveABIFormat(args[0 ..^ 2])
+
+  # A `{.ffi.}` value type is a passive data definition (it can stand alone, so
+  # it does not require a declared library). `cbor` serialization rides the
+  # generic overloads; `c` is recognized but gated until its codec lands.
   if prc.kind == nnkTypeDef:
+    gateABIFormat(abiFormat, "`.ffi.` type")
     var cleanTypeDef = prc.copyNimTree()
     if cleanTypeDef[0].kind == nnkPragmaExpr:
       cleanTypeDef[0] = cleanTypeDef[0][0]
-    return registerFFITypeInfo(cleanTypeDef)
+    return registerFFITypeInfo(cleanTypeDef, abiFormat)
+
+  requireLibraryDeclared("`.ffi.`")
+  gateABIFormat(abiFormat, "`.ffi.` proc")
 
   let procName = prc[0]
   let formalParams = prc[3]
@@ -914,6 +980,7 @@ macro ffi*(prc: untyped): untyped =
           returnTypeName: retTn,
           returnIsPtr: retIsPtr,
           returnIsHandle: retIsHandle,
+          abiFormat: abiFormat,
         )
       )
 
@@ -1139,7 +1206,7 @@ proc addCtorRequestToRegistry(reqTypeName, libTypeName: NimNode): NimNode =
     echo regAssign.repr
   return regAssign
 
-macro ffiCtor*(prc: untyped): untyped =
+macro ffiCtor*(args: varargs[untyped]): untyped =
   ## Defines a C-exported constructor that creates an FFIContext and populates
   ## ctx.myLib asynchronously in the FFI thread.
   ##
@@ -1147,6 +1214,9 @@ macro ffiCtor*(prc: untyped): untyped =
   ##   - Have Nim-typed parameters (carried over the wire as a single CBOR blob)
   ##   - Return Future[Result[LibType, string]]
   ##   - NOT include ctx, callback, or userData in its signature
+  ##
+  ## The wire format follows the library default and can be overridden with
+  ## `{.ffiCtor: "abi = c".}` / `{.ffiCtor: "abi = cbor".}`.
   ##
   ## Example:
   ##   proc mylib_create*(config: SimpleConfig): Future[Result[SimpleLib, string]] {.ffiCtor.} =
@@ -1161,6 +1231,11 @@ macro ffiCtor*(prc: untyped): untyped =
   ## also fires when async initialization completes, passing the ctx address as
   ## a decimal string on success. The caller should hold the returned pointer
   ## and pass it to subsequent .ffi. calls.
+
+  requireLibraryDeclared("`.ffiCtor.`")
+  let prc = args[^1]
+  let abiFormat = resolveABIFormat(args[0 ..^ 2])
+  gateABIFormat(abiFormat, "`.ffiCtor.` proc")
 
   let procName = prc[0]
   let formalParams = prc[3]
@@ -1320,6 +1395,7 @@ macro ffiCtor*(prc: untyped): untyped =
         extraParams: ctorExtraParams,
         returnTypeName: $libTypeName,
         returnIsPtr: false,
+        abiFormat: abiFormat,
       )
     )
 
@@ -1335,12 +1411,15 @@ macro ffiCtor*(prc: untyped): untyped =
     echo stmts.repr
   return stmts
 
-macro ffiDtor*(prc: untyped): untyped =
+macro ffiDtor*(args: varargs[untyped]): untyped =
   ## Defines a C-exported destructor that tears down the FFIContext after the
   ## body runs.
   ##
   ## The annotated proc must have exactly one parameter of the library type.
   ## The body contains any library-level cleanup to run before context teardown.
+  ##
+  ## The wire format follows the library default and can be overridden with
+  ## `{.ffiDtor: "abi = c".}` / `{.ffiDtor: "abi = cbor".}`.
   ##
   ## Example:
   ##   proc waku_destroy*(w: Waku) {.ffiDtor.} =
@@ -1353,6 +1432,11 @@ macro ffiDtor*(prc: untyped): untyped =
   ## destroyFFIContext to tear down the FFI thread and free the context.
   ## Returns RET_OK on success, RET_ERR on failure (null/invalid ctx, or
   ## destroyFFIContext failure).
+
+  requireLibraryDeclared("`.ffiDtor.`")
+  let prc = args[^1]
+  let abiFormat = resolveABIFormat(args[0 ..^ 2])
+  gateABIFormat(abiFormat, "`.ffiDtor.` proc")
 
   let procName = prc[0]
   let formalParams = prc[3]
@@ -1434,6 +1518,7 @@ macro ffiDtor*(prc: untyped): untyped =
       extraParams: @[],
       returnTypeName: "",
       returnIsPtr: false,
+      abiFormat: abiFormat,
     )
   )
 
@@ -1447,16 +1532,20 @@ macro ffiDtor*(prc: untyped): untyped =
     echo stmts.repr
   return stmts
 
-macro ffiEvent*(wireName: static[string], prc: untyped): untyped =
+macro ffiEvent*(args: varargs[untyped]): untyped =
   ## Declares a library-initiated event. The annotated proc has an empty
   ## body — the macro fills it with a `dispatchFFIEventCbor` call so the
   ## Nim author dispatches the event by calling the proc with a typed
   ## payload, and the per-target codegens emit a typed handler dispatcher
   ## on the foreign side.
   ##
-  ## The pragma takes the wire-format event name verbatim (no case
-  ## conversion). That string appears in the CBOR `eventType` field and is
-  ## the single source of truth across Nim / C++ / Rust bindings.
+  ## The first pragma argument is the wire-format event name, taken verbatim
+  ## (no case conversion). That string appears in the CBOR `eventType` field
+  ## and is the single source of truth across Nim / C++ / Rust bindings.
+  ##
+  ## The wire format follows the library default and can be overridden by
+  ## passing an `"abi = ..."` spec after the event name, e.g.
+  ## `{.ffiEvent("on_peer_connected", "abi = cbor").}`.
   ##
   ## Example:
   ##   type PeerInfo {.ffi.} = object
@@ -1471,8 +1560,20 @@ macro ffiEvent*(wireName: static[string], prc: untyped): untyped =
   ## Restriction (first pass): exactly one parameter. Multi-param events
   ## need a synthesised envelope struct; planned for a follow-up.
 
+  requireLibraryDeclared("`.ffiEvent.`")
+  if args.len < 2:
+    error("ffiEvent requires a wire-name string and a proc declaration")
+
+  let prc = args[^1]
   if prc.kind notin {nnkProcDef, nnkFuncDef}:
     error("ffiEvent must be applied to a proc declaration")
+
+  if args[0].kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+    error("ffiEvent: the first argument must be the wire-name string literal")
+  let wireName = $args[0]
+  # Args between the wire name and the proc are ABI override specs.
+  let abiFormat = resolveABIFormat(args[1 ..^ 2])
+  gateABIFormat(abiFormat, "`.ffiEvent.` proc")
 
   let procName = prc[0]
   let formalParams = prc[3]
@@ -1527,6 +1628,7 @@ macro ffiEvent*(wireName: static[string], prc: untyped): untyped =
       nimProcName: $userProcName,
       libName: currentLibName,
       payloadTypeName: payloadTypeNameStr,
+      abiFormat: abiFormat,
     )
   )
 

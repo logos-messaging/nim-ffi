@@ -1,7 +1,15 @@
 ## Compile-time metadata types for FFI binding generation.
 ## Populated by the {.ffiCtor.} and {.ffi.} macros and consumed by codegen.
 
+import std/strutils
+
 type
+  ABIFormat* {.pure.} = enum
+    ## Wire format for an FFI payload. `Cbor` is wired end-to-end; `C` (flat
+    ## C-struct) is recognized but gated by the macros until its codegen lands.
+    Cbor = "cbor"
+    C = "c"
+
   FFIParamMeta* = object
     name*: string # Nim param name, e.g. "req"
     typeName*: string # Nim type name, e.g. "EchoRequest"
@@ -22,6 +30,7 @@ type
     returnTypeName*: string # e.g. "EchoResponse", "string", "pointer"
     returnIsPtr*: bool # true if return type is ptr T
     returnIsHandle*: bool # true if return type is an {.ffiHandle.} type
+    abiFormat*: ABIFormat # wire format for this interaction (default Cbor)
 
   FFIFieldMeta* = object
     name*: string # e.g. "delayMs"
@@ -30,23 +39,69 @@ type
   FFITypeMeta* = object
     name*: string
     fields*: seq[FFIFieldMeta]
+    abiFormat*: ABIFormat # wire format for this type (default Cbor)
 
   FFIEventMeta* = object
-    ## Library-initiated event declared with `{.ffiEvent: "wire_name".}`.
-    ## `wireName` is the literal string the foreign side dispatches on
-    ## (it appears in the CBOR `eventType` field, verbatim — no case
-    ## conversion). `payloadTypeName` is the Nim type of the single
-    ## payload parameter.
+    ## Library-initiated event from `{.ffiEvent: "wire_name".}`. `wireName` is
+    ## the verbatim CBOR `eventType` string the foreign side dispatches on.
     wireName*: string
     nimProcName*: string
     libName*: string
     payloadTypeName*: string
+    abiFormat*: ABIFormat # wire format for this event (default Cbor)
 
 # Compile-time registries populated by the macros
 var ffiProcRegistry* {.compileTime.}: seq[FFIProcMeta]
 var ffiTypeRegistry* {.compileTime.}: seq[FFITypeMeta]
 var ffiEventRegistry* {.compileTime.}: seq[FFIEventMeta]
 var currentLibName* {.compileTime.}: string
+
+# Set by `declareLibrary`; the FFI annotations require it (name/type/default ABI).
+var libraryDeclared* {.compileTime.}: bool = false
+
+# Library-wide default ABI, inherited by each annotation unless it overrides.
+var currentDefaultABIFormat* {.compileTime.}: ABIFormat = ABIFormat.Cbor
+
+proc abiCodegenImplemented*(fmt: ABIFormat): bool =
+  ## Whether `fmt` has a working end-to-end proc-dispatch path. Only `Cbor` does
+  ## today; this is the single seam a future PR flips when `c` dispatch lands.
+  fmt == ABIFormat.Cbor
+
+proc parseABIFormatName*(name: string): tuple[ok: bool, fmt: ABIFormat] =
+  ## Bare format name (`"c"`/`"cbor"`, case-insensitive) → `ABIFormat`;
+  ## `ok` is false otherwise.
+  case name.strip().toLowerAscii()
+  of "cbor":
+    (true, ABIFormat.Cbor)
+  of "c":
+    (true, ABIFormat.C)
+  else:
+    (false, ABIFormat.Cbor)
+
+proc parseAbiSpec*(spec: string): tuple[ok: bool, fmt: ABIFormat, err: string] =
+  ## Parse an `"abi = <format>"` override (whitespace/case tolerant). On bad
+  ## grammar or format, returns `ok = false` with a human-readable `err`.
+  let parts = spec.split('=')
+  if parts.len != 2:
+    return (
+      false,
+      ABIFormat.Cbor,
+      "invalid ABI override '" & spec & "'; expected `abi = c` or `abi = cbor`",
+    )
+  if parts[0].strip().toLowerAscii() != "abi":
+    return (
+      false,
+      ABIFormat.Cbor,
+      "invalid ABI override '" & spec & "'; expected `abi = c` or `abi = cbor`",
+    )
+  let (ok, fmt) = parseABIFormatName(parts[1])
+  if not ok:
+    return (
+      false,
+      ABIFormat.Cbor,
+      "unknown ABI format '" & parts[1].strip() & "'; valid values are `c` and `cbor`",
+    )
+  (true, fmt, "")
 
 # Lib type name (set by declareLibrary) so handle-receiver procs resolve the pool.
 var currentLibType* {.compileTime.}: string
