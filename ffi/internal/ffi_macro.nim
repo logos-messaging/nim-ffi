@@ -12,8 +12,8 @@ proc requireLibraryDeclared(where: string) {.compileTime.} =
   ## ran before this annotation.
   if not libraryDeclared:
     error(
-      where & ": declareLibrary(name, LibType[, defaultABIFormat]) must be " &
-        "called before any FFI annotation"
+      where &
+        ": declareLibrary(name, LibType[, defaultABIFormat]) must be called before any FFI annotation"
     )
 
 proc resolveABIFormat(abiSpecs: seq[NimNode]): ABIFormat {.compileTime.} =
@@ -36,8 +36,9 @@ proc gateABIFormat(fmt: ABIFormat, where: string) {.compileTime.} =
   ## `c` request fails loudly instead of emitting CBOR mislabeled as C.
   if not abiCodegenImplemented(fmt):
     error(
-      where & ": ABI format '" & $fmt & "' is recognized but not yet implemented; " &
-        "only 'cbor' currently generates working bindings"
+      where &
+        ": ABI format is recognized but not yet implemented (only 'cbor' currently generates working bindings): " &
+        $fmt
     )
 
 proc isPtr(typ: NimNode): bool =
