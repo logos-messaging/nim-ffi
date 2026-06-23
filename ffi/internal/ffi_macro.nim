@@ -13,8 +13,8 @@ proc requireLibraryDeclared(where: string) {.compileTime.} =
   ## ran before this annotation.
   if not libraryDeclared:
     error(
-      where & ": declareLibrary(name, LibType[, defaultABIFormat]) must be " &
-        "called before any FFI annotation"
+      where &
+        ": declareLibrary(name, LibType[, defaultABIFormat]) must be called before any FFI annotation"
     )
 
 proc resolveABIFormat(abiSpecs: seq[NimNode]): ABIFormat {.compileTime.} =
@@ -37,9 +37,16 @@ proc gateABIFormat(fmt: ABIFormat, where: string) {.compileTime.} =
   ## `c` request fails loudly instead of emitting CBOR mislabeled as C.
   if not abiCodegenImplemented(fmt):
     error(
-      where & ": ABI format '" & $fmt & "' is recognized but not yet implemented; " &
-        "only 'cbor' currently generates working bindings"
+      where &
+        ": ABI format is recognized but not yet implemented (only 'cbor' currently generates working bindings): " &
+        $fmt
     )
+
+proc gateFFITypeABIFormat(fmt: ABIFormat, where: string) {.compileTime.} =
+  ## Type annotations only register metadata. `cbor` uses the generic CBOR
+  ## overloads, while `c` emits its flat `_CWire` companion from `genBindings()`.
+  case fmt
+  of ABIFormat.Cbor, ABIFormat.C: discard
 
 proc isPtr(typ: NimNode): bool =
   ## True iff `typ` is a `ptr T` type expression — i.e. an `nnkPtrTy` AST node.
@@ -747,6 +754,7 @@ macro ffi*(args: varargs[untyped]): untyped =
   # emitted later by `genBindings()`, since a type-pragma macro can only return
   # a TypeDef; `cbor` rides the generic overloads. Both abis are valid here.
   if prc.kind == nnkTypeDef:
+    gateFFITypeABIFormat(abiFormat, "`.ffi.` type")
     var cleanTypeDef = prc.copyNimTree()
     if cleanTypeDef[0].kind == nnkPragmaExpr:
       cleanTypeDef[0] = cleanTypeDef[0][0]

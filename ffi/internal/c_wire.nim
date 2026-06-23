@@ -9,7 +9,10 @@ proc cwireAllocStr*(s: string): cstring {.inline.} =
   ## `cwireFreeStr`. Empty input still yields a valid buffer, never NULL.
   alloc.alloc(s)
 
-proc cwireFreeStr*(s: cstring) {.inline.} =
-  ## Idempotent free for a `cwireAllocStr` cstring; `nil` is a no-op.
-  if not s.isNil():
-    alloc.dealloc(s)
+proc cwireFreeStr*(s: var cstring) {.inline.} =
+  ## Idempotent free for a `cwireAllocStr` cstring; `nil` is a no-op. Taken by
+  ## `var` and reset to `nil` after release so a repeated call can't double-free.
+  if s.isNil():
+    return
+  alloc.dealloc(s)
+  s = nil

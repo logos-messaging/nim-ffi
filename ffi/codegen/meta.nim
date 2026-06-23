@@ -82,7 +82,13 @@ proc parseAbiSpec*(spec: string): tuple[ok: bool, fmt: ABIFormat, err: string] =
   ## Parse an `"abi = <format>"` override (whitespace/case tolerant). On bad
   ## grammar or format, returns `ok = false` with a human-readable `err`.
   let parts = spec.split('=')
-  if parts.len != 2 or parts[0].strip().toLowerAscii() != "abi":
+  if parts.len != 2:
+    return (
+      false,
+      ABIFormat.Cbor,
+      "invalid ABI override '" & spec & "'; expected `abi = c` or `abi = cbor`",
+    )
+  if parts[0].strip().toLowerAscii() != "abi":
     return (
       false,
       ABIFormat.Cbor,
