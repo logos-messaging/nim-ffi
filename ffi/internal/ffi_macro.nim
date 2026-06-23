@@ -46,8 +46,7 @@ proc gateFFITypeABIFormat(fmt: ABIFormat, where: string) {.compileTime.} =
   ## Type annotations only register metadata. `cbor` uses the generic CBOR
   ## overloads, while `c` emits its flat `_CWire` companion from `genBindings()`.
   case fmt
-  of ABIFormat.Cbor, ABIFormat.C:
-    discard
+  of ABIFormat.Cbor, ABIFormat.C: discard
 
 proc isPtr(typ: NimNode): bool =
   ## True iff `typ` is a `ptr T` type expression — i.e. an `nnkPtrTy` AST node.
