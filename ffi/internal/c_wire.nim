@@ -1,5 +1,6 @@
 ## Runtime helpers for the macro-generated `*_CWire` companion types: only the
-## `cstring` fields need allocation, packed on pack and released on free.
+## `cstring` fields need allocation here (seq/Option are alloc'd inline by the
+## macro), packed on pack and released on free.
 
 import ../alloc
 
