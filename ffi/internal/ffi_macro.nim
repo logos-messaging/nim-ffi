@@ -2,6 +2,7 @@ import std/[macros, tables, strutils]
 import chronos
 import ../ffi_types
 import ../codegen/[meta, string_helpers]
+import ./c_macro_helpers
 when defined(ffiGenBindings):
   import ../codegen/rust
   import ../codegen/cpp
@@ -40,6 +41,12 @@ proc gateABIFormat(fmt: ABIFormat, where: string) {.compileTime.} =
         ": ABI format is recognized but not yet implemented (only 'cbor' currently generates working bindings): " &
         $fmt
     )
+
+proc gateFFITypeABIFormat(fmt: ABIFormat, where: string) {.compileTime.} =
+  ## Type annotations only register metadata. `cbor` uses the generic CBOR
+  ## overloads, while `c` emits its flat `_CWire` companion from `genBindings()`.
+  case fmt
+  of ABIFormat.Cbor, ABIFormat.C: discard
 
 proc isPtr(typ: NimNode): bool =
   ## True iff `typ` is a `ptr T` type expression — i.e. an `nnkPtrTy` AST node.
@@ -739,16 +746,15 @@ macro ffi*(args: varargs[untyped]): untyped =
   ##   proc mylib_send*(w: MyLib, cfg: SendConfig): Future[Result[string, string]] {.ffi.} =
   ##     return ok("done")
 
-  # The annotated node is always the last vararg; any leading args are ABI
-  # override specs (`"abi = ..."`).
+  # Annotated node is the last vararg; leading args are `"abi = ..."` specs.
   let prc = args[^1]
   let abiFormat = resolveABIFormat(args[0 ..^ 2])
 
-  # A `{.ffi.}` value type is a passive data definition (it can stand alone, so
-  # it does not require a declared library). `cbor` serialization rides the
-  # generic overloads; `c` is recognized but gated until its codec lands.
+  # A value type stands alone (no library required). Its `c` companion is
+  # emitted later by `genBindings()`, since a type-pragma macro can only return
+  # a TypeDef; `cbor` rides the generic overloads. Both abis are valid here.
   if prc.kind == nnkTypeDef:
-    gateABIFormat(abiFormat, "`.ffi.` type")
+    gateFFITypeABIFormat(abiFormat, "`.ffi.` type")
     var cleanTypeDef = prc.copyNimTree()
     if cleanTypeDef[0].kind == nnkPragmaExpr:
       cleanTypeDef[0] = cleanTypeDef[0][0]
@@ -1655,7 +1661,9 @@ macro genBindings*(
   ## Supported languages (-d:targetLang): "rust" (default), "cpp".
   ## Output path and nim source path default to -d:ffiOutputDir and
   ## -d:ffiSrcPath, or can be passed as explicit arguments.
-  ## This macro is a no-op unless -d:ffiGenBindings is set.
+  ## Foreign-binding file emission is a no-op unless -d:ffiGenBindings is set;
+  ## the `abi = c` `_CWire` companions are emitted unconditionally (runtime
+  ## code, not generated files).
   ##
   ## Example (all via compile flags):
   ##   genBindings()
@@ -1691,4 +1699,7 @@ macro genBindings*(
         "genBindings: unknown targetLang '" & lang & "'. Use 'rust', 'cpp', or 'cddl'."
       )
 
-  return newEmptyNode()
+  let cwireCompanions = flushCWireCompanions()
+  when defined(ffiDumpMacros):
+    echo cwireCompanions.repr
+  cwireCompanions
