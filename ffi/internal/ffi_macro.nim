@@ -748,6 +748,7 @@ macro ffi*(args: varargs[untyped]): untyped =
   # emitted later by `genBindings()`, since a type-pragma macro can only return
   # a TypeDef; `cbor` rides the generic overloads. Both abis are valid here.
   if prc.kind == nnkTypeDef:
+    gateABIFormat(abiFormat, "`.ffi.` type")
     var cleanTypeDef = prc.copyNimTree()
     if cleanTypeDef[0].kind == nnkPragmaExpr:
       cleanTypeDef[0] = cleanTypeDef[0][0]
