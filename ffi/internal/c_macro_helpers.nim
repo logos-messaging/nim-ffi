@@ -2,8 +2,10 @@
 ## For each `{.ffi: "abi = c".}` object T, emits a `T_CWire` companion plus
 ## `cwirePack` / `cwireUnpack` / `cwireFree`. Field mapping: `string`→`cstring`,
 ## `seq[T]`→`<name>_items`+`<name>_len`, `Option[T]`/`Maybe[T]`→`ptr T_w`
-## (nil=none), nested {.ffi.}→`T_CWire`, POD unchanged; seq/Option nest to any
-## depth, but a `seq` may not nest inside seq/Option (no single-field form).
+## (nil=none), nested {.ffi.}→`T_CWire`, `array[N, T]`→inline `array[N, T_w]`,
+## `tuple[a: T, ...]`→`tuple[a: T_w, ...]`, POD unchanged. seq/Option/array/tuple
+## nest to any depth, but a `seq` may not nest inside another container (it has
+## no single-field wire form — only the top-level `_items`/`_len` split).
 
 import std/macros
 import ../codegen/meta
@@ -50,6 +52,24 @@ proc isSeqType(t: NimNode): bool =
 proc isOptionType(t: NimNode): bool =
   isBracketOf(t, ["Option", "Maybe"])
 
+proc isArrayType(t: NimNode): bool =
+  t.kind == nnkBracketExpr and t.len == 3 and t[0].kind == nnkIdent and $t[0] == "array"
+
+proc isTupleType(t: NimNode): bool =
+  t.kind == nnkTupleTy
+
+proc tupleComponents(t: NimNode): seq[tuple[name: string, typ: NimNode]] =
+  ## Flatten a named-tuple type into `(name, type)` pairs, expanding grouped
+  ## declarations like `tuple[a, b: int]` into one entry per name.
+  var comps: seq[tuple[name: string, typ: NimNode]] = @[]
+  for defs in t:
+    if defs.kind != nnkIdentDefs:
+      error("cwire: only named tuples are supported: " & t.repr)
+    let typ = defs[^2]
+    for i in 0 ..< defs.len - 2:
+      comps.add((name: $defs[i], typ: typ))
+  comps
+
 proc isKnownFFIType(name: string): bool {.compileTime.} =
   for typeMeta in ffiTypeRegistry:
     if typeMeta.name == name:
@@ -59,18 +79,50 @@ proc isKnownFFIType(name: string): bool {.compileTime.} =
 proc isNestedFFIType(t: NimNode): bool =
   t.kind == nnkIdent and isKnownFFIType($t)
 
+proc cwireNeedsFree(t: NimNode): bool =
+  ## Whether the wire form of `t` owns shared-memory allocations that
+  ## `cwireFree` must release. POD scalars (and aggregates entirely of POD)
+  ## own nothing, so their free is elided.
+  if isStringType(t) or isNestedFFIType(t) or isOptionType(t) or isSeqType(t):
+    return true
+  if isArrayType(t):
+    return cwireNeedsFree(t[2])
+  if isTupleType(t):
+    for c in tupleComponents(t):
+      if cwireNeedsFree(c.typ):
+        return true
+    return false
+  false
+
+proc rejectNestedSeq(t: NimNode) =
+  ## `seq` has no single-field wire form (only the top-level `_items`/`_len`
+  ## split), so it can't sit inside another container. One message, one place.
+  error(
+    "cwire: `seq` has no single-field wire form, so it can't nest inside " &
+      "another container (use it only as a top-level field): " & t.repr
+  )
+
 proc wireValueType(t: NimNode): NimNode =
   ## Single-field wire form of value type `t`: `string`→`cstring`, nested
-  ## {.ffi.}→`T_CWire`, `Option[T]`→`ptr <wireOf T>`, POD unchanged. `seq`
-  ## has no single-field form, so it errors here (see `wireFieldsFor`).
+  ## {.ffi.}→`T_CWire`, `Option[T]`→`ptr <wireOf T>`, `array[N, T]`→
+  ## `array[N, <wireOf T>]`, `tuple[a: T, ...]`→`tuple[a: <wireOf T>, ...]`,
+  ## POD unchanged. `seq` has no single-field form, so it errors here.
   if isStringType(t):
     return ident("cstring")
   if isNestedFFIType(t):
     return ident(cwireTypeName($t))
   if isOptionType(t):
     return nnkPtrTy.newTree(wireValueType(t[1]))
+  if isArrayType(t):
+    return
+      nnkBracketExpr.newTree(ident("array"), t[1].copyNimTree(), wireValueType(t[2]))
+  if isTupleType(t):
+    let wireTup = nnkTupleTy.newTree()
+    for c in tupleComponents(t):
+      wireTup.add(newIdentDefs(ident(c.name), wireValueType(c.typ)))
+    return wireTup
   if isSeqType(t):
-    error("cwire: `seq` cannot be nested inside seq/Option: " & t.repr)
+    rejectNestedSeq(t)
   t
 
 proc wireFieldsFor(fieldName: string, fieldType: NimNode): seq[NimNode] =
@@ -111,18 +163,28 @@ proc buildCWireTypeDef(
 proc emitOptionPack(dstAccess, srcAccess, userType: NimNode): NimNode
 proc emitOptionUnpack(dstAccess, srcAccess, userType: NimNode): NimNode
 proc emitOptionFree(dstAccess, userType: NimNode): NimNode
+proc emitArrayPack(dstAccess, srcAccess, arrType: NimNode): NimNode
+proc emitArrayUnpack(dstAccess, srcAccess, arrType: NimNode): NimNode
+proc emitArrayFree(dstAccess, arrType: NimNode): NimNode
+proc emitTuplePack(dstAccess, srcAccess, tupType: NimNode): NimNode
+proc emitTupleUnpack(dstAccess, srcAccess, tupType: NimNode): NimNode
+proc emitTupleFree(dstAccess, tupType: NimNode): NimNode
 
 proc emitElemPack(dstElem, srcElem, elemType: NimNode): NimNode =
   ## Pack one value: cstring for `string`, recursive `cwirePack` for nested
-  ## ffi types, recursive Option handling, direct copy for POD.
+  ## ffi types, recursive Option/array/tuple handling, direct copy for POD.
   if isStringType(elemType):
     return newAssignment(dstElem, newCall(ident("cwireAllocStr"), srcElem))
   if isNestedFFIType(elemType):
     return newCall(ident("cwirePack"), dstElem, srcElem)
   if isOptionType(elemType):
     return emitOptionPack(dstElem, srcElem, elemType)
+  if isArrayType(elemType):
+    return emitArrayPack(dstElem, srcElem, elemType)
+  if isTupleType(elemType):
+    return emitTuplePack(dstElem, srcElem, elemType)
   if isSeqType(elemType):
-    error("cwire: `seq` cannot be nested inside seq/Option: " & elemType.repr)
+    rejectNestedSeq(elemType)
   newAssignment(dstElem, srcElem)
 
 proc emitElemUnpack(dstElem, srcElem, elemType: NimNode): NimNode =
@@ -133,8 +195,12 @@ proc emitElemUnpack(dstElem, srcElem, elemType: NimNode): NimNode =
     return newAssignment(dstElem, newCall(ident("cwireUnpack"), srcElem))
   if isOptionType(elemType):
     return emitOptionUnpack(dstElem, srcElem, elemType)
+  if isArrayType(elemType):
+    return emitArrayUnpack(dstElem, srcElem, elemType)
+  if isTupleType(elemType):
+    return emitTupleUnpack(dstElem, srcElem, elemType)
   if isSeqType(elemType):
-    error("cwire: `seq` cannot be nested inside seq/Option: " & elemType.repr)
+    rejectNestedSeq(elemType)
   newAssignment(dstElem, srcElem)
 
 proc emitElemFree(elemAccess, elemType: NimNode): NimNode =
@@ -145,8 +211,12 @@ proc emitElemFree(elemAccess, elemType: NimNode): NimNode =
     return newCall(ident("cwireFree"), elemAccess)
   if isOptionType(elemType):
     return emitOptionFree(elemAccess, elemType)
+  if isArrayType(elemType):
+    return emitArrayFree(elemAccess, elemType)
+  if isTupleType(elemType):
+    return emitTupleFree(elemAccess, elemType)
   if isSeqType(elemType):
-    error("cwire: `seq` cannot be nested inside seq/Option: " & elemType.repr)
+    rejectNestedSeq(elemType)
   newEmptyNode()
 
 proc maybeStmt(n: NimNode): NimNode =
@@ -155,6 +225,73 @@ proc maybeStmt(n: NimNode): NimNode =
   if n.kind == nnkEmpty:
     return newStmtList()
   newStmtList(n)
+
+proc indexLoop(access, idx, body: NimNode): NimNode =
+  ## `for <idx> in low(access) .. high(access): body` — `low`/`high` so any
+  ## array index range (not just 0-based) is covered.
+  nnkForStmt.newTree(
+    idx,
+    nnkInfix.newTree(
+      ident(".."), newCall(ident("low"), access), newCall(ident("high"), access)
+    ),
+    newStmtList(body),
+  )
+
+proc emitArrayPack(dstAccess, srcAccess, arrType: NimNode): NimNode =
+  ## Pack a fixed `array[N, T]` element-by-element into the inline wire array;
+  ## the array itself needs no allocation, only its GC'd element contents do.
+  let idx = genSym(nskForVar, "i")
+  let body = emitElemPack(
+    nnkBracketExpr.newTree(dstAccess, idx),
+    nnkBracketExpr.newTree(srcAccess, idx),
+    arrType[2],
+  )
+  indexLoop(srcAccess, idx, body)
+
+proc emitArrayUnpack(dstAccess, srcAccess, arrType: NimNode): NimNode =
+  ## Inverse of `emitArrayPack`: copy each wire element back into the Nim array.
+  let idx = genSym(nskForVar, "i")
+  let body = emitElemUnpack(
+    nnkBracketExpr.newTree(dstAccess, idx),
+    nnkBracketExpr.newTree(srcAccess, idx),
+    arrType[2],
+  )
+  indexLoop(srcAccess, idx, body)
+
+proc emitArrayFree(dstAccess, arrType: NimNode): NimNode =
+  ## Free each array element; `nnkEmpty` when the element type owns nothing.
+  if not cwireNeedsFree(arrType[2]):
+    return newEmptyNode()
+  let idx = genSym(nskForVar, "i")
+  let body = emitElemFree(nnkBracketExpr.newTree(dstAccess, idx), arrType[2])
+  indexLoop(dstAccess, idx, body)
+
+proc emitTuplePack(dstAccess, srcAccess, tupType: NimNode): NimNode =
+  ## Pack each named tuple component into the matching wire component.
+  let body = newStmtList()
+  for c in tupleComponents(tupType):
+    let nm = ident(c.name)
+    body.add(emitElemPack(newDotExpr(dstAccess, nm), newDotExpr(srcAccess, nm), c.typ))
+  body
+
+proc emitTupleUnpack(dstAccess, srcAccess, tupType: NimNode): NimNode =
+  ## Inverse of `emitTuplePack`: copy each wire component back out.
+  let body = newStmtList()
+  for c in tupleComponents(tupType):
+    let nm = ident(c.name)
+    body.add(
+      emitElemUnpack(newDotExpr(dstAccess, nm), newDotExpr(srcAccess, nm), c.typ)
+    )
+  body
+
+proc emitTupleFree(dstAccess, tupType: NimNode): NimNode =
+  ## Free each tuple component that owns allocations; `nnkEmpty` when none do.
+  if not cwireNeedsFree(tupType):
+    return newEmptyNode()
+  let body = newStmtList()
+  for c in tupleComponents(tupType):
+    body.add(maybeStmt(emitElemFree(newDotExpr(dstAccess, ident(c.name)), c.typ)))
+  body
 
 proc emitSeqPack(dstObj, srcAccess, fieldNameIdent, userType: NimNode): NimNode =
   ## Pack a seq field into a freshly `allocShared`'d `UncheckedArray`; an empty
@@ -187,16 +324,17 @@ proc emitSeqPack(dstObj, srcAccess, fieldNameIdent, userType: NimNode): NimNode 
 
 proc emitOptionPack(dstAccess, srcAccess, userType: NimNode): NimNode =
   ## Pack an Option into a `ptr`: some → `allocShared` a box and pack into it,
-  ## none → nil.
+  ## none → nil. The payload is read into a local once, so a composite inner
+  ## type (e.g. `array`/`tuple`) isn't re-`get()`-copied per element.
   let innerType = userType[1]
   let wireInner = wireValueType(innerType)
   let bufType = nnkPtrTy.newTree(wireInner)
-  let elemPack = emitElemPack(
-    nnkBracketExpr.newTree(dstAccess), newCall(ident("get"), srcAccess), innerType
-  )
+  let innerVal = genSym(nskLet, "innerVal")
+  let elemPack = emitElemPack(nnkBracketExpr.newTree(dstAccess), innerVal, innerType)
   quote:
     if `srcAccess`.isSome():
       `dstAccess` = cast[`bufType`](allocShared(sizeof(`wireInner`)))
+      let `innerVal` = `srcAccess`.get()
       `elemPack`
     else:
       `dstAccess` = nil
@@ -375,7 +513,7 @@ proc collectNestedFFITypes(
     fieldTypes: seq[NimNode], deps: var seq[string]
 ) {.compileTime.} =
   ## Append (deduped) the names of nested ffi types referenced anywhere in
-  ## `fieldTypes`, recursing through `seq`/`Option`/`Maybe` to any depth.
+  ## `fieldTypes`, recursing through `seq`/`Option`/`array`/`tuple` to any depth.
   for t in fieldTypes:
     if isNestedFFIType(t):
       let n = $t
@@ -383,6 +521,11 @@ proc collectNestedFFITypes(
         deps.add(n)
     elif isSeqType(t) or isOptionType(t):
       collectNestedFFITypes(@[t[1]], deps)
+    elif isArrayType(t):
+      collectNestedFFITypes(@[t[2]], deps)
+    elif isTupleType(t):
+      for c in tupleComponents(t):
+        collectNestedFFITypes(@[c.typ], deps)
 
 proc ensureCWireFor(typeName: string, sink: NimNode) {.compileTime.} =
   ## Idempotent: if `typeName`'s cwire companion has not yet been emitted,
