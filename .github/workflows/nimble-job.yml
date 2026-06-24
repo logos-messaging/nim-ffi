@@ -1,0 +1,66 @@
+name: nimble-job
+
+# Single-OS job that sets up the Nim/Nimble toolchain + cached deps, then runs
+# one shell command across the Nim-version matrix. Shared by the ci.yml jobs
+# whose only difference is the command they run (check-bindings, the submit
+# scaling gate, …). Multi-OS / sanitizer matrices live in test.yml /
+# tests-sanitized.yml instead.
+on:
+  workflow_call:
+    inputs:
+      run:
+        required: true
+        type: string
+        description: Shell command to run once the toolchain and deps are ready.
+      nim-versions:
+        required: true
+        type: string
+        description: JSON array of Nim versions to matrix over.
+      nimble-version:
+        required: true
+        type: string
+      runs-on:
+        required: false
+        type: string
+        default: ubuntu-22.04
+
+jobs:
+  run:
+    strategy:
+      fail-fast: false
+      matrix:
+        nim-version: ${{ fromJSON(inputs.nim-versions) }}
+    runs-on: ${{ inputs.runs-on }}
+    name: Nim ${{ matrix.nim-version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: ${{ matrix.nim-version }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Nimble ${{ inputs.nimble-version }}
+        run: |
+          cd /tmp && nimble install "nimble@${{ inputs.nimble-version }}" -y
+          echo "$HOME/.nimble/bin" >> $GITHUB_PATH
+
+      - name: Cache nimble deps
+        id: cache-nimbledeps
+        uses: actions/cache@v4
+        with:
+          path: |
+            nimbledeps/
+            nimble.paths
+          key: ${{ runner.os }}-nimbledeps-${{ matrix.nim-version }}-${{ hashFiles('*.nimble') }}
+          restore-keys: |
+            ${{ runner.os }}-nimbledeps-${{ matrix.nim-version }}-
+            ${{ runner.os }}-nimbledeps-
+
+      - name: Install nimble deps
+        if: steps.cache-nimbledeps.outputs.cache-hit != 'true'
+        run: nimble setup --localdeps -y
+
+      - name: Run
+        run: ${{ inputs.run }}
