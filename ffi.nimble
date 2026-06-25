@@ -65,6 +65,25 @@ proc sanFlags(san: string): string =
   else:
     raise newException(ValueError, "unknown NIM_FFI_SAN: " & san)
 
+proc mmModes(): seq[string] =
+  ## Memory-management modes to build under, selected by NIM_FFI_MM (empty = both).
+  case getEnv("NIM_FFI_MM", "")
+  of "orc":
+    @[nimFlagsOrc]
+  of "refc":
+    @[nimFlagsRefc]
+  else:
+    @[nimFlagsOrc, nimFlagsRefc]
+
+proc applyTsanSuppressions() =
+  ## Adds tsan.supp to TSAN_OPTIONS without clobbering options the CI job set.
+  let suppPath = thisDir() & "/tsan.supp"
+  let existing = getEnv("TSAN_OPTIONS")
+  if existing == "":
+    putEnv("TSAN_OPTIONS", "suppressions=" & suppPath)
+  elif "suppressions=" notin existing:
+    putEnv("TSAN_OPTIONS", existing & ":suppressions=" & suppPath)
+
 task buildffi, "Compile the library":
   exec "nim c " & nimFlagsOrc & " --app:lib --noMain ffi.nim"
 
@@ -90,6 +109,17 @@ task bench_codec, "Microbenchmark: cbor vs c (cwire) wire-format codecs":
   # debug build. Not part of `test` — timing is a measurement, not a gate.
   exec "nim c -r " & nimFlagsOrc & " -d:danger tests/bench/bench_codec.nim"
 
+task bench_ffi_submit,
+  "Concurrent-submit stress + scaling gate for sendRequestToFFIThread":
+  # Honors NIM_FFI_SAN / NIM_FFI_MM like test_sanitized so CI drives it under
+  # asan-ubsan and tsan; FFI_SUBMIT_PER_THREAD sets per-thread volume.
+  let san = getEnv("NIM_FFI_SAN", "none")
+  let extra = sanFlags(san)
+  if san == "tsan":
+    applyTsanSuppressions()
+  for flags in mmModes():
+    exec "nim c -r " & flags & " -d:danger" & extra & " tests/bench/bench_ffi_submit.nim"
+
 task test_cpp_e2e, "Build and run the C++ end-to-end tests for the timer example":
   # Regenerate the C++ bindings so the suite always runs against fresh codegen.
   runOrQuit "nimble genbindings_cpp"
@@ -104,23 +134,10 @@ task test_cpp_e2e, "Build and run the C++ end-to-end tests for the timer example
 task test_sanitized,
   "Run all unit tests under a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
   let san = getEnv("NIM_FFI_SAN", "none")
-  let mm = getEnv("NIM_FFI_MM", "")
   let extra = sanFlags(san)
-  let modes =
-    if mm == "orc":
-      @[nimFlagsOrc]
-    elif mm == "refc":
-      @[nimFlagsRefc]
-    else:
-      @[nimFlagsOrc, nimFlagsRefc]
   if san == "tsan":
-    let suppPath = thisDir() & "/tsan.supp"
-    let existing = getEnv("TSAN_OPTIONS")
-    if existing == "":
-      putEnv("TSAN_OPTIONS", "suppressions=" & suppPath)
-    elif "suppressions=" notin existing:
-      putEnv("TSAN_OPTIONS", existing & ":suppressions=" & suppPath)
-  for flags in modes:
+    applyTsanSuppressions()
+  for flags in mmModes():
     for t in unitTests:
       exec "nim c -r " & flags & extra & " tests/unit/" & t & ".nim"
 
