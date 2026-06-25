@@ -336,8 +336,12 @@ proc buildFFINewReqProc(reqTypeName, body: NimNode): NimNode =
           `reqObjIdent`.`fieldName` = `fieldName`
       )
 
-  let reqNameLit =
-    newLit(if reqTypeName.kind == nnkPostfix: $reqTypeName[1] else: $reqTypeName)
+  let reqNameLit = newLit(
+    if reqTypeName.kind == nnkPostfix:
+      $reqTypeName[1]
+    else:
+      $reqTypeName
+  )
   newBody.add(
     quote do:
       let (sharedData, sharedLen) = cborEncodeShared(`reqObjIdent`)
@@ -919,8 +923,12 @@ macro ffi*(args: varargs[untyped]): untyped =
 
     # Build the FFIThreadRequest payload directly from the incoming bytes.
     let reqPtrIdent = genSym(nskLet, "reqPtr")
-    let reqNameLit =
-      newLit(if reqTypeName.kind == nnkPostfix: $reqTypeName[1] else: $reqTypeName)
+    let reqNameLit = newLit(
+      if reqTypeName.kind == nnkPostfix:
+        $reqTypeName[1]
+      else:
+        $reqTypeName
+    )
     ffiBody.add quote do:
       let `reqPtrIdent` = FFIThreadRequest.initFromPtr(
         callback, userData, cstring(`reqNameLit`), reqCbor, int(reqCborLen)
@@ -1042,8 +1050,12 @@ proc buildCtorFFINewReqProc(reqTypeName: NimNode, paramNames: seq[string]): NimN
   let retType = newTree(nnkPtrTy, ident("FFIThreadRequest"))
   formalParams = @[retType] & formalParams
 
-  let reqNameLit =
-    newLit(if reqTypeName.kind == nnkPostfix: $reqTypeName[1] else: $reqTypeName)
+  let reqNameLit = newLit(
+    if reqTypeName.kind == nnkPostfix:
+      $reqTypeName[1]
+    else:
+      $reqTypeName
+  )
   var newBody = newStmtList()
   newBody.add quote do:
     return FFIThreadRequest.initFromPtr(
@@ -1142,8 +1154,7 @@ proc buildCtorProcessFFIRequestProc(
       return err($error)
 
   let myLibIdent = newDotExpr(newTree(nnkDerefExpr, ctxIdent), ident("myLib"))
-  let myLibOwnedIdent =
-    newDotExpr(newTree(nnkDerefExpr, ctxIdent), ident("myLibOwned"))
+  let myLibOwnedIdent = newDotExpr(newTree(nnkDerefExpr, ctxIdent), ident("myLibOwned"))
   let myLibRefdIdent = newDotExpr(newTree(nnkDerefExpr, ctxIdent), ident("myLibRefd"))
   newBody.add quote do:
     `myLibIdent` = createShared(`libTypeName`)
@@ -1574,8 +1585,11 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
   ##   # ... then from inside any {.ffi.} handler:
   ##   onPeerConnected(PeerInfo(id: "p-1", address: "127.0.0.1"))
   ##
-  ## Restriction (first pass): exactly one parameter. Multi-param events
-  ## need a synthesised envelope struct; planned for a follow-up.
+  ## Parameters: a single parameter rides the wire directly (a scalar, or an
+  ## existing {.ffi.} object). Two or more parameters are bundled into a
+  ## synthesised, registered envelope object named `<WireNamePascalCase>Payload`
+  ## whose fields are the parameters, so the foreign side still decodes one
+  ## typed value.
 
   requireLibraryDeclared("`.ffiEvent.`")
   if args.len < 2:
@@ -1595,35 +1609,70 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
   let procName = prc[0]
   let formalParams = prc[3]
 
-  if formalParams.len != 2:
-    error(
-      "ffiEvent (first pass) supports exactly one parameter; got " &
-        $(formalParams.len - 1)
-    )
-
-  let paramDef = formalParams[1]
-  let payloadParamName = paramDef[0]
-  let payloadTypeNode = paramDef[1]
-
-  let payloadTypeNameStr =
-    case payloadTypeNode.kind
-    of nnkIdent:
-      $payloadTypeNode
-    else:
-      payloadTypeNode.repr
+  if formalParams.len < 2:
+    error("ffiEvent requires at least one parameter")
 
   var userProcName = procName
   if procName.kind == nnkPostfix:
     userProcName = procName[1]
 
-  # The generated body: dispatchFFIEventCbor("wire_name", payload).
+  # Flatten the parameter list (a grouped `a, b: T` expands to one entry each).
+  var paramNames: seq[NimNode] = @[]
+  var paramTypes: seq[NimNode] = @[]
+  for i in 1 ..< formalParams.len:
+    let p = formalParams[i]
+    for j in 0 ..< p.len - 2:
+      rejectRawPtrType(
+        p[^2], "`.ffiEvent.` proc " & $userProcName & " parameter " & $p[j]
+      )
+      paramNames.add(p[j])
+      paramTypes.add(p[^2])
+
   let wireNameLit = newStrLitNode(wireName)
+  let resultStmts = newStmtList()
+
+  var payloadTypeNameStr: string
+  var dispatchPayload: NimNode
+
+  if paramNames.len == 1:
+    let payloadTypeNode = paramTypes[0]
+    payloadTypeNameStr =
+      if payloadTypeNode.kind == nnkIdent:
+        $payloadTypeNode
+      else:
+        payloadTypeNode.repr
+    dispatchPayload = paramNames[0]
+  else:
+    # Synthesise + register an envelope object, then dispatch an instance built
+    # from the parameters.
+    let payloadType = ident(snakeToPascalCase(wireName) & "Payload")
+    payloadTypeNameStr = $payloadType
+
+    var paramNameStrs: seq[string] = @[]
+    for n in paramNames:
+      paramNameStrs.add($n)
+    let typeSection = buildCtorRequestType(payloadType, paramNameStrs, paramTypes)
+    discard registerFFITypeInfo(typeSection[0], abiFormat)
+    resultStmts.add(typeSection)
+
+    let envelope = nnkObjConstr.newTree(payloadType)
+    for i in 0 ..< paramNames.len:
+      # `cstring` rides as `string` in the envelope (per storageType).
+      let value =
+        if paramTypes[i].kind == nnkIdent and $paramTypes[i] == "cstring":
+          newCall(ident("$"), paramNames[i])
+        else:
+          paramNames[i]
+      envelope.add(nnkExprColonExpr.newTree(paramNames[i], value))
+    dispatchPayload = envelope
+
   let dispatchBody =
-    newStmtList(newCall(ident("dispatchFFIEventCbor"), wireNameLit, payloadParamName))
+    newStmtList(newCall(ident("dispatchFFIEventCbor"), wireNameLit, dispatchPayload))
 
   var newParams = newSeq[NimNode]()
   newParams.add(formalParams[0]) # return type (typically empty/void)
-  newParams.add(paramDef)
+  for i in 1 ..< formalParams.len:
+    newParams.add(formalParams[i])
 
   let pragmas =
     if prc.len >= 5 and prc[4].kind != nnkEmpty:
@@ -1638,6 +1687,7 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
     procType = prc.kind,
     pragmas = pragmas,
   )
+  resultStmts.add(generated)
 
   ffiEventRegistry.add(
     FFIEventMeta(
@@ -1650,8 +1700,8 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
   )
 
   when defined(ffiDumpMacros):
-    echo generated.repr
-  return generated
+    echo resultStmts.repr
+  return resultStmts
 
 macro genBindings*(
     outputDir: static[string] = ffiOutputDir, nimSrcRelPath: static[string] = ffiSrcPath

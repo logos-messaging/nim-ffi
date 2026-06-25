@@ -117,6 +117,25 @@ unsafe extern "C" fn on_echo_fired_trampoline(
     }
 }
 
+struct OnJobScheduledHandler {
+    f: Box<dyn Fn(&OnJobScheduledPayload) + Send + Sync>,
+}
+
+unsafe extern "C" fn on_job_scheduled_trampoline(
+    ret: c_int, msg: *const c_char, len: usize, ud: *mut c_void,
+) {
+    if ud.is_null() || ret != 0 || msg.is_null() || len == 0 {
+        return;
+    }
+    let h = &*(ud as *const OnJobScheduledHandler);
+    let bytes = slice::from_raw_parts(msg as *const u8, len);
+    #[derive(serde::Deserialize)]
+    struct Envelope { payload: OnJobScheduledPayload }
+    if let Ok(env) = ciborium::de::from_reader::<Envelope, _>(bytes) {
+        (h.f)(&env.payload);
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ListenerHandle { pub id: u64 }
 
@@ -196,6 +215,16 @@ impl MyTimerCtx {
         let owned: Box<OnEchoFiredHandler> = Box::new(OnEchoFiredHandler { f: Box::new(handler) });
         let raw = &*owned as *const OnEchoFiredHandler as *mut c_void;
         self.add_listener_inner(b"on_echo_fired\0".as_ptr() as *const c_char, on_echo_fired_trampoline, raw, owned)
+    }
+
+    /// Register a typed listener for `on_job_scheduled`. The returned handle can be
+    /// passed to `remove_event_listener` to unregister.
+    pub fn add_on_job_scheduled_listener<F>(&self, handler: F) -> ListenerHandle
+    where F: Fn(&OnJobScheduledPayload) + Send + Sync + 'static,
+    {
+        let owned: Box<OnJobScheduledHandler> = Box::new(OnJobScheduledHandler { f: Box::new(handler) });
+        let raw = &*owned as *const OnJobScheduledHandler as *mut c_void;
+        self.add_listener_inner(b"on_job_scheduled\0".as_ptr() as *const c_char, on_job_scheduled_trampoline, raw, owned)
     }
 
     /// Remove a previously-registered listener by handle. Returns true

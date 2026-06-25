@@ -48,6 +48,11 @@ type EchoEvent {.ffi.} = object
 
 proc onEchoFired*(evt: EchoEvent) {.ffiEvent: "on_echo_fired".}
 
+# A multi-parameter event: the macro synthesises + registers an envelope object
+# (`OnJobScheduledPayload`) from the params, so the foreign side still decodes a
+# single typed value — no per-event payload type to hand-write.
+proc onJobScheduled*(jobId: string, willRunCount: int) {.ffiEvent: "on_job_scheduled".}
+
 # --- Constructor -----------------------------------------------------------
 # Called once from Rust. Creates the FFIContext + MyTimer.
 # Uses chronos (await sleepAsync) so the body is async.
@@ -127,6 +132,7 @@ proc myTimerSchedule*(
     else:
       1
   let jitter = if schedule.jitter.isSome: schedule.jitter.get else: 0
+  onJobScheduled(timer.name & ":" & job.name, willRunCount)
   return ok(
     ScheduleResult(
       jobId: timer.name & ":" & job.name,

@@ -443,6 +443,33 @@ inline CborError decode_cbor(CborValue& it, EchoEvent& v) {
     return cbor_value_advance(&it);
 }
 
+struct OnJobScheduledPayload {
+    std::string jobId;
+    int64_t willRunCount;
+};
+inline CborError encode_cbor(CborEncoder& e, const OnJobScheduledPayload& v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(&e, &m, 2);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "jobId"); if (err) return err;
+    err = encode_cbor(m, v.jobId);              if (err) return err;
+    err = cbor_encode_text_stringz(&m, "willRunCount"); if (err) return err;
+    err = encode_cbor(m, v.willRunCount);              if (err) return err;
+    return cbor_encoder_close_container(&e, &m);
+}
+inline CborError decode_cbor(CborValue& it, OnJobScheduledPayload& v) {
+    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(&it, "jobId", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.jobId); if (err) return err;
+    err = cbor_value_map_find_value(&it, "willRunCount", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.willRunCount); if (err) return err;
+    return cbor_value_advance(&it);
+}
+
 struct JobSpec {
     std::string name;
     std::vector<std::string> payload;
@@ -834,6 +861,16 @@ public:
         auto* raw = owned.get();
         const auto id = my_timer_add_event_listener(
             ptr_, "on_echo_fired", &MyTimerCtx::typedTrampoline<EchoEvent>, raw);
+        if (id == 0) return ListenerHandle{0};
+        listeners_.emplace(id, std::move(owned));
+        return ListenerHandle{id};
+    }
+
+    ListenerHandle addOnJobScheduledListener(std::function<void(const OnJobScheduledPayload&)> handler) {
+        auto owned = std::make_unique<TypedListener<OnJobScheduledPayload>>(std::move(handler));
+        auto* raw = owned.get();
+        const auto id = my_timer_add_event_listener(
+            ptr_, "on_job_scheduled", &MyTimerCtx::typedTrampoline<OnJobScheduledPayload>, raw);
         if (id == 0) return ListenerHandle{0};
         listeners_.emplace(id, std::move(owned));
         return ListenerHandle{id};

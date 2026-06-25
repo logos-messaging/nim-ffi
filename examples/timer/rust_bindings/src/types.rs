@@ -44,6 +44,14 @@ pub struct EchoEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnJobScheduledPayload {
+    #[serde(rename = "jobId")]
+    pub job_id: String,
+    #[serde(rename = "willRunCount")]
+    pub will_run_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobSpec {
     pub name: String,
     pub payload: Vec<String>,

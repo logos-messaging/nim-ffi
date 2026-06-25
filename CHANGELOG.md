@@ -20,6 +20,12 @@ All notable changes to this project are documented in this file.
   where `-install_name` requires `-dynamiclib`.
 
 ### Added
+- `{.ffiEvent.}` now accepts multiple parameters. The macro synthesises and
+  registers an envelope object (`<WireNamePascalCase>Payload`) whose fields are
+  the parameters and dispatches an instance of it, so multi-field events no
+  longer need a hand-written payload type. A single parameter still rides the
+  wire directly (a scalar, or an existing `{.ffi.}` object). The foreign
+  bindings gain the envelope as a first-class struct plus a typed handler.
 - Per-interaction ABI-format annotations: `declareLibrary` now takes an
   optional `defaultABIFormat` (`"cbor"` default, or `"c"`) that every
   `{.ffi.}` / `{.ffiCtor.}` / `{.ffiDtor.}` / `{.ffiRaw.}` / `{.ffiEvent.}`
