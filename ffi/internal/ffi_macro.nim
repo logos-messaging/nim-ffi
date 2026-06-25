@@ -861,8 +861,8 @@ macro ffi*(args: varargs[untyped]): untyped =
     ## All `.ffi.` procs dispatch through the FFI thread channel and reply
     ## through the callback when the future resolves — the previous "sync
     ## fast-path" that ran inline on the foreign caller thread was removed
-    ## (PR #23 review, items 1–5) because it bypassed `foreignThreadGc`,
-    ## `ctx.lock`, and chronos's single-thread invariant.
+    ## (PR #23 review, items 1–5) because it bypassed `foreignThreadGc`, the
+    ## MPSC ingress hand-off, and chronos's single-thread invariant.
     let helperProc = buildAsyncHelperProc()
 
     # registerReqFFI lambda: typed params, returns user's typed Result.

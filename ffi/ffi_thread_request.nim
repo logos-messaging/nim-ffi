@@ -26,6 +26,10 @@ type FFIThreadRequest* = object
   reqId*: cstring ## Per-proc Req type name used to look up the handler.
   data*: ptr UncheckedArray[byte] ## Owned CBOR-encoded request payload.
   dataLen*: int
+  next*: ptr FFIThreadRequest
+    ## Intrusive ingress-queue link (see `ffi_request_queue.nim`). Touched only
+    ## under the queue's lock; the request doubles as its own node, so no
+    ## separate node alloc lands on the per-thread ORC MemRegion.
 
 proc allocBaseRequest(
     callback: FFICallBack, userData: pointer, reqId: cstring
@@ -39,6 +43,7 @@ proc allocBaseRequest(
   ret[].reqId = reqId.alloc()
   ret[].data = nil
   ret[].dataLen = 0
+  ret[].next = nil
   return ret
 
 proc copySharedPayload(req: ptr FFIThreadRequest, data: ptr byte, dataLen: int) =

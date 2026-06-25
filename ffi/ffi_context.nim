@@ -7,12 +7,13 @@
 {.passc: "-fPIC".}
 
 import std/[atomics, locks, options, tables]
-import chronicles, chronos, chronos/threadsync, taskpools/channels_spsc_single, results
+import chronicles, chronos, chronos/threadsync, results
 import
   ./ffi_types,
   ./ffi_events,
   ./ffi_handles,
   ./ffi_thread_request,
+  ./ffi_request_queue,
   ./logging,
   ./cbor_serial
 
@@ -22,10 +23,8 @@ type FFIContext*[T] = object
   myLib*: ptr T # main library object (Waku, LibP2P, SDS, …)
   ffiThread: Thread[(ptr FFIContext[T])]
   eventThread: Thread[(ptr FFIContext[T])]
-  lock: Lock
-  reqChannel: ChannelSPSCSingle[ptr FFIThreadRequest]
-  reqSignal: ThreadSignalPtr
-  reqReceivedSignal: ThreadSignalPtr
+  reqQueue: FFIRequestQueue # mutex-guarded MPSC ingress from foreign threads
+  reqSignal: ThreadSignalPtr # wakes the FFI thread on enqueue
   stopSignal: ThreadSignalPtr
   threadExitSignal: ThreadSignalPtr
     # bounds destroyFFIContext's wait so a blocked loop cannot hang the caller
@@ -60,9 +59,11 @@ template closeAndNil(field: untyped) =
     field = nil
 
 proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## Mirror of `initContextResources`. Threads MUST be joined first;
-  ## fields are nil'd after close so re-init on the same slot is safe.
-  ctx.lock.deinitLock()
+  ## Mirror of `initContextResources`. Threads MUST be joined first (so the FFI
+  ## thread has drained the queue); fields are nil'd after close so re-init on
+  ## the same slot is safe. `deinitRequestQueue` frees any request a producer
+  ## raced in after the final drain, so teardown leaks nothing.
+  deinitRequestQueue(ctx[].reqQueue)
   deinitEventRegistry(ctx[].eventRegistry)
   deinitHandleRegistry(ctx[].handles)
   deinitEventQueue(ctx[].eventQueue)
@@ -74,7 +75,6 @@ proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     discard
   else:
     closeAndNil(ctx.reqSignal)
-    closeAndNil(ctx.reqReceivedSignal)
     closeAndNil(ctx.stopSignal)
     closeAndNil(ctx.threadExitSignal)
     closeAndNil(ctx.eventQueueSignal)
@@ -96,12 +96,11 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## the slot (freeShared or pool.releaseSlot).
   # Nil first so deferred cleanup can't double-close a reused pool slot.
   ctx.reqSignal = nil
-  ctx.reqReceivedSignal = nil
   ctx.stopSignal = nil
   ctx.threadExitSignal = nil
   ctx.eventQueueSignal = nil
   ctx.eventThreadExitSignal = nil
-  ctx.lock.initLock()
+  initRequestQueue(ctx[].reqQueue)
   initEventRegistry(ctx[].eventRegistry)
   initHandleRegistry(ctx[].handles)
   initEventQueue(ctx[].eventQueue)
@@ -116,7 +115,6 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
           error = error
 
   newSignalOrErr(ctx.reqSignal, "reqSignal")
-  newSignalOrErr(ctx.reqReceivedSignal, "reqReceivedSignal")
   newSignalOrErr(ctx.stopSignal, "stopSignal")
   newSignalOrErr(ctx.threadExitSignal, "threadExitSignal")
   newSignalOrErr(ctx.eventQueueSignal, "eventQueueSignal")
