@@ -33,6 +33,9 @@ type WireWithOption {.ffi.} = object
 type WireWithVector {.ffi.} = object
   items: seq[string]
 
+type WireWithBytes {.ffi.} = object
+  blob: seq[byte]
+
 proc toHex(bytes: openArray[byte]): string =
   var buf = ""
   for b in bytes:
@@ -106,3 +109,28 @@ suite "wire format — seq[T]":
     # map(1), "items" -> array(3) of text strings "a", "bb", "ccc":
     # 83 (array 3) 61 61 ("a") 62 62 62 ("bb") 63 63 63 63 ("ccc")
     check toHex(bytes) == "a1656974656d7383616162626263636363"
+
+suite "wire format — seq[byte]":
+  ## `cbor_serialization` emits `seq[byte]` as a CBOR **byte string** (major
+  ## type 2), not an array (major type 4). The C++ codegen mirrors this with a
+  ## `std::vector<std::uint8_t>` overload that uses `cbor_encode_byte_string`.
+  ## These goldens pin the cross-language contract.
+
+  test "seq[byte] field rides as a CBOR byte string, not an array":
+    let v = WireWithBytes(blob: @[1'u8, 2'u8, 3'u8])
+    let bytes = cborEncode(v)
+    # map(1): "blob" -> byte-string len 3 (0x43) 01 02 03
+    check toHex(bytes) == "a164626c6f6243010203"
+    # The value is a byte string (0x40–0x5b), never an array (0x80–0x9b).
+    let valMajor = bytes[6]
+    check valMajor >= 0x40'u8
+    check valMajor <= 0x5b'u8
+    let back = cborDecode(bytes, WireWithBytes)
+    check back.isOk
+    check back.value.blob == v.blob
+
+  test "empty seq[byte] field rides as byte-string(0)":
+    let v = WireWithBytes(blob: @[])
+    let bytes = cborEncode(v)
+    # map(1): "blob" -> byte-string len 0 (0x40)
+    check toHex(bytes) == "a164626c6f6240"

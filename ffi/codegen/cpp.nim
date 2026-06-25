@@ -46,8 +46,14 @@ proc nimTypeToCpp*(typeName: string): string =
   of "string", "cstring": "std::string"
   of "int", "int64": "int64_t"
   of "int32": "int32_t"
+  of "int16": "int16_t"
+  of "int8": "int8_t"
+  of "uint", "uint64": "uint64_t"
+  of "uint32": "uint32_t"
+  of "uint16": "uint16_t"
+  of "uint8", "byte": "uint8_t"
   of "bool": "bool"
-  of "float": "float"
+  of "float", "float32": "float"
   of "float64": "double"
   of "pointer": CppPtrType
   else: trimmed

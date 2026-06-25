@@ -36,6 +36,14 @@ inline CborError encode_cbor(CborEncoder& e, const std::vector<T>& v) {
     return cbor_encoder_close_container(&e, &arr);
 }
 
+// `seq[byte]` rides the wire as a CBOR byte string (major type 2), matching
+// Nim's cbor_serialization. This non-template overload beats the std::vector<T>
+// template in overload resolution, so std::vector<std::uint8_t> fields use it
+// automatically.
+inline CborError encode_cbor(CborEncoder& e, const std::vector<std::uint8_t>& v) {
+    return cbor_encode_byte_string(&e, v.data(), v.size());
+}
+
 template<typename T>
 inline CborError encode_cbor(CborEncoder& e, const std::optional<T>& v) {
     if (!v) return cbor_encode_null(&e);
@@ -111,6 +119,20 @@ inline CborError decode_cbor(CborValue& it, std::vector<T>& out) {
         if (err) return err;
     }
     return cbor_value_leave_container(&it, &inner);
+}
+
+// Counterpart to the byte-string encoder above: decode a CBOR byte string
+// (major type 2) back into std::vector<std::uint8_t>.
+inline CborError decode_cbor(CborValue& it, std::vector<std::uint8_t>& out) {
+    if (!cbor_value_is_byte_string(&it)) return CborErrorImproperValue;
+    size_t len = 0;
+    CborError err = cbor_value_get_string_length(&it, &len);
+    if (err) return err;
+    out.resize(len);
+    err = cbor_value_copy_byte_string(
+        &it, out.empty() ? nullptr : out.data(), &len, nullptr);
+    if (err) return err;
+    return cbor_value_advance(&it);
 }
 
 template<typename T>

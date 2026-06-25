@@ -31,7 +31,12 @@ proc nimTypeToCddl*(typeName: string): string =
   let t = typeName.strip()
   let seqI = innerOf(t, "seq[")
   if seqI.len > 0:
-    return "[* " & nimTypeToCddl(seqI) & "]"
+    let inner = seqI.strip()
+    if inner == "byte" or inner == "uint8":
+      # `seq[byte]` rides the wire as a CBOR byte string, matching the Nim
+      # cbor_serialization writer — reflect that in the schema.
+      return "bytes"
+    return "[* " & nimTypeToCddl(inner) & "]"
   let arrI = innerOf(t, "array[")
   if arrI.len > 0:
     # CDDL has no fixed-length array literal as ergonomic as Nim's array; emit
@@ -52,7 +57,7 @@ proc nimTypeToCddl*(typeName: string): string =
   case t
   of "bool": "bool"
   of "int", "int64", "int32", "int16", "int8": "int"
-  of "uint", "uint64", "uint32", "uint16", "uint8": "uint"
+  of "uint", "uint64", "uint32", "uint16", "uint8", "byte": "uint"
   of "string", "cstring": "tstr"
   of "float", "float64": "float64"
   of "float32": "float32"
