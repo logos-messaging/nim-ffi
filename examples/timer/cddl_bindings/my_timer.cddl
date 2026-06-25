@@ -9,6 +9,7 @@ EchoResponse = { echoed: tstr, timerName: tstr }
 ComplexRequest = { messages: [* EchoRequest], tags: [* tstr], note: tstr / nil, retries: int / nil }
 ComplexResponse = { summary: tstr, itemCount: int, hasNote: bool }
 EchoEvent = { message: tstr, echoCount: int }
+OnJobScheduledPayload = { jobId: tstr, willRunCount: int }
 JobPriority = "low" / "normal" / "high"
 JobSpec = { name: tstr, payload: [* tstr], priority: JobPriority }
 RetryPolicy = { maxAttempts: int, backoffMs: int, retryOn: [* tstr] }
