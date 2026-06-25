@@ -7,12 +7,7 @@ This directory holds Nim micro/stress benchmarks. Neither is part of `nimble tes
 
 ## `sendRequestToFFIThread` concurrent-submit stress / throughput
 
-`bench_ffi_submit.nim` motivates
-[issue #90](https://github.com/logos-messaging/nim-ffi/issues/90): every
-foreign-thread call serialises the whole `trySend + reqSignal.fireSync +
-reqReceivedSignal.waitSync` cycle under a single `ctx.lock`. The lock is
-load-bearing because `reqChannel` is single-slot and the accept handshake waits
-on a *shared* `reqReceivedSignal`, so producers cannot overlap.
+`bench_ffi_submit.nim` motivates [issue #90](https://github.com/logos-messaging/nim-ffi/issues/90): every foreign-thread call serialises the whole `trySend + reqSignal.fireSync + reqReceivedSignal.waitSync` cycle under a single `ctx.lock`. The lock is load-bearing because `reqChannel` is single-slot and the accept handshake waits on a *shared* `reqReceivedSignal`, so producers cannot overlap.
 
 The bench fans **K producer threads (1 → 8)** at one context, each firing the same per-thread volume of no-op requests. It times the **submit phase only** — from the start gate until every producer returns from its last `sendRequestToFFIThread` — because that is the path the fix parallelises; completion is bounded by the single FFI thread and deliberately excluded. Each thread count runs `FFI_SUBMIT_ITERS` times (default 5) and the **median** submit/sec is reported, so run-to-run noise can't move the verdict.
 

@@ -49,13 +49,12 @@ proc waitForCompletions(target: int): bool =
   true
 
 proc median(xs: seq[float]): float =
-  let s = sorted(xs)
-  if s.len == 0:
-    0.0
-  elif s.len mod 2 == 1:
-    s[s.len div 2]
-  else:
-    (s[s.len div 2 - 1] + s[s.len div 2]) / 2.0
+  if xs.len == 0:
+    return 0.0
+  let s = xs.sorted()
+  if s.len mod 2 == 1:
+    return s[s.len div 2]
+  (s[s.len div 2 - 1] + s[s.len div 2]) / 2.0
 
 type IterResult = object
   submitRate: float ## submits/sec over the submit phase only (sends issued)
@@ -81,9 +80,7 @@ proc runOnce(
     args[i] = ProducerArg(ctx: ctx, count: perThread)
     createThread(threads[i], producerBody, addr args[i])
 
-  # Time the submit phase only: from the start gate until every producer has
-  # returned from its last sendRequestToFFIThread. This is the path the lock
-  # serialises — completion is bounded by the single FFI thread and excluded.
+  # Times the lock-serialised submit path only; completion (single FFI thread) is excluded.
   let start = Moment.now()
   gStart.store(true)
   joinThreads(threads)

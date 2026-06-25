@@ -198,10 +198,12 @@ jobs:
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
   submit-scaling-gate:
-    # Intentionally RED until the per-request submit lock is replaced: asserts
-    # sendRequestToFFIThread submit throughput scales with producer threads,
-    # which the global lock cannot do. Non-sanitized + orc so the timing is
-    # meaningful (sanitizers distort thread scheduling). See the bench source.
+    # Forcing function, red by design: asserts sendRequestToFFIThread submit
+    # throughput scales with producer-thread count. The per-request global lock
+    # serialises every submit, so this stays red until the lock is replaced with
+    # MPSC ingress — a standing reminder, not a transient failure. Pinned to orc +
+    # unsanitized because the gate is timing-based and the contention it measures
+    # is mm-independent. Full rationale and baseline numbers: tests/bench/README.md.
     name: Submit Scaling Gate
     needs: versions
     uses: ./.github/workflows/nimble-job.yml
