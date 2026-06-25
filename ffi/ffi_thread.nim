@@ -4,50 +4,40 @@
 ## and the `onFFIThread` threadvar. Companion to `event_thread.nim`.
 ##
 ## Responsibilities:
-## - Receive `FFIThreadRequest`s from foreign threads via `reqChannel` and
-##   dispatch them through the user-registered handler table.
+## - Receive `FFIThreadRequest`s from foreign threads via `reqQueue` (a
+##   lock-free MPSC queue) and dispatch them through the user-registered
+##   handler table.
 ## - Advance `ctx.ffiHeartbeat` each loop iteration so the event thread can
 ##   detect a wedged FFI thread.
 
 proc sendRequestToFFIThread*(
-    ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, timeout = InfiniteDuration
+    ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest
 ): Result[void, string] =
   if ctx.eventQueueStuck.load():
     deleteRequest(ffiRequest)
     return err("event queue stuck - library cannot accept new requests")
 
   if onFFIThread:
-    # Re-entrant dispatch from a handler would self-deadlock on `reqReceivedSignal`.
+    # A handler re-dispatching onto its own FFI thread would enqueue work the
+    # blocked dispatcher can never drain; reject instead of dead-locking.
     deleteRequest(ffiRequest)
     return err(
       "reentrant ffi call: a handler invoked sendRequestToFFIThread on its own context"
     )
 
-  # Serialise the trySend + fireSync + waitSync — reqChannel is SP and reqReceivedSignal is shared.
-  ctx.lock.acquire()
-  defer:
-    ctx.lock.release()
+  # Lock-free hand-off: the queue is unbounded so enqueue can't fail, and the
+  # request's completion is reported asynchronously through its own callback —
+  # no shared accept-ack, so concurrent producers never serialise here.
+  ctx.reqQueue.push(ffiRequest)
 
-  let sentOk = ctx.reqChannel.trySend(ffiRequest)
-  if not sentOk:
-    deleteRequest(ffiRequest)
-    return err("Couldn't send a request to the ffi thread")
+  # A failed wake is non-fatal: the request is queued and the FFI thread's
+  # poll-drain dispatches it within one tick regardless of the signal. Return
+  # ok so the caller doesn't fire its error callback for a request that will
+  # still complete normally — returning err here would double-fire the callback.
+  ctx.reqSignal.fireSync().isOkOr:
+    error "failed to wake FFI thread after enqueue (request still queued)",
+      error = error
 
-  let fireSyncRes = ctx.reqSignal.fireSync()
-  if fireSyncRes.isErr():
-    deleteRequest(ffiRequest)
-    return err("failed fireSync: " & $fireSyncRes.error)
-
-  if fireSyncRes.get() == false:
-    deleteRequest(ffiRequest)
-    return err("Couldn't fireSync in time")
-
-  let res = ctx.reqReceivedSignal.waitSync(timeout)
-  if res.isErr():
-    # FFI thread was signaled and owns the request; don't double-free.
-    return err("Couldn't receive reqReceivedSignal signal")
-
-  # On ok the FFI thread's processRequest deallocShared(req)'s.
   ok()
 
 proc processRequest[T](
@@ -122,30 +112,35 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
           continue
         pending.del(i)
 
+    proc drainQueue() =
+      ## Dispatch every request the producers have enqueued. fireSync coalesces,
+      ## so one wake can stand for many submits — drain to empty, not one per
+      ## wake, or queued requests would strand until the next signal.
+      while true:
+        let request = ctx.reqQueue.pop()
+        if request.isNil():
+          break
+        # Tick per dispatch so a large backlog can't flatline the heartbeat and
+        # trip the event thread's wedged-FFI-thread detection mid-drain.
+        discard ctx.ffiHeartbeat.fetchAdd(1)
+        if ctx.myLib.isNil():
+          ctx.myLib = addr ffiReqHandler
+        pending.add processRequest(request, ctx)
+
     while ctx.running.load():
       # Freezes if a sync handler blocks the dispatcher; event thread reads to detect wedged FFI thread.
       discard ctx.ffiHeartbeat.fetchAdd(1)
 
       reapCompleted()
 
-      let gotSignal = await ctx.reqSignal.wait().withTimeout(chronos.milliseconds(100))
-      if not gotSignal:
-        continue
+      # Drain regardless of the wait outcome: a missed/coalesced signal must not
+      # leave requests stranded, and the 100ms timeout bounds shutdown latency.
+      discard await ctx.reqSignal.wait().withTimeout(100.milliseconds)
+      drainQueue()
 
-      var request: ptr FFIThreadRequest
-      if not ctx.reqChannel.tryRecv(request):
-        continue
-
-      if ctx.myLib.isNil():
-        ctx.myLib = addr ffiReqHandler
-
-      pending.add processRequest(request, ctx)
-
-      let fireRes = ctx.reqReceivedSignal.fireSync()
-      if fireRes.isErr():
-        error "could not fireSync back to requester thread", error = fireRes.error
-
-    # Drain so each pending handler's deleteRequest defer runs before exit.
+    # Drain once more so requests enqueued just before `running` flipped still
+    # dispatch and each pending handler's deleteRequest defer runs before exit.
+    drainQueue()
     reapCompleted()
     if pending.len > 0:
       try:

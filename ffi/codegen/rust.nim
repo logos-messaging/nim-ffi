@@ -505,19 +505,18 @@ proc generateApiRs*(
   )
   lines.add("// Every call through the generated FFI proc goes through")
   lines.add(
-    "// `sendRequestToFFIThread` on the Nim side, which serialises every request"
+    "// `sendRequestToFFIThread` on the Nim side, which only enqueues the request"
   )
   lines.add(
-    "// behind `ctx.lock` and dispatches handlers on a single FFI thread, so the"
+    "// onto a lock-free MPSC queue (sound from any number of threads) and wakes"
   )
   lines.add(
-    "// pointer is never accessed concurrently from Rust. The Nim-side reentrancy"
+    "// the single FFI thread that dispatches every handler. The context is thus"
   )
-  lines.add("// guard (`onFFIThread` threadvar) prevents handlers from re-entering the")
-  lines.add(
-    "// dispatcher and self-deadlocking. These invariants make it sound to mark"
-  )
-  lines.add("// the wrapper as Send + Sync.")
+  lines.add("// never mutated non-atomically from the caller's thread. The Nim-side")
+  lines.add("// reentrancy guard (`onFFIThread` threadvar) prevents handlers from")
+  lines.add("// re-entering the dispatcher. These invariants make it sound to mark the")
+  lines.add("// wrapper as Send + Sync.")
   lines.add("unsafe impl Send for $1 {}" % [ctxTypeName])
   lines.add("unsafe impl Sync for $1 {}" % [ctxTypeName])
   lines.add("")

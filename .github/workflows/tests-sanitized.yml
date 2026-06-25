@@ -89,5 +89,15 @@ jobs:
       - name: Run unit tests (${{ inputs.sanitizer }})
         run: nimble test_sanitized -y
 
+      # Correctness only here (exactly-once, no leaks/races). The scaling gate is
+      # off: sanitizers distort thread timing, so throughput scaling is measured
+      # in the non-sanitized Submit Scaling Gate job (ci.yml) instead.
+      - name: Run sendRequestToFFIThread submit stress (${{ inputs.sanitizer }})
+        env:
+          FFI_SUBMIT_PER_THREAD: 2000
+          FFI_SUBMIT_ITERS: 1
+          FFI_SCALING_GATE: 0
+        run: nimble bench_ffi_submit -y
+
       - name: Run C++ e2e tests (${{ inputs.sanitizer }})
         run: nimble test_cpp_e2e_sanitized -y

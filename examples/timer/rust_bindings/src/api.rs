@@ -129,12 +129,13 @@ pub struct MyTimerCtx {
 
 // SAFETY: The `ptr` field points to an FFIContext owned by the Nim runtime.
 // Every call through the generated FFI proc goes through
-// `sendRequestToFFIThread` on the Nim side, which serialises every request
-// behind `ctx.lock` and dispatches handlers on a single FFI thread, so the
-// pointer is never accessed concurrently from Rust. The Nim-side reentrancy
-// guard (`onFFIThread` threadvar) prevents handlers from re-entering the
-// dispatcher and self-deadlocking. These invariants make it sound to mark
-// the wrapper as Send + Sync.
+// `sendRequestToFFIThread` on the Nim side, which only enqueues the request
+// onto a lock-free MPSC queue (sound from any number of threads) and wakes
+// the single FFI thread that dispatches every handler. The context is thus
+// never mutated non-atomically from the caller's thread. The Nim-side
+// reentrancy guard (`onFFIThread` threadvar) prevents handlers from
+// re-entering the dispatcher. These invariants make it sound to mark the
+// wrapper as Send + Sync.
 unsafe impl Send for MyTimerCtx {}
 unsafe impl Sync for MyTimerCtx {}
 

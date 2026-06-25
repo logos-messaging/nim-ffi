@@ -10,6 +10,7 @@
 ## chunk's `owner` pointer dangles into reclaimed TLS and the deallocator
 ## segfaults. `malloc`/`free` are process-global and immune to that.
 
+import std/atomics
 import system/ansi_c
 import results
 import chronos
@@ -26,6 +27,10 @@ type FFIThreadRequest* = object
   reqId*: cstring ## Per-proc Req type name used to look up the handler.
   data*: ptr UncheckedArray[byte] ## Owned CBOR-encoded request payload.
   dataLen*: int
+  next*: Atomic[ptr FFIThreadRequest]
+    ## Intrusive MPSC-queue link (see `ffi_request_queue.nim`). Touched only by
+    ## the queue's producers/consumer — the request doubles as its own node, so
+    ## no separate node alloc lands on the per-thread ORC MemRegion.
 
 proc allocBaseRequest(
     callback: FFICallBack, userData: pointer, reqId: cstring
@@ -39,6 +44,7 @@ proc allocBaseRequest(
   ret[].reqId = reqId.alloc()
   ret[].data = nil
   ret[].dataLen = 0
+  ret[].next.store(nil, moRelaxed)
   return ret
 
 proc copySharedPayload(req: ptr FFIThreadRequest, data: ptr byte, dataLen: int) =
