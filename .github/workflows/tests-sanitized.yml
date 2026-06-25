@@ -9,7 +9,7 @@ on:
       nim-versions:
         required: true
         type: string
-        description: JSON array of Nim versions to run the matrix against, e.g. '["2.2.4","stable"]'.
+        description: JSON array of Nim versions to run the matrix against, e.g. '["2.2.6","stable"]'.
       nimble-version:
         required: true
         type: string
