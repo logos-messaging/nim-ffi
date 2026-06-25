@@ -119,7 +119,21 @@ proc main() =
   let gateOn = getEnv("FFI_SCALING_GATE", "1") != "0"
   if perThread < 1 or iters < 1:
     quit("FFI_SUBMIT_PER_THREAD and FFI_SUBMIT_ITERS must be >= 1")
-  let threadCounts = [1, 2, 4, 8]
+  # CI default is a light sweep so the gate and the (far slower) asan/tsan jobs
+  # stay fast; the high-contention curve (e.g. up to 100 threads) is opt-in for
+  # local on-demand runs via FFI_SUBMIT_THREADS. A heavy sweep under a sanitizer
+  # on a slow runner can't settle its callbacks within `settleTimeout` and would
+  # fail on a timeout, not a real bug — so it is kept out of CI deliberately.
+  #   FFI_SUBMIT_THREADS="1,8,16,32,64,100" nimble bench_ffi_submit
+  let threadCounts = block:
+    var cs: seq[int]
+    for part in getEnv("FFI_SUBMIT_THREADS", "1,2,4,8").split(','):
+      let p = part.strip()
+      if p.len > 0:
+        cs.add(parseInt(p))
+    if cs.len < 2:
+      quit("FFI_SUBMIT_THREADS needs >= 2 counts (first = baseline, last = peak)")
+    cs
 
   echo "── sendRequestToFFIThread submit throughput (median of ",
     iters, ") ──────"
