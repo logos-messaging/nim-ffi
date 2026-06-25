@@ -404,3 +404,33 @@ TEST(TimerE2E, RemoveEventListenerStopsDelivery) {
     EXPECT_EQ(keptHits.load(), 2);
     EXPECT_EQ(removedHits.load(), 1) << "removed listener fired after removeEventListener";
 }
+
+// Cross-language byte-string contract: the generated C++ codec must round-trip
+// a std::vector<std::uint8_t> as a CBOR byte string (major type 2), byte-for-byte
+// identical to what Nim's cbor_serialization emits for `seq[byte]`. The goldens
+// below match tests/unit/test_wire_compat.nim and tests/unit/test_serial.nim.
+TEST(WireCompat, SeqByteRidesAsByteString) {
+    const std::vector<std::uint8_t> blob{1, 2, 3};
+    auto enc = encodeCborFFI(blob);
+    ASSERT_FALSE(enc.isErr()) << enc.error();
+    // 0x43 = byte string, length 3; then the raw bytes 01 02 03.
+    const std::vector<std::uint8_t> golden{0x43, 0x01, 0x02, 0x03};
+    EXPECT_EQ(enc.value(), golden);
+
+    auto dec = decodeCborFFI<std::vector<std::uint8_t>>(enc.value());
+    ASSERT_FALSE(dec.isErr()) << dec.error();
+    EXPECT_EQ(dec.value(), blob);
+}
+
+TEST(WireCompat, EmptySeqByteRidesAsEmptyByteString) {
+    const std::vector<std::uint8_t> blob{};
+    auto enc = encodeCborFFI(blob);
+    ASSERT_FALSE(enc.isErr()) << enc.error();
+    // 0x40 = byte string, length 0.
+    const std::vector<std::uint8_t> golden{0x40};
+    EXPECT_EQ(enc.value(), golden);
+
+    auto dec = decodeCborFFI<std::vector<std::uint8_t>>(enc.value());
+    ASSERT_FALSE(dec.isErr()) << dec.error();
+    EXPECT_TRUE(dec.value().empty());
+}

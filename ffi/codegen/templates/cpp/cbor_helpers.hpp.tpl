@@ -36,6 +36,14 @@ inline CborError encode_cbor(CborEncoder& e, const std::vector<T>& v) {
     return cbor_encoder_close_container(&e, &arr);
 }
 
+// `seq[byte]` rides the wire as a CBOR byte string (major type 2), matching
+// Nim's cbor_serialization. This non-template overload beats the std::vector<T>
+// template in overload resolution, so std::vector<std::uint8_t> fields use it
+// automatically.
+inline CborError encode_cbor(CborEncoder& e, const std::vector<std::uint8_t>& v) {
+    return cbor_encode_byte_string(&e, v.data(), v.size());
+}
+
 template<typename T>
 inline CborError encode_cbor(CborEncoder& e, const std::optional<T>& v) {
     if (!v) return cbor_encode_null(&e);
@@ -44,17 +52,20 @@ inline CborError encode_cbor(CborEncoder& e, const std::optional<T>& v) {
 
 // ── decode_cbor overloads ───────────────────────────────────────────────
 
-inline CborError decode_cbor(CborValue& it, bool& out) {
-    if (!cbor_value_is_boolean(&it)) return CborErrorImproperValue;
-    CborError err = cbor_value_get_boolean(&it, &out);
+// After reading a leaf value, the parser must advance past it; both steps
+// short-circuit on the same CborError, so they always travel together.
+inline CborError advance_if_ok(CborValue& it, CborError err) {
     if (err) return err;
     return cbor_value_advance(&it);
 }
+
+inline CborError decode_cbor(CborValue& it, bool& out) {
+    if (!cbor_value_is_boolean(&it)) return CborErrorImproperValue;
+    return advance_if_ok(it, cbor_value_get_boolean(&it, &out));
+}
 inline CborError decode_cbor(CborValue& it, int64_t& out) {
     if (!cbor_value_is_integer(&it)) return CborErrorImproperValue;
-    CborError err = cbor_value_get_int64_checked(&it, &out);
-    if (err) return err;
-    return cbor_value_advance(&it);
+    return advance_if_ok(it, cbor_value_get_int64_checked(&it, &out));
 }
 inline CborError decode_cbor(CborValue& it, int32_t& out) {
     int64_t tmp = 0;
@@ -65,15 +76,11 @@ inline CborError decode_cbor(CborValue& it, int32_t& out) {
 }
 inline CborError decode_cbor(CborValue& it, uint64_t& out) {
     if (!cbor_value_is_unsigned_integer(&it)) return CborErrorImproperValue;
-    CborError err = cbor_value_get_uint64(&it, &out);
-    if (err) return err;
-    return cbor_value_advance(&it);
+    return advance_if_ok(it, cbor_value_get_uint64(&it, &out));
 }
 inline CborError decode_cbor(CborValue& it, double& out) {
     if (cbor_value_is_double(&it)) {
-        CborError err = cbor_value_get_double(&it, &out);
-        if (err) return err;
-        return cbor_value_advance(&it);
+        return advance_if_ok(it, cbor_value_get_double(&it, &out));
     }
     if (cbor_value_is_float(&it)) {
         float f = 0.0f;
@@ -90,9 +97,8 @@ inline CborError decode_cbor(CborValue& it, std::string& out) {
     CborError err = cbor_value_get_string_length(&it, &len);
     if (err) return err;
     out.resize(len);
-    err = cbor_value_copy_text_string(&it, out.empty() ? nullptr : &out[0], &len, nullptr);
-    if (err) return err;
-    return cbor_value_advance(&it);
+    return advance_if_ok(
+        it, cbor_value_copy_text_string(&it, out.empty() ? nullptr : &out[0], &len, nullptr));
 }
 
 template<typename T>
@@ -111,6 +117,18 @@ inline CborError decode_cbor(CborValue& it, std::vector<T>& out) {
         if (err) return err;
     }
     return cbor_value_leave_container(&it, &inner);
+}
+
+// Counterpart to the byte-string encoder above: decode a CBOR byte string
+// (major type 2) back into std::vector<std::uint8_t>.
+inline CborError decode_cbor(CborValue& it, std::vector<std::uint8_t>& out) {
+    if (!cbor_value_is_byte_string(&it)) return CborErrorImproperValue;
+    size_t len = 0;
+    CborError err = cbor_value_get_string_length(&it, &len);
+    if (err) return err;
+    out.resize(len);
+    return advance_if_ok(
+        it, cbor_value_copy_byte_string(&it, out.empty() ? nullptr : out.data(), &len, nullptr));
 }
 
 template<typename T>

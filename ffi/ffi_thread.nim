@@ -128,7 +128,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
       reapCompleted()
 
-      let gotSignal = await ctx.reqSignal.wait().withTimeout(100.milliseconds)
+      let gotSignal = await ctx.reqSignal.wait().withTimeout(chronos.milliseconds(100))
       if not gotSignal:
         continue
 
