@@ -41,7 +41,7 @@ static:
     "RequestQueueCount must be a power of two"
 
 type
-  RequestShard = object
+  RequestQueue = object
     lock: Lock
     head: ptr FFIThreadRequest ## consumer pops here (oldest)
     tail: ptr FFIThreadRequest ## producers on this queue append here (newest)
@@ -49,7 +49,7 @@ type
     pad: array[QueuePadBytes, byte]
 
   FFIRequestQueue* = object
-    queues: array[RequestQueueCount, RequestShard]
+    queues: array[RequestQueueCount, RequestQueue]
 
 var gRequestQueue {.threadvar.}: int
 var gRequestQueueAssigned {.threadvar.}: bool
@@ -64,26 +64,26 @@ proc myQueueIndex(): int {.raises: [].} =
   return gRequestQueue and (RequestQueueCount - 1) # RequestQueueCount is a power of two
 
 proc initRequestQueue*(q: var FFIRequestQueue) {.raises: [].} =
-  for i in 0 ..< RequestQueueCount:
-    q.queues[i].lock.initLock()
-    q.queues[i].head = nil
-    q.queues[i].tail = nil
-    q.queues[i].count = 0
+  for queue in q.queues.mitems:
+    queue.lock.initLock()
+    queue.head = nil
+    queue.tail = nil
+    queue.count = 0
 
 proc deinitRequestQueue*(q: var FFIRequestQueue) {.raises: [].} =
   ## Both producers and the consumer must have stopped. Frees any request still
   ## queued on any queue — e.g. one a producer raced in after the FFI thread's
   ## final drain — so a teardown race leaks nothing instead of dangling them.
-  for i in 0 ..< RequestQueueCount:
-    var node = q.queues[i].head
+  for queue in q.queues.mitems:
+    var node = queue.head
     while not node.isNil:
       let nxt = node[].next
       deleteRequest(node)
       node = nxt
-    q.queues[i].head = nil
-    q.queues[i].tail = nil
-    q.queues[i].count = 0
-    q.queues[i].lock.deinitLock()
+    queue.head = nil
+    queue.tail = nil
+    queue.count = 0
+    queue.lock.deinitLock()
 
 proc pushRequest*(
     q: var FFIRequestQueue, node: ptr FFIThreadRequest
@@ -113,23 +113,23 @@ proc detachAllRequests*(q: var FFIRequestQueue): ptr FFIThreadRequest {.raises: 
   ## (dispatch frees the node).
   var head: ptr FFIThreadRequest = nil
   var tail: ptr FFIThreadRequest = nil
-  for i in 0 ..< RequestQueueCount:
-    withLock q.queues[i].lock:
-      let h = q.queues[i].head
+  for queue in q.queues.mitems:
+    withLock queue.lock:
+      let h = queue.head
       if not h.isNil:
         if head.isNil:
           head = h
         else:
           tail[].next = h
-        tail = q.queues[i].tail
-        q.queues[i].head = nil
-        q.queues[i].tail = nil
-        q.queues[i].count = 0
+        tail = queue.tail
+        queue.head = nil
+        queue.tail = nil
+        queue.count = 0
   return head
 
 proc requestQueueLen*(q: var FFIRequestQueue): int {.raises: [].} =
   var n = 0
-  for i in 0 ..< RequestQueueCount:
-    withLock q.queues[i].lock:
-      n += q.queues[i].count
+  for queue in q.queues.mitems:
+    withLock queue.lock:
+      n += queue.count
   return n
