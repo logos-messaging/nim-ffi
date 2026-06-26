@@ -25,23 +25,18 @@ proc sendRequestToFFIThread*(
       "reentrant ffi call: a handler invoked sendRequestToFFIThread on its own context"
     )
 
-  # Mutex-guarded hand-off: the lock inside pushRequest covers only the O(1)
-  # enqueue; the request malloc (already done) and the wake below stay outside
-  # it, so concurrent producers don't serialise. The queue is unbounded, so
-  # enqueue can't fail, and completion is reported through the request's own
-  # callback — there is no accept-ack to wait on.
+  # The lock inside pushRequest covers only the O(1) enqueue; the wake stays
+  # outside it, so concurrent producers don't serialise. Unbounded, so enqueue
+  # can't fail — completion comes via the request's own callback, no accept-ack.
   #
-  # Only wake the FFI thread when this push found the queue empty. While the
-  # consumer is draining (queue non-empty) the wake is redundant — and a
-  # fireSync() syscall per submit, contended across producers, is precisely
-  # what destroys submit scaling. A skipped edge can't strand the request: the
-  # consumer drains to empty and re-polls every 100ms regardless.
+  # Wake only when the push found the queue empty: while the consumer drains, a
+  # fireSync() syscall per submit (contended across producers) is what destroys
+  # scaling. A skipped wake can't strand the request — the consumer re-polls 100ms.
   let shouldWake = ctx.reqQueue.pushRequest(ffiRequest)
 
-  # A failed wake is non-fatal: the request is queued and the FFI thread's
-  # poll-drain dispatches it within one tick regardless of the signal. Returning
-  # err here would double-fire the caller's callback for a request that still
-  # completes normally.
+  # A failed wake is non-fatal: the request is queued and the poll-drain
+  # dispatches it within a tick anyway. Returning err would double-fire the
+  # caller's callback for a request that still completes.
   if shouldWake:
     ctx.reqSignal.fireSync().isOkOr:
       error "failed to wake FFI thread after enqueue (request still queued)",
@@ -141,8 +136,8 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
           # and trip the event thread's wedged-FFI-thread detection mid-drain.
           ctx.proveAlive()
           if ctx.myLib.isNil():
-            # Keep this reference to `ffiReqHandler` inside the closure is what keeps
-            # the variable in the async env, so `myLib` stays valid across awaits.
+            # This reference must stay inside the closure: it's what keeps
+            # `ffiReqHandler` in the async env, so `myLib` survives across awaits.
             ctx.myLib = addr ffiReqHandler
 
           pending.add processRequest(request, ctx)

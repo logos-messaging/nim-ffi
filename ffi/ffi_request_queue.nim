@@ -1,26 +1,16 @@
-## Sharded, mutex-guarded multi-producer / single-consumer ingress for
-## `ptr FFIThreadRequest`. Replaces the single-slot SPSC channel plus the
-## blocking accept handshake (`reqReceivedSignal.waitSync`) that made every
-## foreign-thread submit serialise.
+## Sharded, mutex-guarded MPSC ingress for `ptr FFIThreadRequest`: foreign
+## threads enqueue without serialising against each other.
 ##
-## Why sharded: a *single* queue — whether mutex-guarded or lock-free (Vyukov) —
-## funnels every producer through one shared cache line (the lock, or the
-## lock-free head). On a multicore host that one hotspot caps aggregate submit
-## throughput, so it cannot scale past a single thread. Splitting the ingress
-## into `RequestQueueCount` independent queues, each picked per producer thread,
-## removes the shared write point: producers contend only when two land on the
-## same queue. Each queue is a plain intrusive FIFO under its own `Lock`, so the
-## structure stays trivially data-race-free under TSAN with no memory-ordering
-## reasoning, and the request *is* its own queue node (intrusive `next`), so
-## enqueue allocates nothing and never touches a Nim GC heap (the cross-thread
-## `MemRegion` hazard documented in `ffi_thread_request.nim`).
+## Why sharded: one shared queue funnels all producers through a single cache
+## line, capping submit throughput. N independent queues (one per producer)
+## remove that hotspot — producers contend only when two pick the same queue.
 ##
-## Ordering: FIFO is preserved per queue, not globally. Concurrent foreign
-## callers already race with no cross-thread ordering guarantee, so this is the
-## same contract the single-slot channel offered in practice.
+## Each queue is an intrusive FIFO under its own `Lock`: race-free under TSAN, and
+## the request is its own node (intrusive `next`), so enqueue never allocates nor
+## touches a Nim GC heap (the cross-thread `MemRegion` hazard).
 ##
-## Unbounded by design: the submit path must never reject or block a caller —
-## completion is reported asynchronously through each request's own callback.
+## FIFO holds per queue, not globally. Unbounded by design: submit never blocks
+## or rejects; completion comes via each request's callback.
 
 import std/[atomics, locks]
 import ./ffi_thread_request
@@ -85,12 +75,9 @@ proc deinitRequestQueue*(q: var FFIRequestQueue) {.raises: [].} =
 proc pushRequest*(
     q: var FFIRequestQueue, request: ptr FFIThreadRequest
 ): bool {.raises: [].} =
-  ## Append `request` to this producer thread's queue; the queue takes ownership.
-  ## Returns true only when the queue was empty before the push. The consumer
-  ## sleeps while its queue is empty, so the caller wakes it (a syscall) only on
-  ## this empty→non-empty push; a push onto an already-non-empty queue needs no
-  ## wake, as the consumer is still draining it. A missed wake can't strand the
-  ## request: the consumer re-polls every 100ms.
+  ## Append `request` to this producer thread's queue (takes ownership). Returns
+  ## true only when the queue was empty: the consumer sleeps on an empty queue, so
+  ## that's the one push that must wake it; a missed wake just waits the 100ms poll.
   request[].next = nil
   let idx = myQueueIndex()
   withLock q.queues[idx].lock:
@@ -103,11 +90,9 @@ proc pushRequest*(
     return wasEmpty
 
 proc mergeQueues*(q: var FFIRequestQueue): ptr FFIThreadRequest {.raises: [].} =
-  ## Single-consumer: splice every queue into one chain and reset the queues to empty.
-  ## Returns nil when all queues are empty;
-  ## the caller then owns every request in the chain
-  ## and must read each request's `next` before dispatching it.
-
+  ## Single-consumer: splice every queue into one chain, resetting them to empty.
+  ## Returns nil when all are empty; the caller then owns the chain and must read
+  ## each request's `next` before dispatching (dispatch frees the request).
   var head: ptr FFIThreadRequest = nil
   var tail: ptr FFIThreadRequest = nil
   for queue in q.queues.mitems:

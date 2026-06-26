@@ -59,10 +59,9 @@ template closeAndNil(field: untyped) =
     field = nil
 
 proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## Mirror of `initContextResources`. Threads MUST be joined first (so the FFI
-  ## thread has drained the queue); fields are nil'd after close so re-init on
-  ## the same slot is safe. `deinitRequestQueue` frees any request a producer
-  ## raced in after the final drain, so teardown leaks nothing.
+  ## Mirror of `initContextResources`. Threads MUST be joined first (FFI thread
+  ## drained); fields are nil'd after close so re-init on the same slot is safe.
+  ## `deinitRequestQueue` frees any request raced in after the final drain.
   deinitRequestQueue(ctx[].reqQueue)
   deinitEventRegistry(ctx[].eventRegistry)
   deinitHandleRegistry(ctx[].handles)
