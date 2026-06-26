@@ -4,7 +4,7 @@
 ## and the `onFFIThread` threadvar. Companion to `event_thread.nim`.
 ##
 ## Responsibilities:
-## - Receive `FFIThreadRequest`s from foreign threads via `reqQueue` (a
+## - Receive `FFIThreadRequest`s from foreign threads via `reqQueueBank` (a
 ##   mutex-guarded MPSC queue) and dispatch them through the user-registered
 ##   handler table.
 ## - Advance `ctx.ffiHeartbeat` each loop iteration so the event thread can
@@ -32,7 +32,7 @@ proc sendRequestToFFIThread*(
   # Wake only when the push found the queue empty: while the consumer drains, a
   # fireSync() syscall per submit (contended across producers) is what destroys
   # scaling. A skipped wake can't strand the request — the consumer re-polls 100ms.
-  let shouldWake = ctx.reqQueue.pushRequest(ffiRequest)
+  let shouldWake = ctx.reqQueueBank.pushRequest(ffiRequest)
 
   # A failed wake is non-fatal: the request is queued and the poll-drain
   # dispatches it within a tick anyway. Returning err would double-fire the
@@ -127,7 +127,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
       ## stand for many submits, so we drain fully rather than once per wake —
       ## otherwise queued requests would sit until the next wake.
       while true:
-        var request = ctx.reqQueue.mergeQueues()
+        var request = ctx.reqQueueBank.mergeQueues()
         if request.isNil():
           break
         while not request.isNil():

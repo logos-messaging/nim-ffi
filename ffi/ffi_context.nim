@@ -23,7 +23,7 @@ type FFIContext*[T] = object
   myLib*: ptr T # main library object (Waku, LibP2P, SDS, …)
   ffiThread: Thread[(ptr FFIContext[T])]
   eventThread: Thread[(ptr FFIContext[T])]
-  reqQueue: FFIRequestQueue # mutex-guarded MPSC ingress from foreign threads
+  reqQueueBank: RequestQueueBank # mutex-guarded MPSC ingress from foreign threads
   reqSignal: ThreadSignalPtr # wakes the FFI thread on enqueue
   stopSignal: ThreadSignalPtr
   threadExitSignal: ThreadSignalPtr
@@ -62,7 +62,7 @@ proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Mirror of `initContextResources`. Threads MUST be joined first (FFI thread
   ## drained); fields are nil'd after close so re-init on the same slot is safe.
   ## `deinitRequestQueue` frees any request raced in after the final drain.
-  deinitRequestQueue(ctx[].reqQueue)
+  deinitRequestQueue(ctx[].reqQueueBank)
   deinitEventRegistry(ctx[].eventRegistry)
   deinitHandleRegistry(ctx[].handles)
   deinitEventQueue(ctx[].eventQueue)
@@ -99,7 +99,7 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ctx.threadExitSignal = nil
   ctx.eventQueueSignal = nil
   ctx.eventThreadExitSignal = nil
-  initRequestQueue(ctx[].reqQueue)
+  initRequestQueue(ctx[].reqQueueBank)
   initEventRegistry(ctx[].eventRegistry)
   initHandleRegistry(ctx[].handles)
   initEventQueue(ctx[].eventQueue)

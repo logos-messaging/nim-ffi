@@ -37,7 +37,7 @@ type
     tail: ptr FFIThreadRequest ## producers on this queue append here (newest)
     pad: array[QueuePadBytes, byte]
 
-  FFIRequestQueue* = object
+  RequestQueueBank* = object
     queues: array[RequestQueueCount, RequestQueue]
 
 var gRequestQueue {.threadvar.}: int
@@ -52,17 +52,17 @@ proc myQueueIndex(): int {.raises: [].} =
     gRequestQueueAssigned = true
   return gRequestQueue and (RequestQueueCount - 1) # RequestQueueCount is a power of two
 
-proc initRequestQueue*(q: var FFIRequestQueue) {.raises: [].} =
-  for queue in q.queues.mitems:
+proc initRequestQueue*(bank: var RequestQueueBank) {.raises: [].} =
+  for queue in bank.queues.mitems:
     queue.lock.initLock()
     queue.head = nil
     queue.tail = nil
 
-proc deinitRequestQueue*(q: var FFIRequestQueue) {.raises: [].} =
+proc deinitRequestQueue*(bank: var RequestQueueBank) {.raises: [].} =
   ## Both producers and the consumer must have stopped. Frees any request still
   ## queued on any queue — e.g. one a producer raced in after the FFI thread's
   ## final drain — so a teardown race leaks nothing instead of dangling them.
-  for queue in q.queues.mitems:
+  for queue in bank.queues.mitems:
     var request = queue.head
     while not request.isNil():
       let nextRequest = request[].next
@@ -73,29 +73,29 @@ proc deinitRequestQueue*(q: var FFIRequestQueue) {.raises: [].} =
     queue.lock.deinitLock()
 
 proc pushRequest*(
-    q: var FFIRequestQueue, request: ptr FFIThreadRequest
+    bank: var RequestQueueBank, request: ptr FFIThreadRequest
 ): bool {.raises: [].} =
   ## Append `request` to this producer thread's queue (takes ownership). Returns
   ## true only when the queue was empty: the consumer sleeps on an empty queue, so
   ## that's the one push that must wake it; a missed wake just waits the 100ms poll.
   request[].next = nil
   let idx = myQueueIndex()
-  withLock q.queues[idx].lock:
-    let wasEmpty = q.queues[idx].tail.isNil()
-    if q.queues[idx].tail.isNil():
-      q.queues[idx].head = request
+  withLock bank.queues[idx].lock:
+    let wasEmpty = bank.queues[idx].tail.isNil()
+    if bank.queues[idx].tail.isNil():
+      bank.queues[idx].head = request
     else:
-      q.queues[idx].tail[].next = request
-    q.queues[idx].tail = request
+      bank.queues[idx].tail[].next = request
+    bank.queues[idx].tail = request
     return wasEmpty
 
-proc mergeQueues*(q: var FFIRequestQueue): ptr FFIThreadRequest {.raises: [].} =
+proc mergeQueues*(bank: var RequestQueueBank): ptr FFIThreadRequest {.raises: [].} =
   ## Single-consumer: splice every queue into one chain, resetting them to empty.
   ## Returns nil when all are empty; the caller then owns the chain and must read
   ## each request's `next` before dispatching (dispatch frees the request).
   var head: ptr FFIThreadRequest = nil
   var tail: ptr FFIThreadRequest = nil
-  for queue in q.queues.mitems:
+  for queue in bank.queues.mitems:
     withLock queue.lock:
       let h = queue.head
       if not h.isNil():
