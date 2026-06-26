@@ -119,7 +119,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
     # Tracked so shutdown can drain them; abandoning a mid-await future leaks the request.
     var pending: seq[Future[void]] = @[]
 
-    proc reapCompleted() =
+    proc cleanFinishedRequests() =
       var i = 0
       while i < pending.len:
         if not pending[i].finished():
@@ -127,12 +127,10 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
           continue
         pending.del(i)
 
-    proc drainQueue() =
-      ## Dispatch every request producers have enqueued. fireSync coalesces, so
-      ## one wake can stand for many submits — drain to empty, not one per wake,
-      ## or queued requests would strand until the next signal. Each detach
-      ## takes the whole chain in one lock, so the consumer barely contends with
-      ## the producers.
+    proc processQueue() =
+      ## Process enqueued requests until the queue is empty. A single wake can
+      ## stand for many submits, so we drain fully rather than once per wake —
+      ## otherwise queued requests would sit until the next wake.
       while true:
         var request = ctx.reqQueue.mergeQueues()
         if request.isNil():
@@ -154,17 +152,16 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
       # Freezes if a sync handler blocks the dispatcher; event thread reads to detect wedged FFI thread.
       ctx.proveAlive()
 
-      reapCompleted()
+      cleanFinishedRequests()
 
-      # Drain regardless of the wait outcome: a missed/coalesced signal must not
-      # leave requests stranded, and the 100ms timeout bounds shutdown latency.
+      # Block until a submit signals us, or for at most 100ms if none does.
       discard await ctx.reqSignal.wait().withTimeout(chronos.milliseconds(100))
-      drainQueue()
+      processQueue()
 
     # Drain once more so requests enqueued just before `running` flipped still
     # dispatch and each pending handler's deleteRequest defer runs before exit.
-    drainQueue()
-    reapCompleted()
+    processQueue()
+    cleanFinishedRequests()
     if pending.len > 0:
       try:
         await allFutures(pending)
