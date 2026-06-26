@@ -109,6 +109,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
   let ffiRun = proc(ctx: ptr FFIContext[T]) {.async.} =
     var ffiReqHandler: T # main library object (Waku, LibP2P, SDS, …)
+    ctx.myLib = addr ffiReqHandler
 
     # Tracked so shutdown can drain them; abandoning a mid-await future leaks the request.
     var pending: seq[Future[void]] = @[]
@@ -136,8 +137,6 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
           # Tick per dispatch so a large backlog can't flatline the heartbeat
           # and trip the event thread's wedged-FFI-thread detection mid-drain.
           discard ctx.ffiHeartbeat.fetchAdd(1)
-          if ctx.myLib.isNil():
-            ctx.myLib = addr ffiReqHandler
           pending.add processRequest(node, ctx)
           node = nxt
 
