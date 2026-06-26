@@ -115,7 +115,6 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
   let ffiRun = proc(ctx: ptr FFIContext[T]) {.async.} =
     var ffiReqHandler: T # main library object (Waku, LibP2P, SDS, …)
-    ctx.myLib = addr ffiReqHandler
 
     # Tracked so shutdown can drain them; abandoning a mid-await future leaks the request.
     var pending: seq[Future[void]] = @[]
@@ -143,6 +142,11 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
           # Tick per dispatch so a large backlog can't flatline the heartbeat
           # and trip the event thread's wedged-FFI-thread detection mid-drain.
           ctx.proveAlive()
+          if ctx.myLib.isNil():
+            # Keep this reference to `ffiReqHandler` inside the closure is what keeps
+            # the variable in the async env, so `myLib` stays valid across awaits.
+            ctx.myLib = addr ffiReqHandler
+
           pending.add processRequest(request, ctx)
           request = nextRequest
 
