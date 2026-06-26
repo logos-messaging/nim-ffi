@@ -92,9 +92,7 @@ proc pushRequest*(
   ## The queue takes ownership. Returns true iff that lane was empty before the
   ## push — i.e. the caller should wake the consumer. When the lane was
   ## non-empty the consumer is already draining (or has a wake pending), so
-  ## firing again is a wasted syscall; coalescing the wake is what lets
-  ## concurrent submits scale. A skipped edge is bounded by the consumer's 100ms
-  ## poll, so it can never strand a request.
+  ## firing again is a wasted syscall.
   node[].next = nil
   let idx = myLaneIndex()
   withLock q.lanes[idx].lock:
