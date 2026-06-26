@@ -35,7 +35,7 @@ By default the bench **fails** (non-zero exit) unless submit throughput at the t
 
 The original lock-bound code measured 2026-06-24 (16-core Linux, orc, `-d:danger`, median of 5): submit scaling held flat at **0.98–1.16x** — adding producers bought nothing. `1.5x` sits above that noise ceiling so the old code fails reliably, and well below what the sharded ingress delivers, so the fix clears it with wide margin.
 
-The fix replaces the single-slot channel + accept handshake with a **sharded, mutex-guarded MPSC ingress** (`ffi/ffi_request_queue.nim`): independent per-producer lanes remove the single shared hotspot, and the wake fires only on a lane's empty→non-empty edge so submits don't each pay a syscall. Measured 2026-06-25 (Apple M5, 10 cores, orc, `-d:danger`, median of 5), submit/sec and scaling vs 1 thread:
+The fix replaces the single-slot channel + accept handshake with a **sharded, mutex-guarded MPSC ingress** (`ffi/ffi_request_queue.nim`): independent per-producer queues remove the single shared hotspot, and the wake fires only on a queue's empty→non-empty edge so submits don't each pay a syscall. Measured 2026-06-25 (Apple M5, 10 cores, orc, `-d:danger`, median of 5), submit/sec and scaling vs 1 thread:
 
 | threads | sharded ingress | vs 1T | lock-free MPSC (Vyukov) | vs 1T |
 | ---: | ---: | :---: | ---: | :---: |
