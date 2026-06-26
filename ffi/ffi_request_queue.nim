@@ -75,33 +75,34 @@ proc deinitRequestQueue*(q: var FFIRequestQueue) {.raises: [].} =
   ## queued on any queue — e.g. one a producer raced in after the FFI thread's
   ## final drain — so a teardown race leaks nothing instead of dangling them.
   for queue in q.queues.mitems:
-    var node = queue.head
-    while not node.isNil:
-      let nxt = node[].next
-      deleteRequest(node)
-      node = nxt
+    var request = queue.head
+    while not request.isNil():
+      let nextRequest = request[].next
+      deleteRequest(request)
+      request = nextRequest
     queue.head = nil
     queue.tail = nil
     queue.count = 0
     queue.lock.deinitLock()
 
 proc pushRequest*(
-    q: var FFIRequestQueue, node: ptr FFIThreadRequest
+    q: var FFIRequestQueue, request: ptr FFIThreadRequest
 ): bool {.raises: [].} =
-  ## Append `node` to this producer thread's queue (one O(1) critical section).
-  ## The queue takes ownership. Returns true iff that queue was empty before the
-  ## push — i.e. the caller should wake the consumer. When the queue was
-  ## non-empty the consumer is already draining (or has a wake pending), so
-  ## firing again is a wasted syscall.
-  node[].next = nil
+  ## Append `request` to this producer thread's queue; the queue takes ownership.
+  ## Returns true only when the queue was empty before the push. The consumer
+  ## sleeps while its queue is empty, so the caller wakes it (a syscall) only on
+  ## this empty→non-empty push; a push onto an already-non-empty queue needs no
+  ## wake, as the consumer is still draining it. A missed wake can't strand the
+  ## request: the consumer re-polls every 100ms.
+  request[].next = nil
   let idx = myQueueIndex()
   withLock q.queues[idx].lock:
-    let wasEmpty = q.queues[idx].tail.isNil
-    if q.queues[idx].tail.isNil:
-      q.queues[idx].head = node
+    let wasEmpty = q.queues[idx].tail.isNil()
+    if q.queues[idx].tail.isNil():
+      q.queues[idx].head = request
     else:
-      q.queues[idx].tail[].next = node
-    q.queues[idx].tail = node
+      q.queues[idx].tail[].next = request
+    q.queues[idx].tail = request
     q.queues[idx].count.inc()
     return wasEmpty
 
@@ -116,8 +117,8 @@ proc detachAllRequests*(q: var FFIRequestQueue): ptr FFIThreadRequest {.raises: 
   for queue in q.queues.mitems:
     withLock queue.lock:
       let h = queue.head
-      if not h.isNil:
-        if head.isNil:
+      if not h.isNil():
+        if head.isNil():
           head = h
         else:
           tail[].next = h
