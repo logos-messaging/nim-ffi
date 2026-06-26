@@ -87,6 +87,12 @@ proc ffiNotifyEventEnqueuedHook() {.gcsafe, raises: [].} =
     if res.isErr():
       error "failed to fire eventQueueSignal after enqueue", err = res.error
 
+proc proveAlive(ctx: ptr FFIContext) =
+  ## Advance the heartbeat the event thread polls to spot a wedged FFI thread.
+  ## Only that the counter keeps moving matters, never its value — so a plain
+  ## atomic increment, no read-back.
+  ctx.ffiHeartbeat.atomicInc()
+
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ## FFI thread body that attends library user API requests
   ffiCurrentEventRegistry = addr ctx[].eventRegistry
@@ -129,20 +135,20 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
       ## takes the whole chain in one lock, so the consumer barely contends with
       ## the producers.
       while true:
-        var node = ctx.reqQueue.mergeQueues()
-        if node.isNil:
+        var request = ctx.reqQueue.mergeQueues()
+        if request.isNil():
           break
-        while not node.isNil:
-          let nxt = node[].next # read before processRequest frees the node
+        while not request.isNil():
+          let nextRequest = request[].next # read before processRequest frees it
           # Tick per dispatch so a large backlog can't flatline the heartbeat
           # and trip the event thread's wedged-FFI-thread detection mid-drain.
-          discard ctx.ffiHeartbeat.fetchAdd(1)
-          pending.add processRequest(node, ctx)
-          node = nxt
+          ctx.proveAlive()
+          pending.add processRequest(request, ctx)
+          request = nextRequest
 
     while ctx.running.load():
       # Freezes if a sync handler blocks the dispatcher; event thread reads to detect wedged FFI thread.
-      discard ctx.ffiHeartbeat.fetchAdd(1)
+      ctx.proveAlive()
 
       reapCompleted()
 
