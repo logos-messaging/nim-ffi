@@ -487,12 +487,9 @@ suite "Nim-native .ffi. / .ffiCtor. API":
     check ctorRes.isOk
     check ctorRes.value.value == 21
 
-# Regression for PR #23 review items 1–5: a `.ffi.` body without `await`
-# used to be emitted as an inline-on-foreign-thread fast path, which bypassed
-# `foreignThreadGc`, the MPSC ingress hand-off, and chronos's single-thread invariant. The
-# sync fast-path was deleted; this test records `getThreadId()` inside a
-# sync body and asserts the handler runs on the FFI thread, not on the
-# caller's thread.
+# A sync `.ffi.` body (no `await`) must run on the FFI thread, not the caller's,
+# so it goes through `foreignThreadGc`, the MPSC ingress hand-off, and chronos's
+# single-thread invariant. Records `getThreadId()` in a sync body and asserts it.
 
 var gRecordedHandlerTid: Atomic[int]
 
@@ -551,10 +548,9 @@ suite "sync-body .ffi. runs on FFI thread (PR #23 regression)":
     # And the callback payload (the recorded tid) matches what the handler stored.
     check cborDecode(callbackBytes(d), int).value == handlerTid
 
-# Regression for PR #23 review item 6: reentrancy guard on
-# sendRequestToFFIThread. A handler running on the FFI thread that re-dispatches
-# through sendRequestToFFIThread would enqueue work onto the very queue its
-# blocked dispatcher can never drain. The guard returns an Err immediately.
+# Reentrancy guard on sendRequestToFFIThread: a handler running on the FFI thread
+# that re-dispatches through it would enqueue work onto the very queue its blocked
+# dispatcher can never drain, so the guard returns an Err immediately.
 
 var gReentrantNestedRes: Channel[string]
 gReentrantNestedRes.open()
