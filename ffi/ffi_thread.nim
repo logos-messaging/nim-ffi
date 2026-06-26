@@ -128,7 +128,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
       ## takes the whole chain in one lock, so the consumer barely contends with
       ## the producers.
       while true:
-        var node = ctx.reqQueue.detachAllRequests()
+        var node = ctx.reqQueue.mergeQueues()
         if node.isNil:
           break
         while not node.isNil:

@@ -106,12 +106,12 @@ proc pushRequest*(
     q.queues[idx].count.inc()
     return wasEmpty
 
-proc detachAllRequests*(q: var FFIRequestQueue): ptr FFIThreadRequest {.raises: [].} =
-  ## Single-consumer: splice every queue's queued chain (each queue FIFO, linked
-  ## by `next`) into one chain and reset the queues to empty, taking each queue's
-  ## lock once. Returns nil when all queues are empty; the caller then owns every
-  ## request in the chain and must read each node's `next` before dispatching it
-  ## (dispatch frees the node).
+proc mergeQueues*(q: var FFIRequestQueue): ptr FFIThreadRequest {.raises: [].} =
+  ## Single-consumer: splice every queue into one chain and reset the queues to empty.
+  ## Returns nil when all queues are empty;
+  ## the caller then owns every request in the chain
+  ## and must read each request's `next` before dispatching it.
+
   var head: ptr FFIThreadRequest = nil
   var tail: ptr FFIThreadRequest = nil
   for queue in q.queues.mitems:
