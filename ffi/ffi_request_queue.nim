@@ -45,7 +45,6 @@ type
     lock: Lock
     head: ptr FFIThreadRequest ## consumer pops here (oldest)
     tail: ptr FFIThreadRequest ## producers on this queue append here (newest)
-    count: int ## queue depth, for metrics only
     pad: array[QueuePadBytes, byte]
 
   FFIRequestQueue* = object
@@ -68,7 +67,6 @@ proc initRequestQueue*(q: var FFIRequestQueue) {.raises: [].} =
     queue.lock.initLock()
     queue.head = nil
     queue.tail = nil
-    queue.count = 0
 
 proc deinitRequestQueue*(q: var FFIRequestQueue) {.raises: [].} =
   ## Both producers and the consumer must have stopped. Frees any request still
@@ -82,7 +80,6 @@ proc deinitRequestQueue*(q: var FFIRequestQueue) {.raises: [].} =
       request = nextRequest
     queue.head = nil
     queue.tail = nil
-    queue.count = 0
     queue.lock.deinitLock()
 
 proc pushRequest*(
@@ -103,7 +100,6 @@ proc pushRequest*(
     else:
       q.queues[idx].tail[].next = request
     q.queues[idx].tail = request
-    q.queues[idx].count.inc()
     return wasEmpty
 
 proc mergeQueues*(q: var FFIRequestQueue): ptr FFIThreadRequest {.raises: [].} =
@@ -125,12 +121,4 @@ proc mergeQueues*(q: var FFIRequestQueue): ptr FFIThreadRequest {.raises: [].} =
         tail = queue.tail
         queue.head = nil
         queue.tail = nil
-        queue.count = 0
   return head
-
-proc requestQueueLen*(q: var FFIRequestQueue): int {.raises: [].} =
-  var n = 0
-  for queue in q.queues.mitems:
-    withLock queue.lock:
-      n += queue.count
-  return n
