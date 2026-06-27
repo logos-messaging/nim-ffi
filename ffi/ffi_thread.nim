@@ -4,50 +4,44 @@
 ## and the `onFFIThread` threadvar. Companion to `event_thread.nim`.
 ##
 ## Responsibilities:
-## - Receive `FFIThreadRequest`s from foreign threads via `reqChannel` and
-##   dispatch them through the user-registered handler table.
+## - Receive `FFIThreadRequest`s from foreign threads via `reqQueueBank` (a
+##   mutex-guarded MPSC queue) and dispatch them through the user-registered
+##   handler table.
 ## - Advance `ctx.ffiHeartbeat` each loop iteration so the event thread can
 ##   detect a wedged FFI thread.
 
 proc sendRequestToFFIThread*(
-    ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, timeout = InfiniteDuration
+    ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest
 ): Result[void, string] =
   if ctx.eventQueueStuck.load():
     deleteRequest(ffiRequest)
     return err("event queue stuck - library cannot accept new requests")
 
   if onFFIThread:
-    # Re-entrant dispatch from a handler would self-deadlock on `reqReceivedSignal`.
+    # A handler re-dispatching onto its own FFI thread would enqueue work the
+    # blocked dispatcher can never drain; reject instead of dead-locking.
     deleteRequest(ffiRequest)
     return err(
       "reentrant ffi call: a handler invoked sendRequestToFFIThread on its own context"
     )
 
-  # Serialise the trySend + fireSync + waitSync — reqChannel is SP and reqReceivedSignal is shared.
-  ctx.lock.acquire()
-  defer:
-    ctx.lock.release()
+  # The lock inside pushRequest covers only the O(1) enqueue; the wake stays
+  # outside it, so concurrent producers don't serialise. Unbounded, so enqueue
+  # can't fail — completion comes via the request's own callback, no accept-ack.
+  #
+  # Wake only when the push found the queue empty: while the consumer drains, a
+  # fireSync() syscall per submit (contended across producers) is what destroys
+  # scaling. A skipped wake can't strand the request — the consumer re-polls 100ms.
+  let shouldWake = ctx.reqQueueBank.pushRequest(ffiRequest)
 
-  let sentOk = ctx.reqChannel.trySend(ffiRequest)
-  if not sentOk:
-    deleteRequest(ffiRequest)
-    return err("Couldn't send a request to the ffi thread")
+  # A failed wake is non-fatal: the request is queued and the poll-drain
+  # dispatches it within a tick anyway. Returning err would double-fire the
+  # caller's callback for a request that still completes.
+  if shouldWake:
+    ctx.reqSignal.fireSync().isOkOr:
+      error "failed to wake FFI thread after enqueue (request still queued)",
+        error = error
 
-  let fireSyncRes = ctx.reqSignal.fireSync()
-  if fireSyncRes.isErr():
-    deleteRequest(ffiRequest)
-    return err("failed fireSync: " & $fireSyncRes.error)
-
-  if fireSyncRes.get() == false:
-    deleteRequest(ffiRequest)
-    return err("Couldn't fireSync in time")
-
-  let res = ctx.reqReceivedSignal.waitSync(timeout)
-  if res.isErr():
-    # FFI thread was signaled and owns the request; don't double-free.
-    return err("Couldn't receive reqReceivedSignal signal")
-
-  # On ok the FFI thread's processRequest deallocShared(req)'s.
   ok()
 
 proc processRequest[T](
@@ -88,6 +82,12 @@ proc ffiNotifyEventEnqueuedHook() {.gcsafe, raises: [].} =
     if res.isErr():
       error "failed to fire eventQueueSignal after enqueue", err = res.error
 
+proc proveAlive(ctx: ptr FFIContext) =
+  ## Advance the heartbeat the event thread polls to spot a wedged FFI thread.
+  ## Only that the counter keeps moving matters, never its value — so a plain
+  ## atomic increment, no read-back.
+  ctx.ffiHeartbeat.atomicInc()
+
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ## FFI thread body that attends library user API requests
   ffiCurrentEventRegistry = addr ctx[].eventRegistry
@@ -114,7 +114,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
     # Tracked so shutdown can drain them; abandoning a mid-await future leaks the request.
     var pending: seq[Future[void]] = @[]
 
-    proc reapCompleted() =
+    proc cleanFinishedRequests() =
       var i = 0
       while i < pending.len:
         if not pending[i].finished():
@@ -122,31 +122,41 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
           continue
         pending.del(i)
 
+    proc processQueue() =
+      ## Process enqueued requests until the queue is empty. A single wake can
+      ## stand for many submits, so we drain fully rather than once per wake —
+      ## otherwise queued requests would sit until the next wake.
+      while true:
+        var request = ctx.reqQueueBank.mergeQueues()
+        if request.isNil():
+          break
+        while not request.isNil():
+          let nextRequest = request[].next # read before processRequest frees it
+          # Tick per dispatch so a large backlog can't flatline the heartbeat
+          # and trip the event thread's wedged-FFI-thread detection mid-drain.
+          ctx.proveAlive()
+          if ctx.myLib.isNil():
+            # This reference must stay inside the closure: it's what keeps
+            # `ffiReqHandler` in the async env, so `myLib` survives across awaits.
+            ctx.myLib = addr ffiReqHandler
+
+          pending.add processRequest(request, ctx)
+          request = nextRequest
+
     while ctx.running.load():
       # Freezes if a sync handler blocks the dispatcher; event thread reads to detect wedged FFI thread.
-      discard ctx.ffiHeartbeat.fetchAdd(1)
+      ctx.proveAlive()
 
-      reapCompleted()
+      cleanFinishedRequests()
 
-      let gotSignal = await ctx.reqSignal.wait().withTimeout(chronos.milliseconds(100))
-      if not gotSignal:
-        continue
+      # Block until a submit signals us, or for at most 100ms if none does.
+      discard await ctx.reqSignal.wait().withTimeout(chronos.milliseconds(100))
+      processQueue()
 
-      var request: ptr FFIThreadRequest
-      if not ctx.reqChannel.tryRecv(request):
-        continue
-
-      if ctx.myLib.isNil():
-        ctx.myLib = addr ffiReqHandler
-
-      pending.add processRequest(request, ctx)
-
-      let fireRes = ctx.reqReceivedSignal.fireSync()
-      if fireRes.isErr():
-        error "could not fireSync back to requester thread", error = fireRes.error
-
-    # Drain so each pending handler's deleteRequest defer runs before exit.
-    reapCompleted()
+    # Drain once more so requests enqueued just before `running` flipped still
+    # dispatch and each pending handler's deleteRequest defer runs before exit.
+    processQueue()
+    cleanFinishedRequests()
     if pending.len > 0:
       try:
         await allFutures(pending)
