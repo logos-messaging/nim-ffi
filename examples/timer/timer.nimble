@@ -24,3 +24,8 @@ task genbindings_cpp, "Generate C++ bindings for the timer example":
   exec "nim c " & nimFlags & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
     " -d:ffiGenBindings -d:targetLang=cpp" & " -d:ffiOutputDir=cpp_bindings" &
     " -d:ffiSrcPath=timer.nim" & " -o:/dev/null timer.nim"
+
+task genbindings_c, "Generate C bindings for the timer example":
+  exec "nim c " & nimFlags & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
+    " -d:ffiGenBindings -d:targetLang=c" & " -d:ffiOutputDir=c_bindings" &
+    " -d:ffiSrcPath=timer.nim" & " -o:/dev/null timer.nim"

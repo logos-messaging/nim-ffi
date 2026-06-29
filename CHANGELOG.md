@@ -20,6 +20,17 @@ All notable changes to this project are documented in this file.
   where `-install_name` requires `-dynamiclib`.
 
 ### Added
+- **C binding generator** (`-d:targetLang=c`): emits a header-only C binding
+  (`<lib>.h`) plus a `CMakeLists.txt`, alongside the existing Rust / C++ / CDDL
+  backends. Requests/responses travel as CBOR using the same vendored TinyCBOR
+  the C++ backend uses. C has no generics or overloading, so each `seq[T]` /
+  `Option[T]` is monomorphised into its own struct + encode/decode/free triple,
+  and the high-level `<lib>_ctx_*` API returns values through out-parameters
+  with a heap `char** err` error channel. Shared codegen helpers were extracted
+  into `ffi/codegen/common.nim` (used by both the C and C++ backends). New
+  `nimble genbindings_c` / `genbindings_c_echo` / `check_bindings_c` /
+  `test_c_e2e` tasks, a `tests/e2e/c` ctest harness, and a
+  `tests/unit/test_c_codegen.nim` unit suite.
 - Per-interaction ABI-format annotations: `declareLibrary` now takes an
   optional `defaultABIFormat` (`"cbor"` default, or `"c"`) that every
   `{.ffi.}` / `{.ffiCtor.}` / `{.ffiDtor.}` / `{.ffiRaw.}` / `{.ffiEvent.}`
