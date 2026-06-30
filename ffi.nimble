@@ -201,8 +201,10 @@ task check_bindings_rust, "Verify checked-in Rust bindings match Nim source":
 
 task check_bindings_cpp, "Verify checked-in C++ bindings match Nim source":
   exec "nimble genbindings_cpp"
+  exec "nimble genbindings_cpp_echo"
   exec "git diff --exit-code --" & " examples/timer/cpp_bindings/my_timer.hpp" &
-    " examples/timer/cpp_bindings/CMakeLists.txt"
+    " examples/timer/cpp_bindings/CMakeLists.txt" &
+    " examples/echo/cpp_bindings/echo.hpp" & " examples/echo/cpp_bindings/CMakeLists.txt"
 
 task check_bindings, "Verify all checked-in example bindings match Nim source":
   exec "nimble check_bindings_rust"
