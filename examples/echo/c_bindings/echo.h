@@ -1,28 +1,26 @@
-/* clock_gettime / CLOCK_REALTIME (used by the sync-call helper) live behind
- * POSIX feature-test macros that strict `-std=c11` would otherwise hide. This
- * self-guard only takes effect when this header is included before any libc
- * header (once <features.h> is pulled in, the level is fixed). For include-
- * order independence, define _POSIX_C_SOURCE>=200809L on the command line — the
- * bundled CMakeLists.txt does this on the headers target. */
-#if !defined(_POSIX_C_SOURCE) || (_POSIX_C_SOURCE < 200809L)
-#  undef _POSIX_C_SOURCE
-#  define _POSIX_C_SOURCE 200809L
-#endif
-
 #ifndef NIM_FFI_PRELUDE_H_INCLUDED
 #define NIM_FFI_PRELUDE_H_INCLUDED
 /* Generated C binding for a nim-ffi library. Requests/responses travel as
  * CBOR (encoded with vendored TinyCBOR on this side, matching the Nim-side
  * cbor_serial codec on the wire — both ends speak RFC 8949).
  *
+ * The API is asynchronous: every method/constructor takes a result callback
+ * and returns immediately. The callback fires exactly once — synchronously on
+ * a submit-time failure, otherwise from the Nim dispatch thread when the reply
+ * arrives.
+ *
  * Memory ownership contract:
  *   - Request-side strings/sequences are *borrowed*: the binding only reads
  *     them while encoding, so a string literal wrapped with nimffi_str() is
  *     fine and is never freed by the binding.
- *   - Response-side values returned through an out-parameter are *owned* by
- *     the caller. Release them with the generated <lib>_free_<Type>() helper.
- *   - Error strings handed back through a `char** err` out-parameter are
- *     heap-allocated; release them with free().
+ *   - Response values and error strings passed into a result callback are
+ *     *owned by the binding* and valid only for the duration of that callback;
+ *     the binding reclaims them once the callback returns. The caller never
+ *     frees them. (The generated <lib>_free_<Type>() helpers are internal — the
+ *     trampolines use them to reclaim decoded payloads.)
+ *   - A context handle delivered to a constructor callback is the exception:
+ *     ownership transfers to the caller, who releases it with
+ *     <lib>_ctx_destroy(). It is a lifecycle handle, not returned data.
  *
  * Trust boundary: the decoders assume the CBOR they parse was produced by the
  * paired Nim library. They reject malformed input rather than trusting it, but
@@ -34,8 +32,6 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
-#include <time.h>
 #include <tinycbor/cbor.h>
 
 #ifdef __cplusplus
@@ -102,6 +98,15 @@ static inline void nimffi_free_bytes(NimFfiBytes* v) {
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Result delivery callback exported by the Nim dylib: `ret` is 0 on success
+ * (then `msg`/`len` carry the CBOR response) or non-zero on failure (then
+ * `msg`/`len` carry the error text, which is NOT NUL-terminated). */
+typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_data);
+
+/* RET_MISSING_CALLBACK from the Nim dispatcher: the callback will never fire,
+ * so the request path must report the failure itself. */
+#define NIMFFI_RET_MISSING_CALLBACK 2
 
 /* ── leaf encoders ─────────────────────────────────────────────────────── */
 static inline CborError nimffi_enc_bool(CborEncoder* e, const bool* v) {
@@ -319,6 +324,19 @@ static inline char* nimffi_dup_cstr(const char* s) {
     char* p = (char*)malloc(n);
     if (p) {
         memcpy(p, s, n);
+    }
+    return p;
+}
+
+/* NUL-terminated copy of a length-delimited (not NUL-terminated) byte run,
+ * for turning the FFICallback's raw error `msg`/`len` into a C string. */
+static inline char* nimffi_dup_cstr_n(const char* s, size_t n) {
+    char* p = (char*)malloc(n + 1);
+    if (p) {
+        if (n > 0) {
+            memcpy(p, s, n);
+        }
+        p[n] = '\0';
     }
     return p;
 }
@@ -571,148 +589,6 @@ static inline CborError echo_dec_EchoVersionReq(
     return cbor_value_advance(it);
 }
 
-#ifndef NIM_FFI_SYNC_CALL_HELPER_H_INCLUDED
-#define NIM_FFI_SYNC_CALL_HELPER_H_INCLUDED
-/* Blocking request/response helper. The Nim side delivers the result through
- * an FFICallback that may fire from another thread — and, on a timeout, may
- * fire *after* the caller has given up. The call state is therefore reference
- * counted (one ref for the caller, one for the pending callback); whichever
- * side runs last frees it, so a late callback can never write into freed
- * memory. Mirrors the C++ binding's shared_ptr-guarded ffi_call_. */
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_data);
-
-typedef struct {
-    pthread_mutex_t mtx;
-    pthread_cond_t cv;
-    int refs;
-    bool done;
-    bool ok;
-    uint8_t* bytes;
-    size_t len;
-    char* err; /* heap C string on failure */
-} NimFfiCallState;
-
-static inline NimFfiCallState* nimffi_state_new(void) {
-    NimFfiCallState* s = (NimFfiCallState*)calloc(1, sizeof(NimFfiCallState));
-    if (!s) {
-        return NULL;
-    }
-    pthread_mutex_init(&s->mtx, NULL);
-    pthread_cond_init(&s->cv, NULL);
-    s->refs = 2;
-    return s;
-}
-
-static inline void nimffi_state_unref(NimFfiCallState* s) {
-    pthread_mutex_lock(&s->mtx);
-    int remaining = --s->refs;
-    pthread_mutex_unlock(&s->mtx);
-    if (remaining != 0) {
-        return;
-    }
-    pthread_mutex_destroy(&s->mtx);
-    pthread_cond_destroy(&s->cv);
-    free(s->bytes);
-    free(s->err);
-    free(s);
-}
-
-/* The single FFICallback shared by every blocking call. `user_data` is the
- * NimFfiCallState*; this consumes the callback's reference on every path. */
-static inline void nimffi_on_result(
-        int ret, const char* msg, size_t len, void* user_data) {
-    NimFfiCallState* s = (NimFfiCallState*)user_data;
-    pthread_mutex_lock(&s->mtx);
-    s->ok = (ret == 0);
-    if (msg && len > 0) {
-        if (s->ok) {
-            s->bytes = (uint8_t*)malloc(len);
-            if (s->bytes) {
-                memcpy(s->bytes, msg, len);
-                s->len = len;
-            }
-        } else {
-            s->err = (char*)malloc(len + 1);
-            if (s->err) {
-                memcpy(s->err, msg, len);
-                s->err[len] = '\0';
-            }
-        }
-    }
-    s->done = true;
-    pthread_cond_signal(&s->cv);
-    pthread_mutex_unlock(&s->mtx);
-    nimffi_state_unref(s);
-}
-
-/* RET_MISSING_CALLBACK from the Nim dispatcher: the callback will never fire,
- * so the request path must reclaim the callback's reference itself. */
-#define NIMFFI_RET_MISSING_CALLBACK 2
-
-/* Wait up to timeout_ms for nimffi_on_result to fire on `s`, then hand the
- * success payload back through out_bytes / out_len and drop the caller's
- * reference. Returns 0 on success; -1 and *err (heap) on failure/timeout.
- * The matching state was created by nimffi_state_new() (refs == 2): the
- * callback owns the other reference and frees the state if it fires late. */
-static inline int nimffi_wait_result(
-        NimFfiCallState* s, uint32_t timeout_ms,
-        uint8_t** out_bytes, size_t* out_len, char** err) {
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += (time_t)(timeout_ms / 1000u);
-    deadline.tv_nsec += (long)(timeout_ms % 1000u) * 1000000L;
-    if (deadline.tv_nsec >= 1000000000L) {
-        deadline.tv_sec += 1;
-        deadline.tv_nsec -= 1000000000L;
-    }
-
-    int rc = 0;
-    pthread_mutex_lock(&s->mtx);
-    while (!s->done && rc == 0) {
-        rc = pthread_cond_timedwait(&s->cv, &s->mtx, &deadline);
-    }
-    bool done = s->done;
-    bool ok = s->ok;
-    uint8_t* bytes = s->bytes;
-    size_t blen = s->len;
-    char* emsg = s->err;
-    if (done && ok) {
-        s->bytes = NULL; /* ownership transferred to caller */
-        s->len = 0;
-    } else if (done) {
-        s->err = NULL;
-    }
-    pthread_mutex_unlock(&s->mtx);
-
-    int status;
-    if (!done) {
-        if (err) *err = nimffi_dup_cstr("FFI call timed out");
-        status = -1;
-    } else if (!ok) {
-        if (err) *err = emsg ? emsg : nimffi_dup_cstr("FFI call failed");
-        status = -1;
-    } else {
-        *out_bytes = bytes;
-        *out_len = blen;
-        status = 0;
-    }
-
-    nimffi_state_unref(s);
-    return status;
-}
-
-#ifdef __cplusplus
-}
-#endif
-
-#endif /* NIM_FFI_SYNC_CALL_HELPER_H_INCLUDED */
-
-
 /* ============================================================ */
 /* C ABI declarations (symbols exported by the Nim dylib)       */
 /* ============================================================ */
@@ -743,38 +619,75 @@ static inline CborError echo_decv_Str(CborValue* it, void* v) { return nimffi_de
 /* ============================================================ */
 typedef struct {
     void* ptr;
-    uint32_t timeout_ms;
 } EchoCtx;
 
-static inline EchoCtx* echo_ctx_create(const EchoConfig* config, uint32_t timeout_ms, char** err) {
-    if (err) *err = NULL;
+typedef void (*EchoCreateFn)(int err_code, EchoCtx* ctx, const char* err_msg, void* user_data);
+typedef struct { EchoCreateFn fn; void* user_data; } EchoCreateBox;
+static void echo_create_trampoline(int ret, const char* msg, size_t len, void* ud) {
+    EchoCreateBox* box = (EchoCreateBox*)ud;
+    if (!box->fn) {
+        free(box);
+        return;
+    }
+    if (ret != 0) {
+        char* em = nimffi_dup_cstr_n(msg ? msg : "", msg ? len : 0);
+        box->fn(ret, NULL, em ? em : "FFI create failed", box->user_data);
+        free(em);
+        free(box);
+        return;
+    }
+    char* err = NULL;
+    NimFfiStr addr;
+    memset(&addr, 0, sizeof(addr));
+    if (nimffi_decode_from_buf(echo_decv_Str, (const uint8_t*)msg, len, &addr, &err) != 0) {
+        box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
+        free(err);
+        free(box);
+        return;
+    }
+    char* endp = NULL;
+    unsigned long long a = addr.data ? strtoull(addr.data, &endp, 10) : 0;
+    bool ok = addr.data && addr.len > 0 && endp && *endp == '\0';
+    nimffi_free_str(&addr);
+    if (!ok) {
+        box->fn(-1, NULL, "FFI create returned non-numeric address", box->user_data);
+        free(box);
+        return;
+    }
+    EchoCtx* ctx = (EchoCtx*)calloc(1, sizeof(EchoCtx));
+    if (!ctx) {
+        box->fn(-1, NULL, "out of memory", box->user_data);
+        free(box);
+        return;
+    }
+    ctx->ptr = (void*)(uintptr_t)a;
+    box->fn(0, ctx, NULL, box->user_data);
+    free(box);
+}
+
+static inline int echo_ctx_create(const EchoConfig* config, EchoCreateFn on_created, void* user_data) {
     EchoCreateCtorReq ffi_req;
     memset(&ffi_req, 0, sizeof(ffi_req));
     ffi_req.config = *config;
     uint8_t* req_buf = NULL;
     size_t req_len = 0;
-    if (nimffi_encode_to_buf(echo_encv_EchoCreateCtorReq, &ffi_req, &req_buf, &req_len, err) != 0) return NULL;
-    NimFfiCallState* st = nimffi_state_new();
-    if (!st) { free(req_buf); if (err) *err = nimffi_dup_cstr("out of memory"); return NULL; }
-    (void)echo_create(req_buf, req_len, nimffi_on_result, st);
+    char* err = NULL;
+    if (nimffi_encode_to_buf(echo_encv_EchoCreateCtorReq, &ffi_req, &req_buf, &req_len, &err) != 0) {
+        if (on_created) on_created(-1, NULL, err ? err : "encode failed", user_data);
+        free(err);
+        return -1;
+    }
+    EchoCreateBox* box = (EchoCreateBox*)malloc(sizeof(EchoCreateBox));
+    if (!box) {
+        free(req_buf);
+        if (on_created) on_created(-1, NULL, "out of memory", user_data);
+        return -1;
+    }
+    box->fn = on_created;
+    box->user_data = user_data;
+    (void)echo_create(req_buf, req_len, echo_create_trampoline, box);
     free(req_buf);
-    uint8_t* resp = NULL;
-    size_t resp_len = 0;
-    if (nimffi_wait_result(st, timeout_ms, &resp, &resp_len, err) != 0) return NULL;
-    NimFfiStr addr;
-    memset(&addr, 0, sizeof(addr));
-    if (nimffi_decode_from_buf(echo_decv_Str, resp, resp_len, &addr, err) != 0) { free(resp); return NULL; }
-    free(resp);
-    char* endp = NULL;
-    unsigned long long a = addr.data ? strtoull(addr.data, &endp, 10) : 0;
-    bool ok = addr.data && addr.len > 0 && endp && *endp == '\0';
-    nimffi_free_str(&addr);
-    if (!ok) { if (err) *err = nimffi_dup_cstr("FFI create returned non-numeric address"); return NULL; }
-    EchoCtx* ctx = (EchoCtx*)calloc(1, sizeof(EchoCtx));
-    if (!ctx) { if (err) *err = nimffi_dup_cstr("out of memory"); return NULL; }
-    ctx->ptr = (void*)(uintptr_t)a;
-    ctx->timeout_ms = timeout_ms;
-    return ctx;
+    return 0;
 }
 
 static inline void echo_ctx_destroy(EchoCtx* ctx) {
@@ -783,64 +696,122 @@ static inline void echo_ctx_destroy(EchoCtx* ctx) {
     free(ctx);
 }
 
-static inline int echo_ctx_shout(const EchoCtx* ctx, const ShoutRequest* req, ShoutResponse* out, char** err) {
-    if (err) *err = NULL;
+typedef void (*EchoShoutReplyFn)(int err_code, const ShoutResponse* reply, const char* err_msg, void* user_data);
+typedef struct { EchoShoutReplyFn fn; void* user_data; } EchoShoutCallBox;
+static void echo_shout_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
+    EchoShoutCallBox* box = (EchoShoutCallBox*)ud;
+    if (!box->fn) {
+        free(box);
+        return;
+    }
+    if (ret != 0) {
+        char* em = nimffi_dup_cstr_n(msg ? msg : "", msg ? len : 0);
+        box->fn(ret, NULL, em ? em : "FFI call failed", box->user_data);
+        free(em);
+        free(box);
+        return;
+    }
+    char* err = NULL;
+    ShoutResponse out;
+    memset(&out, 0, sizeof(out));
+    int dec = nimffi_decode_from_buf(echo_decv_ShoutResponse, (const uint8_t*)msg, len, &out, &err);
+    if (dec != 0) {
+        box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
+        free(err);
+        echo_free_ShoutResponse(&out);
+        free(box);
+        return;
+    }
+    box->fn(0, &out, NULL, box->user_data);
+    echo_free_ShoutResponse(&out);
+    free(box);
+}
+static inline int echo_ctx_shout(const EchoCtx* ctx, const ShoutRequest* req, EchoShoutReplyFn on_reply, void* user_data) {
     EchoShoutReq ffi_req;
     memset(&ffi_req, 0, sizeof(ffi_req));
     ffi_req.req = *req;
     uint8_t* req_buf = NULL;
     size_t req_len = 0;
-    if (nimffi_encode_to_buf(echo_encv_EchoShoutReq, &ffi_req, &req_buf, &req_len, err) != 0) return -1;
-    NimFfiCallState* st = nimffi_state_new();
-    if (!st) { free(req_buf); if (err) *err = nimffi_dup_cstr("out of memory"); return -1; }
-    int ret = echo_shout(ctx->ptr, nimffi_on_result, st, req_buf, req_len);
-    free(req_buf);
-    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
-        nimffi_state_unref(st);
-        nimffi_state_unref(st);
-        if (err) *err = nimffi_dup_cstr("RET_MISSING_CALLBACK (internal error)");
+    char* err = NULL;
+    if (nimffi_encode_to_buf(echo_encv_EchoShoutReq, &ffi_req, &req_buf, &req_len, &err) != 0) {
+        if (on_reply) on_reply(-1, NULL, err ? err : "encode failed", user_data);
+        free(err);
         return -1;
     }
-    uint8_t* resp = NULL;
-    size_t resp_len = 0;
-    if (nimffi_wait_result(st, ctx->timeout_ms, &resp, &resp_len, err) != 0) return -1;
-    memset(out, 0, sizeof(*out));
-    int dec = nimffi_decode_from_buf(echo_decv_ShoutResponse, resp, resp_len, out, err);
-    free(resp);
-    if (dec != 0) {
-        echo_free_ShoutResponse(out);
-        memset(out, 0, sizeof(*out));
+    EchoShoutCallBox* box = (EchoShoutCallBox*)malloc(sizeof(EchoShoutCallBox));
+    if (!box) {
+        free(req_buf);
+        if (on_reply) on_reply(-1, NULL, "out of memory", user_data);
+        return -1;
     }
-    return dec;
+    box->fn = on_reply;
+    box->user_data = user_data;
+    int ret = echo_shout(ctx->ptr, echo_shout_reply_trampoline, box, req_buf, req_len);
+    free(req_buf);
+    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
+        if (on_reply) on_reply(-1, NULL, "RET_MISSING_CALLBACK (internal error)", user_data);
+        free(box);
+        return -1;
+    }
+    return 0;
 }
 
-static inline int echo_ctx_version(const EchoCtx* ctx, NimFfiStr* out, char** err) {
-    if (err) *err = NULL;
+typedef void (*EchoVersionReplyFn)(int err_code, const NimFfiStr* reply, const char* err_msg, void* user_data);
+typedef struct { EchoVersionReplyFn fn; void* user_data; } EchoVersionCallBox;
+static void echo_version_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
+    EchoVersionCallBox* box = (EchoVersionCallBox*)ud;
+    if (!box->fn) {
+        free(box);
+        return;
+    }
+    if (ret != 0) {
+        char* em = nimffi_dup_cstr_n(msg ? msg : "", msg ? len : 0);
+        box->fn(ret, NULL, em ? em : "FFI call failed", box->user_data);
+        free(em);
+        free(box);
+        return;
+    }
+    char* err = NULL;
+    NimFfiStr out;
+    memset(&out, 0, sizeof(out));
+    int dec = nimffi_decode_from_buf(echo_decv_Str, (const uint8_t*)msg, len, &out, &err);
+    if (dec != 0) {
+        box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
+        free(err);
+        nimffi_free_str(&out);
+        free(box);
+        return;
+    }
+    box->fn(0, &out, NULL, box->user_data);
+    nimffi_free_str(&out);
+    free(box);
+}
+static inline int echo_ctx_version(const EchoCtx* ctx, EchoVersionReplyFn on_reply, void* user_data) {
     EchoVersionReq ffi_req;
     memset(&ffi_req, 0, sizeof(ffi_req));
     uint8_t* req_buf = NULL;
     size_t req_len = 0;
-    if (nimffi_encode_to_buf(echo_encv_EchoVersionReq, &ffi_req, &req_buf, &req_len, err) != 0) return -1;
-    NimFfiCallState* st = nimffi_state_new();
-    if (!st) { free(req_buf); if (err) *err = nimffi_dup_cstr("out of memory"); return -1; }
-    int ret = echo_version(ctx->ptr, nimffi_on_result, st, req_buf, req_len);
-    free(req_buf);
-    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
-        nimffi_state_unref(st);
-        nimffi_state_unref(st);
-        if (err) *err = nimffi_dup_cstr("RET_MISSING_CALLBACK (internal error)");
+    char* err = NULL;
+    if (nimffi_encode_to_buf(echo_encv_EchoVersionReq, &ffi_req, &req_buf, &req_len, &err) != 0) {
+        if (on_reply) on_reply(-1, NULL, err ? err : "encode failed", user_data);
+        free(err);
         return -1;
     }
-    uint8_t* resp = NULL;
-    size_t resp_len = 0;
-    if (nimffi_wait_result(st, ctx->timeout_ms, &resp, &resp_len, err) != 0) return -1;
-    memset(out, 0, sizeof(*out));
-    int dec = nimffi_decode_from_buf(echo_decv_Str, resp, resp_len, out, err);
-    free(resp);
-    if (dec != 0) {
-        nimffi_free_str(out);
-        memset(out, 0, sizeof(*out));
+    EchoVersionCallBox* box = (EchoVersionCallBox*)malloc(sizeof(EchoVersionCallBox));
+    if (!box) {
+        free(req_buf);
+        if (on_reply) on_reply(-1, NULL, "out of memory", user_data);
+        return -1;
     }
-    return dec;
+    box->fn = on_reply;
+    box->user_data = user_data;
+    int ret = echo_version(ctx->ptr, echo_version_reply_trampoline, box, req_buf, req_len);
+    free(req_buf);
+    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
+        if (on_reply) on_reply(-1, NULL, "RET_MISSING_CALLBACK (internal error)", user_data);
+        free(box);
+        return -1;
+    }
+    return 0;
 }
 

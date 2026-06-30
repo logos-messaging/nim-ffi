@@ -10,6 +10,15 @@
 extern "C" {
 #endif
 
+/* Result delivery callback exported by the Nim dylib: `ret` is 0 on success
+ * (then `msg`/`len` carry the CBOR response) or non-zero on failure (then
+ * `msg`/`len` carry the error text, which is NOT NUL-terminated). */
+typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_data);
+
+/* RET_MISSING_CALLBACK from the Nim dispatcher: the callback will never fire,
+ * so the request path must report the failure itself. */
+#define NIMFFI_RET_MISSING_CALLBACK 2
+
 /* ── leaf encoders ─────────────────────────────────────────────────────── */
 static inline CborError nimffi_enc_bool(CborEncoder* e, const bool* v) {
     return cbor_encode_boolean(e, *v);
@@ -226,6 +235,19 @@ static inline char* nimffi_dup_cstr(const char* s) {
     char* p = (char*)malloc(n);
     if (p) {
         memcpy(p, s, n);
+    }
+    return p;
+}
+
+/* NUL-terminated copy of a length-delimited (not NUL-terminated) byte run,
+ * for turning the FFICallback's raw error `msg`/`len` into a C string. */
+static inline char* nimffi_dup_cstr_n(const char* s, size_t n) {
+    char* p = (char*)malloc(n + 1);
+    if (p) {
+        if (n > 0) {
+            memcpy(p, s, n);
+        }
+        p[n] = '\0';
     }
     return p;
 }

@@ -36,14 +36,35 @@ cmake --build build
 ./build/my_timer_example
 ```
 
+## Asynchronous API
+
+Every method and the constructor take a typed **result callback** and return
+immediately. The callback fires exactly once — synchronously if the request
+fails to even submit, otherwise from the Nim dispatch thread when the reply
+arrives:
+
+```c
+static void on_echo(int err_code, const EchoResponse* reply,
+                    const char* err_msg, void* user_data) {
+    if (err_code != 0) { /* err_msg is set, reply is NULL */ return; }
+    printf("echoed: %s\n", reply->echoed.data);
+}
+...
+my_timer_ctx_echo(ctx, &req, on_echo, /*user_data=*/NULL);
+```
+
+See `main.c` for the full pattern, including a small `wait_done()` poll helper
+that turns each async call back into a sequential step.
+
 ## Memory Ownership
 
 - Request-side strings/sequences are *borrowed* — wrap C strings with
   `nimffi_str(...)`; the binding never frees them.
-- Response values returned through an out-parameter are *owned* by the caller;
-  release them with the generated `my_timer_free_<Type>()` helper.
-- Error strings handed back through a `char** err` are heap-allocated; release
-  them with `free()`.
+- Reply values and error strings passed into a result callback are **owned by
+  the binding** and valid only for the duration of that callback. The caller
+  never frees them — copy out anything you need to keep before returning.
+- A `MyTimerCtx*` delivered to the constructor callback is the exception:
+  ownership transfers to you, and you release it with `my_timer_ctx_destroy()`.
 
 ## Do Not Edit
 

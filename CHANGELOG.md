@@ -24,9 +24,12 @@ All notable changes to this project are documented in this file.
   (`<lib>.h`) plus a `CMakeLists.txt`, alongside the existing Rust / C++ / CDDL
   backends. Requests/responses travel as CBOR using the same vendored TinyCBOR
   the C++ backend uses. C has no generics or overloading, so each `seq[T]` /
-  `Option[T]` is monomorphised into its own struct + encode/decode/free triple,
-  and the high-level `<lib>_ctx_*` API returns values through out-parameters
-  with a heap `char** err` error channel. Shared codegen helpers were extracted
+  `Option[T]` is monomorphised into its own struct + encode/decode/free triple.
+  The high-level `<lib>_ctx_*` API is asynchronous: each method/constructor
+  takes a typed result callback and the binding owns and reclaims all reply
+  data and error strings (valid only for the duration of the callback), so the
+  caller never frees anything — there is no blocking wait and no manual-free
+  contract. Shared codegen helpers were extracted
   into `ffi/codegen/common.nim` (used by both the C and C++ backends). New
   `nimble genbindings_c` / `genbindings_c_echo` / `check_bindings_c` /
   `test_c_e2e` tasks, a `tests/e2e/c` ctest harness, and a

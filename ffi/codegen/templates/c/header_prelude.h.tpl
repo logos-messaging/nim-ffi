@@ -1,28 +1,26 @@
-/* clock_gettime / CLOCK_REALTIME (used by the sync-call helper) live behind
- * POSIX feature-test macros that strict `-std=c11` would otherwise hide. This
- * self-guard only takes effect when this header is included before any libc
- * header (once <features.h> is pulled in, the level is fixed). For include-
- * order independence, define _POSIX_C_SOURCE>=200809L on the command line — the
- * bundled CMakeLists.txt does this on the headers target. */
-#if !defined(_POSIX_C_SOURCE) || (_POSIX_C_SOURCE < 200809L)
-#  undef _POSIX_C_SOURCE
-#  define _POSIX_C_SOURCE 200809L
-#endif
-
 #ifndef NIM_FFI_PRELUDE_H_INCLUDED
 #define NIM_FFI_PRELUDE_H_INCLUDED
 /* Generated C binding for a nim-ffi library. Requests/responses travel as
  * CBOR (encoded with vendored TinyCBOR on this side, matching the Nim-side
  * cbor_serial codec on the wire — both ends speak RFC 8949).
  *
+ * The API is asynchronous: every method/constructor takes a result callback
+ * and returns immediately. The callback fires exactly once — synchronously on
+ * a submit-time failure, otherwise from the Nim dispatch thread when the reply
+ * arrives.
+ *
  * Memory ownership contract:
  *   - Request-side strings/sequences are *borrowed*: the binding only reads
  *     them while encoding, so a string literal wrapped with nimffi_str() is
  *     fine and is never freed by the binding.
- *   - Response-side values returned through an out-parameter are *owned* by
- *     the caller. Release them with the generated <lib>_free_<Type>() helper.
- *   - Error strings handed back through a `char** err` out-parameter are
- *     heap-allocated; release them with free().
+ *   - Response values and error strings passed into a result callback are
+ *     *owned by the binding* and valid only for the duration of that callback;
+ *     the binding reclaims them once the callback returns. The caller never
+ *     frees them. (The generated <lib>_free_<Type>() helpers are internal — the
+ *     trampolines use them to reclaim decoded payloads.)
+ *   - A context handle delivered to a constructor callback is the exception:
+ *     ownership transfers to the caller, who releases it with
+ *     <lib>_ctx_destroy(). It is a lifecycle handle, not returned data.
  *
  * Trust boundary: the decoders assume the CBOR they parse was produced by the
  * paired Nim library. They reject malformed input rather than trusting it, but
@@ -34,8 +32,6 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
-#include <time.h>
 #include <tinycbor/cbor.h>
 
 #ifdef __cplusplus

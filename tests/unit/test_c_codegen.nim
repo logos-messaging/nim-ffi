@@ -125,8 +125,26 @@ suite "generateCHeader: ABI declarations and context API":
     check "timer_ctx_version(" in header
     check "timer_ctx_destroy(" in header
 
-  test "a no-parameter method takes only the out-parameter and err":
-    check "timer_ctx_version(const TimerCtx* ctx, NimFfiStr* out, char** err)" in header
+  test "the async API is callback-driven, not blocking":
+    # methods take a typed reply callback + user_data; no out-param, no char** err
+    check "typedef void (*TimerVersionReplyFn)(int err_code, const NimFfiStr* reply, const char* err_msg, void* user_data);" in
+      header
+    check "TimerVersionCallBox" in header
+    check "timer_version_reply_trampoline(" in header
+    check "timer_ctx_version(const TimerCtx* ctx, TimerVersionReplyFn on_reply, void* user_data)" in
+      header
+
+  test "the constructor is async and hands the context to a callback":
+    check "typedef void (*TimerCreateFn)(int err_code, TimerCtx* ctx, const char* err_msg, void* user_data);" in
+      header
+    check "timer_create_trampoline(" in header
+    check "timer_ctx_create(const EchoRequest* config, TimerCreateFn on_created, void* user_data)" in
+      header
+
+  test "no blocking sync-call machinery or per-call timeout survives":
+    check "nimffi_wait_result" notin header
+    check "NimFfiCallState" notin header
+    check "timeout_ms" notin header
 
   test "an empty request envelope still encodes a (zero-length) map":
     check "_nimffi_empty" in header

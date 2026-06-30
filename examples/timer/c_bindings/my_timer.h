@@ -1,28 +1,26 @@
-/* clock_gettime / CLOCK_REALTIME (used by the sync-call helper) live behind
- * POSIX feature-test macros that strict `-std=c11` would otherwise hide. This
- * self-guard only takes effect when this header is included before any libc
- * header (once <features.h> is pulled in, the level is fixed). For include-
- * order independence, define _POSIX_C_SOURCE>=200809L on the command line — the
- * bundled CMakeLists.txt does this on the headers target. */
-#if !defined(_POSIX_C_SOURCE) || (_POSIX_C_SOURCE < 200809L)
-#  undef _POSIX_C_SOURCE
-#  define _POSIX_C_SOURCE 200809L
-#endif
-
 #ifndef NIM_FFI_PRELUDE_H_INCLUDED
 #define NIM_FFI_PRELUDE_H_INCLUDED
 /* Generated C binding for a nim-ffi library. Requests/responses travel as
  * CBOR (encoded with vendored TinyCBOR on this side, matching the Nim-side
  * cbor_serial codec on the wire — both ends speak RFC 8949).
  *
+ * The API is asynchronous: every method/constructor takes a result callback
+ * and returns immediately. The callback fires exactly once — synchronously on
+ * a submit-time failure, otherwise from the Nim dispatch thread when the reply
+ * arrives.
+ *
  * Memory ownership contract:
  *   - Request-side strings/sequences are *borrowed*: the binding only reads
  *     them while encoding, so a string literal wrapped with nimffi_str() is
  *     fine and is never freed by the binding.
- *   - Response-side values returned through an out-parameter are *owned* by
- *     the caller. Release them with the generated <lib>_free_<Type>() helper.
- *   - Error strings handed back through a `char** err` out-parameter are
- *     heap-allocated; release them with free().
+ *   - Response values and error strings passed into a result callback are
+ *     *owned by the binding* and valid only for the duration of that callback;
+ *     the binding reclaims them once the callback returns. The caller never
+ *     frees them. (The generated <lib>_free_<Type>() helpers are internal — the
+ *     trampolines use them to reclaim decoded payloads.)
+ *   - A context handle delivered to a constructor callback is the exception:
+ *     ownership transfers to the caller, who releases it with
+ *     <lib>_ctx_destroy(). It is a lifecycle handle, not returned data.
  *
  * Trust boundary: the decoders assume the CBOR they parse was produced by the
  * paired Nim library. They reject malformed input rather than trusting it, but
@@ -34,8 +32,6 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
-#include <time.h>
 #include <tinycbor/cbor.h>
 
 #ifdef __cplusplus
@@ -102,6 +98,15 @@ static inline void nimffi_free_bytes(NimFfiBytes* v) {
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Result delivery callback exported by the Nim dylib: `ret` is 0 on success
+ * (then `msg`/`len` carry the CBOR response) or non-zero on failure (then
+ * `msg`/`len` carry the error text, which is NOT NUL-terminated). */
+typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_data);
+
+/* RET_MISSING_CALLBACK from the Nim dispatcher: the callback will never fire,
+ * so the request path must report the failure itself. */
+#define NIMFFI_RET_MISSING_CALLBACK 2
 
 /* ── leaf encoders ─────────────────────────────────────────────────────── */
 static inline CborError nimffi_enc_bool(CborEncoder* e, const bool* v) {
@@ -319,6 +324,19 @@ static inline char* nimffi_dup_cstr(const char* s) {
     char* p = (char*)malloc(n);
     if (p) {
         memcpy(p, s, n);
+    }
+    return p;
+}
+
+/* NUL-terminated copy of a length-delimited (not NUL-terminated) byte run,
+ * for turning the FFICallback's raw error `msg`/`len` into a C string. */
+static inline char* nimffi_dup_cstr_n(const char* s, size_t n) {
+    char* p = (char*)malloc(n + 1);
+    if (p) {
+        if (n > 0) {
+            memcpy(p, s, n);
+        }
+        p[n] = '\0';
     }
     return p;
 }
@@ -1144,148 +1162,6 @@ static inline void my_timer_free_MyTimerScheduleReq(MyTimerScheduleReq* v) {
     my_timer_free_RetryPolicy(&v->retry);
 }
 
-#ifndef NIM_FFI_SYNC_CALL_HELPER_H_INCLUDED
-#define NIM_FFI_SYNC_CALL_HELPER_H_INCLUDED
-/* Blocking request/response helper. The Nim side delivers the result through
- * an FFICallback that may fire from another thread — and, on a timeout, may
- * fire *after* the caller has given up. The call state is therefore reference
- * counted (one ref for the caller, one for the pending callback); whichever
- * side runs last frees it, so a late callback can never write into freed
- * memory. Mirrors the C++ binding's shared_ptr-guarded ffi_call_. */
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_data);
-
-typedef struct {
-    pthread_mutex_t mtx;
-    pthread_cond_t cv;
-    int refs;
-    bool done;
-    bool ok;
-    uint8_t* bytes;
-    size_t len;
-    char* err; /* heap C string on failure */
-} NimFfiCallState;
-
-static inline NimFfiCallState* nimffi_state_new(void) {
-    NimFfiCallState* s = (NimFfiCallState*)calloc(1, sizeof(NimFfiCallState));
-    if (!s) {
-        return NULL;
-    }
-    pthread_mutex_init(&s->mtx, NULL);
-    pthread_cond_init(&s->cv, NULL);
-    s->refs = 2;
-    return s;
-}
-
-static inline void nimffi_state_unref(NimFfiCallState* s) {
-    pthread_mutex_lock(&s->mtx);
-    int remaining = --s->refs;
-    pthread_mutex_unlock(&s->mtx);
-    if (remaining != 0) {
-        return;
-    }
-    pthread_mutex_destroy(&s->mtx);
-    pthread_cond_destroy(&s->cv);
-    free(s->bytes);
-    free(s->err);
-    free(s);
-}
-
-/* The single FFICallback shared by every blocking call. `user_data` is the
- * NimFfiCallState*; this consumes the callback's reference on every path. */
-static inline void nimffi_on_result(
-        int ret, const char* msg, size_t len, void* user_data) {
-    NimFfiCallState* s = (NimFfiCallState*)user_data;
-    pthread_mutex_lock(&s->mtx);
-    s->ok = (ret == 0);
-    if (msg && len > 0) {
-        if (s->ok) {
-            s->bytes = (uint8_t*)malloc(len);
-            if (s->bytes) {
-                memcpy(s->bytes, msg, len);
-                s->len = len;
-            }
-        } else {
-            s->err = (char*)malloc(len + 1);
-            if (s->err) {
-                memcpy(s->err, msg, len);
-                s->err[len] = '\0';
-            }
-        }
-    }
-    s->done = true;
-    pthread_cond_signal(&s->cv);
-    pthread_mutex_unlock(&s->mtx);
-    nimffi_state_unref(s);
-}
-
-/* RET_MISSING_CALLBACK from the Nim dispatcher: the callback will never fire,
- * so the request path must reclaim the callback's reference itself. */
-#define NIMFFI_RET_MISSING_CALLBACK 2
-
-/* Wait up to timeout_ms for nimffi_on_result to fire on `s`, then hand the
- * success payload back through out_bytes / out_len and drop the caller's
- * reference. Returns 0 on success; -1 and *err (heap) on failure/timeout.
- * The matching state was created by nimffi_state_new() (refs == 2): the
- * callback owns the other reference and frees the state if it fires late. */
-static inline int nimffi_wait_result(
-        NimFfiCallState* s, uint32_t timeout_ms,
-        uint8_t** out_bytes, size_t* out_len, char** err) {
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += (time_t)(timeout_ms / 1000u);
-    deadline.tv_nsec += (long)(timeout_ms % 1000u) * 1000000L;
-    if (deadline.tv_nsec >= 1000000000L) {
-        deadline.tv_sec += 1;
-        deadline.tv_nsec -= 1000000000L;
-    }
-
-    int rc = 0;
-    pthread_mutex_lock(&s->mtx);
-    while (!s->done && rc == 0) {
-        rc = pthread_cond_timedwait(&s->cv, &s->mtx, &deadline);
-    }
-    bool done = s->done;
-    bool ok = s->ok;
-    uint8_t* bytes = s->bytes;
-    size_t blen = s->len;
-    char* emsg = s->err;
-    if (done && ok) {
-        s->bytes = NULL; /* ownership transferred to caller */
-        s->len = 0;
-    } else if (done) {
-        s->err = NULL;
-    }
-    pthread_mutex_unlock(&s->mtx);
-
-    int status;
-    if (!done) {
-        if (err) *err = nimffi_dup_cstr("FFI call timed out");
-        status = -1;
-    } else if (!ok) {
-        if (err) *err = emsg ? emsg : nimffi_dup_cstr("FFI call failed");
-        status = -1;
-    } else {
-        *out_bytes = bytes;
-        *out_len = blen;
-        status = 0;
-    }
-
-    nimffi_state_unref(s);
-    return status;
-}
-
-#ifdef __cplusplus
-}
-#endif
-
-#endif /* NIM_FFI_SYNC_CALL_HELPER_H_INCLUDED */
-
-
 /* ============================================================ */
 /* C ABI declarations (symbols exported by the Nim dylib)       */
 /* ============================================================ */
@@ -1347,41 +1223,78 @@ typedef struct {
 
 typedef struct {
     void* ptr;
-    uint32_t timeout_ms;
     MyTimerCtxListener* listeners;
     size_t listeners_len;
     size_t listeners_cap;
 } MyTimerCtx;
 
-static inline MyTimerCtx* my_timer_ctx_create(const TimerConfig* config, uint32_t timeout_ms, char** err) {
-    if (err) *err = NULL;
+typedef void (*MyTimerCreateFn)(int err_code, MyTimerCtx* ctx, const char* err_msg, void* user_data);
+typedef struct { MyTimerCreateFn fn; void* user_data; } MyTimerCreateBox;
+static void my_timer_create_trampoline(int ret, const char* msg, size_t len, void* ud) {
+    MyTimerCreateBox* box = (MyTimerCreateBox*)ud;
+    if (!box->fn) {
+        free(box);
+        return;
+    }
+    if (ret != 0) {
+        char* em = nimffi_dup_cstr_n(msg ? msg : "", msg ? len : 0);
+        box->fn(ret, NULL, em ? em : "FFI create failed", box->user_data);
+        free(em);
+        free(box);
+        return;
+    }
+    char* err = NULL;
+    NimFfiStr addr;
+    memset(&addr, 0, sizeof(addr));
+    if (nimffi_decode_from_buf(my_timer_decv_Str, (const uint8_t*)msg, len, &addr, &err) != 0) {
+        box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
+        free(err);
+        free(box);
+        return;
+    }
+    char* endp = NULL;
+    unsigned long long a = addr.data ? strtoull(addr.data, &endp, 10) : 0;
+    bool ok = addr.data && addr.len > 0 && endp && *endp == '\0';
+    nimffi_free_str(&addr);
+    if (!ok) {
+        box->fn(-1, NULL, "FFI create returned non-numeric address", box->user_data);
+        free(box);
+        return;
+    }
+    MyTimerCtx* ctx = (MyTimerCtx*)calloc(1, sizeof(MyTimerCtx));
+    if (!ctx) {
+        box->fn(-1, NULL, "out of memory", box->user_data);
+        free(box);
+        return;
+    }
+    ctx->ptr = (void*)(uintptr_t)a;
+    box->fn(0, ctx, NULL, box->user_data);
+    free(box);
+}
+
+static inline int my_timer_ctx_create(const TimerConfig* config, MyTimerCreateFn on_created, void* user_data) {
     MyTimerCreateCtorReq ffi_req;
     memset(&ffi_req, 0, sizeof(ffi_req));
     ffi_req.config = *config;
     uint8_t* req_buf = NULL;
     size_t req_len = 0;
-    if (nimffi_encode_to_buf(my_timer_encv_MyTimerCreateCtorReq, &ffi_req, &req_buf, &req_len, err) != 0) return NULL;
-    NimFfiCallState* st = nimffi_state_new();
-    if (!st) { free(req_buf); if (err) *err = nimffi_dup_cstr("out of memory"); return NULL; }
-    (void)my_timer_create(req_buf, req_len, nimffi_on_result, st);
+    char* err = NULL;
+    if (nimffi_encode_to_buf(my_timer_encv_MyTimerCreateCtorReq, &ffi_req, &req_buf, &req_len, &err) != 0) {
+        if (on_created) on_created(-1, NULL, err ? err : "encode failed", user_data);
+        free(err);
+        return -1;
+    }
+    MyTimerCreateBox* box = (MyTimerCreateBox*)malloc(sizeof(MyTimerCreateBox));
+    if (!box) {
+        free(req_buf);
+        if (on_created) on_created(-1, NULL, "out of memory", user_data);
+        return -1;
+    }
+    box->fn = on_created;
+    box->user_data = user_data;
+    (void)my_timer_create(req_buf, req_len, my_timer_create_trampoline, box);
     free(req_buf);
-    uint8_t* resp = NULL;
-    size_t resp_len = 0;
-    if (nimffi_wait_result(st, timeout_ms, &resp, &resp_len, err) != 0) return NULL;
-    NimFfiStr addr;
-    memset(&addr, 0, sizeof(addr));
-    if (nimffi_decode_from_buf(my_timer_decv_Str, resp, resp_len, &addr, err) != 0) { free(resp); return NULL; }
-    free(resp);
-    char* endp = NULL;
-    unsigned long long a = addr.data ? strtoull(addr.data, &endp, 10) : 0;
-    bool ok = addr.data && addr.len > 0 && endp && *endp == '\0';
-    nimffi_free_str(&addr);
-    if (!ok) { if (err) *err = nimffi_dup_cstr("FFI create returned non-numeric address"); return NULL; }
-    MyTimerCtx* ctx = (MyTimerCtx*)calloc(1, sizeof(MyTimerCtx));
-    if (!ctx) { if (err) *err = nimffi_dup_cstr("out of memory"); return NULL; }
-    ctx->ptr = (void*)(uintptr_t)a;
-    ctx->timeout_ms = timeout_ms;
-    return ctx;
+    return 0;
 }
 
 static inline void my_timer_ctx_destroy(MyTimerCtx* ctx) {
@@ -1426,100 +1339,216 @@ static inline bool my_timer_ctx_remove_event_listener(MyTimerCtx* ctx, uint64_t 
     return rc == 0;
 }
 
-static inline int my_timer_ctx_echo(const MyTimerCtx* ctx, const EchoRequest* req, EchoResponse* out, char** err) {
-    if (err) *err = NULL;
+typedef void (*MyTimerEchoReplyFn)(int err_code, const EchoResponse* reply, const char* err_msg, void* user_data);
+typedef struct { MyTimerEchoReplyFn fn; void* user_data; } MyTimerEchoCallBox;
+static void my_timer_echo_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
+    MyTimerEchoCallBox* box = (MyTimerEchoCallBox*)ud;
+    if (!box->fn) {
+        free(box);
+        return;
+    }
+    if (ret != 0) {
+        char* em = nimffi_dup_cstr_n(msg ? msg : "", msg ? len : 0);
+        box->fn(ret, NULL, em ? em : "FFI call failed", box->user_data);
+        free(em);
+        free(box);
+        return;
+    }
+    char* err = NULL;
+    EchoResponse out;
+    memset(&out, 0, sizeof(out));
+    int dec = nimffi_decode_from_buf(my_timer_decv_EchoResponse, (const uint8_t*)msg, len, &out, &err);
+    if (dec != 0) {
+        box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
+        free(err);
+        my_timer_free_EchoResponse(&out);
+        free(box);
+        return;
+    }
+    box->fn(0, &out, NULL, box->user_data);
+    my_timer_free_EchoResponse(&out);
+    free(box);
+}
+static inline int my_timer_ctx_echo(const MyTimerCtx* ctx, const EchoRequest* req, MyTimerEchoReplyFn on_reply, void* user_data) {
     MyTimerEchoReq ffi_req;
     memset(&ffi_req, 0, sizeof(ffi_req));
     ffi_req.req = *req;
     uint8_t* req_buf = NULL;
     size_t req_len = 0;
-    if (nimffi_encode_to_buf(my_timer_encv_MyTimerEchoReq, &ffi_req, &req_buf, &req_len, err) != 0) return -1;
-    NimFfiCallState* st = nimffi_state_new();
-    if (!st) { free(req_buf); if (err) *err = nimffi_dup_cstr("out of memory"); return -1; }
-    int ret = my_timer_echo(ctx->ptr, nimffi_on_result, st, req_buf, req_len);
-    free(req_buf);
-    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
-        nimffi_state_unref(st);
-        nimffi_state_unref(st);
-        if (err) *err = nimffi_dup_cstr("RET_MISSING_CALLBACK (internal error)");
+    char* err = NULL;
+    if (nimffi_encode_to_buf(my_timer_encv_MyTimerEchoReq, &ffi_req, &req_buf, &req_len, &err) != 0) {
+        if (on_reply) on_reply(-1, NULL, err ? err : "encode failed", user_data);
+        free(err);
         return -1;
     }
-    uint8_t* resp = NULL;
-    size_t resp_len = 0;
-    if (nimffi_wait_result(st, ctx->timeout_ms, &resp, &resp_len, err) != 0) return -1;
-    memset(out, 0, sizeof(*out));
-    int dec = nimffi_decode_from_buf(my_timer_decv_EchoResponse, resp, resp_len, out, err);
-    free(resp);
-    if (dec != 0) {
-        my_timer_free_EchoResponse(out);
-        memset(out, 0, sizeof(*out));
+    MyTimerEchoCallBox* box = (MyTimerEchoCallBox*)malloc(sizeof(MyTimerEchoCallBox));
+    if (!box) {
+        free(req_buf);
+        if (on_reply) on_reply(-1, NULL, "out of memory", user_data);
+        return -1;
     }
-    return dec;
+    box->fn = on_reply;
+    box->user_data = user_data;
+    int ret = my_timer_echo(ctx->ptr, my_timer_echo_reply_trampoline, box, req_buf, req_len);
+    free(req_buf);
+    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
+        if (on_reply) on_reply(-1, NULL, "RET_MISSING_CALLBACK (internal error)", user_data);
+        free(box);
+        return -1;
+    }
+    return 0;
 }
 
-static inline int my_timer_ctx_version(const MyTimerCtx* ctx, NimFfiStr* out, char** err) {
-    if (err) *err = NULL;
+typedef void (*MyTimerVersionReplyFn)(int err_code, const NimFfiStr* reply, const char* err_msg, void* user_data);
+typedef struct { MyTimerVersionReplyFn fn; void* user_data; } MyTimerVersionCallBox;
+static void my_timer_version_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
+    MyTimerVersionCallBox* box = (MyTimerVersionCallBox*)ud;
+    if (!box->fn) {
+        free(box);
+        return;
+    }
+    if (ret != 0) {
+        char* em = nimffi_dup_cstr_n(msg ? msg : "", msg ? len : 0);
+        box->fn(ret, NULL, em ? em : "FFI call failed", box->user_data);
+        free(em);
+        free(box);
+        return;
+    }
+    char* err = NULL;
+    NimFfiStr out;
+    memset(&out, 0, sizeof(out));
+    int dec = nimffi_decode_from_buf(my_timer_decv_Str, (const uint8_t*)msg, len, &out, &err);
+    if (dec != 0) {
+        box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
+        free(err);
+        nimffi_free_str(&out);
+        free(box);
+        return;
+    }
+    box->fn(0, &out, NULL, box->user_data);
+    nimffi_free_str(&out);
+    free(box);
+}
+static inline int my_timer_ctx_version(const MyTimerCtx* ctx, MyTimerVersionReplyFn on_reply, void* user_data) {
     MyTimerVersionReq ffi_req;
     memset(&ffi_req, 0, sizeof(ffi_req));
     uint8_t* req_buf = NULL;
     size_t req_len = 0;
-    if (nimffi_encode_to_buf(my_timer_encv_MyTimerVersionReq, &ffi_req, &req_buf, &req_len, err) != 0) return -1;
-    NimFfiCallState* st = nimffi_state_new();
-    if (!st) { free(req_buf); if (err) *err = nimffi_dup_cstr("out of memory"); return -1; }
-    int ret = my_timer_version(ctx->ptr, nimffi_on_result, st, req_buf, req_len);
-    free(req_buf);
-    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
-        nimffi_state_unref(st);
-        nimffi_state_unref(st);
-        if (err) *err = nimffi_dup_cstr("RET_MISSING_CALLBACK (internal error)");
+    char* err = NULL;
+    if (nimffi_encode_to_buf(my_timer_encv_MyTimerVersionReq, &ffi_req, &req_buf, &req_len, &err) != 0) {
+        if (on_reply) on_reply(-1, NULL, err ? err : "encode failed", user_data);
+        free(err);
         return -1;
     }
-    uint8_t* resp = NULL;
-    size_t resp_len = 0;
-    if (nimffi_wait_result(st, ctx->timeout_ms, &resp, &resp_len, err) != 0) return -1;
-    memset(out, 0, sizeof(*out));
-    int dec = nimffi_decode_from_buf(my_timer_decv_Str, resp, resp_len, out, err);
-    free(resp);
-    if (dec != 0) {
-        nimffi_free_str(out);
-        memset(out, 0, sizeof(*out));
+    MyTimerVersionCallBox* box = (MyTimerVersionCallBox*)malloc(sizeof(MyTimerVersionCallBox));
+    if (!box) {
+        free(req_buf);
+        if (on_reply) on_reply(-1, NULL, "out of memory", user_data);
+        return -1;
     }
-    return dec;
+    box->fn = on_reply;
+    box->user_data = user_data;
+    int ret = my_timer_version(ctx->ptr, my_timer_version_reply_trampoline, box, req_buf, req_len);
+    free(req_buf);
+    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
+        if (on_reply) on_reply(-1, NULL, "RET_MISSING_CALLBACK (internal error)", user_data);
+        free(box);
+        return -1;
+    }
+    return 0;
 }
 
-static inline int my_timer_ctx_complex(const MyTimerCtx* ctx, const ComplexRequest* req, ComplexResponse* out, char** err) {
-    if (err) *err = NULL;
+typedef void (*MyTimerComplexReplyFn)(int err_code, const ComplexResponse* reply, const char* err_msg, void* user_data);
+typedef struct { MyTimerComplexReplyFn fn; void* user_data; } MyTimerComplexCallBox;
+static void my_timer_complex_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
+    MyTimerComplexCallBox* box = (MyTimerComplexCallBox*)ud;
+    if (!box->fn) {
+        free(box);
+        return;
+    }
+    if (ret != 0) {
+        char* em = nimffi_dup_cstr_n(msg ? msg : "", msg ? len : 0);
+        box->fn(ret, NULL, em ? em : "FFI call failed", box->user_data);
+        free(em);
+        free(box);
+        return;
+    }
+    char* err = NULL;
+    ComplexResponse out;
+    memset(&out, 0, sizeof(out));
+    int dec = nimffi_decode_from_buf(my_timer_decv_ComplexResponse, (const uint8_t*)msg, len, &out, &err);
+    if (dec != 0) {
+        box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
+        free(err);
+        my_timer_free_ComplexResponse(&out);
+        free(box);
+        return;
+    }
+    box->fn(0, &out, NULL, box->user_data);
+    my_timer_free_ComplexResponse(&out);
+    free(box);
+}
+static inline int my_timer_ctx_complex(const MyTimerCtx* ctx, const ComplexRequest* req, MyTimerComplexReplyFn on_reply, void* user_data) {
     MyTimerComplexReq ffi_req;
     memset(&ffi_req, 0, sizeof(ffi_req));
     ffi_req.req = *req;
     uint8_t* req_buf = NULL;
     size_t req_len = 0;
-    if (nimffi_encode_to_buf(my_timer_encv_MyTimerComplexReq, &ffi_req, &req_buf, &req_len, err) != 0) return -1;
-    NimFfiCallState* st = nimffi_state_new();
-    if (!st) { free(req_buf); if (err) *err = nimffi_dup_cstr("out of memory"); return -1; }
-    int ret = my_timer_complex(ctx->ptr, nimffi_on_result, st, req_buf, req_len);
-    free(req_buf);
-    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
-        nimffi_state_unref(st);
-        nimffi_state_unref(st);
-        if (err) *err = nimffi_dup_cstr("RET_MISSING_CALLBACK (internal error)");
+    char* err = NULL;
+    if (nimffi_encode_to_buf(my_timer_encv_MyTimerComplexReq, &ffi_req, &req_buf, &req_len, &err) != 0) {
+        if (on_reply) on_reply(-1, NULL, err ? err : "encode failed", user_data);
+        free(err);
         return -1;
     }
-    uint8_t* resp = NULL;
-    size_t resp_len = 0;
-    if (nimffi_wait_result(st, ctx->timeout_ms, &resp, &resp_len, err) != 0) return -1;
-    memset(out, 0, sizeof(*out));
-    int dec = nimffi_decode_from_buf(my_timer_decv_ComplexResponse, resp, resp_len, out, err);
-    free(resp);
-    if (dec != 0) {
-        my_timer_free_ComplexResponse(out);
-        memset(out, 0, sizeof(*out));
+    MyTimerComplexCallBox* box = (MyTimerComplexCallBox*)malloc(sizeof(MyTimerComplexCallBox));
+    if (!box) {
+        free(req_buf);
+        if (on_reply) on_reply(-1, NULL, "out of memory", user_data);
+        return -1;
     }
-    return dec;
+    box->fn = on_reply;
+    box->user_data = user_data;
+    int ret = my_timer_complex(ctx->ptr, my_timer_complex_reply_trampoline, box, req_buf, req_len);
+    free(req_buf);
+    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
+        if (on_reply) on_reply(-1, NULL, "RET_MISSING_CALLBACK (internal error)", user_data);
+        free(box);
+        return -1;
+    }
+    return 0;
 }
 
-static inline int my_timer_ctx_schedule(const MyTimerCtx* ctx, const JobSpec* job, const RetryPolicy* retry, const ScheduleConfig* schedule, ScheduleResult* out, char** err) {
-    if (err) *err = NULL;
+typedef void (*MyTimerScheduleReplyFn)(int err_code, const ScheduleResult* reply, const char* err_msg, void* user_data);
+typedef struct { MyTimerScheduleReplyFn fn; void* user_data; } MyTimerScheduleCallBox;
+static void my_timer_schedule_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
+    MyTimerScheduleCallBox* box = (MyTimerScheduleCallBox*)ud;
+    if (!box->fn) {
+        free(box);
+        return;
+    }
+    if (ret != 0) {
+        char* em = nimffi_dup_cstr_n(msg ? msg : "", msg ? len : 0);
+        box->fn(ret, NULL, em ? em : "FFI call failed", box->user_data);
+        free(em);
+        free(box);
+        return;
+    }
+    char* err = NULL;
+    ScheduleResult out;
+    memset(&out, 0, sizeof(out));
+    int dec = nimffi_decode_from_buf(my_timer_decv_ScheduleResult, (const uint8_t*)msg, len, &out, &err);
+    if (dec != 0) {
+        box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
+        free(err);
+        my_timer_free_ScheduleResult(&out);
+        free(box);
+        return;
+    }
+    box->fn(0, &out, NULL, box->user_data);
+    my_timer_free_ScheduleResult(&out);
+    free(box);
+}
+static inline int my_timer_ctx_schedule(const MyTimerCtx* ctx, const JobSpec* job, const RetryPolicy* retry, const ScheduleConfig* schedule, MyTimerScheduleReplyFn on_reply, void* user_data) {
     MyTimerScheduleReq ffi_req;
     memset(&ffi_req, 0, sizeof(ffi_req));
     ffi_req.job = *job;
@@ -1527,27 +1556,27 @@ static inline int my_timer_ctx_schedule(const MyTimerCtx* ctx, const JobSpec* jo
     ffi_req.schedule = *schedule;
     uint8_t* req_buf = NULL;
     size_t req_len = 0;
-    if (nimffi_encode_to_buf(my_timer_encv_MyTimerScheduleReq, &ffi_req, &req_buf, &req_len, err) != 0) return -1;
-    NimFfiCallState* st = nimffi_state_new();
-    if (!st) { free(req_buf); if (err) *err = nimffi_dup_cstr("out of memory"); return -1; }
-    int ret = my_timer_schedule(ctx->ptr, nimffi_on_result, st, req_buf, req_len);
-    free(req_buf);
-    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
-        nimffi_state_unref(st);
-        nimffi_state_unref(st);
-        if (err) *err = nimffi_dup_cstr("RET_MISSING_CALLBACK (internal error)");
+    char* err = NULL;
+    if (nimffi_encode_to_buf(my_timer_encv_MyTimerScheduleReq, &ffi_req, &req_buf, &req_len, &err) != 0) {
+        if (on_reply) on_reply(-1, NULL, err ? err : "encode failed", user_data);
+        free(err);
         return -1;
     }
-    uint8_t* resp = NULL;
-    size_t resp_len = 0;
-    if (nimffi_wait_result(st, ctx->timeout_ms, &resp, &resp_len, err) != 0) return -1;
-    memset(out, 0, sizeof(*out));
-    int dec = nimffi_decode_from_buf(my_timer_decv_ScheduleResult, resp, resp_len, out, err);
-    free(resp);
-    if (dec != 0) {
-        my_timer_free_ScheduleResult(out);
-        memset(out, 0, sizeof(*out));
+    MyTimerScheduleCallBox* box = (MyTimerScheduleCallBox*)malloc(sizeof(MyTimerScheduleCallBox));
+    if (!box) {
+        free(req_buf);
+        if (on_reply) on_reply(-1, NULL, "out of memory", user_data);
+        return -1;
     }
-    return dec;
+    box->fn = on_reply;
+    box->user_data = user_data;
+    int ret = my_timer_schedule(ctx->ptr, my_timer_schedule_reply_trampoline, box, req_buf, req_len);
+    free(req_buf);
+    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
+        if (on_reply) on_reply(-1, NULL, "RET_MISSING_CALLBACK (internal error)", user_data);
+        free(box);
+        return -1;
+    }
+    return 0;
 }
 

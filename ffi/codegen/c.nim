@@ -18,7 +18,6 @@ const CPtrType* = "uint64_t"
 const
   HeaderPreludeTpl = staticRead("templates/c/header_prelude.h.tpl")
   CborHelpersTpl = staticRead("templates/c/cbor_helpers.h.tpl")
-  SyncCallHelperTpl = staticRead("templates/c/sync_call_helper.h.tpl")
   CMakeListsTpl = staticRead("templates/c/CMakeLists.txt.tpl")
 
 type LeafInfo = tuple[ok: bool, cType: string, suffix: string, owns: bool]
@@ -439,7 +438,6 @@ proc emitContextStruct(
     lines.add("")
   lines.add("typedef struct {")
   lines.add("    void* ptr;")
-  lines.add("    uint32_t timeout_ms;")
   if events.len > 0:
     lines.add("    " & ctxType & "Listener* listeners;")
     lines.add("    size_t listeners_len;")
@@ -447,71 +445,129 @@ proc emitContextStruct(
   lines.add("} " & ctxType & ";")
   lines.add("")
 
+proc emitCallBox(lines: var seq[string], fnType, boxType: string) =
+  lines.add("typedef struct { " & fnType & " fn; void* user_data; } " & boxType & ";")
+
+proc emitReplyTrampolineHead(lines: var seq[string], tramp, boxType, fallback: string) =
+  ## Opens a reply trampoline: cast the user-data back to the call box, bail if
+  ## the caller passed no callback (nothing to deliver to, and leaving early
+  ## avoids allocating a result nobody receives), then deliver a non-zero `ret`
+  ## as an error. The error text in msg/len is not NUL-terminated, so copy it.
+  lines.add(
+    "static void " & tramp & "(int ret, const char* msg, size_t len, void* ud) {"
+  )
+  lines.add("    " & boxType & "* box = (" & boxType & "*)ud;")
+  lines.add("    if (!box->fn) {")
+  lines.add("        free(box);")
+  lines.add("        return;")
+  lines.add("    }")
+  lines.add("    if (ret != 0) {")
+  lines.add("        char* em = nimffi_dup_cstr_n(msg ? msg : \"\", msg ? len : 0);")
+  lines.add(
+    "        box->fn(ret, NULL, em ? em : \"" & fallback & "\", box->user_data);"
+  )
+  lines.add("        free(em);")
+  lines.add("        free(box);")
+  lines.add("        return;")
+  lines.add("    }")
+
 proc emitConstructors(
     lines: var seq[string],
     reg: var CTypeReg,
-    ctxType, libName: string,
+    ctxType, libType, libName: string,
     ctors: seq[FFIProcMeta],
 ) =
+  if ctors.len == 0:
+    return
+  let fnType = libType & "CreateFn"
+  let boxType = libType & "CreateBox"
+  let tramp = libName & "_create_trampoline"
+  lines.add(
+    "typedef void (*" & fnType & ")(int err_code, " & ctxType &
+      "* ctx, const char* err_msg, void* user_data);"
+  )
+  emitCallBox(lines, fnType, boxType)
+  emitReplyTrampolineHead(lines, tramp, boxType, "FFI create failed")
+  lines.add("    char* err = NULL;")
+  lines.add("    NimFfiStr addr;")
+  lines.add("    memset(&addr, 0, sizeof(addr));")
+  lines.add(
+    "    if (nimffi_decode_from_buf(" & libName &
+      "_decv_Str, (const uint8_t*)msg, len, &addr, &err) != 0) {"
+  )
+  lines.add("        box->fn(-1, NULL, err ? err : \"decode failed\", box->user_data);")
+  lines.add("        free(err);")
+  lines.add("        free(box);")
+  lines.add("        return;")
+  lines.add("    }")
+  lines.add("    char* endp = NULL;")
+  lines.add(
+    "    unsigned long long a = addr.data ? strtoull(addr.data, &endp, 10) : 0;"
+  )
+  lines.add("    bool ok = addr.data && addr.len > 0 && endp && *endp == '\\0';")
+  lines.add("    nimffi_free_str(&addr);")
+  lines.add("    if (!ok) {")
+  lines.add(
+    "        box->fn(-1, NULL, \"FFI create returned non-numeric address\", box->user_data);"
+  )
+  lines.add("        free(box);")
+  lines.add("        return;")
+  lines.add("    }")
+  lines.add(
+    "    " & ctxType & "* ctx = (" & ctxType & "*)calloc(1, sizeof(" & ctxType & "));"
+  )
+  lines.add("    if (!ctx) {")
+  lines.add("        box->fn(-1, NULL, \"out of memory\", box->user_data);")
+  lines.add("        free(box);")
+  lines.add("        return;")
+  lines.add("    }")
+  lines.add("    ctx->ptr = (void*)(uintptr_t)a;")
+  lines.add("    box->fn(0, ctx, NULL, box->user_data);")
+  lines.add("    free(box);")
+  lines.add("}")
+  lines.add("")
   for ctor in ctors:
     let reqName = reqStructName(ctor)
     let (params, assigns) = buildReqParams(reg, ctor.extraParams)
-    let sig = block:
-      let head = "static inline " & ctxType & "* " & libName & "_ctx_create("
+    let head = "static inline int " & libName & "_ctx_create("
+    let sig =
       if params.len > 0:
-        head & params.join(", ") & ", uint32_t timeout_ms, char** err) {"
+        head & params.join(", ") & ", " & fnType & " on_created, void* user_data) {"
       else:
-        head & "uint32_t timeout_ms, char** err) {"
+        head & fnType & " on_created, void* user_data) {"
     lines.add(sig)
-    lines.add("    if (err) *err = NULL;")
     lines.add("    " & reqName & " ffi_req;")
     lines.add("    memset(&ffi_req, 0, sizeof(ffi_req));")
     for a in assigns:
       lines.add(a)
     lines.add("    uint8_t* req_buf = NULL;")
     lines.add("    size_t req_len = 0;")
+    lines.add("    char* err = NULL;")
     lines.add(
       "    if (nimffi_encode_to_buf(" & libName & "_encv_" & cToken(reqName) &
-        ", &ffi_req, &req_buf, &req_len, err) != 0) return NULL;"
-    )
-    lines.add("    NimFfiCallState* st = nimffi_state_new();")
-    lines.add(
-      "    if (!st) { free(req_buf); if (err) *err = nimffi_dup_cstr(\"out of memory\"); return NULL; }"
+        ", &ffi_req, &req_buf, &req_len, &err) != 0) {"
     )
     lines.add(
-      "    (void)" & ctor.procName & "(req_buf, req_len, nimffi_on_result, st);"
+      "        if (on_created) on_created(-1, NULL, err ? err : \"encode failed\", user_data);"
     )
+    lines.add("        free(err);")
+    lines.add("        return -1;")
+    lines.add("    }")
+    lines.add(
+      "    " & boxType & "* box = (" & boxType & "*)malloc(sizeof(" & boxType & "));"
+    )
+    lines.add("    if (!box) {")
+    lines.add("        free(req_buf);")
+    lines.add(
+      "        if (on_created) on_created(-1, NULL, \"out of memory\", user_data);"
+    )
+    lines.add("        return -1;")
+    lines.add("    }")
+    lines.add("    box->fn = on_created;")
+    lines.add("    box->user_data = user_data;")
+    lines.add("    (void)" & ctor.procName & "(req_buf, req_len, " & tramp & ", box);")
     lines.add("    free(req_buf);")
-    lines.add("    uint8_t* resp = NULL;")
-    lines.add("    size_t resp_len = 0;")
-    lines.add(
-      "    if (nimffi_wait_result(st, timeout_ms, &resp, &resp_len, err) != 0) return NULL;"
-    )
-    lines.add("    NimFfiStr addr;")
-    lines.add("    memset(&addr, 0, sizeof(addr));")
-    lines.add(
-      "    if (nimffi_decode_from_buf(" & libName &
-        "_decv_Str, resp, resp_len, &addr, err) != 0) { free(resp); return NULL; }"
-    )
-    lines.add("    free(resp);")
-    lines.add("    char* endp = NULL;")
-    lines.add(
-      "    unsigned long long a = addr.data ? strtoull(addr.data, &endp, 10) : 0;"
-    )
-    lines.add("    bool ok = addr.data && addr.len > 0 && endp && *endp == '\\0';")
-    lines.add("    nimffi_free_str(&addr);")
-    lines.add(
-      "    if (!ok) { if (err) *err = nimffi_dup_cstr(\"FFI create returned non-numeric address\"); return NULL; }"
-    )
-    lines.add(
-      "    " & ctxType & "* ctx = (" & ctxType & "*)calloc(1, sizeof(" & ctxType & "));"
-    )
-    lines.add(
-      "    if (!ctx) { if (err) *err = nimffi_dup_cstr(\"out of memory\"); return NULL; }"
-    )
-    lines.add("    ctx->ptr = (void*)(uintptr_t)a;")
-    lines.add("    ctx->timeout_ms = timeout_ms;")
-    lines.add("    return ctx;")
+    lines.add("    return 0;")
     lines.add("}")
     lines.add("")
 
@@ -594,67 +650,97 @@ proc emitListenerApi(
   lines.add("")
 
 proc emitMethod(
-    lines: var seq[string], reg: var CTypeReg, ctxType, libName: string, m: FFIProcMeta
+    lines: var seq[string],
+    reg: var CTypeReg,
+    ctxType, libType, libName: string,
+    m: FFIProcMeta,
 ) =
   let stripped = stripLibPrefix(m.procName, libName)
   let reqName = reqStructName(m)
   let retC = cReturnType(reg, m)
+  let retFree = freeFn(reg, retC)
   let (params, assigns) = buildReqParams(reg, m.extraParams)
+  let methodPascal = snakeToPascalCase(stripped)
+  let fnType = libType & methodPascal & "ReplyFn"
+  let boxType = libType & methodPascal & "CallBox"
+  let tramp = libName & "_" & stripped & "_reply_trampoline"
+
+  lines.add(
+    "typedef void (*" & fnType & ")(int err_code, const " & retC &
+      "* reply, const char* err_msg, void* user_data);"
+  )
+  emitCallBox(lines, fnType, boxType)
+  emitReplyTrampolineHead(lines, tramp, boxType, "FFI call failed")
+  lines.add("    char* err = NULL;")
+  lines.add("    " & retC & " out;")
+  lines.add("    memset(&out, 0, sizeof(out));")
+  lines.add(
+    "    int dec = nimffi_decode_from_buf(" & libName & "_decv_" & cToken(retC) &
+      ", (const uint8_t*)msg, len, &out, &err);"
+  )
+  lines.add("    if (dec != 0) {")
+  lines.add("        box->fn(-1, NULL, err ? err : \"decode failed\", box->user_data);")
+  lines.add("        free(err);")
+  # A partial decode may have allocated some fields; reclaim them (out is
+  # zeroed, so the typed free skips what was never written).
+  if retFree.len > 0:
+    lines.add("        " & retFree & "(&out);")
+  lines.add("        free(box);")
+  lines.add("        return;")
+  lines.add("    }")
+  lines.add("    box->fn(0, &out, NULL, box->user_data);")
+  if retFree.len > 0:
+    lines.add("    " & retFree & "(&out);")
+  lines.add("    free(box);")
+  lines.add("}")
+
   let head =
     "static inline int " & libName & "_ctx_" & stripped & "(const " & ctxType & "* ctx, "
   let sig =
     if params.len > 0:
-      head & params.join(", ") & ", " & retC & "* out, char** err) {"
+      head & params.join(", ") & ", " & fnType & " on_reply, void* user_data) {"
     else:
-      head & retC & "* out, char** err) {"
+      head & fnType & " on_reply, void* user_data) {"
   lines.add(sig)
-  lines.add("    if (err) *err = NULL;")
   lines.add("    " & reqName & " ffi_req;")
   lines.add("    memset(&ffi_req, 0, sizeof(ffi_req));")
   for a in assigns:
     lines.add(a)
   lines.add("    uint8_t* req_buf = NULL;")
   lines.add("    size_t req_len = 0;")
+  lines.add("    char* err = NULL;")
   lines.add(
     "    if (nimffi_encode_to_buf(" & libName & "_encv_" & cToken(reqName) &
-      ", &ffi_req, &req_buf, &req_len, err) != 0) return -1;"
-  )
-  lines.add("    NimFfiCallState* st = nimffi_state_new();")
-  lines.add(
-    "    if (!st) { free(req_buf); if (err) *err = nimffi_dup_cstr(\"out of memory\"); return -1; }"
+      ", &ffi_req, &req_buf, &req_len, &err) != 0) {"
   )
   lines.add(
-    "    int ret = " & m.procName & "(ctx->ptr, nimffi_on_result, st, req_buf, req_len);"
+    "        if (on_reply) on_reply(-1, NULL, err ? err : \"encode failed\", user_data);"
+  )
+  lines.add("        free(err);")
+  lines.add("        return -1;")
+  lines.add("    }")
+  lines.add(
+    "    " & boxType & "* box = (" & boxType & "*)malloc(sizeof(" & boxType & "));"
+  )
+  lines.add("    if (!box) {")
+  lines.add("        free(req_buf);")
+  lines.add("        if (on_reply) on_reply(-1, NULL, \"out of memory\", user_data);")
+  lines.add("        return -1;")
+  lines.add("    }")
+  lines.add("    box->fn = on_reply;")
+  lines.add("    box->user_data = user_data;")
+  lines.add(
+    "    int ret = " & m.procName & "(ctx->ptr, " & tramp & ", box, req_buf, req_len);"
   )
   lines.add("    free(req_buf);")
   lines.add("    if (ret == NIMFFI_RET_MISSING_CALLBACK) {")
-  lines.add("        nimffi_state_unref(st);")
-  lines.add("        nimffi_state_unref(st);")
   lines.add(
-    "        if (err) *err = nimffi_dup_cstr(\"RET_MISSING_CALLBACK (internal error)\");"
+    "        if (on_reply) on_reply(-1, NULL, \"RET_MISSING_CALLBACK (internal error)\", user_data);"
   )
+  lines.add("        free(box);")
   lines.add("        return -1;")
   lines.add("    }")
-  lines.add("    uint8_t* resp = NULL;")
-  lines.add("    size_t resp_len = 0;")
-  lines.add(
-    "    if (nimffi_wait_result(st, ctx->timeout_ms, &resp, &resp_len, err) != 0) return -1;"
-  )
-  lines.add("    memset(out, 0, sizeof(*out));")
-  lines.add(
-    "    int dec = nimffi_decode_from_buf(" & libName & "_decv_" & cToken(retC) &
-      ", resp, resp_len, out, err);"
-  )
-  lines.add("    free(resp);")
-  # Reclaim fields a partial decode already allocated (out is zeroed, so the
-  # typed free skips the rest); re-zero so the caller can free again safely.
-  let retFree = freeFn(reg, retC)
-  if retFree.len > 0:
-    lines.add("    if (dec != 0) {")
-    lines.add("        " & retFree & "(out);")
-    lines.add("        memset(out, 0, sizeof(*out));")
-    lines.add("    }")
-  lines.add("    return dec;")
+  lines.add("    return 0;")
   lines.add("}")
   lines.add("")
 
@@ -725,9 +811,6 @@ proc generateCHeader*(
     lines.add(codec)
   lines.add("")
 
-  lines.add(SyncCallHelperTpl)
-  lines.add("")
-
   lines.add("/* ============================================================ */")
   lines.add("/* C ABI declarations (symbols exported by the Nim dylib)       */")
   lines.add("/* ============================================================ */")
@@ -788,11 +871,11 @@ proc generateCHeader*(
 
   emitEventMachinery(lines, reg, libType, libName, events)
   emitContextStruct(lines, ctxType, events)
-  emitConstructors(lines, reg, ctxType, libName, ctors)
+  emitConstructors(lines, reg, ctxType, libType, libName, ctors)
   emitDestructor(lines, ctxType, libName, classified.dtorProcName, events)
   emitListenerApi(lines, ctxType, libType, libName, events)
   for m in methods:
-    emitMethod(lines, reg, ctxType, libName, m)
+    emitMethod(lines, reg, ctxType, libType, libName, m)
 
   lines.join("\n") & "\n"
 
