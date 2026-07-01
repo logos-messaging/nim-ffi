@@ -18,6 +18,16 @@ proc requireLibraryDeclared(where: string) {.compileTime.} =
         ": declareLibrary(name, LibType[, defaultABIFormat]) must be called before any FFI annotation"
     )
 
+proc requireBeforeGenBindings(where: string) {.compileTime.} =
+  ## Enforce that this annotation expands before `genBindings()`. Anything
+  ## registered afterwards never reaches the generator, so turn what used to be
+  ## a silent drop into a loud error pointing at the fix.
+  if genBindingsEmitted:
+    error(
+      where &
+        " appears after genBindings(); genBindings() must be the LAST FFI call in the compilation root, after every {.ffi.}/{.ffiCtor.}/{.ffiDtor.}/{.ffiEvent.} annotation"
+    )
+
 proc resolveABIFormat(abiSpecs: seq[NimNode]): ABIFormat {.compileTime.} =
   ## Resolve one annotation's ABI from its optional `"abi = ..."` string specs
   ## (last wins), inheriting the library default when absent.
@@ -602,6 +612,7 @@ macro ffiRaw*(args: varargs[untyped]): untyped =
   ##   ) {.ffiRaw.} =
   ##     return ok(WakuNodeVersionString)
 
+  requireBeforeGenBindings("`.ffiRaw.`")
   requireLibraryDeclared("`.ffiRaw.`")
   let prc = args[^1]
   gateABIFormat(resolveABIFormat(args[0 ..^ 2]), "`.ffiRaw.` proc")
@@ -692,6 +703,7 @@ macro ffiHandle*(args: varargs[untyped]): untyped =
   ##
   ## An optional `"abi = ..."` spec is accepted for surface parity but only
   ## validated — a handle always rides as an abi-agnostic `uint64` id.
+  requireBeforeGenBindings("`.ffiHandle.`")
   requireLibraryDeclared("`.ffiHandle.`")
   let prc = args[^1]
   discard resolveABIFormat(args[0 ..^ 2])
@@ -747,6 +759,7 @@ macro ffi*(args: varargs[untyped]): untyped =
   ##   proc mylib_send*(w: MyLib, cfg: SendConfig): Future[Result[string, string]] {.ffi.} =
   ##     return ok("done")
 
+  requireBeforeGenBindings("`.ffi.`")
   # Annotated node is the last vararg; leading args are `"abi = ..."` specs.
   let prc = args[^1]
   let abiFormat = resolveABIFormat(args[0 ..^ 2])
@@ -1236,6 +1249,7 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
   ## a decimal string on success. The caller should hold the returned pointer
   ## and pass it to subsequent .ffi. calls.
 
+  requireBeforeGenBindings("`.ffiCtor.`")
   requireLibraryDeclared("`.ffiCtor.`")
   let prc = args[^1]
   let abiFormat = resolveABIFormat(args[0 ..^ 2])
@@ -1437,6 +1451,7 @@ macro ffiDtor*(args: varargs[untyped]): untyped =
   ## Returns RET_OK on success, RET_ERR on failure (null/invalid ctx, or
   ## destroyFFIContext failure).
 
+  requireBeforeGenBindings("`.ffiDtor.`")
   requireLibraryDeclared("`.ffiDtor.`")
   let prc = args[^1]
   let abiFormat = resolveABIFormat(args[0 ..^ 2])
@@ -1543,12 +1558,15 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
   ## payload, and the per-target codegens emit a typed handler dispatcher
   ## on the foreign side.
   ##
-  ## The first pragma argument is the wire-format event name, taken verbatim
-  ## (no case conversion). That string appears in the CBOR `eventType` field
-  ## and is the single source of truth across Nim / C++ / Rust bindings.
+  ## The wire-format event name is optional: when omitted it is derived from
+  ## the proc name via `camelToSnakeCase` (matching how {.ffi.} derives its C
+  ## export symbol), so `proc onPeerConnected(...)` becomes `on_peer_connected`.
+  ## Pass a string literal to override it verbatim (no case conversion). That
+  ## name appears in the CBOR `eventType` field and is the single source of
+  ## truth across Nim / C++ / Rust bindings.
   ##
   ## The wire format follows the library default and can be overridden by
-  ## passing an `"abi = ..."` spec after the event name, e.g.
+  ## passing an `"abi = ..."` spec (after the optional event name), e.g.
   ## `{.ffiEvent("on_peer_connected", "abi = cbor").}`.
   ##
   ## Example:
@@ -1556,7 +1574,7 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
   ##     id: string
   ##     address: string
   ##
-  ##   proc onPeerConnected*(peer: PeerInfo) {.ffiEvent: "on_peer_connected".}
+  ##   proc onPeerConnected*(peer: PeerInfo) {.ffiEvent.}  # -> "on_peer_connected"
   ##
   ##   # ... then from inside any {.ffi.} handler:
   ##   onPeerConnected(PeerInfo(id: "p-1", address: "127.0.0.1"))
@@ -1564,22 +1582,35 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
   ## Restriction (first pass): exactly one parameter. Multi-param events
   ## need a synthesised envelope struct; planned for a follow-up.
 
+  requireBeforeGenBindings("`.ffiEvent.`")
   requireLibraryDeclared("`.ffiEvent.`")
-  if args.len < 2:
-    error("ffiEvent requires a wire-name string and a proc declaration")
+  if args.len < 1:
+    error("ffiEvent must be applied to a proc declaration")
 
   let prc = args[^1]
   if prc.kind notin {nnkProcDef, nnkFuncDef}:
     error("ffiEvent must be applied to a proc declaration")
 
-  if args[0].kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
-    error("ffiEvent: the first argument must be the wire-name string literal")
-  let wireName = $args[0]
-  # Args between the wire name and the proc are ABI override specs.
-  let abiFormat = resolveABIFormat(args[1 ..^ 2])
+  let procName = prc[0]
+  var userProcName = procName
+  if procName.kind == nnkPostfix:
+    userProcName = procName[1]
+
+  # Leading args before the proc are an optional explicit wire-name string
+  # followed by optional `"abi = ..."` specs. A leading string that isn't an
+  # ABI spec is the wire name; otherwise derive it from the proc name.
+  let leading = args[0 ..^ 2]
+  var wireName = ""
+  var abiSpecStart = 0
+  if leading.len > 0 and leading[0].kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit} and
+      not parseAbiSpec($leading[0]).ok:
+    wireName = $leading[0]
+    abiSpecStart = 1
+  if wireName.len == 0:
+    wireName = camelToSnakeCase($userProcName)
+  let abiFormat = resolveABIFormat(leading[abiSpecStart ..^ 1])
   gateABIFormat(abiFormat, "`.ffiEvent.` proc")
 
-  let procName = prc[0]
   let formalParams = prc[3]
 
   if formalParams.len != 2:
@@ -1598,10 +1629,6 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
       $payloadTypeNode
     else:
       payloadTypeNode.repr
-
-  var userProcName = procName
-  if procName.kind == nnkPostfix:
-    userProcName = procName[1]
 
   # The generated body: dispatchFFIEventCbor("wire_name", payload).
   let wireNameLit = newStrLitNode(wireName)
@@ -1668,6 +1695,8 @@ macro genBindings*(
   ##   # nim c -d:ffiGenBindings -d:targetLang=rust \
   ##   #        -d:ffiOutputDir=examples/timer/rust_bindings \
   ##   #        -d:ffiSrcPath=../timer.nim mylib.nim
+
+  genBindingsEmitted = true
 
   when defined(ffiGenBindings):
     if outputDir.len == 0:
