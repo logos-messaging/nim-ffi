@@ -7,6 +7,7 @@ when defined(ffiGenBindings):
   import ../codegen/rust
   import ../codegen/cpp
   import ../codegen/c
+  import ../codegen/c_abi
   import ../codegen/cddl
 
 proc requireLibraryDeclared(where: string) {.compileTime.} =
@@ -988,6 +989,14 @@ macro ffi*(args: varargs[untyped]): untyped =
         )
       )
 
+    if abiFormat == ABIFormat.C:
+      # The flat-struct exported wrapper + reply trampoline are emitted at
+      # genBindings() time (see flushCAbiDispatch); the CBOR `ffiProc` is not.
+      registerCAbiMethod(
+        cExportName, libTypeName, reqTypeName, extraParamNames, extraParamTypes,
+        resultRetType,
+      )
+      return newStmtList(helperProc, registerReq)
     return newStmtList(helperProc, registerReq, ffiProc)
 
   let stmts = asyncPath()
@@ -1407,9 +1416,16 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
     when not declared(`poolIdent`):
       var `poolIdent`: FFIContextPool[`libTypeName`]
 
-  let stmts = newStmtList(
-    typeDef, ffiNewReqProc, helperProc, processProc, addToReg, poolDecl, ffiProc
-  )
+  let stmts =
+    if abiFormat == ABIFormat.C:
+      # The flat-struct exported wrapper is emitted at genBindings() time (see
+      # flushCAbiDispatch); the CBOR `ffiProc` is not.
+      registerCAbiCtor(cExportName, libTypeName, reqTypeName, paramNames, paramTypes)
+      newStmtList(typeDef, ffiNewReqProc, helperProc, processProc, addToReg, poolDecl)
+    else:
+      newStmtList(
+        typeDef, ffiNewReqProc, helperProc, processProc, addToReg, poolDecl, ffiProc
+      )
 
   when defined(ffiDumpMacros):
     echo stmts.repr
@@ -1578,6 +1594,11 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
   # Args between the wire name and the proc are ABI override specs.
   let abiFormat = resolveABIFormat(args[1 ..^ 2])
   gateABIFormat(abiFormat, "`.ffiEvent.` proc")
+  if abiFormat == ABIFormat.C:
+    error(
+      "`.ffiEvent.` proc: the `c` ABI does not yet support events; declare the " &
+        "event with `abi = cbor` (events still ride CBOR internally)"
+    )
 
   let procName = prc[0]
   let formalParams = prc[3]
@@ -1693,6 +1714,11 @@ macro genBindings*(
         ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
         ffiEventRegistry,
       )
+    of "c_abi":
+      generateCAbiBindings(
+        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
+        ffiEventRegistry,
+      )
     of "cddl":
       generateCddlBindings(
         ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath
@@ -1700,10 +1726,12 @@ macro genBindings*(
     else:
       error(
         "genBindings: unknown targetLang '" & lang &
-          "'. Use 'rust', 'cpp', 'c', or 'cddl'."
+          "'. Use 'rust', 'cpp', 'c', 'c_abi', or 'cddl'."
       )
 
-  let cwireCompanions = flushCWireCompanions()
+  let emitted = flushCWireCompanions()
+  for node in flushCAbiDispatch():
+    emitted.add(node)
   when defined(ffiDumpMacros):
-    echo cwireCompanions.repr
-  cwireCompanions
+    echo emitted.repr
+  emitted

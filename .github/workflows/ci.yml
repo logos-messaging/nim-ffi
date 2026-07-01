@@ -168,6 +168,14 @@ jobs:
           fi
           nimble test_cpp_e2e -y
 
+      # The CBOR-free abi=c C binding (issue #105). Linux-only: the generated
+      # header is platform-checked by the check-bindings job, and the runtime
+      # path only needs one OS to exercise the flat-struct dispatch.
+      - name: Run abi=c C e2e test
+        if: matrix.label == 'Linux'
+        shell: bash
+        run: nimble test_c_abi_e2e -y
+
   check-bindings:
     # Single OS is enough — codegen output is platform-independent; the Nim
     # matrix catches version-sensitive output (the PR #39 drift class).
