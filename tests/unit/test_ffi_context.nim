@@ -11,6 +11,7 @@ type CallbackData = object
   lock: Lock
   cond: Cond
   called: bool
+  callCount: int
   retCode: cint
   msg: array[1024, byte]
   msgLen: int
@@ -34,6 +35,7 @@ proc testCallback(
     copyMem(addr d[].msg[0], msg, n)
   d[].msgLen = n
   d[].called = true
+  inc d[].callCount
   signal(d[].cond)
   release(d[].lock)
 
@@ -225,6 +227,12 @@ suite "destroyFFIContext refc workaround":
     let ctx = pool.createFFIContext().valueOr:
       check false
       return
+
+    # This case stresses the refc destroy workaround, not the request timeout:
+    # the 50k-allocation handler can outrun the finite default deadline on a slow
+    # sanitizer/ARM runner, tripping a spurious timeout err. Opt out so the check
+    # below observes the handler's real result.
+    ctx.defaultRequestTimeout = InfiniteDuration
 
     var d: CallbackData
     initCallbackData(d)
@@ -610,3 +618,91 @@ suite "reentrancy guard (PR #23 review, item 6)":
     let nestedMsg = gReentrantNestedRes.recv()
     check nestedMsg.startsWith("err:")
     check "reentrant ffi call" in nestedMsg
+
+# Per-proc handler timeout (issue #93): a `{.ffi: "timeout = <ms>".}` override
+# bounds how long a handler may run before the caller is unblocked with an err.
+# The handler is NOT cancelled — it keeps running — so the callback must still
+# fire exactly once.
+
+type TimeoutConfig {.ffi.} = object
+  dummy: int
+
+proc testlib_slow_timeout*(
+    lib: SimpleLib, cfg: TimeoutConfig
+): Future[Result[string, string]] {.ffi: "timeout = 100".} =
+  await sleepAsync(500.milliseconds)
+  return ok("slow-timeout-done")
+
+proc testlib_under_deadline*(
+    lib: SimpleLib, cfg: TimeoutConfig
+): Future[Result[string, string]] {.ffi: "timeout = 1000".} =
+  await sleepAsync(50.milliseconds)
+  return ok("under-deadline-done")
+
+proc createSimpleCtx(): ptr FFIContext[SimpleLib] =
+  ## Spins up a SimpleLib context via the ctor and returns it (nil on failure).
+  var ctorD: CallbackData
+  initCallbackData(ctorD)
+  defer:
+    deinitCallbackData(ctorD)
+  var cfg = cborEncode(TestlibCreateCtorReq(config: SimpleConfig(initialValue: 1)))
+  let ctorRet =
+    testlib_create(encodedPtr(cfg), cfg.len.csize_t, testCallback, addr ctorD)
+  if ctorRet.isNil():
+    return nil
+  waitCallback(ctorD)
+  if ctorD.retCode != RET_OK:
+    return nil
+  let ctxAddr = ctorAddrFromCbor(callbackBytes(ctorD))
+  if ctxAddr == 0:
+    return nil
+  cast[ptr FFIContext[SimpleLib]](ctxAddr)
+
+suite "per-proc request timeout (issue #93)":
+  test "handler past its deadline yields a timeout err, fired exactly once":
+    let ctx = createSimpleCtx()
+    check not ctx.isNil()
+    defer:
+      check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
+
+    var d: CallbackData
+    initCallbackData(d)
+    defer:
+      deinitCallbackData(d)
+
+    var reqBytes = cborEncode(TestlibSlowTimeoutReq(cfg: TimeoutConfig(dummy: 0)))
+    let ret = testlib_slow_timeout(
+      ctx, testCallback, addr d, encodedPtr(reqBytes), reqBytes.len.csize_t
+    )
+    check ret == RET_OK
+
+    waitCallback(d)
+    check d.retCode == RET_ERR
+    check "timed out" in callbackErr(d)
+
+    # The handler (500 ms) is still running past the 100 ms deadline; once it
+    # finishes it must NOT deliver a second callback.
+    os.sleep(700)
+    check d.callCount == 1
+
+  test "handler finishing under its deadline returns normally":
+    let ctx = createSimpleCtx()
+    check not ctx.isNil()
+    defer:
+      check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
+
+    var d: CallbackData
+    initCallbackData(d)
+    defer:
+      deinitCallbackData(d)
+
+    var reqBytes = cborEncode(TestlibUnderDeadlineReq(cfg: TimeoutConfig(dummy: 0)))
+    let ret = testlib_under_deadline(
+      ctx, testCallback, addr d, encodedPtr(reqBytes), reqBytes.len.csize_t
+    )
+    check ret == RET_OK
+
+    waitCallback(d)
+    check d.retCode == RET_OK
+    check cborDecode(callbackBytes(d), string).value == "under-deadline-done"
+    check d.callCount == 1

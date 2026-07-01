@@ -20,6 +20,16 @@ All notable changes to this project are documented in this file.
   where `-install_name` requires `-dynamiclib`.
 
 ### Added
+- Configurable per-request handler timeout with a finite default: each
+  `FFIContext` now carries a `defaultRequestTimeout` (5s) applied to every
+  handler, replacing the previous unbounded wait so a wedged handler can no
+  longer hang a foreign caller forever. On trip the caller is unblocked with an
+  `ffi request timed out after <n>ms` err; the handler is left running (not
+  cancelled, since a hard-cancel mid-call into the underlying library can leave
+  it partial), and the callback still fires exactly once. Override per proc with
+  a `"timeout = <ms>"` spec (e.g. `{.ffi: "timeout = 30000".}`), parsed like the
+  `abi = ...` spec; runtime-only, codegen ignores it
+  ([#93](https://github.com/logos-messaging/nim-ffi/issues/93)).
 - **C binding generator** (`-d:targetLang=c`): emits a header-only C binding
   (`<lib>.h`) plus a `CMakeLists.txt`, alongside the existing Rust / C++ / CDDL
   backends. Requests/responses travel as CBOR using the same vendored TinyCBOR
