@@ -6,6 +6,7 @@ import ./c_macro_helpers
 when defined(ffiGenBindings):
   import ../codegen/rust
   import ../codegen/cpp
+  import ../codegen/c
   import ../codegen/cddl
 
 proc requireLibraryDeclared(where: string) {.compileTime.} =
@@ -1655,7 +1656,7 @@ macro genBindings*(
   ## In a multi-file library, import all sub-modules first and call
   ## genBindings() once at the bottom of the top-level compilation-root file.
   ##
-  ## Supported languages (-d:targetLang): "rust" (default), "cpp".
+  ## Supported languages (-d:targetLang): "rust" (default), "cpp", "c", "cddl".
   ## Output path and nim source path default to -d:ffiOutputDir and
   ## -d:ffiSrcPath, or can be passed as explicit arguments.
   ## Foreign-binding file emission is a no-op unless -d:ffiGenBindings is set;
@@ -1687,13 +1688,19 @@ macro genBindings*(
         ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
         ffiEventRegistry,
       )
+    of "c":
+      generateCBindings(
+        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
+        ffiEventRegistry,
+      )
     of "cddl":
       generateCddlBindings(
         ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath
       )
     else:
       error(
-        "genBindings: unknown targetLang '" & lang & "'. Use 'rust', 'cpp', or 'cddl'."
+        "genBindings: unknown targetLang '" & lang &
+          "'. Use 'rust', 'cpp', 'c', or 'cddl'."
       )
 
   let cwireCompanions = flushCWireCompanions()

@@ -131,6 +131,13 @@ task test_cpp_e2e, "Build and run the C++ end-to-end tests for the timer example
   # single-config generators (Make/Ninja) on Linux/macOS.
   runOrQuit "ctest --test-dir tests/e2e/cpp/build --output-on-failure -C Debug"
 
+task test_c_e2e, "Build and run the C end-to-end tests for the timer example":
+  # Regenerate the C bindings so the suite always runs against fresh codegen.
+  runOrQuit "nimble genbindings_c"
+  runOrQuit "cmake -S tests/e2e/c -B tests/e2e/c/build"
+  runOrQuit "cmake --build tests/e2e/c/build --config Debug"
+  runOrQuit "ctest --test-dir tests/e2e/c/build --output-on-failure -C Debug"
+
 task test_sanitized,
   "Run all unit tests under a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
   let san = getEnv("NIM_FFI_SAN", "none")
@@ -151,6 +158,16 @@ task test_cpp_e2e_sanitized,
     " -DNIM_FFI_SANITIZER=" & san
   runOrQuit "cmake --build tests/e2e/cpp/build --config Debug -j"
   runOrQuit "ctest --test-dir tests/e2e/cpp/build --output-on-failure -C Debug"
+
+task test_c_e2e_sanitized,
+  "Build and run the C e2e tests with a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
+  let mm = getEnv("NIM_FFI_MM", "orc")
+  let san = getEnv("NIM_FFI_SAN", "none")
+  runOrQuit "nimble genbindings_c"
+  runOrQuit "cmake -S tests/e2e/c -B tests/e2e/c/build" & " -DNIM_FFI_MM=" & mm &
+    " -DNIM_FFI_SANITIZER=" & san
+  runOrQuit "cmake --build tests/e2e/c/build --config Debug -j"
+  runOrQuit "ctest --test-dir tests/e2e/c/build --output-on-failure -C Debug"
 
 task genbindings_example, "Generate Rust bindings for the timer example":
   exec "nim c " & nimFlagsOrc &
@@ -194,6 +211,22 @@ task genbindings_cpp_echo, "Generate C++ bindings for the echo example":
     " -d:ffiOutputDir=examples/echo/cpp_bindings" & " -d:ffiSrcPath=../echo.nim" &
     " -o:/dev/null examples/echo/echo.nim"
 
+task genbindings_c, "Generate C bindings for the timer example":
+  exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
+    " -d:ffiGenBindings -d:targetLang=c" & " -d:ffiOutputDir=examples/timer/c_bindings" &
+    " -d:ffiSrcPath=../timer.nim" & " -o:/dev/null examples/timer/timer.nim"
+  exec "nim c " & nimFlagsRefc & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
+    " -d:ffiGenBindings -d:targetLang=c" & " -d:ffiOutputDir=examples/timer/c_bindings" &
+    " -d:ffiSrcPath=../timer.nim" & " -o:/dev/null examples/timer/timer.nim"
+
+task genbindings_c_echo, "Generate C bindings for the echo example":
+  exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libecho" &
+    " -d:ffiGenBindings -d:targetLang=c" & " -d:ffiOutputDir=examples/echo/c_bindings" &
+    " -d:ffiSrcPath=../echo.nim" & " -o:/dev/null examples/echo/echo.nim"
+  exec "nim c " & nimFlagsRefc & " --app:lib --noMain --nimMainPrefix:libecho" &
+    " -d:ffiGenBindings -d:targetLang=c" & " -d:ffiOutputDir=examples/echo/c_bindings" &
+    " -d:ffiSrcPath=../echo.nim" & " -o:/dev/null examples/echo/echo.nim"
+
 task check_bindings_rust, "Verify checked-in Rust bindings match Nim source":
   exec "nimble genbindings_rust"
   exec "git diff --exit-code --" & " examples/timer/rust_bindings/Cargo.toml" &
@@ -206,6 +239,18 @@ task check_bindings_cpp, "Verify checked-in C++ bindings match Nim source":
     " examples/timer/cpp_bindings/CMakeLists.txt" &
     " examples/echo/cpp_bindings/echo.hpp" & " examples/echo/cpp_bindings/CMakeLists.txt"
 
+task check_bindings_c, "Verify checked-in C bindings match Nim source":
+  exec "nimble genbindings_c"
+  exec "nimble genbindings_c_echo"
+  exec "git diff --exit-code --" & " examples/timer/c_bindings/my_timer.h" &
+    " examples/timer/c_bindings/nim_ffi_prelude.h" &
+    " examples/timer/c_bindings/nim_ffi_cbor.h" &
+    " examples/timer/c_bindings/CMakeLists.txt" & " examples/echo/c_bindings/echo.h" &
+    " examples/echo/c_bindings/nim_ffi_prelude.h" &
+    " examples/echo/c_bindings/nim_ffi_cbor.h" &
+    " examples/echo/c_bindings/CMakeLists.txt"
+
 task check_bindings, "Verify all checked-in example bindings match Nim source":
   exec "nimble check_bindings_rust"
   exec "nimble check_bindings_cpp"
+  exec "nimble check_bindings_c"

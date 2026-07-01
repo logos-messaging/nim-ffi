@@ -4,7 +4,7 @@
 ## the Nim-side cbor_serial codec on the wire — both ends speak RFC 8949).
 
 import std/[os, strutils]
-import ./meta, ./string_helpers
+import ./meta, ./string_helpers, ./c_cpp_common
 
 ## Wire-format C++ type used for any Nim `ptr T` / `pointer`. Fixed 64-bit so
 ## the CBOR payload size is stable regardless of host architecture.
@@ -20,13 +20,6 @@ const
   SyncCallHelperTpl = staticRead("templates/cpp/sync_call_helper.hpp.tpl")
   ContextRuleOf5Tpl = staticRead("templates/cpp/context_rule_of_5.hpp.tpl")
   CMakeListsTpl = staticRead("templates/cpp/CMakeLists.txt.tpl")
-
-proc genericInnerType(typeName, prefix: string): string =
-  if typeName.startsWith(prefix) and typeName.endsWith("]"):
-    let start = prefix.len
-    let lastIndex = typeName.len - 2
-    return typeName[start .. lastIndex]
-  return ""
 
 proc nimTypeToCpp*(typeName: string): string =
   let trimmed = typeName.strip()
@@ -57,19 +50,6 @@ proc nimTypeToCpp*(typeName: string): string =
   of "float64": "double"
   of "pointer": CppPtrType
   else: trimmed
-
-proc stripLibPrefixCpp(procName, libName: string): string =
-  let prefix = libName & "_"
-  if procName.startsWith(prefix):
-    return procName[prefix.len .. ^1]
-  return procName
-
-proc reqStructName(p: FFIProcMeta): string =
-  let camel = snakeToPascalCase(p.procName)
-  if p.kind == FFIKind.CTOR:
-    camel & "CtorReq"
-  else:
-    camel & "Req"
 
 proc emitStructCborCodec(
     lines: var seq[string], structName: string, fields: seq[(string, string)]
@@ -361,24 +341,10 @@ proc generateCppHeader*(
   lines.add(SyncCallHelperTpl)
 
   # ── High-level C++ context class ──────────────────────────────────────────
-  var ctors: seq[FFIProcMeta] = @[]
-  var methods: seq[FFIProcMeta] = @[]
-  for p in procs:
-    case p.kind
-    of FFIKind.CTOR:
-      ctors.add(p)
-    of FFIKind.FFI:
-      methods.add(p)
-    of FFIKind.DTOR:
-      discard
-
-  let libTypeName =
-    if ctors.len > 0:
-      ctors[0].libTypeName
-    else:
-      capitalizeFirstLetter(libName)
-
-  let ctxTypeName = libTypeName & "Ctx"
+  let classified = classifyProcs(procs)
+  let ctors = classified.ctors
+  let methods = classified.methods
+  let ctxTypeName = libTypeName(ctors, libName) & "Ctx"
 
   lines.add("// ============================================================")
   lines.add("// High-level C++ context class")
@@ -496,7 +462,7 @@ proc generateCppHeader*(
 
   # ── Instance methods ────────────────────────────────────────────────────
   for m in methods:
-    let methodName = stripLibPrefixCpp(m.procName, libName)
+    let methodName = stripLibPrefix(m.procName, libName)
     let retCppType =
       if m.returnRidesAsPtr():
         CppPtrType
