@@ -20,16 +20,52 @@ const EmptyErrorMarker = "unknown error"
   ## the callback's msg ptr non-nil and gives the foreign side a recognizable
   ## fallback to log.
 
+const MaxScalarArgs* = 8
+  ## Inline capacity for the scalar fast path. A `.ffi.` method with more than
+  ## this many scalar params can't use the fast path (checked at compile time).
+
 type FFIThreadRequest* = object
   callback*: FFICallBack
   userData*: pointer
   reqId*: cstring ## Per-proc Req type name used to look up the handler.
   data*: ptr UncheckedArray[byte] ## Owned CBOR-encoded request payload.
   dataLen*: int
+  isScalar*: bool
+    ## Set by `initScalar`: the payload rode inline in `scalarArgs` (no CBOR,
+    ## no `data` buffer), so `deleteRequest` has nothing extra to free.
+  scalarArgs*: array[MaxScalarArgs, uint64]
+    ## Scalar-fast-path args inlined in the envelope (one `ffiPackScalar` value
+    ## per slot) so there's no per-call `c_malloc`. A plain array rather than a
+    ## `union` with `data`: costs a fixed 64 bytes per request but keeps the
+    ## `next` link and `deleteRequest` unaliased and branch-free.
   next*: ptr FFIThreadRequest
     ## Intrusive ingress-queue link (see `ffi_request_queue.nim`). Touched only
     ## under the queue's lock; the request doubles as its own node, so no
     ## separate node alloc lands on the per-thread ORC MemRegion.
+
+func ffiPackScalar*[T](x: T): uint64 =
+  ## Bit-cast one scalar into a `uint64` request slot. Signed ints sign-extend
+  ## to 64 bits; `float32` widens to `float64` (exactly representable, so the
+  ## value round-trips); `bool` becomes 0/1. Reverse with `ffiUnpackScalar`.
+  when T is SomeFloat:
+    cast[uint64](float64(x))
+  elif T is bool:
+    uint64(ord(x))
+  elif T is SomeSignedInt:
+    cast[uint64](int64(x))
+  else:
+    uint64(x)
+
+func ffiUnpackScalar*[T](u: uint64, _: typedesc[T]): T =
+  ## Inverse of `ffiPackScalar`: reinterpret a request slot back into `T`.
+  when T is SomeFloat:
+    T(cast[float64](u))
+  elif T is bool:
+    u != 0'u64
+  elif T is SomeSignedInt:
+    T(cast[int64](u))
+  else:
+    T(u)
 
 proc allocBaseRequest(
     callback: FFICallBack, userData: pointer, reqId: cstring
@@ -43,6 +79,7 @@ proc allocBaseRequest(
   ret[].reqId = reqId.alloc()
   ret[].data = nil
   ret[].dataLen = 0
+  ret[].isScalar = false
   ret[].next = nil
   return ret
 
@@ -117,6 +154,49 @@ proc initFromOwnedShared*(
   var ret = allocBaseRequest(callback, userData, reqId)
   adoptOwnedSharedPayload(ret, data, dataLen)
   return ret
+
+proc initScalar*(
+    T: typedesc[FFIThreadRequest],
+    callback: FFICallBack,
+    userData: pointer,
+    reqId: cstring,
+    args: varargs[uint64],
+): ptr type T =
+  ## Builds a scalar-fast-path request: the packed scalar args ride inline in
+  ## `scalarArgs` with no payload `c_malloc`. `args` come from `ffiPackScalar`.
+  ## Only the routing `reqId` cstring is heap-allocated, same as the CBOR path.
+  doAssert args.len <= MaxScalarArgs,
+    "initScalar: " & $args.len & " scalar args exceed MaxScalarArgs (" & $MaxScalarArgs &
+      ")"
+  var ret = allocBaseRequest(callback, userData, reqId)
+  ret[].isScalar = true
+  for i in 0 ..< args.len:
+    ret[].scalarArgs[i] = args[i]
+  ret
+
+func ffiScalarRetBytes*[T](x: T): seq[byte] =
+  ## Serializes a scalar handler result into the raw response payload the
+  ## callback carries — no CBOR envelope. A `string`/`cstring` rides as its
+  ## own UTF-8 bytes (like the error path); every other scalar rides as the
+  ## 8-byte native-endian image of `ffiPackScalar(x)`. Note: an empty string
+  ## yields a 0-length payload, which `handleRes` sends as the CBOR-null
+  ## sentinel — the foreign scalar reader (a follow-up) must special-case it.
+  when T is string:
+    var b = newSeq[byte](x.len)
+    if x.len > 0:
+      copyMem(addr b[0], unsafeAddr x[0], x.len)
+    b
+  elif T is cstring:
+    let n = x.len
+    var b = newSeq[byte](n)
+    if n > 0:
+      copyMem(addr b[0], cast[pointer](x), n)
+    b
+  else:
+    let u = ffiPackScalar(x)
+    var b = newSeq[byte](sizeof(uint64))
+    copyMem(addr b[0], unsafeAddr u, sizeof(uint64))
+    b
 
 proc deleteRequest*(request: ptr FFIThreadRequest) =
   if not request[].data.isNil:
