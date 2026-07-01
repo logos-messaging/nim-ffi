@@ -30,6 +30,9 @@ type FFIThreadRequest* = object
     ## Intrusive ingress-queue link (see `ffi_request_queue.nim`). Touched only
     ## under the queue's lock; the request doubles as its own node, so no
     ## separate node alloc lands on the per-thread ORC MemRegion.
+  responded*: bool
+    ## De-duplicates the callback across the timeout and completion paths. Both
+    ## run on the FFI thread, so a plain flag suffices — no cross-thread race.
 
 proc allocBaseRequest(
     callback: FFICallBack, userData: pointer, reqId: cstring
@@ -44,6 +47,7 @@ proc allocBaseRequest(
   ret[].data = nil
   ret[].dataLen = 0
   ret[].next = nil
+  ret[].responded = false
   return ret
 
 proc copySharedPayload(req: ptr FFIThreadRequest, data: ptr byte, dataLen: int) =
@@ -125,12 +129,9 @@ proc deleteRequest*(request: ptr FFIThreadRequest) =
     c_free(cast[pointer](request[].reqId))
   c_free(request)
 
-proc handleRes*(res: Result[seq[byte], string], request: ptr FFIThreadRequest) =
-  ## Fires the registered callback exactly once and frees the request.
-  ## Success payload is CBOR bytes; error payload is the raw UTF-8 error string.
-  defer:
-    deleteRequest(request)
-
+proc fireCallback(res: Result[seq[byte], string], request: ptr FFIThreadRequest) =
+  ## Delivers one response to the foreign callback. Success payload is CBOR
+  ## bytes; error payload is the raw UTF-8 error string.
   if res.isErr():
     foreignThreadGc:
       let msg = if res.error.len > 0: res.error else: EmptyErrorMarker
@@ -154,6 +155,24 @@ proc handleRes*(res: Result[seq[byte], string], request: ptr FFIThreadRequest) =
       request[].callback(
         RET_OK, cast[ptr cchar](addr sentinel), 1.csize_t, request[].userData
       )
+
+proc respondOnce*(request: ptr FFIThreadRequest, res: Result[seq[byte], string]) =
+  ## Fires the callback the first time it's called for `request` and no-ops
+  ## after — the timeout path and the handler-completion path both call it, but
+  ## the foreign side must be answered exactly once. Does NOT free the request:
+  ## freeing stays with `handleRes` so the handler always owns the buffer until
+  ## it finishes.
+  if request[].responded:
+    return
+  request[].responded = true
+  fireCallback(res, request)
+
+proc handleRes*(res: Result[seq[byte], string], request: ptr FFIThreadRequest) =
+  ## Terminal step of every request: delivers the response (unless a timeout
+  ## already did) and frees the request exactly once.
+  defer:
+    deleteRequest(request)
+  respondOnce(request, res)
 
 proc nilProcess*(reqId: cstring): Future[Result[seq[byte], string]] {.async.} =
   return err("This request type is not implemented: " & $reqId)
