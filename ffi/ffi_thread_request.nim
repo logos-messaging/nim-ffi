@@ -178,9 +178,9 @@ func ffiScalarRetBytes*[T](x: T): seq[byte] =
   ## Serializes a scalar handler result into the raw response payload the
   ## callback carries — no CBOR envelope. A `string`/`cstring` rides as its
   ## own UTF-8 bytes (like the error path); every other scalar rides as the
-  ## 8-byte native-endian image of `ffiPackScalar(x)`. Note: an empty string
-  ## yields a 0-length payload, which `handleRes` sends as the CBOR-null
-  ## sentinel — the foreign scalar reader (a follow-up) must special-case it.
+  ## 8-byte native-endian image of `ffiPackScalar(x)`. An empty string yields a
+  ## 0-length payload, which `handleRes` delivers as a genuine 0-length
+  ## `RET_OK` buffer (not the CBOR-null sentinel), so it reads back as "".
   when T is string:
     var b = newSeq[byte](x.len)
     if x.len > 0:
@@ -227,6 +227,13 @@ proc handleRes*(res: Result[seq[byte], string], request: ptr FFIThreadRequest) =
         cast[ptr cchar](unsafeAddr bytes[0]),
         cast[csize_t](bytes.len),
         request[].userData,
+      )
+    elif request[].isScalar:
+      # A scalar return of 0 bytes is a real empty string, not "no value":
+      # hand back a genuine empty buffer, not the CBOR-null sentinel.
+      var empty: byte
+      request[].callback(
+        RET_OK, cast[ptr cchar](addr empty), 0.csize_t, request[].userData
       )
     else:
       # Always hand the callback a real buffer; CBOR null marks "no value".
