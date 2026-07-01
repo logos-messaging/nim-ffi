@@ -228,6 +228,12 @@ suite "destroyFFIContext refc workaround":
       check false
       return
 
+    # This case stresses the refc destroy workaround, not the request timeout:
+    # the 50k-allocation handler can outrun the finite default deadline on a slow
+    # sanitizer/ARM runner, tripping a spurious timeout err. Opt out so the check
+    # below observes the handler's real result.
+    ctx.defaultRequestTimeout = InfiniteDuration
+
     var d: CallbackData
     initCallbackData(d)
     defer:
