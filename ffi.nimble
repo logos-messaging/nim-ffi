@@ -84,6 +84,19 @@ proc applyTsanSuppressions() =
   elif "suppressions=" notin existing:
     putEnv("TSAN_OPTIONS", existing & ":suppressions=" & suppPath)
 
+proc removeStaleEchoLib() =
+  ## The CBOR and `abi = c` echo e2e suites both compile examples/echo/echo.nim
+  ## to the same repo-root `libecho.so`, differing only by `-d:ffiEchoAbiC`.
+  ## CMake keys the dylib rebuild on echo.nim's mtime, not the ABI flag, so a
+  ## `libecho.so` left by an earlier CBOR e2e step is silently reused by the
+  ## abi=c build — the flat-struct C caller then reaches the CBOR entry points
+  ## (wrong arity/ABI) and segfaults. Delete it first to force a fresh rebuild
+  ## with the right ABI.
+  for name in ["libecho.so", "libecho.dylib", "echo.dll"]:
+    let path = thisDir() / name
+    if fileExists(path):
+      rmFile(path)
+
 task buildffi, "Compile the library":
   exec "nim c " & nimFlagsOrc & " --app:lib --noMain ffi.nim"
 
@@ -141,6 +154,7 @@ task test_c_e2e, "Build and run the C end-to-end tests for the timer example":
 task test_c_abi_e2e, "Build and run the CBOR-free abi=c C end-to-end test (echo)":
   # Regenerate the abi=c bindings so the suite always runs against fresh codegen.
   runOrQuit "nimble genbindings_c_abi_echo"
+  removeStaleEchoLib()
   runOrQuit "cmake -S tests/e2e/c_abi -B tests/e2e/c_abi/build"
   runOrQuit "cmake --build tests/e2e/c_abi/build --config Debug"
   runOrQuit "ctest --test-dir tests/e2e/c_abi/build --output-on-failure -C Debug"
@@ -180,6 +194,7 @@ task test_c_abi_e2e_sanitized,
   "Build and run the abi=c C e2e test with a sanitizer (NIM_FFI_SAN)":
   let san = getEnv("NIM_FFI_SAN", "none")
   runOrQuit "nimble genbindings_c_abi_echo"
+  removeStaleEchoLib()
   runOrQuit "cmake -S tests/e2e/c_abi -B tests/e2e/c_abi/build" & " -DNIM_FFI_SANITIZER=" &
     san
   runOrQuit "cmake --build tests/e2e/c_abi/build --config Debug -j"
