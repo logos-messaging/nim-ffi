@@ -60,7 +60,14 @@ proc scalarfast_checked*(
     return err("negative not allowed")
   return ok(n * 2)
 
-## --- C-shape callback harness (mirrors test_ffi_context.nim) ----------------
+proc scalarfast_blank*(
+    lib: ScalarLib
+): Future[Result[string, string]] {.ffi: "abi = c".} =
+  ## Empty-string return — must ride back as a genuine 0-length RET_OK payload,
+  ## not the CBOR-null sentinel.
+  return ok("")
+
+## C-shape callback harness (mirrors test_ffi_context.nim).
 
 type CallbackData = object
   lock: Lock
@@ -121,10 +128,7 @@ proc scalarStr(d: CallbackData): string =
   s
 
 proc callbackErr(d: CallbackData): string =
-  var msg = newString(d.msgLen)
-  if d.msgLen > 0:
-    copyMem(addr msg[0], unsafeAddr d.msg[0], d.msgLen)
-  msg
+  scalarStr(d)
 
 proc encodedPtr(bytes: var seq[byte]): ptr byte =
   if bytes.len == 0:
@@ -181,6 +185,22 @@ suite "scalar fast path — C export shape":
     waitCallback(d)
     check d.retCode == RET_OK
     check scalarStr(d) == "scalarfast v1"
+
+  test "empty string return rides back as a real 0-length RET_OK payload":
+    let ctx = makeCtx(0)
+    defer:
+      check ScalarLibFFIPool.destroyFFIContext(ctx).isOk()
+
+    var d: CallbackData
+    initCallbackData(d)
+    defer:
+      deinitCallbackData(d)
+
+    check scalarfast_blank(ctx, testCallback, addr d) == RET_OK
+    waitCallback(d)
+    check d.retCode == RET_OK
+    check d.msgLen == 0 # NOT 1 (would be the 0xf6 sentinel)
+    check scalarStr(d) == ""
 
   test "float param round-trips through the uint64 slot":
     let ctx = makeCtx(0)
@@ -249,13 +269,17 @@ suite "scalar fast path — Nim-native shape":
     check bad.isErr()
     check bad.error == "negative not allowed"
 
+    let blank = waitFor scalarfast_blank(ScalarLib(base: 0))
+    check blank.isOk()
+    check blank.value == ""
+
 # `ffiProcRegistry` is a compile-time var, so its assertions run in a static
 # block (mirrors test_abi_format.nim). A scalar-only `abi = c` proc must be
 # flagged, recognised by `isScalarOnly`, and dropped from `bindableProcs`.
 static:
   const scalarNames = [
     "scalarfast_add", "scalarfast_version", "scalarfast_scale", "scalarfast_positive",
-    "scalarfast_checked",
+    "scalarfast_checked", "scalarfast_blank",
   ]
   var seen = 0
   for p in ffiProcRegistry:
