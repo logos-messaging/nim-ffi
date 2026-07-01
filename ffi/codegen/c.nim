@@ -13,7 +13,7 @@
 ## distinctly-named codec emitted by the cbor_helpers template.
 
 import std/[os, strutils, tables, sets]
-import ./meta, ./string_helpers, ./c_cpp_common
+import ./meta, ./string_helpers, ./c_cpp_common, ./types_ir
 
 ## Wire-format C type for any Nim `ptr T` / `pointer`. Fixed 64-bit so the CBOR
 ## payload size is stable regardless of host architecture (mirrors CppPtrType).
@@ -30,80 +30,42 @@ const
   PreludeHeaderName* = "nim_ffi_prelude.h"
   CborHeaderName* = "nim_ffi_cbor.h"
 
-type LeafInfo = tuple[ok: bool, cType: string, suffix: string, owns: bool]
-
-func leafCType(t: string): LeafInfo =
-  ## Maps a Nim leaf type to its C type, codec suffix and whether a decoded
-  ## value owns heap memory. `ok` is false for composite types (seq/Option/
-  ## user structs), which are monomorphised separately.
-  case t
-  of "int", "int64":
-    (true, "int64_t", "i64", false)
-  of "int32":
-    (true, "int32_t", "i32", false)
-  of "int16":
-    (true, "int16_t", "i16", false)
-  of "int8":
-    (true, "int8_t", "i8", false)
-  of "uint", "uint64":
-    (true, "uint64_t", "u64", false)
-  of "uint32":
-    (true, "uint32_t", "u32", false)
-  of "uint16":
-    (true, "uint16_t", "u16", false)
-  of "uint8", "byte":
-    (true, "uint8_t", "u8", false)
-  of "bool":
-    (true, "bool", "bool", false)
-  of "float", "float64":
-    (true, "double", "f64", false)
-  of "float32":
-    (true, "float", "f32", false)
-  of "pointer":
-    (true, CPtrType, "u64", false)
-  of "string", "cstring":
-    (true, "NimFfiStr", "str", true)
-  else:
-    (false, "", "", false)
-
-func cToken(cType: string): string =
-  ## Short PascalCase token used to build monomorphised container names and
-  ## codec-adapter symbols. Composite C type names are already unique C
-  ## identifiers, so they pass through verbatim.
-  case cType
-  of "int64_t": "I64"
-  of "int32_t": "I32"
-  of "int16_t": "I16"
-  of "int8_t": "I8"
-  of "uint64_t": "U64"
-  of "uint32_t": "U32"
-  of "uint16_t": "U16"
-  of "uint8_t": "U8"
-  of "bool": "Bool"
-  of "double": "F64"
-  of "float": "F32"
-  of "NimFfiStr": "Str"
-  of "NimFfiBytes": "Bytes"
-  else: cType
+const scalarCInfoTable: array[ScalarKind, tuple[cType, suffix: string]] = [
+  skBool: ("bool", "bool"),
+  skI8: ("int8_t", "i8"),
+  skI16: ("int16_t", "i16"),
+  skI32: ("int32_t", "i32"),
+  skI64: ("int64_t", "i64"),
+  skU8: ("uint8_t", "u8"),
+  skU16: ("uint16_t", "u16"),
+  skU32: ("uint32_t", "u32"),
+  skU64: ("uint64_t", "u64"),
+  skF32: ("float", "f32"),
+  skF64: ("double", "f64"),
+]
 
 func leafSuffix(cType: string): string =
-  ## Inverse of leafCType's cType→suffix for the leaf codecs the template
-  ## provides; empty string for composite types.
+  ## C type name → leaf codec suffix for the leaf codecs the template provides;
+  ## empty string for composite types. Driven off the shared scalar table so it
+  ## can't drift from the IR's scalar set.
+  for s in ScalarKind:
+    if scalarCInfoTable[s].cType == cType:
+      return scalarCInfoTable[s].suffix
   case cType
-  of "int64_t": "i64"
-  of "int32_t": "i32"
-  of "int16_t": "i16"
-  of "int8_t": "i8"
-  of "uint64_t": "u64"
-  of "uint32_t": "u32"
-  of "uint16_t": "u16"
-  of "uint8_t": "u8"
-  of "bool": "bool"
-  of "double": "f64"
-  of "float": "f32"
   of "NimFfiStr": "str"
   of "NimFfiBytes": "bytes"
   else: ""
+
+func cToken(cType: string): string =
+  ## Short PascalCase token used to build monomorphised container names and
+  ## codec-adapter symbols. Leaf types reuse their codec suffix (e.g.
+  ## `int64_t`→`I64`); composite C type names are already unique C identifiers,
+  ## so they pass through verbatim.
+  let suffix = leafSuffix(cType)
+  if suffix.len > 0:
+    capitalizeFirstLetter(suffix)
+  else:
+    cType
 
 type CTypeReg = object
   libName: string ## snake_case symbol prefix, e.g. "my_timer"
@@ -293,44 +255,44 @@ proc emitStructType(reg: var CTypeReg, t: FFITypeMeta) =
   reg.codecs.add(body.join("\n"))
   reg.owns[t.name] = owns
 
-proc ensureCType(reg: var CTypeReg, nimType: string): tuple[cType: string, owns: bool] =
-  let t = nimType.strip()
-  if t.startsWith("ptr ") or t == "pointer":
-    return (CPtrType, false)
-  let leaf = leafCType(t)
-  if leaf.ok:
-    return (leaf.cType, leaf.owns)
-
-  let seqInner = genericInnerType(t, "seq[")
-  if seqInner.len > 0:
-    let inner = seqInner.strip()
-    if inner == "byte" or inner == "uint8":
-      return ("NimFfiBytes", true)
-    let (elemC, _) = ensureCType(reg, inner)
+proc ensureCType(reg: var CTypeReg, t: FFIType): tuple[cType: string, owns: bool] =
+  ## Walks the shared type IR into a C type, monomorphising each distinct
+  ## `seq[T]` / `Option[T]` into its own struct + codec triple on first sight.
+  case t.kind
+  of ftPtr:
+    (CPtrType, false)
+  of ftScalar:
+    (scalarCInfoTable[t.scalar].cType, false)
+  of ftStr:
+    ("NimFfiStr", true)
+  of ftBytes:
+    ("NimFfiBytes", true)
+  of ftSeq:
+    let (elemC, _) = ensureCType(reg, t.elem)
     let name = reg.libType & "Seq_" & cToken(elemC)
     if name notin reg.emitted:
       reg.emitted.incl(name)
       emitSeqType(reg, name, elemC)
-    return (name, true)
-
-  var optInner = genericInnerType(t, "Option[")
-  if optInner.len == 0:
-    optInner = genericInnerType(t, "Maybe[")
-  if optInner.len > 0:
-    let (elemC, elemOwns) = ensureCType(reg, optInner.strip())
+    (name, true)
+  of ftOpt:
+    let (elemC, elemOwns) = ensureCType(reg, t.elem)
     let name = reg.libType & "Opt_" & cToken(elemC)
     if name notin reg.emitted:
       reg.emitted.incl(name)
       emitOptType(reg, name, elemC, elemOwns)
-    return (name, reg.owns.getOrDefault(name, false))
+    (name, reg.owns.getOrDefault(name, false))
+  of ftStruct:
+    let name = t.name
+    if name notin reg.emitted:
+      reg.emitted.incl(name)
+      if name in reg.typeTable:
+        emitStructType(reg, reg.typeTable[name])
+      else:
+        reg.decls.add("/* unknown type referenced: " & name & " */")
+    (name, reg.owns.getOrDefault(name, false))
 
-  if t notin reg.emitted:
-    reg.emitted.incl(t)
-    if t in reg.typeTable:
-      emitStructType(reg, reg.typeTable[t])
-    else:
-      reg.decls.add("/* unknown type referenced: " & t & " */")
-  (t, reg.owns.getOrDefault(t, false))
+proc ensureCType(reg: var CTypeReg, nimType: string): tuple[cType: string, owns: bool] =
+  ensureCType(reg, parseFFIType(nimType))
 
 proc reqTypeMeta(p: FFIProcMeta): FFITypeMeta =
   ## Synthesises the per-proc Req struct as an FFITypeMeta so it flows through
@@ -347,7 +309,7 @@ func paramByValue(nimType: string, ridesAsPtr: bool): bool =
   ## aggregates (seq, Option, user structs) pass by const pointer.
   if ridesAsPtr:
     return true
-  leafCType(nimType.strip()).ok
+  parseFFIType(nimType).kind in {ftScalar, ftStr, ftPtr}
 
 proc cReturnType(reg: var CTypeReg, p: FFIProcMeta): string =
   if p.returnRidesAsPtr():
