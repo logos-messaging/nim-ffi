@@ -9,7 +9,7 @@
 ## distinctly-named codec emitted by the cbor_helpers template.
 
 import std/[os, strutils, tables, sets]
-import ./meta, ./string_helpers, ./common
+import ./meta, ./string_helpers, ./c_cpp_common
 
 ## Wire-format C type for any Nim `ptr T` / `pointer`. Fixed 64-bit so the CBOR
 ## payload size is stable regardless of host architecture (mirrors CppPtrType).
@@ -522,7 +522,7 @@ proc emitConstructors(
   lines.add("        return;")
   lines.add("    }")
   lines.add("    ctx->ptr = (void*)(uintptr_t)a;")
-  lines.add("    box->fn(0, ctx, NULL, box->user_data);")
+  lines.add("    box->fn(NIMFFI_RET_OK, ctx, NULL, box->user_data);")
   lines.add("    free(box);")
   lines.add("}")
   lines.add("")
@@ -688,7 +688,7 @@ proc emitMethod(
   lines.add("        free(box);")
   lines.add("        return;")
   lines.add("    }")
-  lines.add("    box->fn(0, &out, NULL, box->user_data);")
+  lines.add("    box->fn(NIMFFI_RET_OK, &out, NULL, box->user_data);")
   if retFree.len > 0:
     lines.add("    " & retFree & "(&out);")
   lines.add("    free(box);")

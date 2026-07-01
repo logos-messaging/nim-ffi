@@ -1,7 +1,26 @@
 #include "my_timer.h"
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
+
+#if defined(__STDC_NO_ATOMICS__)
+#  error "C11 atomics required (or provide a mutex/condvar fallback)"
+#endif
+#include <stdatomic.h>
+
+/* The `done` flags below are written from the library's dispatch thread and
+ * polled from main, so they cross a thread boundary — atomics, not `volatile`,
+ * give the visibility guarantee. sleep_ms wraps the platform nap so the demo
+ * builds on Windows too. */
+#if defined(_WIN32)
+#  include <windows.h>
+static void sleep_ms(unsigned ms) { Sleep(ms); }
+#else
+#  include <time.h>
+static void sleep_ms(unsigned ms) {
+    struct timespec t = {(time_t)(ms / 1000), (long)(ms % 1000) * 1000 * 1000};
+    nanosleep(&t, NULL);
+}
+#endif
 
 /* The generated bindings are asynchronous: each call takes a result callback
  * and returns immediately. The reply and any error string handed to that
@@ -12,26 +31,25 @@
 
 /* Poll up to ~5s for a callback to fire. Returns false if it never did, so the
  * caller can report a stuck call instead of treating it as an empty success. */
-static bool wait_done(volatile int* done) {
-    for (int i = 0; i < 500 && !*done; i++) {
-        struct timespec t = {0, 10 * 1000 * 1000}; /* 10ms */
-        nanosleep(&t, NULL);
+static bool wait_done(atomic_int* done) {
+    for (int i = 0; i < 500 && !atomic_load(done); i++) {
+        sleep_ms(10);
     }
-    return *done != 0;
+    return atomic_load(done) != 0;
 }
 
-static volatile int g_echo_count = 0;
+static atomic_int g_echo_count = 0;
 static char g_echo_message[256];
 
 static void on_echo_fired(const EchoEvent* evt, void* user_data) {
     (void)user_data;
-    g_echo_count = (int)evt->echoCount;
+    atomic_store(&g_echo_count, (int)evt->echoCount);
     snprintf(g_echo_message, sizeof(g_echo_message), "%s",
              evt->message.data ? evt->message.data : "");
 }
 
 typedef struct {
-    volatile int done;
+    atomic_int done;
     int err_code;
     MyTimerCtx* ctx;
     char err[256];
@@ -42,14 +60,14 @@ static void on_created(int ec, MyTimerCtx* ctx, const char* em, void* ud) {
     w->err_code = ec;
     w->ctx = ctx;
     if (em) snprintf(w->err, sizeof(w->err), "%s", em);
-    w->done = 1;
+    atomic_store(&w->done, 1);
 }
 
 /* Generic reply sink: each step copies the fields it cares about out of its
  * typed reply into these slots (text_a/text_b for strings, num_a/num_b for
  * integers, flag for a boolean) before the binding reclaims the reply. */
 typedef struct {
-    volatile int done;
+    atomic_int done;
     int err_code;
     char err[256];
     char text_a[256];
@@ -64,7 +82,7 @@ static void on_version(int ec, const NimFfiStr* reply, const char* em, void* ud)
     w->err_code = ec;
     if (reply && reply->data) snprintf(w->text_a, sizeof(w->text_a), "%s", reply->data);
     if (em) snprintf(w->err, sizeof(w->err), "%s", em);
-    w->done = 1;
+    atomic_store(&w->done, 1);
 }
 
 static void on_echo(int ec, const EchoResponse* reply, const char* em, void* ud) {
@@ -77,7 +95,7 @@ static void on_echo(int ec, const EchoResponse* reply, const char* em, void* ud)
             snprintf(w->text_b, sizeof(w->text_b), "%s", reply->timerName.data);
     }
     if (em) snprintf(w->err, sizeof(w->err), "%s", em);
-    w->done = 1;
+    atomic_store(&w->done, 1);
 }
 
 static void on_complex(int ec, const ComplexResponse* reply, const char* em, void* ud) {
@@ -90,7 +108,7 @@ static void on_complex(int ec, const ComplexResponse* reply, const char* em, voi
             snprintf(w->text_a, sizeof(w->text_a), "%s", reply->summary.data);
     }
     if (em) snprintf(w->err, sizeof(w->err), "%s", em);
-    w->done = 1;
+    atomic_store(&w->done, 1);
 }
 
 static void on_schedule(int ec, const ScheduleResult* reply, const char* em, void* ud) {
@@ -103,7 +121,7 @@ static void on_schedule(int ec, const ScheduleResult* reply, const char* em, voi
             snprintf(w->text_a, sizeof(w->text_a), "%s", reply->jobId.data);
     }
     if (em) snprintf(w->err, sizeof(w->err), "%s", em);
-    w->done = 1;
+    atomic_store(&w->done, 1);
 }
 
 /* Fire an async call, block until its callback lands, and bail to cleanup on a
@@ -196,10 +214,9 @@ int main(void) {
     my_timer_ctx_echo(ctx, &evt_req, on_echo, &w);
     wait_done(&w.done);
     /* The event fires from the library's dispatch thread; give it a moment. */
-    struct timespec settle = {0, 100 * 1000 * 1000};
-    nanosleep(&settle, NULL);
+    sleep_ms(500);
     printf("[6] typed event onEchoFired: message=%s, echoCount=%d\n",
-           g_echo_message, g_echo_count);
+           g_echo_message, atomic_load(&g_echo_count));
 
     my_timer_ctx_remove_event_listener(ctx, handle);
 

@@ -15,8 +15,13 @@ extern "C" {
  * `msg`/`len` carry the error text, which is NOT NUL-terminated). */
 typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_data);
 
-/* RET_MISSING_CALLBACK from the Nim dispatcher: the callback will never fire,
- * so the request path must report the failure itself. */
+/* Return / callback status codes. NIMFFI_RET_OK (0) is success; any non-zero
+ * value handed to a result callback's `err_code` (or returned by a submit call)
+ * is a failure. NIMFFI_RET_MISSING_CALLBACK is a special case from the Nim
+ * dispatcher: the callback will never fire, so the request path must report the
+ * failure itself. */
+#define NIMFFI_RET_OK 0
+#define NIMFFI_RET_ERROR 1
 #define NIMFFI_RET_MISSING_CALLBACK 2
 
 /* ── leaf encoders ─────────────────────────────────────────────────────── */
@@ -88,6 +93,9 @@ static inline CborError nimffi_dec_i32(CborValue* it, int32_t* out) {
     if (err) {
         return err;
     }
+    if (tmp < INT32_MIN || tmp > INT32_MAX) {
+        return CborErrorDataTooLarge;
+    }
     *out = (int32_t)tmp;
     return CborNoError;
 }
@@ -97,6 +105,9 @@ static inline CborError nimffi_dec_i16(CborValue* it, int16_t* out) {
     if (err) {
         return err;
     }
+    if (tmp < INT16_MIN || tmp > INT16_MAX) {
+        return CborErrorDataTooLarge;
+    }
     *out = (int16_t)tmp;
     return CborNoError;
 }
@@ -105,6 +116,9 @@ static inline CborError nimffi_dec_i8(CborValue* it, int8_t* out) {
     CborError err = nimffi_dec_i64(it, &tmp);
     if (err) {
         return err;
+    }
+    if (tmp < INT8_MIN || tmp > INT8_MAX) {
+        return CborErrorDataTooLarge;
     }
     *out = (int8_t)tmp;
     return CborNoError;
@@ -121,6 +135,9 @@ static inline CborError nimffi_dec_u32(CborValue* it, uint32_t* out) {
     if (err) {
         return err;
     }
+    if (tmp > UINT32_MAX) {
+        return CborErrorDataTooLarge;
+    }
     *out = (uint32_t)tmp;
     return CborNoError;
 }
@@ -130,6 +147,9 @@ static inline CborError nimffi_dec_u16(CborValue* it, uint16_t* out) {
     if (err) {
         return err;
     }
+    if (tmp > UINT16_MAX) {
+        return CborErrorDataTooLarge;
+    }
     *out = (uint16_t)tmp;
     return CborNoError;
 }
@@ -138,6 +158,9 @@ static inline CborError nimffi_dec_u8(CborValue* it, uint8_t* out) {
     CborError err = nimffi_dec_u64(it, &tmp);
     if (err) {
         return err;
+    }
+    if (tmp > UINT8_MAX) {
+        return CborErrorDataTooLarge;
     }
     *out = (uint8_t)tmp;
     return CborNoError;
