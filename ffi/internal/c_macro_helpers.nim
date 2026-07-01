@@ -553,3 +553,370 @@ proc flushCWireCompanions*(): NimNode {.compileTime.} =
     if typeMeta.abiFormat == ABIFormat.C:
       ensureCWireFor(typeMeta.name, sink)
   sink
+
+## abi = c proc dispatch. The foreign surface is CBOR-free — the flat `_CWire`
+## structs are the C ABI — but transport reuses the proven CBOR request path
+## internally: the generated exported wrapper `cwireUnpack`s the request into a
+## Nim object, `cborEncodeShared`s it onto the FFI thread, and a Nim reply
+## trampoline `cborDecode`s the reply and `cwirePack`s it back into a `_CWire`
+## struct delivered to the caller's typed callback. So the C consumer never
+## links CBOR, yet the whole thread/dispatch machinery is unchanged.
+##
+## All of this is emitted at `genBindings()` time (after `flushCWireCompanions`)
+## so the request-envelope companions and their `cwireUnpack` overloads are in
+## scope: the exported wrappers reference them, and a proc must follow the
+## procs it calls.
+
+type
+  CAbiKind = enum
+    cakMethod
+    cakCtor
+
+  CAbiSpec = object
+    kind: CAbiKind
+    exportName: string ## snake_case C symbol, e.g. "echo_shout"
+    libType: NimNode ## library value type, e.g. `Echo`
+    envelope: NimNode ## per-proc Req type, e.g. `EchoShoutReq`
+    paramNames: seq[string] ## envelope field names (the extra params)
+    paramTypes: seq[NimNode] ## envelope field types
+    respType: NimNode ## method result T; empty for a ctor
+
+var cAbiSpecs {.compileTime.}: seq[CAbiSpec]
+
+proc copyTypes(types: seq[NimNode]): seq[NimNode] {.compileTime.} =
+  var res: seq[NimNode] = @[]
+  for t in types:
+    res.add(t.copyNimTree())
+  res
+
+proc registerCAbiMethod*(
+    exportName: string,
+    libType, envelope: NimNode,
+    paramNames: seq[string],
+    paramTypes: seq[NimNode],
+    respType: NimNode,
+) {.compileTime.} =
+  ## Record an `abi = c` method so `flushCAbiDispatch` can emit its wrapper.
+  ## Nodes are frozen with `copyNimTree` — the originals are shared with the Req
+  ## `type` section, which the compiler later binds to `nnkSym`, and a bound
+  ## type symbol reused in the generated body triggers a compiler ICE.
+  cAbiSpecs.add(
+    CAbiSpec(
+      kind: cakMethod,
+      exportName: exportName,
+      libType: libType.copyNimTree(),
+      envelope: envelope.copyNimTree(),
+      paramNames: paramNames,
+      paramTypes: copyTypes(paramTypes),
+      respType: respType.copyNimTree(),
+    )
+  )
+
+proc registerCAbiCtor*(
+    exportName: string,
+    libType, envelope: NimNode,
+    paramNames: seq[string],
+    paramTypes: seq[NimNode],
+) {.compileTime.} =
+  ## Record an `abi = c` constructor so `flushCAbiDispatch` can emit its wrapper.
+  ## See `registerCAbiMethod` for why the nodes are frozen with `copyNimTree`.
+  cAbiSpecs.add(
+    CAbiSpec(
+      kind: cakCtor,
+      exportName: exportName,
+      libType: libType.copyNimTree(),
+      envelope: envelope.copyNimTree(),
+      paramNames: paramNames,
+      paramTypes: copyTypes(paramTypes),
+      respType: newEmptyNode(),
+    )
+  )
+
+proc isStringResp(t: NimNode): bool =
+  t.kind == nnkIdent and ($t == "string" or $t == "cstring")
+
+proc cdeclReplyPragma(): NimNode =
+  nnkPragma.newTree(
+    ident("cdecl"),
+    ident("gcsafe"),
+    nnkExprColonExpr.newTree(ident("raises"), nnkBracket.newTree()),
+  )
+
+proc cAbiCbType(replyType: NimNode): NimNode =
+  ## `proc(err: cint, reply: <replyType>, errMsg: cstring, ud: pointer)
+  ## {.cdecl, gcsafe, raises: [].}` — the caller's typed reply callback.
+  let fp = nnkFormalParams.newTree(
+    newEmptyNode(),
+    newIdentDefs(ident("err"), ident("cint")),
+    newIdentDefs(ident("reply"), replyType),
+    newIdentDefs(ident("errMsg"), ident("cstring")),
+    newIdentDefs(ident("ud"), ident("pointer")),
+  )
+  nnkProcTy.newTree(fp, cdeclReplyPragma())
+
+proc boxTypeDef(boxName, cbType: NimNode): NimNode =
+  ## `type <boxName> = object` holding the caller's callback + user data, heap
+  ## boxed across the thread hand-off.
+  let recList = nnkRecList.newTree(
+    newIdentDefs(ident("fn"), cbType), newIdentDefs(ident("ud"), ident("pointer"))
+  )
+  let objTy = nnkObjectTy.newTree(newEmptyNode(), newEmptyNode(), recList)
+  nnkTypeSection.newTree(nnkTypeDef.newTree(boxName, newEmptyNode(), objTy))
+
+proc replyTrampProc(trampName, body: NimNode): NimNode =
+  ## A `FFICallBack`-shaped Nim proc: it runs on the FFI thread inside
+  ## `handleRes`' `foreignThreadGc`, converts the reply, and frees the box.
+  newProc(
+    name = trampName,
+    params = @[
+      newEmptyNode(),
+      newIdentDefs(ident("ret"), ident("cint")),
+      newIdentDefs(ident("msg"), nnkPtrTy.newTree(ident("cchar"))),
+      newIdentDefs(ident("len"), ident("csize_t")),
+      newIdentDefs(ident("ud"), ident("pointer")),
+    ],
+    body = body,
+    pragmas = cdeclReplyPragma(),
+  )
+
+proc objectTrampBody(boxName, respType, respWire: NimNode): NimNode =
+  ## Reply trampoline for an object return: recover the box, deliver a transport
+  ## error as a copied NUL-terminated string, else CBOR-decode the reply,
+  ## `cwirePack` it into the flat wire struct, hand a pointer to the caller, and
+  ## release the wire.
+  quote:
+    let box = cast[ptr `boxName`](ud)
+    if box.isNil():
+      return
+    defer:
+      freeBox(box)
+    if box.fn.isNil():
+      return
+    try:
+      if ret != RET_OK:
+        var em = newString(int(len))
+        if int(len) > 0:
+          copyMem(addr em[0], msg, int(len))
+        box.fn(ret, nil, em.cstring, box.ud)
+        return
+      let decoded =
+        cborDecodePtr(cast[ptr UncheckedArray[byte]](msg), int(len), `respType`)
+      if decoded.isErr():
+        box.fn(RET_ERR, nil, decoded.error.cstring, box.ud)
+      else:
+        var wire: `respWire`
+        cwirePack(wire, decoded.get())
+        box.fn(RET_OK, addr wire, nil, box.ud)
+        cwireFree(wire)
+    except CatchableError as e:
+      box.fn(RET_ERR, nil, e.msg.cstring, box.ud)
+
+proc stringTrampBody(boxName: NimNode): NimNode =
+  ## Reply trampoline for a `string` return (and the ctor's address string):
+  ## CBOR-decode the reply into a Nim string and hand its (NUL-terminated)
+  ## `cstring` to the caller for the duration of the call.
+  quote:
+    let box = cast[ptr `boxName`](ud)
+    if box.isNil():
+      return
+    defer:
+      freeBox(box)
+    if box.fn.isNil():
+      return
+    try:
+      if ret != RET_OK:
+        var em = newString(int(len))
+        if int(len) > 0:
+          copyMem(addr em[0], msg, int(len))
+        box.fn(ret, nil, em.cstring, box.ud)
+        return
+      let decoded = cborDecodePtr(cast[ptr UncheckedArray[byte]](msg), int(len), string)
+      if decoded.isErr():
+        box.fn(RET_ERR, nil, decoded.error.cstring, box.ud)
+      else:
+        let replyStr = decoded.get()
+        box.fn(RET_OK, replyStr.cstring, nil, box.ud)
+    except CatchableError as e:
+      box.fn(RET_ERR, nil, e.msg.cstring, box.ud)
+
+proc exportedMethodProc(
+    spec: CAbiSpec, boxName, envWire, trampName, poolIdent, cbType: NimNode
+): NimNode =
+  # `cwireUnpack` and `cborEncodeShared` run on the *calling* thread and allocate
+  # GC memory, so the caller must be a GC-registered thread — which the dylib's
+  # load thread already is. Deliberately NOT wrapped in `foreignThreadGc`: its
+  # `tearDownForeignThreadGc` would destroy that thread's live ORC heap (a
+  # use-after-free / nil-read crash), and unlike the CBOR path — which only
+  # memcpy's bytes here — this path genuinely needs the heap intact.
+  let envName = spec.envelope
+  let libFFICtx =
+    nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), spec.libType))
+  let body = quote:
+    if onReply.isNil():
+      return RET_MISSING_CALLBACK
+    if not `poolIdent`.isValidCtx(cast[pointer](ctx)):
+      onReply(RET_ERR, nil, "ctx is not a valid FFI context".cstring, userData)
+      return RET_ERR
+    var reqObj: `envName` = cwireUnpack(req[])
+    let enc = cborEncodeShared(reqObj)
+    let reqBuf = enc.data
+    let reqBufLen = enc.len
+    let box = cast[ptr `boxName`](allocBox(sizeof(`boxName`)))
+    box.fn = onReply
+    box.ud = userData
+    let typeStr = $`envName`
+    let reqPtr = FFIThreadRequest.initFromOwnedShared(
+      `trampName`, box, typeStr.cstring, reqBuf, reqBufLen
+    )
+    let sendRes =
+      try:
+        ffi_context.sendRequestToFFIThread(ctx, reqPtr)
+      except Exception as exc:
+        Result[void, string].err("sendRequestToFFIThread exception: " & exc.msg)
+    if sendRes.isErr():
+      onReply(RET_ERR, nil, sendRes.error.cstring, userData)
+      return RET_ERR
+    return RET_OK
+  newProc(
+    name = ident($envName & "CAbiExport"),
+    params = @[
+      ident("cint"),
+      newIdentDefs(ident("ctx"), libFFICtx),
+      newIdentDefs(ident("onReply"), cbType),
+      newIdentDefs(ident("userData"), ident("pointer")),
+      newIdentDefs(ident("req"), nnkPtrTy.newTree(envWire)),
+    ],
+    body = body,
+    pragmas = nnkPragma.newTree(
+      ident("dynlib"),
+      nnkExprColonExpr.newTree(ident("exportc"), newStrLitNode(spec.exportName)),
+      ident("cdecl"),
+      nnkExprColonExpr.newTree(ident("raises"), nnkBracket.newTree()),
+    ),
+  )
+
+proc exportedCtorProc(
+    spec: CAbiSpec, boxName, envWire, trampName, poolIdent, cbType: NimNode
+): NimNode =
+  let envName = spec.envelope
+  # See exportedMethodProc: the request conversion allocates GC on the calling
+  # thread, so no `foreignThreadGc` (its teardown would free that thread's heap).
+  # `when declared(initializeLibrary): initializeLibrary()` — built as raw AST;
+  # a `when` with an undeclared symbol inside `quote` trips a compiler ICE.
+  let initGuard = nnkWhenStmt.newTree(
+    nnkElifBranch.newTree(
+      newCall(ident("declared"), ident("initializeLibrary")),
+      newStmtList(newCall(ident("initializeLibrary"))),
+    )
+  )
+  let body = quote:
+    let ctxRes = `poolIdent`.createFFIContext()
+    if ctxRes.isErr():
+      if not onCreated.isNil():
+        onCreated(
+          RET_ERR,
+          nil,
+          ("ffiCtor: failed to create FFIContext: " & $ctxRes.error).cstring,
+          userData,
+        )
+      return nil
+    let ctx = ctxRes.get()
+    var reqObj: `envName` = cwireUnpack(req[])
+    let enc = cborEncodeShared(reqObj)
+    let reqBuf = enc.data
+    let reqBufLen = enc.len
+    let box = cast[ptr `boxName`](allocBox(sizeof(`boxName`)))
+    box.fn = onCreated
+    box.ud = userData
+    let typeStr = $`envName`
+    let reqPtr = FFIThreadRequest.initFromOwnedShared(
+      `trampName`, box, typeStr.cstring, reqBuf, reqBufLen
+    )
+    let sendRes =
+      try:
+        ctx.sendRequestToFFIThread(reqPtr)
+      except Exception as exc:
+        Result[void, string].err("sendRequestToFFIThread exception: " & exc.msg)
+    if sendRes.isErr():
+      if not onCreated.isNil():
+        onCreated(RET_ERR, nil, sendRes.error.cstring, userData)
+      return nil
+    return cast[pointer](ctx)
+  body.insert(0, initGuard)
+  newProc(
+    name = ident($envName & "CAbiExport"),
+    params = @[
+      ident("pointer"),
+      newIdentDefs(ident("req"), nnkPtrTy.newTree(envWire)),
+      newIdentDefs(ident("onCreated"), cbType),
+      newIdentDefs(ident("userData"), ident("pointer")),
+    ],
+    body = body,
+    pragmas = nnkPragma.newTree(
+      ident("dynlib"),
+      nnkExprColonExpr.newTree(ident("exportc"), newStrLitNode(spec.exportName)),
+      ident("cdecl"),
+      nnkExprColonExpr.newTree(ident("raises"), nnkBracket.newTree()),
+    ),
+  )
+
+proc ensureCWireForFields(
+    sink: NimNode, typeName: string, names: seq[string], types: seq[NimNode]
+) {.compileTime.} =
+  ## Emit the `_CWire` companion + conversion procs for a synthetic per-proc Req
+  ## envelope (not a user `{.ffi.}` type, so it isn't in `ffiTypeRegistry`).
+  ## Nested user-type deps are already emitted by `flushCWireCompanions`.
+  if isCWireEmitted(typeName):
+    return
+  var deps: seq[string] = @[]
+  collectNestedFFITypes(types, deps)
+  for dep in deps:
+    ensureCWireFor(dep, sink)
+  markCWireEmitted(typeName)
+  let section = newNimNode(nnkTypeSection)
+  section.add(buildCWireTypeDef(typeName, names, types))
+  sink.add(section)
+  for p in buildCWireProcs(typeName, names, types):
+    sink.add(p)
+
+proc flushCAbiDispatch*(): NimNode {.compileTime.} =
+  ## Emit the exported wrappers + reply trampolines for every registered
+  ## `abi = c` proc. Runs after `flushCWireCompanions` so nested companions and
+  ## their `cwireUnpack`/`cwirePack` overloads are already defined.
+  let sink = newStmtList()
+  for spec in cAbiSpecs:
+    let envName = spec.envelope
+    ensureCWireForFields(sink, $envName, spec.paramNames, spec.paramTypes)
+    let envWire = ident(cwireTypeName($envName))
+    let boxName = ident($envName & "CBox")
+    let trampName = ident($envName & "CReply")
+    let poolIdent = ident($spec.libType & "FFIPool")
+    case spec.kind
+    of cakCtor:
+      let cbType = cAbiCbType(ident("cstring"))
+      sink.add(boxTypeDef(boxName, cbType))
+      sink.add(replyTrampProc(trampName, stringTrampBody(boxName)))
+      sink.add(exportedCtorProc(spec, boxName, envWire, trampName, poolIdent, cbType))
+    of cakMethod:
+      let rt = spec.respType
+      if isStringResp(rt):
+        let cbType = cAbiCbType(ident("cstring"))
+        sink.add(boxTypeDef(boxName, cbType))
+        sink.add(replyTrampProc(trampName, stringTrampBody(boxName)))
+        sink.add(
+          exportedMethodProc(spec, boxName, envWire, trampName, poolIdent, cbType)
+        )
+      elif rt.kind == nnkIdent:
+        let respWire = ident(cwireTypeName($rt))
+        let cbType = cAbiCbType(nnkPtrTy.newTree(respWire))
+        sink.add(boxTypeDef(boxName, cbType))
+        sink.add(replyTrampProc(trampName, objectTrampBody(boxName, rt, respWire)))
+        sink.add(
+          exportedMethodProc(spec, boxName, envWire, trampName, poolIdent, cbType)
+        )
+      else:
+        error(
+          "abi = c: unsupported response type for proc '" & spec.exportName & "': " &
+            rt.repr & " (only object and string returns are wired)"
+        )
+  sink

@@ -63,9 +63,10 @@ var libraryDeclared* {.compileTime.}: bool = false
 var currentDefaultABIFormat* {.compileTime.}: ABIFormat = ABIFormat.Cbor
 
 proc abiCodegenImplemented*(fmt: ABIFormat): bool =
-  ## Whether `fmt` has a working proc-dispatch path. Only `Cbor` does today; the
-  ## seam a future PR flips once the `c` dispatch path is wired.
-  fmt == ABIFormat.Cbor
+  ## Whether `fmt` has a working proc-dispatch path. Both `Cbor` and `C` are
+  ## wired: `Cbor` rides the generic overloads, `C` rides the flat `_CWire`
+  ## companions (a CBOR-free foreign surface with CBOR transport internally).
+  fmt in {ABIFormat.Cbor, ABIFormat.C}
 
 proc parseABIFormatName*(name: string): tuple[ok: bool, fmt: ABIFormat] =
   ## Bare format name (`"c"`/`"cbor"`, case-insensitive) → `ABIFormat`;

@@ -44,6 +44,18 @@ proc dealloc*(p: cstring) {.inline.} =
   if not p.isNil():
     c_free(cast[pointer](p))
 
+proc allocBox*(size: int): pointer =
+  ## `c_malloc` block for a cross-thread callback box (allocated on the foreign
+  ## caller thread, freed on the FFI thread). Uses libc for the same
+  ## thread-lifetime safety reason as the rest of this module. Free with
+  ## `freeBox`.
+  c_malloc(csize_t(size))
+
+proc freeBox*(p: pointer) =
+  ## Releases a block from `allocBox`. Nil-safe.
+  if not p.isNil():
+    c_free(p)
+
 proc allocSharedSeq*[T](s: seq[T]): SharedSeq[T] =
   if s.len == 0:
     return (cast[ptr UncheckedArray[T]](nil), 0)
