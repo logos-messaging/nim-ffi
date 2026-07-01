@@ -50,7 +50,7 @@ type
     structName*: proc(name: string): string {.noSideEffect, nimcall.}
       ## nil ⇒ the user type name passes through unchanged
 
-func genericInnerType(typeName, prefix: string): string =
+func genericInnerType*(typeName, prefix: string): string =
   ## Inner type of a single-parameter generic `Prefix[Inner]`, e.g.
   ## `genericInnerType("seq[int]", "seq[")` → `"int"`; "" if not that shape.
   if typeName.startsWith(prefix) and typeName.endsWith("]"):

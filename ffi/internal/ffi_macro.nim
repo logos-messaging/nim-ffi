@@ -9,6 +9,7 @@ when defined(ffiGenBindings):
   import ../codegen/rust
   import ../codegen/cpp
   import ../codegen/c
+  import ../codegen/c_abi
   import ../codegen/cddl
 
 proc requireLibraryDeclared(where: string) {.compileTime.} =
@@ -954,9 +955,10 @@ macro ffi*(args: varargs[untyped]): untyped =
     abiFormat: abiFormat,
   )
 
-  # Qualifies for the CBOR-free fast path only if `abi = c`, every wire param +
-  # return is scalar (`isScalarOnly`), and the args fit the inline slots. A
-  # non-scalar `abi = c` proc stays gated — full C-wire dispatch is a follow-up.
+  # Does this proc qualify for the CBOR-free scalar fast path? Only `abi = c`
+  # opts in, and only when every wire param + the return is a plain scalar
+  # (see `isScalarOnly`) and the args fit the inline slots. A non-scalar
+  # `abi = c` proc rides the flat `_CWire` C-dispatch emitted by `asyncPath`.
   let scalarEligible =
     abiFormat == ABIFormat.C and isScalarOnly(procMeta) and
     extraParamNames.len <= MaxScalarArgs
@@ -1085,6 +1087,17 @@ macro ffi*(args: varargs[untyped]): untyped =
 
     ffiProcRegistry.add(procMeta)
 
+    if abiFormat == ABIFormat.C:
+      # The flat-struct exported wrapper + reply trampoline are emitted at
+      # genBindings() time (see flushCAbiDispatch); the CBOR `ffiProc` is not.
+      registerCAbiMethod(
+        cExportName, libTypeName, reqTypeName, extraParamNames, extraParamTypes,
+        resultRetType,
+      )
+      return newStmtList(
+        helperProc, registerReq, registerRequestTimeout(reqTypeName, timeoutMs)
+      )
+
     return newStmtList(
       helperProc, registerReq, ffiProc, registerRequestTimeout(reqTypeName, timeoutMs)
     )
@@ -1108,9 +1121,6 @@ macro ffi*(args: varargs[untyped]): untyped =
       extraParamTypes = extraParamTypes,
       procMeta = procMeta,
     )
-
-  if abiFormat == ABIFormat.C and not scalarEligible:
-    gateABIFormat(abiFormat, "`.ffi.` proc")
 
   let stmts =
     if scalarEligible:
@@ -1534,16 +1544,31 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
     when not declared(`poolIdent`):
       var `poolIdent`: FFIContextPool[`libTypeName`]
 
-  let stmts = newStmtList(
-    typeDef,
-    ffiNewReqProc,
-    helperProc,
-    processProc,
-    addToReg,
-    poolDecl,
-    ffiProc,
-    registerRequestTimeout(reqTypeName, timeoutMs),
-  )
+  let stmts =
+    if abiFormat == ABIFormat.C:
+      # The flat-struct exported wrapper is emitted at genBindings() time (see
+      # flushCAbiDispatch); the CBOR `ffiProc` is not.
+      registerCAbiCtor(cExportName, libTypeName, reqTypeName, paramNames, paramTypes)
+      newStmtList(
+        typeDef,
+        ffiNewReqProc,
+        helperProc,
+        processProc,
+        addToReg,
+        poolDecl,
+        registerRequestTimeout(reqTypeName, timeoutMs),
+      )
+    else:
+      newStmtList(
+        typeDef,
+        ffiNewReqProc,
+        helperProc,
+        processProc,
+        addToReg,
+        poolDecl,
+        ffiProc,
+        registerRequestTimeout(reqTypeName, timeoutMs),
+      )
 
   when defined(ffiDumpMacros):
     echo stmts.repr
@@ -1720,6 +1745,11 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
   let (wireName, abiSpecStart) = resolveEventWireName(leading, userProcName)
   let abiFormat = resolveABIFormat(leading[abiSpecStart ..^ 1])
   gateABIFormat(abiFormat, "`.ffiEvent.` proc")
+  if abiFormat == ABIFormat.C:
+    error(
+      "`.ffiEvent.` proc: the `c` ABI does not yet support events; declare the " &
+        "event with `abi = cbor` (events still ride CBOR internally)"
+    )
 
   let formalParams = prc[3]
 
@@ -1839,15 +1869,22 @@ macro genBindings*(
       generateCBindings(
         genProcs, ffiTypeRegistry, libName, outputDir, nimSrcRelPath, ffiEventRegistry
       )
+    of "c_abi":
+      generateCAbiBindings(
+        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
+        ffiEventRegistry,
+      )
     of "cddl":
       generateCddlBindings(genProcs, ffiTypeRegistry, libName, outputDir, nimSrcRelPath)
     else:
       error(
         "genBindings: unknown targetLang '" & lang &
-          "'. Use 'rust', 'cpp', 'c', or 'cddl'."
+          "'. Use 'rust', 'cpp', 'c', 'c_abi', or 'cddl'."
       )
 
-  let cwireCompanions = flushCWireCompanions()
+  let emitted = flushCWireCompanions()
+  for node in flushCAbiDispatch():
+    emitted.add(node)
   when defined(ffiDumpMacros):
-    echo cwireCompanions.repr
-  cwireCompanions
+    echo emitted.repr
+  emitted

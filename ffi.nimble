@@ -138,6 +138,13 @@ task test_c_e2e, "Build and run the C end-to-end tests for the timer example":
   runOrQuit "cmake --build tests/e2e/c/build --config Debug"
   runOrQuit "ctest --test-dir tests/e2e/c/build --output-on-failure -C Debug"
 
+task test_c_abi_e2e, "Build and run the CBOR-free abi=c C end-to-end test (echo)":
+  # Regenerate the abi=c bindings so the suite always runs against fresh codegen.
+  runOrQuit "nimble genbindings_c_abi_echo"
+  runOrQuit "cmake -S tests/e2e/c_abi -B tests/e2e/c_abi/build"
+  runOrQuit "cmake --build tests/e2e/c_abi/build --config Debug"
+  runOrQuit "ctest --test-dir tests/e2e/c_abi/build --output-on-failure -C Debug"
+
 task test_sanitized,
   "Run all unit tests under a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
   let san = getEnv("NIM_FFI_SAN", "none")
@@ -168,6 +175,15 @@ task test_c_e2e_sanitized,
     " -DNIM_FFI_SANITIZER=" & san
   runOrQuit "cmake --build tests/e2e/c/build --config Debug -j"
   runOrQuit "ctest --test-dir tests/e2e/c/build --output-on-failure -C Debug"
+
+task test_c_abi_e2e_sanitized,
+  "Build and run the abi=c C e2e test with a sanitizer (NIM_FFI_SAN)":
+  let san = getEnv("NIM_FFI_SAN", "none")
+  runOrQuit "nimble genbindings_c_abi_echo"
+  runOrQuit "cmake -S tests/e2e/c_abi -B tests/e2e/c_abi/build" & " -DNIM_FFI_SANITIZER=" &
+    san
+  runOrQuit "cmake --build tests/e2e/c_abi/build --config Debug -j"
+  runOrQuit "ctest --test-dir tests/e2e/c_abi/build --output-on-failure -C Debug"
 
 task genbindings_example, "Generate Rust bindings for the timer example":
   exec "nim c " & nimFlagsOrc &
@@ -227,6 +243,16 @@ task genbindings_c_echo, "Generate C bindings for the echo example":
     " -d:ffiGenBindings -d:targetLang=c" & " -d:ffiOutputDir=examples/echo/c_bindings" &
     " -d:ffiSrcPath=../echo.nim" & " -o:/dev/null examples/echo/echo.nim"
 
+task genbindings_c_abi_echo, "Generate CBOR-free abi=c C bindings for the echo example":
+  exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libecho" &
+    " -d:ffiEchoAbiC -d:ffiGenBindings -d:targetLang=c_abi" &
+    " -d:ffiOutputDir=examples/echo/c_abi_bindings" & " -d:ffiSrcPath=../echo.nim" &
+    " -o:/dev/null examples/echo/echo.nim"
+  exec "nim c " & nimFlagsRefc & " --app:lib --noMain --nimMainPrefix:libecho" &
+    " -d:ffiEchoAbiC -d:ffiGenBindings -d:targetLang=c_abi" &
+    " -d:ffiOutputDir=examples/echo/c_abi_bindings" & " -d:ffiSrcPath=../echo.nim" &
+    " -o:/dev/null examples/echo/echo.nim"
+
 task check_bindings_rust, "Verify checked-in Rust bindings match Nim source":
   exec "nimble genbindings_rust"
   exec "git diff --exit-code --" & " examples/timer/rust_bindings/Cargo.toml" &
@@ -250,7 +276,13 @@ task check_bindings_c, "Verify checked-in C bindings match Nim source":
     " examples/echo/c_bindings/nim_ffi_cbor.h" &
     " examples/echo/c_bindings/CMakeLists.txt"
 
+task check_bindings_c_abi, "Verify checked-in abi=c C bindings match Nim source":
+  exec "nimble genbindings_c_abi_echo"
+  exec "git diff --exit-code --" & " examples/echo/c_abi_bindings/echo.h" &
+    " examples/echo/c_abi_bindings/CMakeLists.txt"
+
 task check_bindings, "Verify all checked-in example bindings match Nim source":
   exec "nimble check_bindings_rust"
   exec "nimble check_bindings_cpp"
   exec "nimble check_bindings_c"
+  exec "nimble check_bindings_c_abi"

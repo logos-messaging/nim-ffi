@@ -1,0 +1,22 @@
+# LeakSanitizer suppressions for the Nim runtime.
+#
+# These are process-lifetime allocations freed implicitly at exit —
+# not real leaks. Add new entries here only with a comment justifying
+# why the leak is unavoidable, and only for symbols inside the Nim
+# standard library, chronos, or chronicles. Anything in our own code
+# (ffi/*) or the generated bindings must be fixed, not suppressed.
+
+# Nim runtime initialisation — allocates global state freed at exit.
+leak:NimMain
+leak:PreMain
+leak:systemDatInit
+
+# GC bootstrap — registers stack bottom / TLS slots once per thread.
+leak:nimGC_setStackBottom
+leak:initStackBottomWith
+leak:setupForeignThreadGc
+
+# Async / logging library globals (event loop singletons, logger
+# registries) — owned for the process lifetime.
+leak:chronos
+leak:chronicles
