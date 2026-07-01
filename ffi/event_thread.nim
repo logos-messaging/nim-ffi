@@ -61,17 +61,25 @@ proc onResponding*(ctx: ptr FFIContext) =
   emitLivenessEvent(ctx, RespondingEventName, RespondingEvent())
 
 proc dispatchQueuedEvent[T](ctx: ptr FFIContext[T], qe: QueuedEvent) =
-  ## Frees `qe`'s c_malloc buffers on exit.
-  defer:
-    freeEventBuffers(qe.name, qe.data)
+  ## Reads the borrowed slab payload; `commitDequeue` (not this proc) frees any
+  ## heap-fallback buffer once the read has returned.
   ctx.dispatchToListeners($qe.name, qe.data, qe.dataLen)
 
+proc drainOneEvent[T](ctx: ptr FFIContext[T]): bool =
+  ## Peek → dispatch → commit for a single event. The slot stays pinned across
+  ## dispatch so the producer can't reuse its slab buffer mid-read; `defer`
+  ## commits even if a listener raises. Returns false when the queue is empty.
+  let opt = ctx.eventQueue.peekEvent()
+  if opt.isNone():
+    return false
+  defer:
+    ctx.eventQueue.commitDequeue()
+  ctx.dispatchQueuedEvent(opt.get())
+  true
+
 proc drainEventQueue[T](ctx: ptr FFIContext[T]) =
-  while true:
-    let opt = ctx.eventQueue.tryDequeueEvent()
-    if opt.isNone():
-      break
-    ctx.dispatchQueuedEvent(opt.get())
+  while ctx.drainOneEvent():
+    discard
 
 type HeartbeatMonitor = object
   startedAt: Moment
@@ -125,7 +133,8 @@ proc eventRun[T](ctx: ptr FFIContext[T]) {.async.} =
 
 proc eventThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ## Drains the event queue and runs the FFI-thread heartbeat check.
-  ## Owns the queued `c_malloc` payloads until dispatch returns.
+  ## Borrows each queued slab payload until dispatch returns, then releases
+  ## any heap-fallback buffer.
   defer:
     let fireRes = ctx.eventThreadExitSignal.fireSync()
     if fireRes.isErr():

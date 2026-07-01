@@ -281,12 +281,62 @@ suite "event thread drains queued events":
       const QueuedEvtName = "queued_evt"
       discard addEventListener(ctx[].eventRegistry, QueuedEvtName, captureCb, addr evt)
 
-      # `tryEnqueueEvent` takes ownership of both buffers on success; the
-      # event thread c_frees them after dispatch returns.
-      let nameBuf = alloc(QueuedEvtName)
+      # `tryEnqueueEvent` copies the payload into the queue's slab and stores
+      # `name` non-owning; the const's cstring backing lives for the process.
       let payload = @[byte 0xDE, 0xAD, 0xBE, 0xEF]
-      var shared = allocSharedSeq(payload)
-      check tryEnqueueEvent(ctx[].eventQueue, nameBuf, shared.data, shared.len)
+      check tryEnqueueEvent(
+        ctx[].eventQueue, cstring(QueuedEvtName), unsafeAddr payload[0], payload.len
+      )
+
+      waitCallback(evt)
+      check evt.retCode == RET_OK
+      check callbackBytes(evt) == payload
+
+suite "oversize payload falls back to heap":
+  ## Payloads larger than `MaxEventPayloadBytes` can't use the fixed slab slot;
+  ## `tryEnqueueEvent` `c_malloc`s a one-off buffer (`dataHeapOwned`) that
+  ## `commitDequeue` frees after dispatch. This exercises that path end-to-end.
+  test "payload above the slab budget still delivers intact":
+    setupCallbackData(evt)
+
+    withPool(ctx):
+      const OversizeEvtName = "oversize_evt"
+      discard
+        addEventListener(ctx[].eventRegistry, OversizeEvtName, captureCb, addr evt)
+
+      var payload = newSeq[byte](MaxEventPayloadBytes + 64)
+      for i in 0 ..< payload.len:
+        payload[i] = byte(i and 0xFF)
+      check payload.len > MaxEventPayloadBytes
+      check tryEnqueueEvent(
+        ctx[].eventQueue, cstring(OversizeEvtName), unsafeAddr payload[0], payload.len
+      )
+
+      waitCallback(evt)
+      check evt.retCode == RET_OK
+      # captureCb caps at its 1024-byte buffer; compare the delivered prefix.
+      let n = min(payload.len, 1024)
+      check callbackBytes(evt) == payload[0 ..< n]
+
+suite "oversize event name falls back to heap":
+  ## A name longer than `MaxEventNameBytes` overflows the fixed name slot and
+  ## takes the same `nameHeapOwned` `c_malloc` fallback. Exercises that branch
+  ## and confirms the full (untruncated) name still routes to its listener.
+  test "name above the name-slab budget still delivers to the right listener":
+    setupCallbackData(evt)
+
+    withPool(ctx):
+      # Comfortably longer than MaxEventNameBytes (64), so the name can't fit
+      # its slab slot and must be heap-allocated.
+      const LongEvtName =
+        "oversize_event_name_that_is_deliberately_much_longer_than_the_name_slab_budget"
+      check LongEvtName.len > MaxEventNameBytes
+      discard addEventListener(ctx[].eventRegistry, LongEvtName, captureCb, addr evt)
+
+      let payload = @[byte 0x11, 0x22, 0x33]
+      check tryEnqueueEvent(
+        ctx[].eventQueue, cstring(LongEvtName), unsafeAddr payload[0], payload.len
+      )
 
       waitCallback(evt)
       check evt.retCode == RET_OK
