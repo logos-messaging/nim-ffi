@@ -243,7 +243,11 @@ task check_bindings_c, "Verify checked-in C bindings match Nim source":
   exec "nimble genbindings_c"
   exec "nimble genbindings_c_echo"
   exec "git diff --exit-code --" & " examples/timer/c_bindings/my_timer.h" &
+    " examples/timer/c_bindings/nim_ffi_prelude.h" &
+    " examples/timer/c_bindings/nim_ffi_cbor.h" &
     " examples/timer/c_bindings/CMakeLists.txt" & " examples/echo/c_bindings/echo.h" &
+    " examples/echo/c_bindings/nim_ffi_prelude.h" &
+    " examples/echo/c_bindings/nim_ffi_cbor.h" &
     " examples/echo/c_bindings/CMakeLists.txt"
 
 task check_bindings, "Verify all checked-in example bindings match Nim source":

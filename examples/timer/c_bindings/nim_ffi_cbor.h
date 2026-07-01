@@ -339,3 +339,4 @@ static inline int nimffi_decode_from_buf(
 #endif
 
 #endif /* NIM_FFI_CBOR_HELPERS_H_INCLUDED */
+

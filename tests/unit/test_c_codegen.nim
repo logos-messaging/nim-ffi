@@ -1,6 +1,7 @@
-## Unit-tests for the C binding generator. Drives generateCHeader directly
-## against a synthetic registry (no macro pipeline, no files written) and
-## asserts on the emitted text — the same approach as test_cddl_codegen.
+## Unit-tests for the C binding generator. Drives generateCLibHeader (and the
+## shared-header generators) directly against a synthetic registry (no macro
+## pipeline, no files written) and asserts on the emitted text — the same
+## approach as test_cddl_codegen.
 
 import std/strutils
 import unittest2
@@ -12,7 +13,7 @@ proc field(n, t: string): FFIFieldMeta =
 proc param(n, t: string, isPtr = false): FFIParamMeta =
   FFIParamMeta(name: n, typeName: t, isPtr: isPtr)
 
-suite "generateCHeader: types and codecs":
+suite "generateCLibHeader: types and codecs":
   setup:
     let types = @[
       FFITypeMeta(
@@ -52,10 +53,10 @@ suite "generateCHeader: types and codecs":
         returnTypeName: "",
       ),
     ]
-    let header = generateCHeader(procs, types, "timer")
+    let header = generateCLibHeader(procs, types, "timer")
 
-  test "vendored TinyCBOR and the leaf prelude are pulled in":
-    check "#include <tinycbor/cbor.h>" in header
+  test "the lib header pulls in the shared cbor header and uses its codecs":
+    check "#include \"nim_ffi_cbor.h\"" in header
     check "NimFfiStr" in header
     check "nimffi_enc_str" in header
 
@@ -83,7 +84,7 @@ suite "generateCHeader: types and codecs":
     # inverse with the per-proc Version-less example via the int-only check:
     check "timer_free_EchoResponse(" in header
 
-suite "generateCHeader: ABI declarations and context API":
+suite "generateCLibHeader: ABI declarations and context API":
   setup:
     let procs = @[
       FFIProcMeta(
@@ -112,7 +113,7 @@ suite "generateCHeader: ABI declarations and context API":
       ),
     ]
     let types = @[FFITypeMeta(name: "EchoRequest", fields: @[field("m", "string")])]
-    let header = generateCHeader(procs, types, "timer")
+    let header = generateCLibHeader(procs, types, "timer")
 
   test "raw dylib symbols are declared with the C ABI shape":
     check "void* timer_create(const uint8_t* req_cbor, size_t req_cbor_len," in header
@@ -149,7 +150,7 @@ suite "generateCHeader: ABI declarations and context API":
   test "an empty request envelope still encodes a (zero-length) map":
     check "_nimffi_empty" in header
 
-suite "generateCHeader: events":
+suite "generateCLibHeader: events":
   setup:
     let procs = @[
       FFIProcMeta(
@@ -178,7 +179,7 @@ suite "generateCHeader: events":
         payloadTypeName: "TickEvent",
       )
     ]
-    let header = generateCHeader(procs, types, "timer", events)
+    let header = generateCLibHeader(procs, types, "timer", events)
 
   test "a typed handler, box and trampoline are emitted per event":
     check "TimerOnTickFn" in header
@@ -193,7 +194,7 @@ suite "generateCHeader: events":
   test "the context tracks listeners only when events exist":
     check "TimerCtxListener* listeners;" in header
 
-suite "generateCHeader: no-event libraries stay lean":
+suite "generateCLibHeader: no-event libraries stay lean":
   test "a library without events has no listener bookkeeping":
     let procs = @[
       FFIProcMeta(
@@ -205,6 +206,24 @@ suite "generateCHeader: no-event libraries stay lean":
         returnTypeName: "Timer",
       )
     ]
-    let header = generateCHeader(procs, @[], "timer")
+    let header = generateCLibHeader(procs, @[], "timer")
     check "listeners_len" notin header
     check "_add_event_listener" in header # raw ABI symbol is always declared
+
+suite "shared headers: prelude and cbor split":
+  test "the prelude owns the leaf types and libc/TinyCBOR includes":
+    let prelude = generateCPreludeHeader()
+    check "#include <tinycbor/cbor.h>" in prelude
+    check "} NimFfiStr;" in prelude
+    check "nimffi_free_str" in prelude
+
+  test "the cbor header carries the leaf codecs and pulls in the prelude":
+    let cbor = generateCCborHeader()
+    check "#include \"nim_ffi_prelude.h\"" in cbor
+    check "nimffi_enc_str" in cbor
+    check "nimffi_decode_from_buf" in cbor
+
+  test "each generated file is independently include-guarded":
+    check "NIM_FFI_PRELUDE_H_INCLUDED" in generateCPreludeHeader()
+    check "NIM_FFI_CBOR_HELPERS_H_INCLUDED" in generateCCborHeader()
+    check "NIM_FFI_LIB_TIMER_H_INCLUDED" in generateCLibHeader(@[], @[], "timer")

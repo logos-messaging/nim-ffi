@@ -1,5 +1,9 @@
 ## C99 binding generator for the nim-ffi framework.
-## Emits a header-only C binding plus a CMakeLists.txt. Requests/responses
+## Emits a header-only C binding plus a CMakeLists.txt. The binding is split
+## into three headers so the example reads cleanly: `nim_ffi_prelude.h` (owned
+## string/byte types + libc includes), `nim_ffi_cbor.h` (leaf CBOR codecs and
+## buffer drivers, includes the prelude), and `<lib>.h` (the library-specific
+## structs, codecs and async API, includes the cbor header). Requests/responses
 ## travel as CBOR (encoded with the same vendored TinyCBOR the C++ backend
 ## uses, matching the Nim-side cbor_serial codec — both ends speak RFC 8949).
 ##
@@ -20,9 +24,15 @@ const
   CborHelpersTpl = staticRead("templates/c/cbor_helpers.h.tpl")
   CMakeListsTpl = staticRead("templates/c/CMakeLists.txt.tpl")
 
+  # Shared headers written alongside the library header. Their names match the
+  # include guards baked into the templates and the `#include` the cbor header
+  # emits for the prelude.
+  PreludeHeaderName* = "nim_ffi_prelude.h"
+  CborHeaderName* = "nim_ffi_cbor.h"
+
 type LeafInfo = tuple[ok: bool, cType: string, suffix: string, owns: bool]
 
-proc leafCType(t: string): LeafInfo =
+func leafCType(t: string): LeafInfo =
   ## Maps a Nim leaf type to its C type, codec suffix and whether a decoded
   ## value owns heap memory. `ok` is false for composite types (seq/Option/
   ## user structs), which are monomorphised separately.
@@ -56,7 +66,7 @@ proc leafCType(t: string): LeafInfo =
   else:
     (false, "", "", false)
 
-proc cToken(cType: string): string =
+func cToken(cType: string): string =
   ## Short PascalCase token used to build monomorphised container names and
   ## codec-adapter symbols. Composite C type names are already unique C
   ## identifiers, so they pass through verbatim.
@@ -76,7 +86,7 @@ proc cToken(cType: string): string =
   of "NimFfiBytes": "Bytes"
   else: cType
 
-proc leafSuffix(cType: string): string =
+func leafSuffix(cType: string): string =
   ## Inverse of leafCType's cType→suffix for the leaf codecs the template
   ## provides; empty string for composite types.
   case cType
@@ -104,19 +114,19 @@ type CTypeReg = object
   decls: seq[string] ## struct typedefs, dependency order
   codecs: seq[string] ## enc/dec/free defs, dependency order
 
-proc encFn(reg: CTypeReg, cType: string): string =
+func encFn(reg: CTypeReg, cType: string): string =
   let suffix = leafSuffix(cType)
   if suffix.len > 0:
     return "nimffi_enc_" & suffix
   reg.libName & "_enc_" & cType
 
-proc decFn(reg: CTypeReg, cType: string): string =
+func decFn(reg: CTypeReg, cType: string): string =
   let suffix = leafSuffix(cType)
   if suffix.len > 0:
     return "nimffi_dec_" & suffix
   reg.libName & "_dec_" & cType
 
-proc freeFn(reg: CTypeReg, cType: string): string =
+func freeFn(reg: CTypeReg, cType: string): string =
   ## Free-function name for `cType`, or "" when the type owns no heap memory.
   case cType
   of "NimFfiStr":
@@ -232,11 +242,9 @@ proc emitStructType(reg: var CTypeReg, t: FFITypeMeta) =
 
   var body: seq[string] = @[]
   body.add("static inline CborError " & reg.libName & "_enc_" & t.name & "(")
+  body.add("        CborEncoder* e, const " & t.name & "* v) {")
   if members.len == 0:
-    body.add("        CborEncoder* e, const " & t.name & "* v) {")
     body.add("    (void)v;")
-  else:
-    body.add("        CborEncoder* e, const " & t.name & "* v) {")
   body.add("    CborEncoder m;")
   body.add("    CborError err = cbor_encoder_create_map(e, &m, " & $members.len & ");")
   body.add("    if (err) return err;")
@@ -334,7 +342,7 @@ proc reqTypeMeta(p: FFIProcMeta): FFITypeMeta =
     fields.add(FFIFieldMeta(name: ep.name, typeName: typeName))
   FFITypeMeta(name: reqStructName(p), fields: fields)
 
-proc paramByValue(reg: CTypeReg, nimType: string, ridesAsPtr: bool): bool =
+func paramByValue(nimType: string, ridesAsPtr: bool): bool =
   ## Scalars / opaque pointers / string views pass by value; composite
   ## aggregates (seq, Option, user structs) pass by const pointer.
   if ridesAsPtr:
@@ -358,7 +366,7 @@ proc buildReqParams(
         CPtrType
       else:
         ensureCType(reg, ep.typeName).cType
-    if paramByValue(reg, ep.typeName, rides):
+    if paramByValue(ep.typeName, rides):
       params.add(cType & " " & ep.name)
       assigns.add("    ffi_req." & ep.name & " = " & ep.name & ";")
     else:
@@ -781,12 +789,26 @@ proc monomorphiseAll(
     discard ensureCType(reg, ev.payloadTypeName)
   (reqTypes, respTypes)
 
-proc generateCHeader*(
+func generateCPreludeHeader*(): string =
+  ## The `nim_ffi_prelude.h` shared header: owned string/byte types plus the
+  ## libc/TinyCBOR includes every nim-ffi C binding needs. Identical across
+  ## libraries, so it is emitted verbatim from the template.
+  HeaderPreludeTpl & "\n"
+
+func generateCCborHeader*(): string =
+  ## The `nim_ffi_cbor.h` shared header: leaf CBOR codecs and buffer drivers.
+  ## Includes the prelude (its guard is inside the template) and is library-
+  ## agnostic, so it too is emitted verbatim.
+  CborHelpersTpl & "\n"
+
+proc generateCLibHeader*(
     procs: seq[FFIProcMeta],
     types: seq[FFITypeMeta],
     libName: string,
     events: seq[FFIEventMeta] = @[],
 ): string =
+  ## The `<lib>.h` header: library-specific structs, monomorphised codecs and
+  ## the async API. Pulls the two shared headers in via the cbor header.
   let classified = classifyProcs(procs)
   let ctors = classified.ctors
   let methods = classified.methods
@@ -796,9 +818,12 @@ proc generateCHeader*(
   var reg = newCTypeReg(libName, libType, types, procs)
   let (reqTypes, respTypes) = monomorphiseAll(reg, types, procs, methods, events)
 
+  let guard = "NIM_FFI_LIB_" & libName.toUpperAscii() & "_H_INCLUDED"
   var lines: seq[string] = @[]
-  lines.add(HeaderPreludeTpl)
-  lines.add(CborHelpersTpl)
+  lines.add("#ifndef " & guard)
+  lines.add("#define " & guard)
+  lines.add("#include \"" & CborHeaderName & "\"")
+  lines.add("")
 
   lines.add("/* ============================================================ */")
   lines.add("/* Generated types (user-declared + per-proc request envelopes) */")
@@ -877,6 +902,7 @@ proc generateCHeader*(
   for m in methods:
     emitMethod(lines, reg, ctxType, libType, libName, m)
 
+  lines.add("#endif /* " & guard & " */")
   lines.join("\n") & "\n"
 
 proc generateCCMakeLists*(libName, nimSrcRelPath: string): string =
@@ -892,7 +918,9 @@ proc generateCBindings*(
     events: seq[FFIEventMeta] = @[],
 ) =
   createDir(outputDir)
+  writeFile(outputDir / PreludeHeaderName, generateCPreludeHeader())
+  writeFile(outputDir / CborHeaderName, generateCCborHeader())
   writeFile(
-    outputDir / (libName & ".h"), generateCHeader(procs, types, libName, events)
+    outputDir / (libName & ".h"), generateCLibHeader(procs, types, libName, events)
   )
   writeFile(outputDir / "CMakeLists.txt", generateCCMakeLists(libName, nimSrcRelPath))
