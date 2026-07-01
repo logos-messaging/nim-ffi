@@ -31,6 +31,11 @@ type
     returnIsPtr*: bool # true if return type is ptr T
     returnIsHandle*: bool # true if return type is an {.ffiHandle.} type
     abiFormat*: ABIFormat # wire format for this interaction (default Cbor)
+    scalarFastPath*: bool
+      ## True for an `abi = c` proc whose whole signature is scalar (see
+      ## `isScalarOnly`): it dispatches through the CBOR-free scalar fast path
+      ## and is skipped by the foreign-binding generators (no dispatch codegen
+      ## yet — the request rides inline POD args, no `_CWire`, no CBOR).
 
   FFIFieldMeta* = object
     name*: string # e.g. "delayMs"
@@ -61,6 +66,53 @@ var libraryDeclared* {.compileTime.}: bool = false
 
 # Library-wide default ABI, inherited by each annotation unless it overrides.
 var currentDefaultABIFormat* {.compileTime.}: ABIFormat = ABIFormat.Cbor
+
+const scalarPodTypeNames = [
+  "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32",
+  "uint64", "byte", "float", "float32", "float64", "bool",
+]
+  ## Fixed-width POD scalars that fit a single `uint64` slot and survive the
+  ## async hop by value — the payload the scalar fast path inlines into the
+  ## request (no heap copy). `cstring`/`string` are intentionally absent as
+  ## *params*: they are pointers to caller memory the FFI thread reads later,
+  ## so they'd need a copy, defeating the zero-alloc promise.
+
+func isScalarParamTypeName*(name: string): bool =
+  ## A param type eligible for the CBOR-free scalar fast path.
+  name in scalarPodTypeNames
+
+func isScalarReturnTypeName*(name: string): bool =
+  ## A return type eligible for the scalar fast path. Unlike params, a
+  ## `string`/`cstring` return is fine: the handler produces the bytes and they
+  ## ride back raw (like the error path), so no caller memory is aliased.
+  name in scalarPodTypeNames or name == "string" or name == "cstring"
+
+func isScalarOnly*(p: FFIProcMeta): bool =
+  ## True iff `p` is a plain `{.ffi.}` method whose every wire param and return
+  ## is scalar — the whole signature crosses without CBOR or `_CWire`. Handles
+  ## and raw pointers are excluded (a handle needs a ctx-registry round-trip;
+  ## a pointer never crosses). Pure over the compile-time metadata.
+  if p.kind != FFIKind.FFI:
+    return false
+  if p.returnIsPtr or p.returnIsHandle:
+    return false
+  if not isScalarReturnTypeName(p.returnTypeName):
+    return false
+  for ep in p.extraParams:
+    if ep.isPtr or ep.isHandle or not isScalarParamTypeName(ep.typeName):
+      return false
+  true
+
+func bindableProcs*(procs: seq[FFIProcMeta]): seq[FFIProcMeta] =
+  ## The procs the foreign-binding generators emit for. Scalar-fast-path procs
+  ## are dropped: their C export takes inline scalar args, not the CBOR
+  ## `(reqCbor, reqCborLen)` shape the current codegen assumes, so emitting a
+  ## CBOR caller for them would be wrong. Foreign codegen is a follow-up.
+  var kept: seq[FFIProcMeta] = @[]
+  for p in procs:
+    if not p.scalarFastPath:
+      kept.add(p)
+  kept
 
 proc abiCodegenImplemented*(fmt: ABIFormat): bool =
   ## Whether `fmt` has a working proc-dispatch path. Only `Cbor` does today; the
