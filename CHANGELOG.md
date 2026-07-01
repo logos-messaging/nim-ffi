@@ -20,6 +20,14 @@ All notable changes to this project are documented in this file.
   where `-install_name` requires `-dynamiclib`.
 
 ### Added
+- `{.ffiEvent.}` no longer requires an explicit wire-name string: when omitted
+  it is derived from the proc name via `camelToSnakeCase`
+  (`onPeerConnected` → `on_peer_connected`), matching how `{.ffi.}` derives its
+  C export symbol. Pass a string literal only to override it.
+- FFI annotations (`{.ffi.}`, `{.ffiCtor.}`, `{.ffiDtor.}`, `{.ffiEvent.}`,
+  `{.ffiHandle.}`, `{.ffiRaw.}`) that expand after `genBindings()` now produce a
+  loud compile error instead of being silently dropped from the generated
+  bindings.
 - **C binding generator** (`-d:targetLang=c`): emits a header-only C binding
   (`<lib>.h`) plus a `CMakeLists.txt`, alongside the existing Rust / C++ / CDDL
   backends. Requests/responses travel as CBOR using the same vendored TinyCBOR

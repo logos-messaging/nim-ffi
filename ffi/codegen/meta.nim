@@ -64,6 +64,11 @@ var currentLibName* {.compileTime.}: string
 # Set by `declareLibrary`; the FFI annotations require it (name/type/default ABI).
 var libraryDeclared* {.compileTime.}: bool = false
 
+# Set by `genBindings()`. Any FFI annotation expanded after it registers into the
+# codegen registries too late to be emitted, so the annotation macros check this
+# and fail loudly instead of silently dropping the proc/type from the bindings.
+var genBindingsEmitted* {.compileTime.}: bool = false
+
 # Library-wide default ABI, inherited by each annotation unless it overrides.
 var currentDefaultABIFormat* {.compileTime.}: ABIFormat = ABIFormat.Cbor
 
