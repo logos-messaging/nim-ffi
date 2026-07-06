@@ -1871,8 +1871,7 @@ macro genBindings*(
       )
     of "c_abi":
       generateCAbiBindings(
-        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
-        ffiEventRegistry,
+        genProcs, ffiTypeRegistry, libName, outputDir, nimSrcRelPath, ffiEventRegistry
       )
     of "cddl":
       generateCddlBindings(genProcs, ffiTypeRegistry, libName, outputDir, nimSrcRelPath)

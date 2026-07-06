@@ -6,11 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef NIMFFI_RET_OK
 #define NIMFFI_RET_OK 0
 #define NIMFFI_RET_ERR 1
 #define NIMFFI_RET_MISSING_CALLBACK 2
-#endif
 
 /* Flat wire structs — the C ABI. Strings are borrowed, NUL-terminated
    `const char*` valid only for the duration of the call they cross. */
@@ -30,12 +28,8 @@ typedef struct {
 typedef struct {
     ShoutRequest req;
 } EchoShoutReq;
-typedef struct {
-    uint8_t _placeholder; /* C forbids empty structs */
-} EchoVersionReq;
 
 typedef void (*EchoShoutReplyFn)(int err_code, const ShoutResponse* reply, const char* err_msg, void* user_data);
-typedef void (*EchoVersionReplyFn)(int err_code, const char* reply, const char* err_msg, void* user_data);
 
 typedef void (*EchoCreateRawFn)(int err_code, const char* ctx_addr, const char* err_msg, void* user_data);
 #ifdef __cplusplus
@@ -44,7 +38,6 @@ extern "C" {
 
 void* echo_create(const EchoCreateCtorReq* req, EchoCreateRawFn on_created, void* user_data);
 int echo_shout(void* ctx, EchoShoutReplyFn on_reply, void* user_data, const EchoShoutReq* req);
-int echo_version(void* ctx, EchoVersionReplyFn on_reply, void* user_data, const EchoVersionReq* req);
 int echo_destroy(void* ctx);
 
 #ifdef __cplusplus
@@ -60,6 +53,7 @@ typedef void (*EchoCreateFn)(int err_code, EchoCtx* ctx, const char* err_msg, vo
 typedef struct { EchoCreateFn fn; void* user_data; } EchoCreateBox;
 static void echo_create_trampoline(int ret, const char* ctx_addr, const char* err_msg, void* ud) {
     EchoCreateBox* box = (EchoCreateBox*)ud;
+    if (!box) return;
     if (!box->fn) { free(box); return; }
     if (ret != 0) {
         box->fn(ret, NULL, err_msg ? err_msg : "FFI create failed", box->user_data);
@@ -111,12 +105,6 @@ static inline int echo_ctx_shout(const EchoCtx* ctx, const ShoutRequest* req, Ec
     memset(&ffi_req, 0, sizeof(ffi_req));
     ffi_req.req = *req;
     return echo_shout(ctx->ptr, on_reply, user_data, &ffi_req);
-}
-
-static inline int echo_ctx_version(const EchoCtx* ctx, EchoVersionReplyFn on_reply, void* user_data) {
-    EchoVersionReq ffi_req;
-    memset(&ffi_req, 0, sizeof(ffi_req));
-    return echo_version(ctx->ptr, on_reply, user_data, &ffi_req);
 }
 
 #endif /* NIM_FFI_LIB_ECHO_C_ABI_H_INCLUDED */

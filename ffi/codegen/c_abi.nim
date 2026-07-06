@@ -143,6 +143,28 @@ func paramByValue(nimType: string, ridesAsPtr: bool): bool =
     return true
   leafCTypeAbi(nimType.strip()).ok
 
+proc reqParamsAndAssigns(
+    reg: var AbiReg, extraParams: seq[FFIParamMeta]
+): tuple[params, assigns: seq[string]] =
+  ## The C parameter list + `ffi_req` field assignments shared by the ctor and
+  ## method wrappers: by-value params copy straight into the request struct,
+  ## by-const-pointer aggregates are dereferenced in.
+  var params, assigns: seq[string] = @[]
+  for ep in extraParams:
+    let rides = ep.ridesAsPtr()
+    let cType =
+      if rides:
+        CPtrType
+      else:
+        wireValueCType(reg, ep.typeName)
+    if paramByValue(ep.typeName, rides):
+      params.add(cType & " " & ep.name)
+      assigns.add("    ffi_req." & ep.name & " = " & ep.name & ";")
+    else:
+      params.add("const " & cType & "* " & ep.name)
+      assigns.add("    ffi_req." & ep.name & " = *" & ep.name & ";")
+  (params, assigns)
+
 proc methodReplyInfo(
     reg: var AbiReg, libType: string, m: FFIProcMeta
 ): tuple[fnType, replyParam: string] =
@@ -248,6 +270,7 @@ proc emitCtxAndCtor(
       "(int ret, const char* ctx_addr, const char* err_msg, void* ud) {"
   )
   lines.add("    " & createBox & "* box = (" & createBox & "*)ud;")
+  lines.add("    if (!box) return;")
   lines.add("    if (!box->fn) { free(box); return; }")
   lines.add("    if (ret != 0) {")
   lines.add(
@@ -281,21 +304,7 @@ proc emitCtxAndCtor(
   lines.add("")
   for ctor in ctors:
     let reqStruct = reqStructName(ctor)
-    var params: seq[string] = @[]
-    var assigns: seq[string] = @[]
-    for ep in ctor.extraParams:
-      let rides = ep.ridesAsPtr()
-      let cType =
-        if rides:
-          CPtrType
-        else:
-          wireValueCType(reg, ep.typeName)
-      if paramByValue(ep.typeName, rides):
-        params.add(cType & " " & ep.name)
-        assigns.add("    ffi_req." & ep.name & " = " & ep.name & ";")
-      else:
-        params.add("const " & cType & "* " & ep.name)
-        assigns.add("    ffi_req." & ep.name & " = *" & ep.name & ";")
+    let (params, assigns) = reqParamsAndAssigns(reg, ctor.extraParams)
     let head = "static inline int " & libName & "_ctx_create("
     let sig =
       if params.len > 0:
@@ -342,21 +351,7 @@ proc emitMethod(
   let stripped = stripLibPrefix(m.procName, m.libName)
   let reqStruct = reqStructName(m)
   let info = methodReplyInfo(reg, libType, m)
-  var params: seq[string] = @[]
-  var assigns: seq[string] = @[]
-  for ep in m.extraParams:
-    let rides = ep.ridesAsPtr()
-    let cType =
-      if rides:
-        CPtrType
-      else:
-        wireValueCType(reg, ep.typeName)
-    if paramByValue(ep.typeName, rides):
-      params.add(cType & " " & ep.name)
-      assigns.add("    ffi_req." & ep.name & " = " & ep.name & ";")
-    else:
-      params.add("const " & cType & "* " & ep.name)
-      assigns.add("    ffi_req." & ep.name & " = *" & ep.name & ";")
+  let (params, assigns) = reqParamsAndAssigns(reg, m.extraParams)
   let head =
     "static inline int " & libName & "_ctx_" & stripped & "(const " & ctxType & "* ctx, "
   let sig =
@@ -404,11 +399,9 @@ proc generateCAbiLibHeader*(
   lines.add("#include <stdlib.h>")
   lines.add("#include <string.h>")
   lines.add("")
-  lines.add("#ifndef NIMFFI_RET_OK")
   lines.add("#define NIMFFI_RET_OK 0")
   lines.add("#define NIMFFI_RET_ERR 1")
   lines.add("#define NIMFFI_RET_MISSING_CALLBACK 2")
-  lines.add("#endif")
   lines.add("")
   lines.add("/* Flat wire structs — the C ABI. Strings are borrowed, NUL-terminated")
   lines.add("   `const char*` valid only for the duration of the call they cross. */")

@@ -632,9 +632,6 @@ proc registerCAbiCtor*(
     )
   )
 
-proc isStringResp(t: NimNode): bool =
-  t.kind == nnkIdent and ($t == "string" or $t == "cstring")
-
 proc cdeclReplyPragma(): NimNode =
   nnkPragma.newTree(
     ident("cdecl"),
@@ -683,7 +680,8 @@ proc objectTrampBody(boxName, respType, respWire: NimNode): NimNode =
   ## Reply trampoline for an object return: recover the box, deliver a transport
   ## error as a copied NUL-terminated string, else CBOR-decode the reply,
   ## `cwirePack` it into the flat wire struct, hand a pointer to the caller, and
-  ## release the wire.
+  ## release the wire. `err_msg` is always a non-nil string; the `reply` struct
+  ## pointer is nil only on error, gated by a non-`RET_OK` `err_code`.
   quote:
     let box = cast[ptr `boxName`](ud)
     if box.isNil():
@@ -706,7 +704,7 @@ proc objectTrampBody(boxName, respType, respWire: NimNode): NimNode =
       else:
         var wire: `respWire`
         cwirePack(wire, decoded.get())
-        box.fn(RET_OK, addr wire, nil, box.ud)
+        box.fn(RET_OK, addr wire, "".cstring, box.ud)
         cwireFree(wire)
     except CatchableError as e:
       box.fn(RET_ERR, nil, e.msg.cstring, box.ud)
@@ -714,7 +712,9 @@ proc objectTrampBody(boxName, respType, respWire: NimNode): NimNode =
 proc stringTrampBody(boxName: NimNode): NimNode =
   ## Reply trampoline for a `string` return (and the ctor's address string):
   ## CBOR-decode the reply into a Nim string and hand its (NUL-terminated)
-  ## `cstring` to the caller for the duration of the call.
+  ## `cstring` to the caller for the duration of the call. Reply and error
+  ## strings are always non-nil empty strings on the paths they don't apply to,
+  ## so a consumer can `strlen`/print either unconditionally without a nil deref.
   quote:
     let box = cast[ptr `boxName`](ud)
     if box.isNil():
@@ -728,16 +728,16 @@ proc stringTrampBody(boxName: NimNode): NimNode =
         var em = newString(int(len))
         if int(len) > 0:
           copyMem(addr em[0], msg, int(len))
-        box.fn(ret, nil, em.cstring, box.ud)
+        box.fn(ret, "".cstring, em.cstring, box.ud)
         return
       let decoded = cborDecodePtr(cast[ptr UncheckedArray[byte]](msg), int(len), string)
       if decoded.isErr():
-        box.fn(RET_ERR, nil, decoded.error.cstring, box.ud)
+        box.fn(RET_ERR, "".cstring, decoded.error.cstring, box.ud)
       else:
         let replyStr = decoded.get()
-        box.fn(RET_OK, replyStr.cstring, nil, box.ud)
+        box.fn(RET_OK, replyStr.cstring, "".cstring, box.ud)
     except CatchableError as e:
-      box.fn(RET_ERR, nil, e.msg.cstring, box.ud)
+      box.fn(RET_ERR, "".cstring, e.msg.cstring, box.ud)
 
 proc exportedMethodProc(
     spec: CAbiSpec, boxName, envWire, trampName, poolIdent, cbType: NimNode
@@ -751,11 +751,18 @@ proc exportedMethodProc(
   let envName = spec.envelope
   let libFFICtx =
     nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), spec.libType))
+  # A string reply is an empty (non-nil) cstring on the error path, matching the
+  # trampoline; an object reply is a nil struct pointer gated by `err_code`.
+  let emptyReply =
+    if isStringType(spec.respType):
+      newDotExpr(newLit(""), ident("cstring"))
+    else:
+      newNilLit()
   let body = quote:
     if onReply.isNil():
       return RET_MISSING_CALLBACK
     if not `poolIdent`.isValidCtx(cast[pointer](ctx)):
-      onReply(RET_ERR, nil, "ctx is not a valid FFI context".cstring, userData)
+      onReply(RET_ERR, `emptyReply`, "ctx is not a valid FFI context".cstring, userData)
       return RET_ERR
     var reqObj: `envName` = cwireUnpack(req[])
     let enc = cborEncodeShared(reqObj)
@@ -771,10 +778,10 @@ proc exportedMethodProc(
     let sendRes =
       try:
         ffi_context.sendRequestToFFIThread(ctx, reqPtr)
-      except Exception as exc:
-        Result[void, string].err("sendRequestToFFIThread exception: " & exc.msg)
+      except Exception as e:
+        Result[void, string].err("sendRequestToFFIThread exception: " & e.msg)
     if sendRes.isErr():
-      onReply(RET_ERR, nil, sendRes.error.cstring, userData)
+      onReply(RET_ERR, `emptyReply`, sendRes.error.cstring, userData)
       return RET_ERR
     return RET_OK
   newProc(
@@ -815,7 +822,7 @@ proc exportedCtorProc(
       if not onCreated.isNil():
         onCreated(
           RET_ERR,
-          nil,
+          "".cstring,
           ("ffiCtor: failed to create FFIContext: " & $ctxRes.error).cstring,
           userData,
         )
@@ -835,11 +842,11 @@ proc exportedCtorProc(
     let sendRes =
       try:
         ctx.sendRequestToFFIThread(reqPtr)
-      except Exception as exc:
-        Result[void, string].err("sendRequestToFFIThread exception: " & exc.msg)
+      except Exception as e:
+        Result[void, string].err("sendRequestToFFIThread exception: " & e.msg)
     if sendRes.isErr():
       if not onCreated.isNil():
-        onCreated(RET_ERR, nil, sendRes.error.cstring, userData)
+        onCreated(RET_ERR, "".cstring, sendRes.error.cstring, userData)
       return nil
     return cast[pointer](ctx)
   body.insert(0, initGuard)
@@ -899,7 +906,7 @@ proc flushCAbiDispatch*(): NimNode {.compileTime.} =
       sink.add(exportedCtorProc(spec, boxName, envWire, trampName, poolIdent, cbType))
     of cakMethod:
       let rt = spec.respType
-      if isStringResp(rt):
+      if isStringType(rt):
         let cbType = cAbiCbType(ident("cstring"))
         sink.add(boxTypeDef(boxName, cbType))
         sink.add(replyTrampProc(trampName, stringTrampBody(boxName)))
