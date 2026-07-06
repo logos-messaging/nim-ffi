@@ -99,16 +99,39 @@ proc snapshotListeners*(
       listeners.add(l)
   listeners
 
-const EventQueueCapacity* = 1024
-  # Sustained backlog at this depth means a listener is wedged.
+const EventQueueCapacity* {.intdefine.} = 1024
+  ## Sustained backlog at this depth means a listener is wedged. Compile-time
+  ## per-library override: `-d:EventQueueCapacity=N`.
+
+const MaxEventPayloadBytes* {.intdefine.} = 512
+  ## Per-slot payload slab budget. Payloads up to this size copy into a
+  ## preallocated, reused buffer (zero steady-state allocation); larger ones
+  ## fall back to a one-off `c_malloc` freed on commit. Compile-time
+  ## per-library override: `-d:MaxEventPayloadBytes=N`.
+
+const MaxEventNameBytes* {.intdefine.} = 64
+  ## Per-slot name slab budget (incl. NUL). Event names are short compile-time
+  ## literals; anything longer takes the same heap fallback as the payload.
+  ## Compile-time per-library override: `-d:MaxEventNameBytes=N`.
+
+const emptyListenerPayload*: cstring = ""
+  ## Non-nil zero-length buffer handed to listeners when the payload is empty
+  ## (a nil pointer would be UB for consumers doing `memcpy` even at len 0).
+  ## Also the stand-in name for a nil/empty event name.
 
 type
   QueuedEvent* = object
-    # Raw `c_malloc` pointers so the buffer survives pool-slot reuse
-    # across thread heaps without an assignment dtor.
+    # `name`/`data` point into the queue's reused per-slot buffers (not freed
+    # per-event) unless the value didn't fit that slot's budget, in which case
+    # the corresponding `*HeapOwned` flag marks a one-off `c_malloc` freed on
+    # commit. Both buffers are `c_malloc`-backed so the event thread can read
+    # them after the producing FFI thread's heap is gone (same TLS hazard as
+    # `alloc.nim`).
     name*: cstring
+    nameHeapOwned*: bool
     data*: ptr UncheckedArray[byte]
     dataLen*: int
+    dataHeapOwned*: bool
 
   EventQueue* = object # SPSC ring; plain lock since ops are short and uncontended.
     lock*: Lock
@@ -116,6 +139,13 @@ type
     tail*: int
     count*: int
     buf*: array[EventQueueCapacity, QueuedEvent]
+    slab*: array[EventQueueCapacity, ptr UncheckedArray[byte]] # payload buffers
+    nameSlab*: array[EventQueueCapacity, ptr UncheckedArray[byte]] # name buffers
+
+proc allocSlot(nbytes: int): ptr UncheckedArray[byte] {.raises: [].} =
+  if nbytes <= 0:
+    return nil
+  cast[ptr UncheckedArray[byte]](c_malloc(csize_t(nbytes)))
 
 proc initEventQueue*(q: var EventQueue) {.raises: [].} =
   q.lock.initLock()
@@ -123,56 +153,117 @@ proc initEventQueue*(q: var EventQueue) {.raises: [].} =
   q.tail = 0
   q.count = 0
   for i in 0 ..< EventQueueCapacity:
-    q.buf[i] = QueuedEvent(name: nil, data: nil, dataLen: 0)
+    q.buf[i] = QueuedEvent()
+    q.slab[i] = allocSlot(MaxEventPayloadBytes)
+    q.nameSlab[i] = allocSlot(MaxEventNameBytes)
 
-proc freeEventBuffers*(
-    name: cstring, data: ptr UncheckedArray[byte]
-) {.raises: [], gcsafe.} =
-  if not name.isNil():
-    c_free(cast[pointer](name))
-  if not data.isNil():
-    c_free(data)
+proc releaseEvent*(qe: QueuedEvent) {.raises: [], gcsafe.} =
+  ## Frees only the heap-fallback buffers. Reused slot buffers persist.
+  if qe.nameHeapOwned and not qe.name.isNil():
+    c_free(cast[pointer](qe.name))
+  if qe.dataHeapOwned and not qe.data.isNil():
+    c_free(qe.data)
 
 proc deinitEventQueue*(q: var EventQueue) {.raises: [].} =
   ## Both producer and consumer must have stopped.
   for i in 0 ..< EventQueueCapacity:
-    freeEventBuffers(q.buf[i].name, q.buf[i].data)
-    q.buf[i] = QueuedEvent(name: nil, data: nil, dataLen: 0)
+    releaseEvent(q.buf[i]) # free any undrained heap-fallback buffers
+    q.buf[i] = QueuedEvent()
+    if not q.slab[i].isNil():
+      c_free(q.slab[i])
+      q.slab[i] = nil
+    if not q.nameSlab[i].isNil():
+      c_free(q.nameSlab[i])
+      q.nameSlab[i] = nil
   q.head = 0
   q.tail = 0
   q.count = 0
   q.lock.deinitLock()
 
+proc copyIntoSlot(
+    slot: ptr UncheckedArray[byte], slotCap, nbytes: int, src: pointer
+): tuple[buf: ptr UncheckedArray[byte], heap: bool, ok: bool] {.raises: [].} =
+  ## Copies `nbytes` from `src` into the reusable `slot` when they fit, else a
+  ## one-off `c_malloc`. `ok=false` only on allocation failure; `nbytes<=0`
+  ## yields `(nil, false, true)` with no copy.
+  if nbytes <= 0:
+    return (nil, false, true)
+  if nbytes <= slotCap and not slot.isNil():
+    copyMem(slot, src, nbytes)
+    return (slot, false, true)
+  let heapBuf = cast[ptr UncheckedArray[byte]](c_malloc(csize_t(nbytes)))
+  if heapBuf.isNil():
+    return (nil, false, false)
+  copyMem(heapBuf, src, nbytes)
+  (heapBuf, true, true)
+
 proc tryEnqueueEvent*(
-    q: var EventQueue, name: cstring, data: ptr UncheckedArray[byte], dataLen: int
+    q: var EventQueue, name: cstring, src: pointer, dataLen: int
 ): bool {.raises: [], gcsafe.} =
-  ## On true the queue owns `name`/`data`; on false the caller still does.
+  ## Copies `name` (NUL included) and `dataLen` payload bytes from `src` into
+  ## the tail slot's reused buffers, or a heap fallback when either overflows
+  ## its slot budget. Returns false (nothing enqueued) when the ring is full or
+  ## a fallback allocation fails.
   withLock q.lock:
     if q.count >= EventQueueCapacity:
       return false
-    q.buf[q.tail] = QueuedEvent(name: name, data: data, dataLen: dataLen)
+    let slot = q.tail
+    # Copy the name *including* its NUL (a non-nil cstring is terminated) so the
+    # stored copy stays a valid cstring; a nil/empty name uses the static stand-in.
+    let nameBytes =
+      if name.isNil():
+        0
+      else:
+        name.len + 1
+    let nameRes =
+      copyIntoSlot(q.nameSlab[slot], MaxEventNameBytes, nameBytes, cast[pointer](name))
+    if not nameRes.ok:
+      return false
+    let dataRes = copyIntoSlot(q.slab[slot], MaxEventPayloadBytes, dataLen, src)
+    if not dataRes.ok:
+      if nameRes.heap:
+        c_free(nameRes.buf) # unwind the name fallback we just took
+      return false
+    let nameCStr =
+      if nameRes.buf.isNil():
+        emptyListenerPayload
+      else:
+        cast[cstring](nameRes.buf)
+    q.buf[slot] = QueuedEvent(
+      name: nameCStr,
+      nameHeapOwned: nameRes.heap,
+      data: dataRes.buf,
+      dataLen: dataLen,
+      dataHeapOwned: dataRes.heap,
+    )
     q.tail = (q.tail + 1) mod EventQueueCapacity
     q.count.inc()
   true
 
-proc tryDequeueEvent*(q: var EventQueue): Option[QueuedEvent] {.raises: [], gcsafe.} =
-  ## Caller takes ownership and must `c_free` both buffers.
+proc peekEvent*(q: var EventQueue): Option[QueuedEvent] {.raises: [], gcsafe.} =
+  ## Returns the head event *without* advancing — the slot stays counted so the
+  ## single-producer can't reuse its slab buffer while the consumer is still
+  ## reading it. Pair every non-none `peekEvent` with a `commitDequeue` once
+  ## dispatch has returned. The returned event borrows the slab slot.
   withLock q.lock:
     if q.count == 0:
       return none(QueuedEvent)
-    let dequeued = q.buf[q.head]
-    q.buf[q.head] = QueuedEvent(name: nil, data: nil, dataLen: 0)
+    return some(q.buf[q.head])
+
+proc commitDequeue*(q: var EventQueue) {.raises: [], gcsafe.} =
+  ## Retires the head slot after its `peekEvent` was dispatched: frees any
+  ## heap-fallback payload, clears the slot, and only now frees it for reuse.
+  withLock q.lock:
+    if q.count == 0:
+      return
+    releaseEvent(q.buf[q.head])
+    q.buf[q.head] = QueuedEvent()
     q.head = (q.head + 1) mod EventQueueCapacity
     q.count.dec()
-    return some(dequeued)
 
 proc eventQueueLen*(q: var EventQueue): int {.raises: [], gcsafe.} =
   withLock q.lock:
     return q.count
-
-const emptyListenerPayload*: cstring = ""
-  ## Non-nil zero-length buffer handed to listeners when the payload is empty
-  ## (a nil pointer would be UB for consumers doing `memcpy` even at len 0).
 
 proc notifyListeners*(
     listeners: seq[FFIEventListener], retCode: cint, data: pointer, dataLen: int
@@ -209,22 +300,19 @@ var ffiCurrentNotifyEventEnqueued* {.threadvar.}: proc() {.gcsafe, raises: [].}
   # Hook so this module doesn't depend on chronos's ThreadSignalPtr.
   # Nil-safe; tick-driven tests leave it unset.
 
-template enqueueOrMarkStuck(
-    eventName: string, namePtr: cstring, dataPtr: ptr UncheckedArray[byte], dataLen: int
-) =
-  ## Takes ownership of `namePtr`/`dataPtr`. On queue-full sets the sticky
-  ## stuck flag and wakes the event thread (firing onNotResponding from here
-  ## would risk deadlock against a back-pressuring listener).
+template enqueueOrMarkStuck(eventName: string, src: pointer, dataLen: int) =
+  ## Copies `eventName` and `dataLen` bytes from `src` into the queue's reused
+  ## slot buffers. On queue-full sets the sticky stuck flag and wakes the event
+  ## thread (firing onNotResponding from here would risk deadlock against a
+  ## back-pressuring listener).
   block enqueueBlock:
     let q = ffiCurrentEventQueue
     if q.isNil():
       chronicles.error "event queue not set on this thread", event = eventName
-      freeEventBuffers(namePtr, dataPtr)
       break enqueueBlock
-    if not q[].tryEnqueueEvent(namePtr, dataPtr, dataLen):
+    if not q[].tryEnqueueEvent(cstring(eventName), src, dataLen):
       chronicles.error "event queue full; library marked stuck",
         event = eventName, capacity = EventQueueCapacity
-      freeEventBuffers(namePtr, dataPtr)
       if not ffiCurrentEventQueueStuck.isNil():
         ffiCurrentEventQueueStuck[].store(true)
       if not ffiCurrentNotifyEventEnqueued.isNil():
@@ -234,26 +322,31 @@ template enqueueOrMarkStuck(
       ffiCurrentNotifyEventEnqueued()
 
 template dispatchFFIEvent*(eventName: string, body: untyped) =
-  ## `body` must yield `string` / `seq[byte]`. FFI thread only: encodes into
-  ## a `c_malloc` buffer and enqueues; the event thread fans out to listeners.
+  ## `body` must yield `string` / `seq[byte]`. FFI thread only: copies the
+  ## bytes into the tail slot (slab, or a heap fallback when oversize) and
+  ## enqueues; the event thread fans out.
   block:
     let evtName: string = eventName
     let bodyVal = body
-    var dataPtr: ptr UncheckedArray[byte] = nil
     let dataLen = bodyVal.len
-    if dataLen > 0:
-      dataPtr = cast[ptr UncheckedArray[byte]](c_malloc(csize_t(dataLen)))
-      copyMem(dataPtr, unsafeAddr bodyVal[0], dataLen)
-    let namePtr = alloc(evtName)
-    enqueueOrMarkStuck(evtName, namePtr, dataPtr, dataLen)
+    let src: pointer =
+      if dataLen > 0:
+        unsafeAddr bodyVal[0]
+      else:
+        nil
+    enqueueOrMarkStuck(evtName, src, dataLen)
 
 template dispatchFFIEventCbor*(eventName: string, eventPayload: typed) =
   ## Typed CBOR variant of `dispatchFFIEvent`. The param is `eventPayload`
   ## (not `payload`) to avoid clobbering `EventEnvelope.payload` substitution.
   block:
     let evtName: string = eventName
-    var (dataPtr, dataLen) = cborEncodeShared(
+    let encoded = cborEncode(
       EventEnvelope[typeof(eventPayload)](eventType: evtName, payload: eventPayload)
     )
-    let namePtr = alloc(evtName)
-    enqueueOrMarkStuck(evtName, namePtr, dataPtr, dataLen)
+    let src: pointer =
+      if encoded.len > 0:
+        unsafeAddr encoded[0]
+      else:
+        nil
+    enqueueOrMarkStuck(evtName, src, encoded.len)
