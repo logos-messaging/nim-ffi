@@ -38,6 +38,13 @@ proc abitest_echo*(
 ): Future[Result[int, string]] {.ffi: "abi = cbor".} =
   return ok(n)
 
+# Per-proc handler-timeout override (issue #93): parsed like the abi spec and
+# recorded in `requestTimeoutsMs`, keyed by the generated Req type name.
+proc abitest_slow*(
+    lib: AbiLib, n: int
+): Future[Result[int, string]] {.ffi: "timeout = 30000".} =
+  return ok(n)
+
 # Event with an explicit ABI override passed after the wire name.
 proc abitest_pinged*(p: Pinged) {.ffiEvent("on_pinged", "abi = cbor").}
 
@@ -90,6 +97,30 @@ suite "ABI format parsing":
     check parseAbiSpec("abi = c = x").ok == false # too many `=`
     check parseAbiSpec("abi = bson").ok == false # unknown format
     check "bson" in parseAbiSpec("abi = bson").err
+
+suite "handler-timeout spec parsing (issue #93)":
+  test "overrideKey extracts the lowercased, trimmed key":
+    check overrideKey("timeout = 30000") == "timeout"
+    check overrideKey("  ABI = c ") == "abi"
+    check overrideKey("bare") == "bare"
+
+  test "parseTimeoutSpec accepts `timeout = <ms>`, flexible spacing":
+    check parseTimeoutSpec("timeout = 30000") == (true, 30000, "")
+    check parseTimeoutSpec("TIMEOUT=100").ms == 100
+    check parseTimeoutSpec("  timeout  =  5 ").ms == 5
+
+  test "parseTimeoutSpec rejects malformed specs and non-positive values":
+    check parseTimeoutSpec("30000").ok == false # missing `timeout =`
+    check parseTimeoutSpec("abi = c").ok == false # wrong key
+    check parseTimeoutSpec("timeout = 1 = 2").ok == false # too many `=`
+    check parseTimeoutSpec("timeout = abc").ok == false # not an integer
+    check parseTimeoutSpec("timeout = 0").ok == false # must be positive
+    check parseTimeoutSpec("timeout = -5").ok == false # must be positive
+
+  test "a `timeout` override is recorded; a plain proc has no entry":
+    # Populated at module init from the annotations above.
+    check requestTimeoutsMs["AbitestSlowReq".cstring] == 30000
+    check not requestTimeoutsMs.hasKey("AbitestPingReq".cstring)
 
 suite "ABI proc-dispatch readiness (why c is still gated on procs)":
   test "cbor proc-dispatch is wired; c proc-dispatch is gated":

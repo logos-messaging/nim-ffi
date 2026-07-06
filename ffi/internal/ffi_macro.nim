@@ -24,16 +24,62 @@ proc resolveABIFormat(abiSpecs: seq[NimNode]): ABIFormat {.compileTime.} =
   ## Resolve one annotation's ABI from its optional `"abi = ..."` string specs
   ## (last wins), inheriting the library default when absent.
   var fmt = currentDefaultABIFormat
-  for spec in abiSpecs:
-    if spec.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+  for override in abiSpecs:
+    if override.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
       error(
-        "FFI ABI override must be a string literal like \"abi = c\", got: " & spec.repr
+        "FFI ABI override must be a string literal like \"abi = c\", got: " &
+          override.repr
       )
-    let parsed = parseAbiSpec($spec)
+    let parsed = parseAbiSpec($override)
     if not parsed.ok:
       error(parsed.err)
     fmt = parsed.fmt
   fmt
+
+proc resolveFFISpecs(
+    specs: seq[NimNode]
+): tuple[abi: ABIFormat, timeoutMs: int] {.compileTime.} =
+  ## Resolve an annotation's `"abi = ..."` and `"timeout = ..."` string specs
+  ## (last of each wins), inheriting the library-default ABI when absent.
+  ## `timeoutMs == 0` means "no per-proc override" (use the context default).
+  var abi = currentDefaultABIFormat
+  var timeoutMs = 0
+  for override in specs:
+    if override.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+      error(
+        "FFI override must be a string literal like \"abi = c\" or " &
+          "\"timeout = 30000\", got: " & override.repr
+      )
+    case overrideKey($override)
+    of "abi":
+      let parsed = parseAbiSpec($override)
+      if not parsed.ok:
+        error(parsed.err)
+      abi = parsed.fmt
+    of "timeout":
+      let parsed = parseTimeoutSpec($override)
+      if not parsed.ok:
+        error(parsed.err)
+      timeoutMs = parsed.ms
+    else:
+      error(
+        "unknown FFI override '" & $override &
+          "'; expected `abi = ...` or `timeout = ...`"
+      )
+  (abi, timeoutMs)
+
+proc registerRequestTimeout(
+    reqTypeName: NimNode, timeoutMs: int
+): NimNode {.compileTime.} =
+  ## Top-level assignment that records a per-proc handler timeout at module init,
+  ## keyed by the same Req type name the dispatcher registry uses. Empty when no
+  ## override was given.
+  if timeoutMs <= 0:
+    return newStmtList()
+  newAssignment(
+    newTree(nnkBracketExpr, ident("requestTimeoutsMs"), newLit($reqTypeName)),
+    newLit(timeoutMs),
+  )
 
 proc gateABIFormat(fmt: ABIFormat, where: string) {.compileTime.} =
   ## Abort if the selected ABI's codegen isn't wired yet (only `Cbor` is), so a
@@ -606,7 +652,8 @@ macro ffiRaw*(args: varargs[untyped]): untyped =
 
   requireLibraryDeclared("`.ffiRaw.`")
   let prc = args[^1]
-  gateABIFormat(resolveABIFormat(args[0 ..^ 2]), "`.ffiRaw.` proc")
+  let (rawAbiFormat, rawTimeoutMs) = resolveFFISpecs(args[0 ..^ 2])
+  gateABIFormat(rawAbiFormat, "`.ffiRaw.` proc")
 
   let procName = prc[0]
   let formalParams = prc[3]
@@ -679,7 +726,8 @@ macro ffiRaw*(args: varargs[untyped]): untyped =
     registerReqFFI(`reqName`, `paramIdent`: `paramType`):
       `anonymousProcNode`
 
-  let stmts = newStmtList(registerReq, ffiProc)
+  let stmts =
+    newStmtList(registerReq, ffiProc, registerRequestTimeout(reqName, rawTimeoutMs))
 
   when defined(ffiDumpMacros):
     echo stmts.repr
@@ -749,14 +797,16 @@ macro ffi*(args: varargs[untyped]): untyped =
   ##   proc mylib_send*(w: MyLib, cfg: SendConfig): Future[Result[string, string]] {.ffi.} =
   ##     return ok("done")
 
-  # Annotated node is the last vararg; leading args are `"abi = ..."` specs.
+  # Annotated node is the last vararg; leading args are override specs.
   let prc = args[^1]
-  let abiFormat = resolveABIFormat(args[0 ..^ 2])
+  let (abiFormat, timeoutMs) = resolveFFISpecs(args[0 ..^ 2])
 
   # A value type stands alone (no library required). Its `c` companion is
   # emitted later by `genBindings()`, since a type-pragma macro can only return
   # a TypeDef; `cbor` rides the generic overloads. Both abis are valid here.
   if prc.kind == nnkTypeDef:
+    if timeoutMs > 0:
+      error("`.ffi.` on a type takes no `timeout` override (it only applies to procs)")
     gateFFITypeABIFormat(abiFormat, "`.ffi.` type")
     var cleanTypeDef = prc.copyNimTree()
     if cleanTypeDef[0].kind == nnkPragmaExpr:
@@ -1011,7 +1061,9 @@ macro ffi*(args: varargs[untyped]): untyped =
 
     ffiProcRegistry.add(procMeta)
 
-    return newStmtList(helperProc, registerReq, ffiProc)
+    return newStmtList(
+      helperProc, registerReq, ffiProc, registerRequestTimeout(reqTypeName, timeoutMs)
+    )
 
   proc scalarPath(): NimNode =
     ## The scalar fast path lives in `ffi_scalar`; here we only build the shared
@@ -1288,7 +1340,7 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
 
   requireLibraryDeclared("`.ffiCtor.`")
   let prc = args[^1]
-  let abiFormat = resolveABIFormat(args[0 ..^ 2])
+  let (abiFormat, timeoutMs) = resolveFFISpecs(args[0 ..^ 2])
   gateABIFormat(abiFormat, "`.ffiCtor.` proc")
 
   let procName = prc[0]
@@ -1458,7 +1510,14 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
       var `poolIdent`: FFIContextPool[`libTypeName`]
 
   let stmts = newStmtList(
-    typeDef, ffiNewReqProc, helperProc, processProc, addToReg, poolDecl, ffiProc
+    typeDef,
+    ffiNewReqProc,
+    helperProc,
+    processProc,
+    addToReg,
+    poolDecl,
+    ffiProc,
+    registerRequestTimeout(reqTypeName, timeoutMs),
   )
 
   when defined(ffiDumpMacros):

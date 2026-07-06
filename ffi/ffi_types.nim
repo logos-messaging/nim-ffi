@@ -37,5 +37,11 @@ template foreignThreadGc*(body: untyped) =
 ## The value is a proc that handles the request asynchronously.
 var registeredRequests*: Table[cstring, FFIRequestProc]
 
+## Per-request handler-timeout overrides in milliseconds, keyed by the same Req
+## type name as `registeredRequests`. Populated at compile time from a
+## `{.ffi: "timeout = <ms>".}` spec; an absent key means "use the context's
+## `defaultRequestTimeout`". Like `registeredRequests`, never mutated at run time.
+var requestTimeoutsMs*: Table[cstring, int]
+
 ### End of FFI utils
 ################################################################################

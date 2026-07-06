@@ -72,6 +72,37 @@ proc abiCodegenImplemented*(fmt: ABIFormat): bool =
   ## seam a future PR flips once the `c` dispatch path is wired.
   fmt == ABIFormat.Cbor
 
+proc overrideKey*(override: string): string =
+  ## Lowercased key of a `key = value` pragma override (the text before `=`),
+  ## used to route it to its parser. `"timeout = 30000"` → `"timeout"`.
+  override.split('=')[0].strip().toLowerAscii()
+
+proc parseTimeoutSpec*(override: string): tuple[ok: bool, ms: int, err: string] =
+  ## Parse a `"timeout = <milliseconds>"` override (whitespace/case tolerant).
+  ## The value must be a positive integer number of milliseconds. On bad
+  ## grammar or value, returns `ok = false` with a human-readable `err`.
+  let parts = override.split('=')
+  if parts.len != 2 or overrideKey(override) != "timeout":
+    return (
+      false,
+      0,
+      "invalid timeout override: '" & override & "'; expected `timeout = <ms>`",
+    )
+  let raw = parts[1].strip()
+  let ms =
+    try:
+      parseInt(raw)
+    except ValueError:
+      return (
+        false,
+        0,
+        "invalid timeout value: '" & raw &
+          "'; expected a positive integer of milliseconds",
+      )
+  if ms <= 0:
+    return (false, 0, "timeout must be a positive number of milliseconds, got: " & raw)
+  (true, ms, "")
+
 proc parseABIFormatName*(name: string): tuple[ok: bool, fmt: ABIFormat] =
   ## Bare format name (`"c"`/`"cbor"`, case-insensitive) → `ABIFormat`;
   ## `ok` is false otherwise.
@@ -83,28 +114,28 @@ proc parseABIFormatName*(name: string): tuple[ok: bool, fmt: ABIFormat] =
   else:
     (false, ABIFormat.Cbor)
 
-proc parseAbiSpec*(spec: string): tuple[ok: bool, fmt: ABIFormat, err: string] =
+proc parseAbiSpec*(override: string): tuple[ok: bool, fmt: ABIFormat, err: string] =
   ## Parse an `"abi = <format>"` override (whitespace/case tolerant). On bad
   ## grammar or format, returns `ok = false` with a human-readable `err`.
-  let parts = spec.split('=')
+  let parts = override.split('=')
   if parts.len != 2:
     return (
       false,
       ABIFormat.Cbor,
-      "invalid ABI override '" & spec & "'; expected `abi = c` or `abi = cbor`",
+      "invalid ABI override: '" & override & "'; expected `abi = c` or `abi = cbor`",
     )
   if parts[0].strip().toLowerAscii() != "abi":
     return (
       false,
       ABIFormat.Cbor,
-      "invalid ABI override '" & spec & "'; expected `abi = c` or `abi = cbor`",
+      "invalid ABI override: '" & override & "'; expected `abi = c` or `abi = cbor`",
     )
   let (ok, fmt) = parseABIFormatName(parts[1])
   if not ok:
     return (
       false,
       ABIFormat.Cbor,
-      "unknown ABI format '" & parts[1].strip() & "'; valid values are `c` and `cbor`",
+      "unknown ABI format: '" & parts[1].strip() & "'; valid values are `c` and `cbor`",
     )
   (true, fmt, "")
 

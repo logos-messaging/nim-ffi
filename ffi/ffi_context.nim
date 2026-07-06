@@ -39,6 +39,12 @@ type FFIContext*[T] = object
   eventQueueStuck*: Atomic[bool] # sticky overflow flag
   running: Atomic[bool] # To control when the threads are running
   registeredRequests: ptr Table[cstring, FFIRequestProc]
+  requestTimeouts: ptr Table[cstring, int]
+    # Per-proc timeout overrides (ms). Points at the compile-time-filled global,
+    # like registeredRequests, so the FFI thread reads it GC-safely via ctx.
+  defaultRequestTimeout*: Duration
+    # Per-handler deadline unless a `{.ffi: "timeout = <ms>".}` override raises
+    # it; `InfiniteDuration` opts out. See processRequest for the trip behavior.
 
 var onFFIThread* {.threadvar.}: bool
   # Re-entrant dispatch guard for `sendRequestToFFIThread`.
@@ -49,6 +55,8 @@ const
   EventThreadTickInterval* = 1.seconds
   FFIHeartbeatStartDelay* = 10.seconds # grace window for library startup
   FFIHeartbeatStaleThreshold* = 1.seconds
+  DefaultRequestTimeout* = 5.seconds
+    # Finite fallback (issue #93) so a wedged handler can't hang a caller forever.
 
 include ./event_thread
 include ./ffi_thread
@@ -105,6 +113,7 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   initEventQueue(ctx[].eventQueue)
   ctx.ffiHeartbeat.store(0)
   ctx.eventQueueStuck.store(false)
+  ctx.defaultRequestTimeout = DefaultRequestTimeout
 
   var success = false
   defer:
@@ -120,6 +129,7 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   newSignalOrErr(ctx.eventThreadExitSignal, "eventThreadExitSignal")
 
   ctx.registeredRequests = addr ffi_types.registeredRequests
+  ctx.requestTimeouts = addr ffi_types.requestTimeoutsMs
 
   ctx.running.store(true)
 
