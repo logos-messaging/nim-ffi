@@ -929,10 +929,9 @@ macro ffi*(args: varargs[untyped]): untyped =
     abiFormat: abiFormat,
   )
 
-  # Does this proc qualify for the CBOR-free scalar fast path? Only `abi = c`
-  # opts in, and only when every wire param + the return is a plain scalar
-  # (see `isScalarOnly`) and the args fit the inline slots. An `abi = c` proc
-  # that isn't scalar-only stays gated — full C-wire dispatch is a follow-up.
+  # Qualifies for the CBOR-free fast path only if `abi = c`, every wire param +
+  # return is scalar (`isScalarOnly`), and the args fit the inline slots. A
+  # non-scalar `abi = c` proc stays gated — full C-wire dispatch is a follow-up.
   let scalarEligible =
     abiFormat == ABIFormat.C and isScalarOnly(procMeta) and
     extraParamNames.len <= MaxScalarArgs
@@ -1790,6 +1789,12 @@ macro genBindings*(
     # export doesn't take the CBOR `(reqCbor, reqCborLen)` shape); drop them so
     # the generators don't emit a broken CBOR caller for them.
     let genProcs = bindableProcs(ffiProcRegistry)
+    for p in ffiProcRegistry:
+      if p.scalarFastPath:
+        hint(
+          "genBindings: skipping scalar-fast-path proc '" & p.procName &
+            "' (no foreign-binding codegen for the scalar shape yet)"
+        )
     case lang
     of "rust":
       generateRustCrate(
@@ -1801,8 +1806,7 @@ macro genBindings*(
       )
     of "c":
       generateCBindings(
-        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
-        ffiEventRegistry,
+        genProcs, ffiTypeRegistry, libName, outputDir, nimSrcRelPath, ffiEventRegistry
       )
     of "cddl":
       generateCddlBindings(genProcs, ffiTypeRegistry, libName, outputDir, nimSrcRelPath)

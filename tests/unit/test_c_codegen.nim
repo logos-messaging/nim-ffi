@@ -3,9 +3,10 @@
 ## pipeline, no files written) and asserts on the emitted text — the same
 ## approach as test_cddl_codegen.
 
-import std/strutils
+import std/[strutils, sequtils]
 import unittest2
 import ffi/codegen/[meta, c]
+import ffi/internal/ffi_scalar
 
 proc field(n, t: string): FFIFieldMeta =
   FFIFieldMeta(name: n, typeName: t)
@@ -209,6 +210,60 @@ suite "generateCLibHeader: no-event libraries stay lean":
     let header = generateCLibHeader(procs, @[], "timer")
     check "listeners_len" notin header
     check "_add_event_listener" in header # raw ABI symbol is always declared
+
+suite "generateCLibHeader: scalar-fast-path procs are excluded":
+  setup:
+    let procs = @[
+      FFIProcMeta(
+        procName: "calc_create",
+        libName: "calc",
+        kind: FFIKind.CTOR,
+        libTypeName: "Calc",
+        returnTypeName: "Calc",
+      ),
+      FFIProcMeta(
+        procName: "calc_echo",
+        libName: "calc",
+        kind: FFIKind.FFI,
+        libTypeName: "Calc",
+        extraParams: @[param("req", "EchoRequest")],
+        returnTypeName: "EchoResponse",
+      ),
+      FFIProcMeta(
+        procName: "calc_add",
+        libName: "calc",
+        kind: FFIKind.FFI,
+        libTypeName: "Calc",
+        extraParams: @[param("a", "int"), param("b", "int")],
+        returnTypeName: "int",
+        abiFormat: ABIFormat.C,
+        scalarFastPath: true,
+      ),
+    ]
+    let types = @[
+      FFITypeMeta(name: "EchoRequest", fields: @[field("m", "string")]),
+      FFITypeMeta(name: "EchoResponse", fields: @[field("echoed", "string")]),
+    ]
+
+  test "bindableProcs keeps the CBOR procs and drops the scalar one":
+    let kept = bindableProcs(procs)
+    check kept.anyIt(it.procName == "calc_create")
+    check kept.anyIt(it.procName == "calc_echo")
+    check not kept.anyIt(it.procName == "calc_add")
+
+  test "the C header emitted from the bindable set carries no scalar symbol":
+    let header = generateCLibHeader(bindableProcs(procs), types, "calc")
+    check "int calc_echo(void* ctx, FFICallback callback" in header
+    check "int calc_add(" notin header # note: calc_add_event_listener is unrelated
+
+  test "unfiltered, the generator would emit a wrong-ABI CBOR caller for it":
+    # Regression guard for the bug bindableProcs prevents: handed the raw
+    # registry, the C generator declares calc_add with the CBOR
+    # (req_cbor, req_cbor_len) prototype, which mismatches its real inline-arg
+    # export. genBindings must feed the filtered set (see the `of "c":` branch).
+    let header = generateCLibHeader(procs, types, "calc")
+    check "int calc_add(void* ctx, FFICallback callback, void* user_data, " &
+      "const uint8_t* req_cbor, size_t req_cbor_len);" in header
 
 suite "shared headers: prelude and cbor split":
   test "the prelude owns the leaf types and libc/TinyCBOR includes":
