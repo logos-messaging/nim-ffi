@@ -4,7 +4,7 @@
 ## the Nim-side cbor_serial codec on the wire — both ends speak RFC 8949).
 
 import std/[os, strutils]
-import ./meta, ./string_helpers, ./c_cpp_common
+import ./meta, ./string_helpers, ./c_cpp_common, ./types_ir
 
 ## Wire-format C++ type used for any Nim `ptr T` / `pointer`. Fixed 64-bit so
 ## the CBOR payload size is stable regardless of host architecture.
@@ -21,35 +21,37 @@ const
   ContextRuleOf5Tpl = staticRead("templates/cpp/context_rule_of_5.hpp.tpl")
   CMakeListsTpl = staticRead("templates/cpp/CMakeLists.txt.tpl")
 
+func cppScalar(s: ScalarKind): string =
+  case s
+  of skBool: "bool"
+  of skI8: "int8_t"
+  of skI16: "int16_t"
+  of skI32: "int32_t"
+  of skI64: "int64_t"
+  of skU8: "uint8_t"
+  of skU16: "uint16_t"
+  of skU32: "uint32_t"
+  of skU64: "uint64_t"
+  of skF32: "float"
+  of skF64: "double"
+
+func cppSeq(elem: string): string =
+  "std::vector<" & elem & ">"
+
+func cppOpt(elem: string): string =
+  "std::optional<" & elem & ">"
+
+const cppMap = NativeTypeMap(
+  scalar: cppScalar,
+  str: "std::string",
+  bytes: "std::vector<uint8_t>",
+  ptrType: CppPtrType,
+  seqOf: cppSeq,
+  optOf: cppOpt,
+) ## structName omitted: C++ uses the user type name verbatim
+
 proc nimTypeToCpp*(typeName: string): string =
-  let trimmed = typeName.strip()
-  if trimmed.startsWith("ptr "):
-    return CppPtrType
-  else:
-    let seqInner = genericInnerType(trimmed, "seq[")
-    if seqInner.len > 0:
-      return "std::vector<" & nimTypeToCpp(seqInner) & ">"
-    let optionInner = genericInnerType(trimmed, "Option[")
-    if optionInner.len > 0:
-      return "std::optional<" & nimTypeToCpp(optionInner) & ">"
-    let maybeInner = genericInnerType(trimmed, "Maybe[")
-    if maybeInner.len > 0:
-      return "std::optional<" & nimTypeToCpp(maybeInner) & ">"
-  case trimmed
-  of "string", "cstring": "std::string"
-  of "int", "int64": "int64_t"
-  of "int32": "int32_t"
-  of "int16": "int16_t"
-  of "int8": "int8_t"
-  of "uint", "uint64": "uint64_t"
-  of "uint32": "uint32_t"
-  of "uint16": "uint16_t"
-  of "uint8", "byte": "uint8_t"
-  of "bool": "bool"
-  of "float", "float32": "float"
-  of "float64": "double"
-  of "pointer": CppPtrType
-  else: trimmed
+  renderNative(cppMap, parseFFIType(typeName))
 
 proc emitStructCborCodec(
     lines: var seq[string], structName: string, fields: seq[(string, string)]

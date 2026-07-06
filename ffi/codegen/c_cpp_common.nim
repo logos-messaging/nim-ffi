@@ -6,16 +6,6 @@
 import std/strutils
 import ./meta, ./string_helpers
 
-proc genericInnerType*(typeName, prefix: string): string =
-  ## Inner type of a single-parameter generic written `Prefix[Inner]`, e.g.
-  ## `genericInnerType("seq[int]", "seq[")` → `"int"`. Empty string when
-  ## `typeName` is not of that shape.
-  if typeName.startsWith(prefix) and typeName.endsWith("]"):
-    let start = prefix.len
-    let lastIndex = typeName.len - 2
-    return typeName[start .. lastIndex]
-  return ""
-
 proc stripLibPrefix*(procName, libName: string): string =
   ## Drops the `<lib>_` prefix from an exported C symbol, e.g.
   ## `stripLibPrefix("timer_echo", "timer")` → `"echo"`.

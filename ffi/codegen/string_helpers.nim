@@ -25,7 +25,7 @@ proc camelToSnakeCase*(s: string): string =
     first = false
   return snake
 
-proc capitalizeFirstLetter*(s: string): string =
+func capitalizeFirstLetter*(s: string): string =
   ## Returns `s` with its first rune uppercased; the rest is left unchanged.
   ## e.g. "abc" → "Abc", "" → "", "Abc" → "Abc"
   if s.len == 0:

@@ -1,38 +1,47 @@
 ## Rust binding generator for the nim-ffi framework.
 ## Generates a complete Rust crate that uses CBOR (ciborium) on the wire.
 
-import std/[os, strutils, sequtils]
-import ./meta, ./string_helpers
+import std/[os, strutils]
+import ./meta, ./string_helpers, ./types_ir
 
 ## Wire-format Rust type used for any Nim `ptr T` / `pointer`. Fixed 64-bit so
 ## the CBOR payload size is stable regardless of host architecture (mirrors
 ## CppPtrType in cpp.nim).
 const RustPtrType* = "u64"
 
+func rustScalar(s: ScalarKind): string =
+  case s
+  of skBool: "bool"
+  of skI8: "i8"
+  of skI16: "i16"
+  of skI32: "i32"
+  of skI64: "i64"
+  of skU8: "u8"
+  of skU16: "u16"
+  of skU32: "u32"
+  of skU64: "u64"
+  of skF32: "f32"
+  of skF64: "f64"
+
+func rustSeq(elem: string): string =
+  "Vec<" & elem & ">"
+
+func rustOpt(elem: string): string =
+  "Option<" & elem & ">"
+
+const rustMap = NativeTypeMap(
+  scalar: rustScalar,
+  str: "String",
+  bytes: "Vec<u8>",
+  ptrType: RustPtrType,
+  seqOf: rustSeq,
+  optOf: rustOpt,
+  structName: capitalizeFirstLetter,
+)
+
 proc nimTypeToRust*(typeName: string): string =
   ## Maps Nim type names to Rust type names, including generics.
-  let t = typeName.strip()
-  if t.startsWith("seq[") and t.endsWith("]"):
-    return "Vec<" & nimTypeToRust(t[4 .. ^2]) & ">"
-  if t.startsWith("Option[") and t.endsWith("]"):
-    return "Option<" & nimTypeToRust(t[7 .. ^2]) & ">"
-  if t.startsWith("Maybe[") and t.endsWith("]"):
-    return "Option<" & nimTypeToRust(t[6 .. ^2]) & ">"
-  case t
-  of "string", "cstring":
-    "String"
-  of "int", "int64":
-    "i64"
-  of "int32":
-    "i32"
-  of "bool":
-    "bool"
-  of "float", "float64":
-    "f64"
-  of "pointer":
-    RustPtrType
-  else:
-    capitalizeFirstLetter(t)
+  renderNative(rustMap, parseFFIType(typeName))
 
 proc deriveLibName*(procs: seq[FFIProcMeta]): string =
   ## Extracts the common prefix before the first `_` from proc names.
