@@ -1,7 +1,7 @@
 ## Rust binding generator for the nim-ffi framework.
 ## Generates a complete Rust crate that uses CBOR (ciborium) on the wire.
 
-import std/[os, strutils, sequtils]
+import std/[os, strutils]
 import ./meta, ./string_helpers, ./types_ir
 
 ## Wire-format Rust type used for any Nim `ptr T` / `pointer`. Fixed 64-bit so

@@ -258,29 +258,33 @@ proc emitStructType(reg: var CTypeReg, t: FFITypeMeta) =
 proc ensureCType(reg: var CTypeReg, t: FFIType): tuple[cType: string, owns: bool] =
   ## Walks the shared type IR into a C type, monomorphising each distinct
   ## `seq[T]` / `Option[T]` into its own struct + codec triple on first sight.
+  ## `owns` marks a C type that carries heap-allocated payload the caller must
+  ## release with its generated free function (strings, byte buffers, and any
+  ## seq/opt/struct transitively containing one); plain scalars and pointers own
+  ## nothing and need no cleanup.
   case t.kind
   of ftPtr:
-    (CPtrType, false)
+    return (CPtrType, false)
   of ftScalar:
-    (scalarCInfoTable[t.scalar].cType, false)
+    return (scalarCInfoTable[t.scalar].cType, false)
   of ftStr:
-    ("NimFfiStr", true)
+    return ("NimFfiStr", true)
   of ftBytes:
-    ("NimFfiBytes", true)
+    return ("NimFfiBytes", true)
   of ftSeq:
     let (elemC, _) = ensureCType(reg, t.elem)
     let name = reg.libType & "Seq_" & cToken(elemC)
     if name notin reg.emitted:
       reg.emitted.incl(name)
       emitSeqType(reg, name, elemC)
-    (name, true)
+    return (name, true)
   of ftOpt:
     let (elemC, elemOwns) = ensureCType(reg, t.elem)
     let name = reg.libType & "Opt_" & cToken(elemC)
     if name notin reg.emitted:
       reg.emitted.incl(name)
       emitOptType(reg, name, elemC, elemOwns)
-    (name, reg.owns.getOrDefault(name, false))
+    return (name, reg.owns.getOrDefault(name, false))
   of ftStruct:
     let name = t.name
     if name notin reg.emitted:
@@ -289,7 +293,7 @@ proc ensureCType(reg: var CTypeReg, t: FFIType): tuple[cType: string, owns: bool
         emitStructType(reg, reg.typeTable[name])
       else:
         reg.decls.add("/* unknown type referenced: " & name & " */")
-    (name, reg.owns.getOrDefault(name, false))
+    return (name, reg.owns.getOrDefault(name, false))
 
 proc ensureCType(reg: var CTypeReg, nimType: string): tuple[cType: string, owns: bool] =
   ensureCType(reg, parseFFIType(nimType))
@@ -306,7 +310,9 @@ proc reqTypeMeta(p: FFIProcMeta): FFITypeMeta =
 
 func paramByValue(nimType: string, ridesAsPtr: bool): bool =
   ## Scalars / opaque pointers / string views pass by value; composite
-  ## aggregates (seq, Option, user structs) pass by const pointer.
+  ## aggregates (seq, Option, user structs) pass by const pointer. Note `ptr T`
+  ## rides by value as the 64-bit wire int (like `pointer`); production params
+  ## reach here as `pointer` since handles are pre-converted upstream.
   if ridesAsPtr:
     return true
   parseFFIType(nimType).kind in {ftScalar, ftStr, ftPtr}

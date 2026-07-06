@@ -1,11 +1,11 @@
-## Structured type IR shared by the C / C++ / Rust binding generators: one
+## Structured type model shared by the C / C++ / Rust binding generators: one
 ## parser (`parseFFIType`) for the Nim type strings each backend used to slice
 ## by hand, plus `renderNative` to walk the result into a backend's type string.
 
 import std/[strutils, options]
 
 type
-  ScalarKind* = enum
+  ScalarKind* {.pure.} = enum
     skBool
     skI8
     skI16
@@ -18,7 +18,7 @@ type
     skF32
     skF64
 
-  FFITypeKind* = enum
+  FFITypeKind* {.pure.} = enum
     ftScalar
     ftStr
     ftBytes
@@ -55,7 +55,7 @@ func genericInnerType(typeName, prefix: string): string =
   ## `genericInnerType("seq[int]", "seq[")` → `"int"`; "" if not that shape.
   if typeName.startsWith(prefix) and typeName.endsWith("]"):
     return typeName[prefix.len .. ^2]
-  ""
+  return ""
 
 func scalarKind(t: string): Option[ScalarKind] =
   ## Single source of truth for the scalar leaf set every backend shares.
@@ -106,7 +106,7 @@ func parseFFIType*(typeName: string): FFIType =
     return FFIType(kind: ftOpt, elem: parseFFIType(optInner.strip()))
 
   let sc = scalarKind(t)
-  if sc.isSome:
+  if sc.isSome():
     return FFIType(kind: ftScalar, scalar: sc.get())
   if t == "string" or t == "cstring":
     return FFIType(kind: ftStr)
