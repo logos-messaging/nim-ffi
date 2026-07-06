@@ -4,6 +4,7 @@ import ../ffi_types
 import ../ffi_thread_request
 import ../codegen/[meta, string_helpers]
 import ./c_macro_helpers
+import ./ffi_scalar
 when defined(ffiGenBindings):
   import ../codegen/rust
   import ../codegen/cpp
@@ -1013,103 +1014,24 @@ macro ffi*(args: varargs[untyped]): untyped =
     return newStmtList(helperProc, registerReq, ffiProc)
 
   proc scalarPath(): NimNode =
-    ## CBOR-free dispatch for an all-scalar `.ffi.` method. The C export packs
-    ## its scalar args inline into the request (no envelope `c_malloc`, no CBOR
-    ## encode); the FFI-thread handler unpacks them, runs the user body, and
-    ## returns the result as raw bytes (see `ffiScalarRetBytes`). The Nim-facing
-    ## helper is emitted unchanged so the proc stays directly callable from Nim.
-    let helperProc = buildAsyncHelperProc()
-
-    let ptrFFICtx =
-      nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), libTypeName))
-    let scalarReqKey = camelName & "Req"
-
-    let reqIdent = genSym(nskLet, "ffiReq")
-    let ctxHandlerName = genSym(nskLet, "ffiCtxHandler")
-    let handlerBody = newStmtList()
-    handlerBody.add quote do:
-      let `reqIdent` = cast[ptr FFIThreadRequest](request)
-      let `ctxHandlerName` = cast[`ptrFFICtx`](reqHandler)
-
-    let helperCall = newTree(nnkCall, userProcName)
-    let ctxMyLib = newDotExpr(newTree(nnkDerefExpr, ctxHandlerName), ident("myLib"))
-    helperCall.add(newTree(nnkDerefExpr, ctxMyLib))
-    for i in 0 ..< extraParamNames.len:
-      let argIdent = ident(extraParamNames[i])
-      let slot = nnkBracketExpr.newTree(
-        newDotExpr(newTree(nnkDerefExpr, reqIdent), ident("scalarArgs")), newLit(i)
-      )
-      handlerBody.add(
-        newLetStmt(
-          argIdent, newCall(ident("ffiUnpackScalar"), slot, extraParamTypes[i])
-        )
-      )
-      helperCall.add(argIdent)
-
-    let retValIdent = genSym(nskLet, "retVal")
-    handlerBody.add quote do:
-      let `retValIdent` = (await `helperCall`).valueOr:
-        return err($error)
-      return ok(ffiScalarRetBytes(`retValIdent`))
-
-    let seqByteResult = nnkBracketExpr.newTree(
-      ident("Future"),
-      nnkBracketExpr.newTree(
-        ident("Result"),
-        nnkBracketExpr.newTree(ident("seq"), ident("byte")),
-        ident("string"),
-      ),
-    )
-    let handlerProc = newProc(
-      name = newEmptyNode(),
-      params = @[
-        seqByteResult,
-        newIdentDefs(ident("request"), ident("pointer")),
-        newIdentDefs(ident("reqHandler"), ident("pointer")),
-      ],
-      body = handlerBody,
-      pragmas = nnkPragma.newTree(ident("async")),
-    )
-    let registerAssign = newAssignment(
-      nnkBracketExpr.newTree(ident("registeredRequests"), newLit(scalarReqKey)),
-      handlerProc,
-    )
-
-    var scalarParams = @[
-      ident("cint"),
-      newIdentDefs(ident("ctx"), ctxType),
-      newIdentDefs(ident("callback"), ident("FFICallBack")),
-      newIdentDefs(ident("userData"), ident("pointer")),
-    ]
-    for i in 0 ..< extraParamNames.len:
-      scalarParams.add(newIdentDefs(ident(extraParamNames[i]), extraParamTypes[i]))
-
-    let ffiBody = newStmtList()
-    ffiBody.add buildCtxGuard()
-
-    let initScalarCall = newTree(
-      nnkCall,
-      newDotExpr(ident("FFIThreadRequest"), ident("initScalar")),
-      ident("callback"),
-      ident("userData"),
-      newDotExpr(newLit(scalarReqKey), ident("cstring")),
-    )
-    for i in 0 ..< extraParamNames.len:
-      initScalarCall.add(newCall(ident("ffiPackScalar"), ident(extraParamNames[i])))
-
+    ## The scalar fast path lives in `ffi_scalar`; here we only build the shared
+    ## dispatch pieces (same helpers the usual path uses) and hand them over, so
+    ## the base macro carries none of the inline pack/unpack machinery.
     let reqPtrIdent = genSym(nskLet, "reqPtr")
-    ffiBody.add newLetStmt(reqPtrIdent, initScalarCall)
-    ffiBody.add buildSendAndReply(reqPtrIdent)
-
-    let ffiProc = buildCExportProc(scalarParams, ffiBody)
-
-    # Registered (not just skipped) so the compile-time metadata stays
-    # introspectable; `bindableProcs` drops it from foreign codegen.
-    var scalarMeta = procMeta
-    scalarMeta.scalarFastPath = true
-    ffiProcRegistry.add(scalarMeta)
-
-    return newStmtList(helperProc, registerAssign, ffiProc)
+    buildScalarPath(
+      helperProc = buildAsyncHelperProc(),
+      ctxGuard = buildCtxGuard(),
+      reqPtrIdent = reqPtrIdent,
+      sendAndReply = buildSendAndReply(reqPtrIdent),
+      userProcName = userProcName,
+      cExportProcName = cExportProcName,
+      cExportName = cExportName,
+      ctxType = ctxType,
+      camelName = camelName,
+      extraParamNames = extraParamNames,
+      extraParamTypes = extraParamTypes,
+      procMeta = procMeta,
+    )
 
   if abiFormat == ABIFormat.C and not scalarEligible:
     gateABIFormat(abiFormat, "`.ffi.` proc")

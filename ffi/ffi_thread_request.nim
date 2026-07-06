@@ -30,9 +30,6 @@ type FFIThreadRequest* = object
   reqId*: cstring ## Per-proc Req type name used to look up the handler.
   data*: ptr UncheckedArray[byte] ## Owned CBOR-encoded request payload.
   dataLen*: int
-  isScalar*: bool
-    ## Set by `initScalar`: the payload rode inline in `scalarArgs` (no CBOR,
-    ## no `data` buffer), so `deleteRequest` has nothing extra to free.
   scalarArgs*: array[MaxScalarArgs, uint64]
     ## Scalar-fast-path args inlined in the envelope (one `ffiPackScalar` value
     ## per slot) so there's no per-call `c_malloc`. A plain array rather than a
@@ -79,7 +76,6 @@ proc allocBaseRequest(
   ret[].reqId = reqId.alloc()
   ret[].data = nil
   ret[].dataLen = 0
-  ret[].isScalar = false
   ret[].next = nil
   return ret
 
@@ -169,7 +165,6 @@ proc initScalar*(
     "initScalar: " & $args.len & " scalar args exceed MaxScalarArgs (" & $MaxScalarArgs &
       ")"
   var ret = allocBaseRequest(callback, userData, reqId)
-  ret[].isScalar = true
   for i in 0 ..< args.len:
     ret[].scalarArgs[i] = args[i]
   ret

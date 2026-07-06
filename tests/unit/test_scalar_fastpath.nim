@@ -12,6 +12,7 @@ import unittest2
 import results
 import ffi
 import ffi/codegen/meta
+import ffi/internal/ffi_scalar
 
 type ScalarLib = object
   base: int
