@@ -129,9 +129,16 @@ proc deleteRequest*(request: ptr FFIThreadRequest) =
     c_free(cast[pointer](request[].reqId))
   c_free(request)
 
-proc fireCallback(res: Result[seq[byte], string], request: ptr FFIThreadRequest) =
-  ## Delivers one response to the foreign callback. Success payload is CBOR
-  ## bytes; error payload is the raw UTF-8 error string.
+proc fireCallback*(res: Result[seq[byte], string], request: ptr FFIThreadRequest) =
+  ## Delivers the response to the foreign callback, at most once per request:
+  ## the timeout path and the handler-completion path both call it, but the
+  ## foreign side must be answered exactly once. Both run on the FFI thread, so
+  ## the plain `responded` flag needs no synchronization. Success payload is the
+  ## encoded response bytes; error payload is the raw UTF-8 error string. Does
+  ## NOT free the request; that stays with `handleRes`.
+  if request[].responded:
+    return
+  request[].responded = true
   if res.isErr():
     foreignThreadGc:
       let msg = if res.error.len > 0: res.error else: EmptyErrorMarker
@@ -156,23 +163,12 @@ proc fireCallback(res: Result[seq[byte], string], request: ptr FFIThreadRequest)
         RET_OK, cast[ptr cchar](addr sentinel), 1.csize_t, request[].userData
       )
 
-proc respondOnce*(request: ptr FFIThreadRequest, res: Result[seq[byte], string]) =
-  ## Fires the callback the first time it's called for `request` and no-ops
-  ## after — the timeout path and the handler-completion path both call it, but
-  ## the foreign side must be answered exactly once. Does NOT free the request:
-  ## freeing stays with `handleRes` so the handler always owns the buffer until
-  ## it finishes.
-  if request[].responded:
-    return
-  request[].responded = true
-  fireCallback(res, request)
-
 proc handleRes*(res: Result[seq[byte], string], request: ptr FFIThreadRequest) =
   ## Terminal step of every request: delivers the response (unless a timeout
   ## already did) and frees the request exactly once.
   defer:
     deleteRequest(request)
-  respondOnce(request, res)
+  fireCallback(res, request)
 
 proc nilProcess*(reqId: cstring): Future[Result[seq[byte], string]] {.async.} =
   return err("This request type is not implemented: " & $reqId)

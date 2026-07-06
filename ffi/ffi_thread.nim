@@ -60,7 +60,8 @@ proc reportTimeoutIfTripped(
   ## deliberately do NOT cancel the handler: a hard-cancel mid-call into the
   ## underlying library (Waku/libp2p) can leave it partially applied, so we
   ## unblock the caller with a timeout err now and let the handler run to
-  ## completion. `respondOnce` keeps the two paths from answering twice.
+  ## completion. `fireCallback`'s once-only guard keeps the two paths from
+  ## answering twice.
   if deadline == InfiniteDuration:
     return
   # Handlers that already completed (e.g. a sync body) skip the timer entirely,
@@ -77,10 +78,11 @@ proc reportTimeoutIfTripped(
     return
   warn "ffi request timed out; caller unblocked, handler left running",
     reqId = reqId, timeoutMs = deadline.milliseconds
-  request.respondOnce(
+  fireCallback(
     Result[seq[byte], string].err(
       "ffi request timed out after " & $deadline.milliseconds & "ms"
-    )
+    ),
+    request,
   )
 
 proc processRequest[T](

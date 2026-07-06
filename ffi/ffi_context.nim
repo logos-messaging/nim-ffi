@@ -43,11 +43,8 @@ type FFIContext*[T] = object
     # Per-proc timeout overrides (ms). Points at the compile-time-filled global,
     # like registeredRequests, so the FFI thread reads it GC-safely via ctx.
   defaultRequestTimeout*: Duration
-    # Deadline applied to each handler unless a `{.ffi: "timeout = <ms>".}`
-    # override raises it. On trip the caller is unblocked with a timeout err and
-    # the handler is left running (see processRequest). Set `InfiniteDuration`
-    # to opt out. Written on the owning thread before the first request; read on
-    # the FFI thread.
+    # Per-handler deadline unless a `{.ffi: "timeout = <ms>".}` override raises
+    # it; `InfiniteDuration` opts out. See processRequest for the trip behavior.
 
 var onFFIThread* {.threadvar.}: bool
   # Re-entrant dispatch guard for `sendRequestToFFIThread`.
@@ -59,8 +56,7 @@ const
   FFIHeartbeatStartDelay* = 10.seconds # grace window for library startup
   FFIHeartbeatStaleThreshold* = 1.seconds
   DefaultRequestTimeout* = 5.seconds
-    # A guess (issue #93): finite so a wedged handler can't hang a caller
-    # forever, generous enough to clear normal handlers. Overridable per proc.
+    # Finite fallback (issue #93) so a wedged handler can't hang a caller forever.
 
 include ./event_thread
 include ./ffi_thread

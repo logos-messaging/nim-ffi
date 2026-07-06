@@ -22,12 +22,13 @@ proc resolveABIFormat(abiSpecs: seq[NimNode]): ABIFormat {.compileTime.} =
   ## Resolve one annotation's ABI from its optional `"abi = ..."` string specs
   ## (last wins), inheriting the library default when absent.
   var fmt = currentDefaultABIFormat
-  for spec in abiSpecs:
-    if spec.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+  for override in abiSpecs:
+    if override.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
       error(
-        "FFI ABI override must be a string literal like \"abi = c\", got: " & spec.repr
+        "FFI ABI override must be a string literal like \"abi = c\", got: " &
+          override.repr
       )
-    let parsed = parseAbiSpec($spec)
+    let parsed = parseAbiSpec($override)
     if not parsed.ok:
       error(parsed.err)
     fmt = parsed.fmt
@@ -41,26 +42,27 @@ proc resolveFFISpecs(
   ## `timeoutMs == 0` means "no per-proc override" (use the context default).
   var abi = currentDefaultABIFormat
   var timeoutMs = 0
-  for spec in specs:
-    if spec.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+  for override in specs:
+    if override.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
       error(
         "FFI override must be a string literal like \"abi = c\" or " &
-          "\"timeout = 30000\", got: " & spec.repr
+          "\"timeout = 30000\", got: " & override.repr
       )
-    case specKey($spec)
+    case overrideKey($override)
     of "abi":
-      let parsed = parseAbiSpec($spec)
+      let parsed = parseAbiSpec($override)
       if not parsed.ok:
         error(parsed.err)
       abi = parsed.fmt
     of "timeout":
-      let parsed = parseTimeoutSpec($spec)
+      let parsed = parseTimeoutSpec($override)
       if not parsed.ok:
         error(parsed.err)
       timeoutMs = parsed.ms
     else:
       error(
-        "unknown FFI override '" & $spec & "'; expected `abi = ...` or `timeout = ...`"
+        "unknown FFI override '" & $override &
+          "'; expected `abi = ...` or `timeout = ...`"
       )
   (abi, timeoutMs)
 
@@ -802,7 +804,7 @@ macro ffi*(args: varargs[untyped]): untyped =
   # a TypeDef; `cbor` rides the generic overloads. Both abis are valid here.
   if prc.kind == nnkTypeDef:
     if timeoutMs > 0:
-      error("`.ffi.` on a type takes no `timeout` override (it applies to procs)")
+      error("`.ffi.` on a type takes no `timeout` override (it only applies to procs)")
     gateFFITypeABIFormat(abiFormat, "`.ffi.` type")
     var cleanTypeDef = prc.copyNimTree()
     if cleanTypeDef[0].kind == nnkPragmaExpr:

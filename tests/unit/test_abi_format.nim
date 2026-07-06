@@ -99,10 +99,10 @@ suite "ABI format parsing":
     check "bson" in parseAbiSpec("abi = bson").err
 
 suite "handler-timeout spec parsing (issue #93)":
-  test "specKey extracts the lowercased, trimmed key":
-    check specKey("timeout = 30000") == "timeout"
-    check specKey("  ABI = c ") == "abi"
-    check specKey("bare") == "bare"
+  test "overrideKey extracts the lowercased, trimmed key":
+    check overrideKey("timeout = 30000") == "timeout"
+    check overrideKey("  ABI = c ") == "abi"
+    check overrideKey("bare") == "bare"
 
   test "parseTimeoutSpec accepts `timeout = <ms>`, flexible spacing":
     check parseTimeoutSpec("timeout = 30000") == (true, 30000, "")
