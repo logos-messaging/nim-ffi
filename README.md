@@ -14,10 +14,11 @@ No hand-written `.h` files, no manual request enums, no shared-memory plumbing.
   `{.ffiDtor.}`, `{.ffiEvent.}`).
 - You **call `genBindings()` last**, which emits the foreign bindings.
 
-Every request/response crosses the boundary as a single CBOR blob; the ctx
-handle returned by the constructor is the only pointer that crosses. Each
-`{.ffi.}` proc runs on the library's own chronos event loop, so bodies can
-`await` freely.
+By default, every request/response crosses the boundary as a single CBOR blob
+(the wire format is configurable per library or per annotation — see
+[ABI format](#abi-format)); the ctx handle returned by the constructor is the
+only pointer that crosses. Each `{.ffi.}` proc runs on the library's own chronos
+event loop, so bodies can `await` freely.
 
 ## Minimal example
 
@@ -31,7 +32,8 @@ type Counter = object
 declareLibrary("counter", Counter)
 
 # 2. Request/response shapes. Any {.ffi.} object type becomes a first-class
-#    struct/class in the generated bindings and rides the wire as CBOR.
+#    struct/class in the generated bindings and rides the wire in the library's
+#    ABI format (CBOR by default).
 type BumpRequest {.ffi.} = object
   by: int
 
@@ -51,7 +53,7 @@ proc counterBump*(
   return ok(BumpResponse(newValue: c.value + req.by))
 
 # 5. Destructor: exactly one param (the library value).
-proc counter_destroy*(c: Counter) {.ffiDtor.} =
+proc counterDestroy*(c: Counter) {.ffiDtor.} =
   discard
 
 # 6. genBindings() must be the LAST FFI call in the file (see below).
@@ -66,7 +68,7 @@ The generated C export names are the snake_case form of the proc names, e.g.
 | Pragma | Applies to | Purpose |
 | --- | --- | --- |
 | `declareLibrary(name, LibType[, defaultABIFormat])` | call | Registers the library, its state type, and the default wire format. Must run before any annotation. |
-| `{.ffi.}` on a `type` | `object` | Registers the type for binding generation; it serializes via the generic CBOR overloads. |
+| `{.ffi.}` on a `type` | `object` | Registers the type for binding generation; it serializes via the library's ABI format (CBOR by default). |
 | `{.ffi.}` on a `proc` | proc | Exposes a method. First param is the library value, then typed params; returns `Future[Result[T, string]]`. |
 | `{.ffiCtor.}` | proc | The constructor. Returns `Future[Result[LibType, string]]`; creates the FFI context. |
 | `{.ffiDtor.}` | proc | The destructor. Exactly one param `(x: LibType)`; tears the context down. |

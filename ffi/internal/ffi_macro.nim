@@ -20,6 +20,18 @@ proc requireLibraryDeclared(where: string) {.compileTime.} =
         ": declareLibrary(name, LibType[, defaultABIFormat]) must be called before any FFI annotation"
     )
 
+proc resolveEventWireName(
+    leading: seq[NimNode], userProcName: NimNode
+): tuple[wireName: string, abiSpecStart: int] {.compileTime.} =
+  ## A leading string that doesn't parse as an `"abi = ..."` spec is the explicit
+  ## wire name; anything else means derive the name from the proc. Returns the
+  ## resolved name and the index where the trailing ABI specs begin.
+  if leading.len > 0 and leading[0].kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit} and
+      ($leading[0]).len > 0 and not parseAbiSpec($leading[0]).ok:
+    ($leading[0], 1)
+  else:
+    (camelToSnakeCase($userProcName), 0)
+
 proc requireBeforeGenBindings(where: string) {.compileTime.} =
   ## Enforce that this annotation expands before `genBindings()`. Anything
   ## registered afterwards never reaches the generator, so turn what used to be
@@ -1705,18 +1717,8 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
   if procName.kind == nnkPostfix:
     userProcName = procName[1]
 
-  # Leading args before the proc are an optional explicit wire-name string
-  # followed by optional `"abi = ..."` specs. A leading string that isn't an
-  # ABI spec is the wire name; otherwise derive it from the proc name.
   let leading = args[0 ..^ 2]
-  var wireName = ""
-  var abiSpecStart = 0
-  if leading.len > 0 and leading[0].kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit} and
-      not parseAbiSpec($leading[0]).ok:
-    wireName = $leading[0]
-    abiSpecStart = 1
-  if wireName.len == 0:
-    wireName = camelToSnakeCase($userProcName)
+  let (wireName, abiSpecStart) = resolveEventWireName(leading, userProcName)
   let abiFormat = resolveABIFormat(leading[abiSpecStart ..^ 1])
   gateABIFormat(abiFormat, "`.ffiEvent.` proc")
 
