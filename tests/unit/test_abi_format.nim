@@ -122,10 +122,11 @@ suite "handler-timeout spec parsing (issue #93)":
     check requestTimeoutsMs["AbitestSlowReq".cstring] == 30000
     check not requestTimeoutsMs.hasKey("AbitestPingReq".cstring)
 
-suite "ABI proc-dispatch readiness (why c is still gated on procs)":
-  test "cbor proc-dispatch is wired; c proc-dispatch is gated":
-    # This predicate is what the proc-form macros consult: `cbor` is wired
-    # end-to-end, while `c` is recognized but gated pending its codec. It is the
-    # single seam a future PR flips when the c codec and dispatch path land.
+suite "ABI proc-dispatch readiness":
+  test "both cbor and c proc-dispatch are wired":
+    # This predicate is what the proc-form macros consult. Both ABIs now have a
+    # working dispatch path: `cbor` rides the generic overloads, `c` rides the
+    # flat `_CWire` companions (a CBOR-free foreign surface, CBOR transport
+    # internally). Events are the one `c` gap, gated separately in the macro.
     check abiCodegenImplemented(ABIFormat.Cbor)
-    check not abiCodegenImplemented(ABIFormat.C)
+    check abiCodegenImplemented(ABIFormat.C)

@@ -73,9 +73,10 @@ var genBindingsEmitted* {.compileTime.}: bool = false
 var currentDefaultABIFormat* {.compileTime.}: ABIFormat = ABIFormat.Cbor
 
 proc abiCodegenImplemented*(fmt: ABIFormat): bool =
-  ## Whether `fmt` has a working proc-dispatch path. Only `Cbor` does today; the
-  ## seam a future PR flips once the `c` dispatch path is wired.
-  fmt == ABIFormat.Cbor
+  ## Whether `fmt` has a working proc-dispatch path. Both `Cbor` and `C` are
+  ## wired: `Cbor` rides the generic overloads, `C` rides the flat `_CWire`
+  ## companions (a CBOR-free foreign surface with CBOR transport internally).
+  fmt in {ABIFormat.Cbor, ABIFormat.C}
 
 proc overrideKey*(override: string): string =
   ## Lowercased key of a `key = value` pragma override (the text before `=`),

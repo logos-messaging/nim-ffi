@@ -62,9 +62,22 @@ All notable changes to this project are documented in this file.
 - `c` (flat C-struct) ABI **codec**: every `{.ffi: "abi = c".}` type gets a
   `<T>_CWire` companion plus `cwirePack` / `cwireUnpack` / `cwireFree`. This
   first slice covers the flat path — POD scalars and `string` (as `cstring`);
-  composite fields follow. The `c` proc-dispatch path and the foreign (C++ /
-  Rust) generators are still pending, so `c` remains rejected on
-  proc/ctor/dtor/event annotations for now.
+  composite fields follow. (The `c` proc-dispatch path and its CBOR-free C
+  generator landed later in this release — see the `-d:targetLang=c_abi` entry
+  below; `c` events remain CBOR-only.)
+- **CBOR-free `abi = c` C binding generator** (`-d:targetLang=c_abi`): emits a
+  single self-contained `<lib>.h` whose flat `_CWire` structs *are* the C ABI,
+  so the C consumer passes native structs and links no CBOR at all (contrast
+  the CBOR `-d:targetLang=c` backend). The `c` proc-dispatch path is now wired
+  end-to-end: the generated exported wrappers `cwireUnpack` the request into a
+  Nim object, reuse the existing CBOR thread transport internally, and a Nim
+  reply trampoline `cwirePack`s the response back into a flat struct for the
+  caller's typed callback. `abiCodegenImplemented` now accepts `c` for
+  proc/ctor/dtor annotations (events remain CBOR-only). New
+  `examples/echo/c_abi_bindings/` (checked in beside the CBOR `c_bindings/` for
+  comparison), `nimble genbindings_c_abi_echo` / `check_bindings_c_abi` /
+  `test_c_abi_e2e` / `test_c_abi_e2e_sanitized` tasks, and a `tests/e2e/c_abi`
+  ctest harness ([#105](https://github.com/logos-messaging/nim-ffi/issues/105)).
 - `tests/bench/bench_codec.nim` (+ `nimble bench_codec`): a single-process
   microbenchmark comparing the `cbor` and `c` codecs across payload shapes,
   isolating codec cost from the (identical) thread/callback round-trip.
