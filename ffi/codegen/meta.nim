@@ -33,9 +33,9 @@ type
     abiFormat*: ABIFormat # wire format for this interaction (default Cbor)
     scalarFastPath*: bool
       ## True for an `abi = c` proc whose whole signature is scalar (see
-      ## `isScalarOnly`): it dispatches through the CBOR-free scalar fast path
-      ## and is skipped by the foreign-binding generators (no dispatch codegen
-      ## yet — the request rides inline POD args, no `_CWire`, no CBOR).
+      ## `isScalarOnly`): dispatches through the CBOR-free scalar fast path and
+      ## is skipped by the foreign-binding generators (their codegen is a
+      ## follow-up).
 
   FFIFieldMeta* = object
     name*: string # e.g. "delayMs"

@@ -17,11 +17,10 @@ const scalarPodTypeNames = [
   "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32",
   "uint64", "byte", "float", "float32", "float64", "bool",
 ]
-  ## Fixed-width POD scalars that fit a single `uint64` slot and survive the
-  ## async hop by value — the payload the scalar fast path inlines into the
-  ## request (no heap copy). `cstring`/`string` are intentionally absent as
-  ## *params*: they are pointers to caller memory the FFI thread reads later,
-  ## so they'd need a copy, defeating the zero-alloc promise.
+  ## Fixed-width POD scalars that fit one `uint64` slot and survive the async
+  ## hop by value. `cstring`/`string` are intentionally absent as *params*:
+  ## they point to caller memory the FFI thread reads after the call returns,
+  ## so passing them inline by value would be unsafe.
 
 func isScalarParamTypeName*(name: string): bool =
   ## A param type eligible for the CBOR-free scalar fast path.
@@ -37,7 +36,7 @@ func isScalarOnly*(p: FFIProcMeta): bool =
   ## True iff `p` is a plain `{.ffi.}` method whose every wire param and return
   ## is scalar — the whole signature crosses without CBOR or `_CWire`. Handles
   ## and raw pointers are excluded (a handle needs a ctx-registry round-trip;
-  ## a pointer never crosses). Pure over the compile-time metadata.
+  ## a pointer never crosses).
   if p.kind != FFIKind.FFI:
     return false
   if p.returnIsPtr or p.returnIsHandle:
@@ -99,7 +98,7 @@ proc buildScalarPath*(
   let retValIdent = genSym(nskLet, "retVal")
   handlerBody.add quote do:
     let `retValIdent` = (await `helperCall`).valueOr:
-      return err($error)
+      return err(error)
     return ok(ffiScalarRetBytes(`retValIdent`))
 
   let seqByteResult = nnkBracketExpr.newTree(

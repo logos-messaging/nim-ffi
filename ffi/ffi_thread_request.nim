@@ -30,11 +30,14 @@ type FFIThreadRequest* = object
   reqId*: cstring ## Per-proc Req type name used to look up the handler.
   data*: ptr UncheckedArray[byte] ## Owned CBOR-encoded request payload.
   dataLen*: int
+  isScalar*: bool
+    ## Set by `initScalar`: the payload rode inline in `scalarArgs` (no CBOR,
+    ## no `data` buffer). Lets `handleRes` tell a scalar 0-length return (a real
+    ## empty string) from a CBOR "no value".
   scalarArgs*: array[MaxScalarArgs, uint64]
-    ## Scalar-fast-path args inlined in the envelope (one `ffiPackScalar` value
-    ## per slot) so there's no per-call `c_malloc`. A plain array rather than a
-    ## `union` with `data`: costs a fixed 64 bytes per request but keeps the
-    ## `next` link and `deleteRequest` unaliased and branch-free.
+    ## Scalar-fast-path args inlined in the envelope so there's no per-call
+    ## `c_malloc`. A plain array rather than a `union` with `data`: costs a fixed
+    ## 64 bytes per request but keeps `deleteRequest` unaliased and branch-free.
   next*: ptr FFIThreadRequest
     ## Intrusive ingress-queue link (see `ffi_request_queue.nim`). Touched only
     ## under the queue's lock; the request doubles as its own node, so no
@@ -79,6 +82,7 @@ proc allocBaseRequest(
   ret[].reqId = reqId.alloc()
   ret[].data = nil
   ret[].dataLen = 0
+  ret[].isScalar = false
   ret[].next = nil
   ret[].responded = false
   return ret
@@ -169,17 +173,17 @@ proc initScalar*(
     "initScalar: " & $args.len & " scalar args exceed MaxScalarArgs (" & $MaxScalarArgs &
       ")"
   var ret = allocBaseRequest(callback, userData, reqId)
+  ret[].isScalar = true
   for i in 0 ..< args.len:
     ret[].scalarArgs[i] = args[i]
   ret
 
 func ffiScalarRetBytes*[T](x: T): seq[byte] =
-  ## Serializes a scalar handler result into the raw response payload the
-  ## callback carries — no CBOR envelope. A `string`/`cstring` rides as its
-  ## own UTF-8 bytes (like the error path); every other scalar rides as the
-  ## 8-byte native-endian image of `ffiPackScalar(x)`. Note: an empty string
-  ## yields a 0-length payload, which `handleRes` sends as the CBOR-null
-  ## sentinel — the foreign scalar reader (a follow-up) must special-case it.
+  ## Serializes a scalar handler result into the raw response payload — no CBOR
+  ## envelope. A `string`/`cstring` rides as its own UTF-8 bytes (like the error
+  ## path); every other scalar rides as the 8-byte native-endian image of
+  ## `ffiPackScalar(x)`. An empty string yields a 0-length payload (see
+  ## `handleRes`, which delivers it as `""` rather than the CBOR-null sentinel).
   when T is string:
     var b = newSeq[byte](x.len)
     if x.len > 0:
@@ -230,6 +234,15 @@ proc fireCallback*(res: Result[seq[byte], string], request: ptr FFIThreadRequest
         cast[ptr cchar](unsafeAddr bytes[0]),
         cast[csize_t](bytes.len),
         request[].userData,
+      )
+    elif request[].isScalar:
+      # `isScalar` marks a scalar-fast-path request (args rode inline in
+      # `scalarArgs`, no CBOR): its result bytes come from `ffiScalarRetBytes`,
+      # not a CBOR encoder. So a 0-byte return is a real empty string, not
+      # "no value" — hand back a genuine empty buffer, not the CBOR-null sentinel.
+      var empty: byte
+      request[].callback(
+        RET_OK, cast[ptr cchar](addr empty), 0.csize_t, request[].userData
       )
     else:
       # Always hand the callback a real buffer; CBOR null marks "no value".
