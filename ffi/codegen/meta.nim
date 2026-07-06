@@ -31,6 +31,11 @@ type
     returnIsPtr*: bool # true if return type is ptr T
     returnIsHandle*: bool # true if return type is an {.ffiHandle.} type
     abiFormat*: ABIFormat # wire format for this interaction (default Cbor)
+    scalarFastPath*: bool
+      ## True for an `abi = c` proc whose whole signature is scalar (see
+      ## `isScalarOnly`): it dispatches through the CBOR-free scalar fast path
+      ## and is skipped by the foreign-binding generators (no dispatch codegen
+      ## yet — the request rides inline POD args, no `_CWire`, no CBOR).
 
   FFIFieldMeta* = object
     name*: string # e.g. "delayMs"

@@ -1,8 +1,10 @@
 import std/[macros, tables, strutils]
 import chronos
 import ../ffi_types
+import ../ffi_thread_request
 import ../codegen/[meta, string_helpers]
 import ./c_macro_helpers
+import ./ffi_scalar
 when defined(ffiGenBindings):
   import ../codegen/rust
   import ../codegen/cpp
@@ -762,7 +764,6 @@ macro ffi*(args: varargs[untyped]): untyped =
     return registerFFITypeInfo(cleanTypeDef, abiFormat)
 
   requireLibraryDeclared("`.ffi.`")
-  gateABIFormat(abiFormat, "`.ffi.` proc")
 
   let procName = prc[0]
   let formalParams = prc[3]
@@ -841,6 +842,97 @@ macro ffi*(args: varargs[untyped]): untyped =
   let ctxType =
     nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), libTypeName))
 
+  proc wireParamMeta(pname: string, ptype: NimNode): FFIParamMeta =
+    let isPointer = isPtr(ptype)
+    let handle = isHandleType(ptype)
+    let tn =
+      if isPointer:
+        nimTypeNameRepr(ptype[0])
+      else:
+        nimTypeNameRepr(ptype)
+    FFIParamMeta(name: pname, typeName: tn, isPtr: isPointer, isHandle: handle)
+
+  var wireParamMetas: seq[FFIParamMeta] = @[]
+  for i in 0 ..< extraParamNames.len:
+    wireParamMetas.add(wireParamMeta(extraParamNames[i], extraParamTypes[i]))
+
+  let retTypeInner = resultInner[1]
+  let retIsPtr = isPtr(retTypeInner)
+  let retIsHandle = isHandleType(retTypeInner)
+  let retTn =
+    if retIsPtr:
+      nimTypeNameRepr(retTypeInner[0])
+    else:
+      nimTypeNameRepr(retTypeInner)
+
+  # Built once, registered by whichever path runs (only `scalarFastPath` differs
+  # between them) and reused for the fast-path eligibility check below.
+  let procMeta = FFIProcMeta(
+    procName: cExportName,
+    libName: currentLibName,
+    kind: FFIKind.FFI,
+    libTypeName: $libTypeName,
+    extraParams: wireParamMetas,
+    returnTypeName: retTn,
+    returnIsPtr: retIsPtr,
+    returnIsHandle: retIsHandle,
+    abiFormat: abiFormat,
+  )
+
+  # Does this proc qualify for the CBOR-free scalar fast path? Only `abi = c`
+  # opts in, and only when every wire param + the return is a plain scalar
+  # (see `isScalarOnly`) and the args fit the inline slots. An `abi = c` proc
+  # that isn't scalar-only stays gated — full C-wire dispatch is a follow-up.
+  let scalarEligible =
+    abiFormat == ABIFormat.C and isScalarOnly(procMeta) and
+    extraParamNames.len <= MaxScalarArgs
+
+  let poolIdent = ident($libTypeName & "FFIPool")
+
+  proc buildCtxGuard(): NimNode =
+    ## Nil-checks the callback and validates `ctx` against the lib's FFI pool,
+    ## replying `RET_ERR` before any request is built. Shared by both wire paths.
+    quote:
+      if callback.isNil:
+        return RET_MISSING_CALLBACK
+      if not `poolIdent`.isValidCtx(cast[pointer](ctx)):
+        let errStr = "ctx is not a valid FFI context"
+        callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
+        return RET_ERR
+
+  proc buildSendAndReply(reqPtrIdent: NimNode): NimNode =
+    ## Hands `reqPtrIdent` to the FFI thread and maps the outcome to a C return
+    ## code, reporting any enqueue failure through the callback. Shared by both
+    ## wire paths.
+    let sendResIdent = genSym(nskLet, "sendRes")
+    quote:
+      let `sendResIdent` =
+        try:
+          ffi_context.sendRequestToFFIThread(ctx, `reqPtrIdent`)
+        except Exception as exc:
+          Result[void, string].err("sendRequestToFFIThread exception: " & exc.msg)
+      if `sendResIdent`.isErr():
+        let errStr = "error in sendRequestToFFIThread: " & `sendResIdent`.error
+        callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
+        return RET_ERR
+      return RET_OK
+
+  proc buildCExportProc(params: seq[NimNode], body: NimNode): NimNode =
+    ## The dynlib/exportc/cdecl C-ABI wrapper both wire paths emit; only the
+    ## params and body differ.
+    newProc(
+      name = postfix(cExportProcName, "*"),
+      params = params,
+      body = body,
+      pragmas = newTree(
+        nnkPragma,
+        ident("dynlib"),
+        newTree(nnkExprColonExpr, ident("exportc"), newStrLitNode(cExportName)),
+        ident("cdecl"),
+        newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
+      ),
+    )
+
   proc buildAsyncHelperProc(): NimNode =
     ## Reproduces the user's exact signature so it stays callable from Nim.
     var helperParams = newSeq[NimNode]()
@@ -904,17 +996,7 @@ macro ffi*(args: varargs[untyped]): untyped =
     let exportedParams = cExportedParams(ctxType)
 
     let ffiBody = newStmtList()
-
-    ffiBody.add quote do:
-      if callback.isNil:
-        return RET_MISSING_CALLBACK
-
-    let asyncPoolIdent = ident($libTypeName & "FFIPool")
-    ffiBody.add quote do:
-      if not `asyncPoolIdent`.isValidCtx(cast[pointer](ctx)):
-        let errStr = "ctx is not a valid FFI context"
-        callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
-        return RET_ERR
+    ffiBody.add buildCtxGuard()
 
     # Build the FFIThreadRequest payload directly from the incoming bytes.
     let reqPtrIdent = genSym(nskLet, "reqPtr")
@@ -923,74 +1005,42 @@ macro ffi*(args: varargs[untyped]): untyped =
       let `reqPtrIdent` = FFIThreadRequest.initFromPtr(
         callback, userData, typeStr.cstring, reqCbor, int(reqCborLen)
       )
+    ffiBody.add buildSendAndReply(reqPtrIdent)
 
-    let sendResIdent = genSym(nskLet, "sendRes")
-    ffiBody.add quote do:
-      let `sendResIdent` =
-        try:
-          ffi_context.sendRequestToFFIThread(ctx, `reqPtrIdent`)
-        except Exception as exc:
-          Result[void, string].err("sendRequestToFFIThread exception: " & exc.msg)
-      if `sendResIdent`.isErr():
-        let errStr = "error in sendRequestToFFIThread: " & `sendResIdent`.error
-        callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
-        return RET_ERR
-      return RET_OK
+    let ffiProc = buildCExportProc(exportedParams, ffiBody)
 
-    let ffiProc = newProc(
-      name = postfix(cExportProcName, "*"),
-      params = exportedParams,
-      body = ffiBody,
-      pragmas = newTree(
-        nnkPragma,
-        ident("dynlib"),
-        newTree(nnkExprColonExpr, ident("exportc"), newStrLitNode(cExportName)),
-        ident("cdecl"),
-        newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
-      ),
-    )
-
-    block:
-      var ffiExtraParams: seq[FFIParamMeta] = @[]
-      for i in 0 ..< extraParamNames.len:
-        let ptype = extraParamTypes[i]
-        let isPointer = isPtr(ptype)
-        let handle = isHandleType(ptype)
-        let tn =
-          if isPointer:
-            nimTypeNameRepr(ptype[0])
-          else:
-            nimTypeNameRepr(ptype)
-        ffiExtraParams.add(
-          FFIParamMeta(
-            name: extraParamNames[i], typeName: tn, isPtr: isPointer, isHandle: handle
-          )
-        )
-      let retTypeInner = resultInner[1]
-      let retIsPtr = isPtr(retTypeInner)
-      let retIsHandle = isHandleType(retTypeInner)
-      let retTn =
-        if retIsPtr:
-          nimTypeNameRepr(retTypeInner[0])
-        else:
-          nimTypeNameRepr(retTypeInner)
-      ffiProcRegistry.add(
-        FFIProcMeta(
-          procName: cExportName,
-          libName: currentLibName,
-          kind: FFIKind.FFI,
-          libTypeName: $libTypeName,
-          extraParams: ffiExtraParams,
-          returnTypeName: retTn,
-          returnIsPtr: retIsPtr,
-          returnIsHandle: retIsHandle,
-          abiFormat: abiFormat,
-        )
-      )
+    ffiProcRegistry.add(procMeta)
 
     return newStmtList(helperProc, registerReq, ffiProc)
 
-  let stmts = asyncPath()
+  proc scalarPath(): NimNode =
+    ## The scalar fast path lives in `ffi_scalar`; here we only build the shared
+    ## dispatch pieces (same helpers the usual path uses) and hand them over, so
+    ## the base macro carries none of the inline pack/unpack machinery.
+    let reqPtrIdent = genSym(nskLet, "reqPtr")
+    buildScalarPath(
+      helperProc = buildAsyncHelperProc(),
+      ctxGuard = buildCtxGuard(),
+      reqPtrIdent = reqPtrIdent,
+      sendAndReply = buildSendAndReply(reqPtrIdent),
+      userProcName = userProcName,
+      cExportProcName = cExportProcName,
+      cExportName = cExportName,
+      ctxType = ctxType,
+      camelName = camelName,
+      extraParamNames = extraParamNames,
+      extraParamTypes = extraParamTypes,
+      procMeta = procMeta,
+    )
+
+  if abiFormat == ABIFormat.C and not scalarEligible:
+    gateABIFormat(abiFormat, "`.ffi.` proc")
+
+  let stmts =
+    if scalarEligible:
+      scalarPath()
+    else:
+      asyncPath()
 
   when defined(ffiDumpMacros):
     echo stmts.repr
@@ -1677,16 +1727,18 @@ macro genBindings*(
       )
     let lang = string_helpers.toLower(targetLang)
     let libName = deriveLibName(ffiProcRegistry)
+    # Scalar-fast-path procs have no foreign-dispatch codegen yet (their C
+    # export doesn't take the CBOR `(reqCbor, reqCborLen)` shape); drop them so
+    # the generators don't emit a broken CBOR caller for them.
+    let genProcs = bindableProcs(ffiProcRegistry)
     case lang
     of "rust":
       generateRustCrate(
-        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
-        ffiEventRegistry,
+        genProcs, ffiTypeRegistry, libName, outputDir, nimSrcRelPath, ffiEventRegistry
       )
     of "cpp", "c++":
       generateCppBindings(
-        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath,
-        ffiEventRegistry,
+        genProcs, ffiTypeRegistry, libName, outputDir, nimSrcRelPath, ffiEventRegistry
       )
     of "c":
       generateCBindings(
@@ -1694,9 +1746,7 @@ macro genBindings*(
         ffiEventRegistry,
       )
     of "cddl":
-      generateCddlBindings(
-        ffiProcRegistry, ffiTypeRegistry, libName, outputDir, nimSrcRelPath
-      )
+      generateCddlBindings(genProcs, ffiTypeRegistry, libName, outputDir, nimSrcRelPath)
     else:
       error(
         "genBindings: unknown targetLang '" & lang &
