@@ -1575,26 +1575,34 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
   return stmts
 
 macro ffiDtor*(args: varargs[untyped]): untyped =
-  ## Defines a C-exported destructor that tears down the FFIContext after the
-  ## body runs.
+  ## Defines a C-exported destructor that tears down the FFIContext.
   ##
-  ## The annotated proc must have exactly one parameter of the library type.
-  ## The body contains any library-level cleanup to run before context teardown.
+  ## The annotated proc must have exactly one parameter of the library type. It
+  ## may be sync (no return type) or async (`Future[void]`) — an async dtor can
+  ## `await` a graceful library shutdown (e.g. `switch.stop()`) whose futures
+  ## live on the FFI event loop.
   ##
   ## The wire format follows the library default and can be overridden with
   ## `{.ffiDtor: "abi = c".}` / `{.ffiDtor: "abi = cbor".}`.
   ##
-  ## Example:
-  ##   proc waku_destroy*(w: Waku) {.ffiDtor.} =
-  ##     w.cleanup()
+  ## Example (async):
+  ##   proc waku_destroy*(w: Waku): Future[void] {.ffiDtor.} =
+  ##     await w.stop()
   ##
   ## The generated C-exported proc has the signature:
   ##   int waku_destroy(void* ctx)
   ##
-  ## It extracts the library value from ctx, runs the body, then calls
-  ## destroyFFIContext to tear down the FFI thread and free the context.
+  ## A non-empty body is lifted into an async impl registered in the library's
+  ## `ffiTeardownHook` slot; the FFI thread awaits it on its own event loop, after
+  ## draining in-flight requests and just before it exits — so the body runs on
+  ## the worker thread, not the host (calling) thread. The C wrapper signals the
+  ## thread to stop and blocks (up to `ThreadExitTimeout`) until it, and the
+  ## teardown, finish, then frees the context. An empty/`discard` body registers
+  ## no hook.
+  ##
   ## Returns RET_OK on success, RET_ERR on failure (null/invalid ctx, or
-  ## destroyFFIContext failure).
+  ## destroyFFIContext failure — e.g. a teardown that outlasts ThreadExitTimeout,
+  ## which leaks the context rather than hanging the caller).
 
   requireBeforeGenBindings("`.ffiDtor.`")
   requireLibraryDeclared("`.ffiDtor.`")
@@ -1611,6 +1619,18 @@ macro ffiDtor*(args: varargs[untyped]): untyped =
 
   let libParamName = formalParams[1][0]
   let libTypeName = formalParams[1][1]
+
+  # A dtor is sync (no return type) or async (`Future[void]`); reject anything
+  # else up front rather than emitting an obscure downstream error.
+  let retTypeNode = formalParams[0]
+  let retIsFutureVoid =
+    retTypeNode.kind == nnkBracketExpr and $retTypeNode[0] == "Future" and
+    retTypeNode.len == 2 and $retTypeNode[1] == "void"
+  if retTypeNode.kind != nnkEmpty and not retIsFutureVoid:
+    error(
+      "ffiDtor: proc must return nothing (sync) or Future[void] (async), got: " &
+        retTypeNode.repr
+    )
 
   let procNameStr = block:
     let raw = $procName
@@ -1639,16 +1659,26 @@ macro ffiDtor*(args: varargs[untyped]): untyped =
     if ctx.isNil or cast[ptr FFIContext[`libTypeName`]](ctx)[].myLib.isNil:
       return RET_ERR
 
-  ffiBody.add quote do:
-    let `libParamName` = cast[ptr FFIContext[`libTypeName`]](ctx)[].myLib[]
-
   let isNoop =
     bodyNode.kind == nnkEmpty or (
       bodyNode.kind == nnkStmtList and bodyNode.len == 1 and
       bodyNode[0].kind == nnkDiscardStmt
     )
-  if not isNoop:
-    ffiBody.add(bodyNode)
+
+  # Lift the body into an async impl registered in the per-library
+  # `ffiTeardownHook`, which the FFI thread awaits at shutdown (see ffi_thread.nim
+  # and ffiTeardownHook's docstring). The C wrapper no longer runs the body.
+  let teardownImplName = genSym(nskProc, "ffiTeardownImpl")
+  let teardownRegistration =
+    if isNoop:
+      newEmptyNode()
+    else:
+      quote:
+        proc `teardownImplName`(lib: ptr `libTypeName`): Future[void] {.async.} =
+          let `libParamName` = lib[]
+          `bodyNode`
+
+        ffiTeardownHook[`libTypeName`]() = `teardownImplName`
 
   let poolIdent = ident($libTypeName & "FFIPool")
   ffiBody.add quote do:
@@ -1690,7 +1720,7 @@ macro ffiDtor*(args: varargs[untyped]): untyped =
     when not declared(`poolIdent`):
       var `poolIdent`: FFIContextPool[`libTypeName`]
 
-  let stmts = newStmtList(poolDecl, ffiProc)
+  let stmts = newStmtList(teardownRegistration, poolDecl, ffiProc)
 
   when defined(ffiDumpMacros):
     echo stmts.repr

@@ -210,4 +210,15 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
       except CatchableError as e:
         error "draining pending FFI requests on shutdown raised", error = e.msg
 
+    # In-flight requests drained; run the library's async shutdown (e.g.
+    # `switch.stop()`) on this event loop before the thread joins. Only if a
+    # `{.ffiDtor.}` registered a hook and a request populated `myLib`. Exceptions
+    # are logged, never propagated: the thread must still fire threadExitSignal.
+    let teardown = ffiTeardownHook[T]()
+    if not teardown.isNil() and not ctx.myLib.isNil():
+      try:
+        await teardown(ctx.myLib)
+      except CatchableError as e:
+        error "library teardown raised on shutdown", error = e.msg
+
   waitFor ffiRun(ctx)

@@ -58,6 +58,19 @@ const
   DefaultRequestTimeout* = 5.seconds
     # Finite fallback (issue #93) so a wedged handler can't hang a caller forever.
 
+type FFITeardownProc*[T] = proc(lib: ptr T): Future[void] {.async.}
+
+proc ffiTeardownHook*[T](): var FFITeardownProc[T] =
+  ## Per-library teardown slot (one `{.global.}` per `T`), assigned at module init
+  ## by a non-empty `{.ffiDtor.}` and awaited by the FFI thread before it exits.
+  ##
+  ## A runtime slot, not an overloaded `ffiTeardown` resolved via `mixin`: the
+  ## constructor force-instantiates the FFI thread body before the dtor (declared
+  ## later in the source) is visible, so an overload would bind the no-op default
+  ## and the teardown would silently never run.
+  var hook {.global.}: FFITeardownProc[T]
+  hook
+
 include ./event_thread
 include ./ffi_thread
 
@@ -180,9 +193,14 @@ proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     error "failed to signal eventQueueSignal in signalStop", error = error
   ok()
 
-## Bound on how long clearContext waits for the FFI thread to exit before
-## leaking ctx rather than hanging the caller.
-const ThreadExitTimeout* = 1500.milliseconds
+## Bound on how long stopAndJoinThreads waits for a worker thread to exit before
+## leaking ctx rather than hanging the caller. Configurable because an async
+## `{.ffiDtor.}` runs its teardown (e.g. `switch.stop()` over many live
+## connections) on the FFI thread before it exits — a graceful shutdown can
+## outlast the default, and being cut short leaks the context instead of waiting.
+## Override at compile time with `-d:ffiThreadExitTimeoutMs=<ms>`.
+const ThreadExitTimeoutMs* {.intdefine.} = 1500
+const ThreadExitTimeout* = ThreadExitTimeoutMs.milliseconds
 
 proc stopAndJoinThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## On timeout, returns err and skips remaining joins (leaves threads live).
