@@ -259,12 +259,15 @@ task genbindings_c_echo, "Generate C bindings for the echo example":
     " -d:ffiSrcPath=../echo.nim" & " -o:/dev/null examples/echo/echo.nim"
 
 task genbindings_c_abi_echo, "Generate CBOR-free abi=c C bindings for the echo example":
+  # echoVersion is all-scalar under the abi=c default, so it has no foreign
+  # codegen yet and is omitted from the bindings; -d:ffiAllowScalarSkip accepts
+  # that omission instead of failing the build (see genBindings()).
   exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libecho" &
-    " -d:ffiEchoAbiC -d:ffiGenBindings -d:targetLang=c_abi" &
+    " -d:ffiEchoAbiC -d:ffiGenBindings -d:targetLang=c_abi -d:ffiAllowScalarSkip" &
     " -d:ffiOutputDir=examples/echo/c_abi_bindings" & " -d:ffiSrcPath=../echo.nim" &
     " -o:/dev/null examples/echo/echo.nim"
   exec "nim c " & nimFlagsRefc & " --app:lib --noMain --nimMainPrefix:libecho" &
-    " -d:ffiEchoAbiC -d:ffiGenBindings -d:targetLang=c_abi" &
+    " -d:ffiEchoAbiC -d:ffiGenBindings -d:targetLang=c_abi -d:ffiAllowScalarSkip" &
     " -d:ffiOutputDir=examples/echo/c_abi_bindings" & " -d:ffiSrcPath=../echo.nim" &
     " -o:/dev/null examples/echo/echo.nim"
 
