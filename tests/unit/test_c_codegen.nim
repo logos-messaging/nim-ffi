@@ -143,10 +143,17 @@ suite "generateCLibHeader: ABI declarations and context API":
     check "timer_ctx_create(const EchoRequest* config, TimerCreateFn on_created, void* user_data)" in
       header
 
-  test "no blocking sync-call machinery or per-call timeout survives":
-    check "nimffi_wait_result" notin header
-    check "NimFfiCallState" notin header
-    check "timeout_ms" notin header
+  test "a blocking _sync wrapper is emitted alongside each async method":
+    check "#include \"nim_ffi_sync.h\"" in header
+    check "timer_ctx_version_sync(const TimerCtx* ctx, NimFfiStr* out, char* err_buf, size_t err_len, uint32_t timeout_ms)" in
+      header
+    # the wrapper drives the shared blocking helper and decodes into the out-param
+    check "nimffi_sync_state_new()" in header
+    check "nimffi_sync_wait(st, timeout_ms)" in header
+
+  test "the constructor gets a blocking _sync wrapper handing back an owned ctx":
+    check "timer_ctx_create_sync(const EchoRequest* config, TimerCtx** out, char* err_buf, size_t err_len, uint32_t timeout_ms)" in
+      header
 
   test "an empty request envelope still encodes a (zero-length) map":
     check "_nimffi_empty" in header
@@ -278,7 +285,17 @@ suite "shared headers: prelude and cbor split":
     check "nimffi_enc_str" in cbor
     check "nimffi_decode_from_buf" in cbor
 
+  test "the sync header carries the blocking-call helper and pulls in the cbor header":
+    let sync = generateCSyncHeader()
+    check "#include \"nim_ffi_cbor.h\"" in sync
+    check "NimFfiSyncState" in sync
+    check "nimffi_sync_wait(" in sync
+    # the platform split the example programs use: pthreads on POSIX, SRWLOCK on Win32
+    check "pthread_cond_timedwait" in sync
+    check "SleepConditionVariableSRW" in sync
+
   test "each generated file is independently include-guarded":
     check "NIM_FFI_PRELUDE_H_INCLUDED" in generateCPreludeHeader()
     check "NIM_FFI_CBOR_HELPERS_H_INCLUDED" in generateCCborHeader()
+    check "NIM_FFI_SYNC_HELPER_H_INCLUDED" in generateCSyncHeader()
     check "NIM_FFI_LIB_TIMER_H_INCLUDED" in generateCLibHeader(@[], @[], "timer")

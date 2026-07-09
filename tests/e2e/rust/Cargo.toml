@@ -1,0 +1,15 @@
+[package]
+name = "rust_e2e"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# End-to-end tests for the generated Rust `my_timer` crate. Depends on the same
+# `rust_bindings` crate the examples use; its build.rs compiles the Nim dylib,
+# so `cargo test` here drives the full CBOR round-trip (Rust -> Nim FFI thread ->
+# chronos -> Rust) over both the blocking and the tokio-async wrappers.
+[dependencies]
+my_timer = { path = "../../../examples/timer/rust_bindings" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }

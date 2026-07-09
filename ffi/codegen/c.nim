@@ -22,13 +22,15 @@ const CPtrType* = "uint64_t"
 const
   HeaderPreludeTpl = staticRead("templates/c/header_prelude.h.tpl")
   CborHelpersTpl = staticRead("templates/c/cbor_helpers.h.tpl")
+  SyncCallHelperTpl = staticRead("templates/c/sync_call_helper.h.tpl")
   CMakeListsTpl = staticRead("templates/c/CMakeLists.txt.tpl")
 
   # Shared headers written alongside the library header. Their names match the
-  # include guards baked into the templates and the `#include` the cbor header
-  # emits for the prelude.
+  # include guards baked into the templates and the `#include` each emits for
+  # the header it depends on.
   PreludeHeaderName* = "nim_ffi_prelude.h"
   CborHeaderName* = "nim_ffi_cbor.h"
+  SyncHeaderName* = "nim_ffi_sync.h"
 
 const scalarCInfoTable: array[ScalarKind, tuple[cType, suffix: string]] = [
   skBool: ("bool", "bool"),
@@ -447,6 +449,41 @@ proc emitReplyTrampolineHead(lines: var seq[string], tramp, boxType, fallback: s
   lines.add("        return;")
   lines.add("    }")
 
+proc emitSyncSubmitPrologue(
+    lines: var seq[string], libName, reqName: string, assigns: seq[string]
+) =
+  ## Shared opening of both `_sync` wrappers: build the per-proc Req envelope,
+  ## CBOR-encode it, and allocate the blocking-call state — bailing with
+  ## `err_buf` set on encode or allocation failure. Leaves `req_buf`/`req_len`
+  ## and `st` in scope for the caller to submit and wait on.
+  lines.add("    " & reqName & " ffi_req;")
+  lines.add("    memset(&ffi_req, 0, sizeof(ffi_req));")
+  for a in assigns:
+    lines.add(a)
+  lines.add("    uint8_t* req_buf = NULL;")
+  lines.add("    size_t req_len = 0;")
+  lines.add("    char* enc_err = NULL;")
+  lines.add(
+    "    if (nimffi_encode_to_buf(" & libName & "_encv_" & cToken(reqName) &
+      ", &ffi_req, &req_buf, &req_len, &enc_err) != 0) {"
+  )
+  lines.add(
+    "        nimffi_copy_err(err_buf, err_len, enc_err ? enc_err : \"encode failed\");"
+  )
+  lines.add("        free(enc_err);")
+  lines.add("        return -1;")
+  lines.add("    }")
+  lines.add("    NimFfiSyncState* st = nimffi_sync_state_new();")
+  lines.add("    if (!st) {")
+  lines.add("        free(req_buf);")
+  lines.add("        nimffi_copy_err(err_buf, err_len, \"out of memory\");")
+  lines.add("        return -1;")
+  lines.add("    }")
+
+proc emitConstructorSync(
+  lines: var seq[string], reg: var CTypeReg, ctxType, libName: string, ctor: FFIProcMeta
+)
+
 proc emitConstructors(
     lines: var seq[string],
     reg: var CTypeReg,
@@ -546,6 +583,85 @@ proc emitConstructors(
     lines.add("    return 0;")
     lines.add("}")
     lines.add("")
+    emitConstructorSync(lines, reg, ctxType, libName, ctor)
+
+proc emitConstructorSync(
+    lines: var seq[string],
+    reg: var CTypeReg,
+    ctxType, libName: string,
+    ctor: FFIProcMeta,
+) =
+  ## Blocking companion to `<lib>_ctx_create`: submits the ctor request, waits up
+  ## to `timeout_ms` for the address callback, and hands the caller an owned
+  ## context via `*out`. Returns 0 on success; non-zero with `err_buf` filled on
+  ## failure. The caller releases the context with `<lib>_ctx_destroy`.
+  let reqName = reqStructName(ctor)
+  let (params, assigns) = buildReqParams(reg, ctor.extraParams)
+  let head = "static inline int " & libName & "_ctx_create_sync("
+  let tail = ctxType & "** out, char* err_buf, size_t err_len, uint32_t timeout_ms) {"
+  lines.add(
+    if params.len > 0:
+      head & params.join(", ") & ", " & tail
+    else:
+      head & tail
+  )
+  emitSyncSubmitPrologue(lines, libName, reqName, assigns)
+  lines.add("    (void)" & ctor.procName & "(req_buf, req_len, nimffi_sync_cb, st);")
+  lines.add("    free(req_buf);")
+  lines.add("    if (!nimffi_sync_wait(st, timeout_ms)) {")
+  lines.add("        nimffi_copy_err(err_buf, err_len, \"FFI create timed out\");")
+  lines.add("        nimffi_sync_state_release(st);")
+  lines.add("        return -1;")
+  lines.add("    }")
+  lines.add("    if (!st->ok) {")
+  lines.add(
+    "        nimffi_copy_err(err_buf, err_len, st->err ? st->err : \"FFI create failed\");"
+  )
+  lines.add("        int rc = st->ret_code ? st->ret_code : -1;")
+  lines.add("        nimffi_sync_state_release(st);")
+  lines.add("        return rc;")
+  lines.add("    }")
+  lines.add("    NimFfiStr addr;")
+  lines.add("    memset(&addr, 0, sizeof(addr));")
+  lines.add("    char* dec_err = NULL;")
+  lines.add(
+    "    if (nimffi_decode_from_buf(" & libName &
+      "_decv_Str, st->bytes, st->bytes_len, &addr, &dec_err) != 0) {"
+  )
+  lines.add(
+    "        nimffi_copy_err(err_buf, err_len, dec_err ? dec_err : \"decode failed\");"
+  )
+  lines.add("        free(dec_err);")
+  lines.add("        nimffi_sync_state_release(st);")
+  lines.add("        return -1;")
+  lines.add("    }")
+  lines.add("    char* endp = NULL;")
+  lines.add(
+    "    unsigned long long a = addr.data ? strtoull(addr.data, &endp, 10) : 0;"
+  )
+  lines.add("    bool ok = addr.data && addr.len > 0 && endp && *endp == '\\0';")
+  lines.add("    nimffi_free_str(&addr);")
+  lines.add("    if (!ok) {")
+  lines.add(
+    "        nimffi_copy_err(err_buf, err_len, \"FFI create returned non-numeric address\");"
+  )
+  lines.add("        nimffi_sync_state_release(st);")
+  lines.add("        return -1;")
+  lines.add("    }")
+  lines.add(
+    "    " & ctxType & "* c = (" & ctxType & "*)calloc(1, sizeof(" & ctxType & "));"
+  )
+  lines.add("    if (!c) {")
+  lines.add("        nimffi_copy_err(err_buf, err_len, \"out of memory\");")
+  lines.add("        nimffi_sync_state_release(st);")
+  lines.add("        return -1;")
+  lines.add("    }")
+  lines.add("    c->ptr = (void*)(uintptr_t)a;")
+  lines.add("    *out = c;")
+  lines.add("    nimffi_sync_state_release(st);")
+  lines.add("    return 0;")
+  lines.add("}")
+  lines.add("")
 
 proc emitDestructor(
     lines: var seq[string],
@@ -720,6 +836,77 @@ proc emitMethod(
   lines.add("}")
   lines.add("")
 
+proc emitMethodSync(
+    lines: var seq[string], reg: var CTypeReg, ctxType, libName: string, m: FFIProcMeta
+) =
+  ## Blocking companion to `<lib>_ctx_<method>`: submits the request, waits up to
+  ## `timeout_ms` for the reply, and decodes it into a caller-owned `*out`.
+  ## Returns 0 on success; non-zero with `err_buf` filled on failure. When the
+  ## reply owns heap memory the caller releases it with the generated
+  ## `<lib>_free_<Type>()` helper.
+  let stripped = stripLibPrefix(m.procName, libName)
+  let reqName = reqStructName(m)
+  let retC = cReturnType(reg, m)
+  let retFree = freeFn(reg, retC)
+  let (params, assigns) = buildReqParams(reg, m.extraParams)
+
+  let head =
+    "static inline int " & libName & "_ctx_" & stripped & "_sync(const " & ctxType &
+    "* ctx, "
+  let tail = retC & "* out, char* err_buf, size_t err_len, uint32_t timeout_ms) {"
+  lines.add(
+    if params.len > 0:
+      head & params.join(", ") & ", " & tail
+    else:
+      head & tail
+  )
+  emitSyncSubmitPrologue(lines, libName, reqName, assigns)
+  lines.add(
+    "    int ret = " & m.procName & "(ctx->ptr, nimffi_sync_cb, st, req_buf, req_len);"
+  )
+  lines.add("    free(req_buf);")
+  lines.add("    if (ret == NIMFFI_RET_MISSING_CALLBACK) {")
+  lines.add(
+    "        nimffi_copy_err(err_buf, err_len, \"RET_MISSING_CALLBACK (internal error)\");"
+  )
+  lines.add("        nimffi_sync_state_release(st);")
+  lines.add("        nimffi_sync_state_release(st);")
+  lines.add("        return -1;")
+  lines.add("    }")
+  lines.add("    if (!nimffi_sync_wait(st, timeout_ms)) {")
+  lines.add("        nimffi_copy_err(err_buf, err_len, \"FFI call timed out\");")
+  lines.add("        nimffi_sync_state_release(st);")
+  lines.add("        return -1;")
+  lines.add("    }")
+  lines.add("    if (!st->ok) {")
+  lines.add(
+    "        nimffi_copy_err(err_buf, err_len, st->err ? st->err : \"FFI call failed\");"
+  )
+  lines.add("        int rc = st->ret_code ? st->ret_code : -1;")
+  lines.add("        nimffi_sync_state_release(st);")
+  lines.add("        return rc;")
+  lines.add("    }")
+  lines.add("    memset(out, 0, sizeof(*out));")
+  lines.add("    char* dec_err = NULL;")
+  lines.add(
+    "    int dec = nimffi_decode_from_buf(" & libName & "_decv_" & cToken(retC) &
+      ", st->bytes, st->bytes_len, out, &dec_err);"
+  )
+  lines.add("    if (dec != 0) {")
+  lines.add(
+    "        nimffi_copy_err(err_buf, err_len, dec_err ? dec_err : \"decode failed\");"
+  )
+  lines.add("        free(dec_err);")
+  if retFree.len > 0:
+    lines.add("        " & retFree & "(out);")
+  lines.add("        nimffi_sync_state_release(st);")
+  lines.add("        return -1;")
+  lines.add("    }")
+  lines.add("    nimffi_sync_state_release(st);")
+  lines.add("    return 0;")
+  lines.add("}")
+  lines.add("")
+
 proc newCTypeReg(
     libName, libType: string, types: seq[FFITypeMeta], procs: seq[FFIProcMeta]
 ): CTypeReg =
@@ -769,6 +956,12 @@ func generateCCborHeader*(): string =
   ## agnostic, so it too is emitted verbatim.
   CborHelpersTpl & "\n"
 
+func generateCSyncHeader*(): string =
+  ## The `nim_ffi_sync.h` shared header: the blocking-call helper backing the
+  ## generated `_sync` wrappers. Includes the cbor header and is library-
+  ## agnostic, so it is emitted verbatim.
+  SyncCallHelperTpl & "\n"
+
 proc generateCLibHeader*(
     procs: seq[FFIProcMeta],
     types: seq[FFITypeMeta],
@@ -791,6 +984,7 @@ proc generateCLibHeader*(
   lines.add("#ifndef " & guard)
   lines.add("#define " & guard)
   lines.add("#include \"" & CborHeaderName & "\"")
+  lines.add("#include \"" & SyncHeaderName & "\"")
   lines.add("")
 
   lines.add("/* ============================================================ */")
@@ -869,6 +1063,7 @@ proc generateCLibHeader*(
   emitListenerApi(lines, ctxType, libType, libName, events)
   for m in methods:
     emitMethod(lines, reg, ctxType, libType, libName, m)
+    emitMethodSync(lines, reg, ctxType, libName, m)
 
   lines.add("#endif /* " & guard & " */")
   lines.join("\n") & "\n"
@@ -888,6 +1083,7 @@ proc generateCBindings*(
   createDir(outputDir)
   writeFile(outputDir / PreludeHeaderName, generateCPreludeHeader())
   writeFile(outputDir / CborHeaderName, generateCCborHeader())
+  writeFile(outputDir / SyncHeaderName, generateCSyncHeader())
   writeFile(
     outputDir / (libName & ".h"), generateCLibHeader(procs, types, libName, events)
   )

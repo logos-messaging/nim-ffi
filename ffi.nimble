@@ -151,6 +151,12 @@ task test_c_e2e, "Build and run the C end-to-end tests for the timer example":
   runOrQuit "cmake --build tests/e2e/c/build --config Debug"
   runOrQuit "ctest --test-dir tests/e2e/c/build --output-on-failure -C Debug"
 
+task test_rust_e2e, "Build and run the Rust end-to-end tests for the timer example":
+  # Regenerate the Rust bindings so the suite always runs against fresh codegen,
+  # then drive both the blocking and tokio-async wrappers via `cargo test`.
+  runOrQuit "nimble genbindings_rust"
+  runOrQuit "cargo test --manifest-path tests/e2e/rust/Cargo.toml"
+
 task test_c_abi_e2e, "Build and run the CBOR-free abi=c C end-to-end test (echo)":
   # Regenerate the abi=c bindings so the suite always runs against fresh codegen.
   runOrQuit "nimble genbindings_c_abi_echo"
@@ -286,9 +292,11 @@ task check_bindings_c, "Verify checked-in C bindings match Nim source":
   exec "git diff --exit-code --" & " examples/timer/c_bindings/my_timer.h" &
     " examples/timer/c_bindings/nim_ffi_prelude.h" &
     " examples/timer/c_bindings/nim_ffi_cbor.h" &
+    " examples/timer/c_bindings/nim_ffi_sync.h" &
     " examples/timer/c_bindings/CMakeLists.txt" & " examples/echo/c_bindings/echo.h" &
     " examples/echo/c_bindings/nim_ffi_prelude.h" &
     " examples/echo/c_bindings/nim_ffi_cbor.h" &
+    " examples/echo/c_bindings/nim_ffi_sync.h" &
     " examples/echo/c_bindings/CMakeLists.txt"
 
 task check_bindings_c_abi, "Verify checked-in abi=c C bindings match Nim source":

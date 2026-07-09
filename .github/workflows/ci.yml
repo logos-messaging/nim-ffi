@@ -93,6 +93,9 @@ jobs:
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
   cpp-e2e:
+    # Native-binding e2e across the OS matrix. C++ runs on every OS; the C and
+    # Rust suites (added below) run Linux-only, so the job id stays `cpp-e2e`
+    # for the required-check name even though it now covers all three backends.
     # Codegen output doesn't vary with mm, so we matrix over OS and Nim only.
     # Windows runs MSVC by default and may surface codegen tweaks needed in
     # the generated CMake (e.g. /EHsc, dllexport) — track follow-ups as bugs
@@ -175,6 +178,21 @@ jobs:
         if: matrix.label == 'Linux'
         shell: bash
         run: nimble test_c_abi_e2e -y
+
+      # CBOR C bindings: exercises the async callback API and the blocking
+      # `_sync` wrappers. Linux-only (codegen is platform-checked by
+      # check-bindings; one OS is enough for the runtime round-trip).
+      - name: Run C e2e tests
+        if: matrix.label == 'Linux'
+        shell: bash
+        run: nimble test_c_e2e -y
+
+      # Rust bindings: drives the generated blocking + tokio-async wrappers
+      # through the full FFI round-trip. Linux-only for the same reason.
+      - name: Run Rust e2e tests
+        if: matrix.label == 'Linux'
+        shell: bash
+        run: nimble test_rust_e2e -y
 
   check-bindings:
     # Single OS is enough — codegen output is platform-independent; the Nim

@@ -1,6 +1,7 @@
 #ifndef NIM_FFI_LIB_MY_TIMER_H_INCLUDED
 #define NIM_FFI_LIB_MY_TIMER_H_INCLUDED
 #include "nim_ffi_cbor.h"
+#include "nim_ffi_sync.h"
 
 /* ============================================================ */
 /* Generated types (user-declared + per-proc request envelopes) */
@@ -894,6 +895,67 @@ static inline int my_timer_ctx_create(const TimerConfig* config, MyTimerCreateFn
     return 0;
 }
 
+static inline int my_timer_ctx_create_sync(const TimerConfig* config, MyTimerCtx** out, char* err_buf, size_t err_len, uint32_t timeout_ms) {
+    MyTimerCreateCtorReq ffi_req;
+    memset(&ffi_req, 0, sizeof(ffi_req));
+    ffi_req.config = *config;
+    uint8_t* req_buf = NULL;
+    size_t req_len = 0;
+    char* enc_err = NULL;
+    if (nimffi_encode_to_buf(my_timer_encv_MyTimerCreateCtorReq, &ffi_req, &req_buf, &req_len, &enc_err) != 0) {
+        nimffi_copy_err(err_buf, err_len, enc_err ? enc_err : "encode failed");
+        free(enc_err);
+        return -1;
+    }
+    NimFfiSyncState* st = nimffi_sync_state_new();
+    if (!st) {
+        free(req_buf);
+        nimffi_copy_err(err_buf, err_len, "out of memory");
+        return -1;
+    }
+    (void)my_timer_create(req_buf, req_len, nimffi_sync_cb, st);
+    free(req_buf);
+    if (!nimffi_sync_wait(st, timeout_ms)) {
+        nimffi_copy_err(err_buf, err_len, "FFI create timed out");
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    if (!st->ok) {
+        nimffi_copy_err(err_buf, err_len, st->err ? st->err : "FFI create failed");
+        int rc = st->ret_code ? st->ret_code : -1;
+        nimffi_sync_state_release(st);
+        return rc;
+    }
+    NimFfiStr addr;
+    memset(&addr, 0, sizeof(addr));
+    char* dec_err = NULL;
+    if (nimffi_decode_from_buf(my_timer_decv_Str, st->bytes, st->bytes_len, &addr, &dec_err) != 0) {
+        nimffi_copy_err(err_buf, err_len, dec_err ? dec_err : "decode failed");
+        free(dec_err);
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    char* endp = NULL;
+    unsigned long long a = addr.data ? strtoull(addr.data, &endp, 10) : 0;
+    bool ok = addr.data && addr.len > 0 && endp && *endp == '\0';
+    nimffi_free_str(&addr);
+    if (!ok) {
+        nimffi_copy_err(err_buf, err_len, "FFI create returned non-numeric address");
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    MyTimerCtx* c = (MyTimerCtx*)calloc(1, sizeof(MyTimerCtx));
+    if (!c) {
+        nimffi_copy_err(err_buf, err_len, "out of memory");
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    c->ptr = (void*)(uintptr_t)a;
+    *out = c;
+    nimffi_sync_state_release(st);
+    return 0;
+}
+
 static inline void my_timer_ctx_destroy(MyTimerCtx* ctx) {
     if (!ctx) return;
     if (ctx->ptr) { my_timer_destroy(ctx->ptr); ctx->ptr = NULL; }
@@ -996,6 +1058,57 @@ static inline int my_timer_ctx_echo(const MyTimerCtx* ctx, const EchoRequest* re
     return 0;
 }
 
+static inline int my_timer_ctx_echo_sync(const MyTimerCtx* ctx, const EchoRequest* req, EchoResponse* out, char* err_buf, size_t err_len, uint32_t timeout_ms) {
+    MyTimerEchoReq ffi_req;
+    memset(&ffi_req, 0, sizeof(ffi_req));
+    ffi_req.req = *req;
+    uint8_t* req_buf = NULL;
+    size_t req_len = 0;
+    char* enc_err = NULL;
+    if (nimffi_encode_to_buf(my_timer_encv_MyTimerEchoReq, &ffi_req, &req_buf, &req_len, &enc_err) != 0) {
+        nimffi_copy_err(err_buf, err_len, enc_err ? enc_err : "encode failed");
+        free(enc_err);
+        return -1;
+    }
+    NimFfiSyncState* st = nimffi_sync_state_new();
+    if (!st) {
+        free(req_buf);
+        nimffi_copy_err(err_buf, err_len, "out of memory");
+        return -1;
+    }
+    int ret = my_timer_echo(ctx->ptr, nimffi_sync_cb, st, req_buf, req_len);
+    free(req_buf);
+    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
+        nimffi_copy_err(err_buf, err_len, "RET_MISSING_CALLBACK (internal error)");
+        nimffi_sync_state_release(st);
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    if (!nimffi_sync_wait(st, timeout_ms)) {
+        nimffi_copy_err(err_buf, err_len, "FFI call timed out");
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    if (!st->ok) {
+        nimffi_copy_err(err_buf, err_len, st->err ? st->err : "FFI call failed");
+        int rc = st->ret_code ? st->ret_code : -1;
+        nimffi_sync_state_release(st);
+        return rc;
+    }
+    memset(out, 0, sizeof(*out));
+    char* dec_err = NULL;
+    int dec = nimffi_decode_from_buf(my_timer_decv_EchoResponse, st->bytes, st->bytes_len, out, &dec_err);
+    if (dec != 0) {
+        nimffi_copy_err(err_buf, err_len, dec_err ? dec_err : "decode failed");
+        free(dec_err);
+        my_timer_free_EchoResponse(out);
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    nimffi_sync_state_release(st);
+    return 0;
+}
+
 typedef void (*MyTimerVersionReplyFn)(int err_code, const NimFfiStr* reply, const char* err_msg, void* user_data);
 typedef struct { MyTimerVersionReplyFn fn; void* user_data; } MyTimerVersionCallBox;
 static void my_timer_version_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
@@ -1052,6 +1165,56 @@ static inline int my_timer_ctx_version(const MyTimerCtx* ctx, MyTimerVersionRepl
         free(box);
         return -1;
     }
+    return 0;
+}
+
+static inline int my_timer_ctx_version_sync(const MyTimerCtx* ctx, NimFfiStr* out, char* err_buf, size_t err_len, uint32_t timeout_ms) {
+    MyTimerVersionReq ffi_req;
+    memset(&ffi_req, 0, sizeof(ffi_req));
+    uint8_t* req_buf = NULL;
+    size_t req_len = 0;
+    char* enc_err = NULL;
+    if (nimffi_encode_to_buf(my_timer_encv_MyTimerVersionReq, &ffi_req, &req_buf, &req_len, &enc_err) != 0) {
+        nimffi_copy_err(err_buf, err_len, enc_err ? enc_err : "encode failed");
+        free(enc_err);
+        return -1;
+    }
+    NimFfiSyncState* st = nimffi_sync_state_new();
+    if (!st) {
+        free(req_buf);
+        nimffi_copy_err(err_buf, err_len, "out of memory");
+        return -1;
+    }
+    int ret = my_timer_version(ctx->ptr, nimffi_sync_cb, st, req_buf, req_len);
+    free(req_buf);
+    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
+        nimffi_copy_err(err_buf, err_len, "RET_MISSING_CALLBACK (internal error)");
+        nimffi_sync_state_release(st);
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    if (!nimffi_sync_wait(st, timeout_ms)) {
+        nimffi_copy_err(err_buf, err_len, "FFI call timed out");
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    if (!st->ok) {
+        nimffi_copy_err(err_buf, err_len, st->err ? st->err : "FFI call failed");
+        int rc = st->ret_code ? st->ret_code : -1;
+        nimffi_sync_state_release(st);
+        return rc;
+    }
+    memset(out, 0, sizeof(*out));
+    char* dec_err = NULL;
+    int dec = nimffi_decode_from_buf(my_timer_decv_Str, st->bytes, st->bytes_len, out, &dec_err);
+    if (dec != 0) {
+        nimffi_copy_err(err_buf, err_len, dec_err ? dec_err : "decode failed");
+        free(dec_err);
+        nimffi_free_str(out);
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    nimffi_sync_state_release(st);
     return 0;
 }
 
@@ -1115,6 +1278,57 @@ static inline int my_timer_ctx_complex(const MyTimerCtx* ctx, const ComplexReque
     return 0;
 }
 
+static inline int my_timer_ctx_complex_sync(const MyTimerCtx* ctx, const ComplexRequest* req, ComplexResponse* out, char* err_buf, size_t err_len, uint32_t timeout_ms) {
+    MyTimerComplexReq ffi_req;
+    memset(&ffi_req, 0, sizeof(ffi_req));
+    ffi_req.req = *req;
+    uint8_t* req_buf = NULL;
+    size_t req_len = 0;
+    char* enc_err = NULL;
+    if (nimffi_encode_to_buf(my_timer_encv_MyTimerComplexReq, &ffi_req, &req_buf, &req_len, &enc_err) != 0) {
+        nimffi_copy_err(err_buf, err_len, enc_err ? enc_err : "encode failed");
+        free(enc_err);
+        return -1;
+    }
+    NimFfiSyncState* st = nimffi_sync_state_new();
+    if (!st) {
+        free(req_buf);
+        nimffi_copy_err(err_buf, err_len, "out of memory");
+        return -1;
+    }
+    int ret = my_timer_complex(ctx->ptr, nimffi_sync_cb, st, req_buf, req_len);
+    free(req_buf);
+    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
+        nimffi_copy_err(err_buf, err_len, "RET_MISSING_CALLBACK (internal error)");
+        nimffi_sync_state_release(st);
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    if (!nimffi_sync_wait(st, timeout_ms)) {
+        nimffi_copy_err(err_buf, err_len, "FFI call timed out");
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    if (!st->ok) {
+        nimffi_copy_err(err_buf, err_len, st->err ? st->err : "FFI call failed");
+        int rc = st->ret_code ? st->ret_code : -1;
+        nimffi_sync_state_release(st);
+        return rc;
+    }
+    memset(out, 0, sizeof(*out));
+    char* dec_err = NULL;
+    int dec = nimffi_decode_from_buf(my_timer_decv_ComplexResponse, st->bytes, st->bytes_len, out, &dec_err);
+    if (dec != 0) {
+        nimffi_copy_err(err_buf, err_len, dec_err ? dec_err : "decode failed");
+        free(dec_err);
+        my_timer_free_ComplexResponse(out);
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    nimffi_sync_state_release(st);
+    return 0;
+}
+
 typedef void (*MyTimerScheduleReplyFn)(int err_code, const ScheduleResult* reply, const char* err_msg, void* user_data);
 typedef struct { MyTimerScheduleReplyFn fn; void* user_data; } MyTimerScheduleCallBox;
 static void my_timer_schedule_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
@@ -1174,6 +1388,59 @@ static inline int my_timer_ctx_schedule(const MyTimerCtx* ctx, const JobSpec* jo
         free(box);
         return -1;
     }
+    return 0;
+}
+
+static inline int my_timer_ctx_schedule_sync(const MyTimerCtx* ctx, const JobSpec* job, const RetryPolicy* retry, const ScheduleConfig* schedule, ScheduleResult* out, char* err_buf, size_t err_len, uint32_t timeout_ms) {
+    MyTimerScheduleReq ffi_req;
+    memset(&ffi_req, 0, sizeof(ffi_req));
+    ffi_req.job = *job;
+    ffi_req.retry = *retry;
+    ffi_req.schedule = *schedule;
+    uint8_t* req_buf = NULL;
+    size_t req_len = 0;
+    char* enc_err = NULL;
+    if (nimffi_encode_to_buf(my_timer_encv_MyTimerScheduleReq, &ffi_req, &req_buf, &req_len, &enc_err) != 0) {
+        nimffi_copy_err(err_buf, err_len, enc_err ? enc_err : "encode failed");
+        free(enc_err);
+        return -1;
+    }
+    NimFfiSyncState* st = nimffi_sync_state_new();
+    if (!st) {
+        free(req_buf);
+        nimffi_copy_err(err_buf, err_len, "out of memory");
+        return -1;
+    }
+    int ret = my_timer_schedule(ctx->ptr, nimffi_sync_cb, st, req_buf, req_len);
+    free(req_buf);
+    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
+        nimffi_copy_err(err_buf, err_len, "RET_MISSING_CALLBACK (internal error)");
+        nimffi_sync_state_release(st);
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    if (!nimffi_sync_wait(st, timeout_ms)) {
+        nimffi_copy_err(err_buf, err_len, "FFI call timed out");
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    if (!st->ok) {
+        nimffi_copy_err(err_buf, err_len, st->err ? st->err : "FFI call failed");
+        int rc = st->ret_code ? st->ret_code : -1;
+        nimffi_sync_state_release(st);
+        return rc;
+    }
+    memset(out, 0, sizeof(*out));
+    char* dec_err = NULL;
+    int dec = nimffi_decode_from_buf(my_timer_decv_ScheduleResult, st->bytes, st->bytes_len, out, &dec_err);
+    if (dec != 0) {
+        nimffi_copy_err(err_buf, err_len, dec_err ? dec_err : "decode failed");
+        free(dec_err);
+        my_timer_free_ScheduleResult(out);
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    nimffi_sync_state_release(st);
     return 0;
 }
 
