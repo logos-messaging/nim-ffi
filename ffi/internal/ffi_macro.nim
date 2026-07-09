@@ -1841,6 +1841,32 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
     echo generated.repr
   return generated
 
+proc reportScalarFastPathDrops(procs: seq[FFIProcMeta]) {.compileTime.} =
+  ## Scalar-fast-path procs have no foreign-binding codegen yet, so they can't
+  ## ride the generated bindings. Fail loudly, naming them, unless
+  ## `-d:ffiAllowScalarSkip` opts into the silent omission (then just hint).
+  var skipped: seq[string] = @[]
+  for p in procs:
+    if p.scalarFastPath:
+      skipped.add(p.procName)
+  if skipped.len == 0:
+    return
+  if ffiAllowScalarSkip:
+    for name in skipped:
+      hint(
+        "genBindings: omitting scalar-fast-path proc '" & name &
+          "' from the bindings (-d:ffiAllowScalarSkip)"
+      )
+    return
+  error(
+    "genBindings: no foreign-binding codegen for scalar-fast-path `abi = c` " &
+      "procs yet, so these would be silently omitted from the generated " & "bindings: " &
+      skipped.join(", ") & ".\n" & "Fix by one of:\n" &
+      "  - switch the proc to `abi = cbor`, or\n" &
+      "  - add a non-scalar param (e.g. a struct or handle) so it takes the " &
+      "CBOR wire shape, or\n" & "  - pass -d:ffiAllowScalarSkip to accept the omission."
+  )
+
 macro genBindings*(
     outputDir: static[string] = ffiOutputDir, nimSrcRelPath: static[string] = ffiSrcPath
 ): untyped =
@@ -1880,16 +1906,8 @@ macro genBindings*(
       )
     let lang = string_helpers.toLower(targetLang)
     let libName = deriveLibName(ffiProcRegistry)
-    # Scalar-fast-path procs have no foreign-dispatch codegen yet (their C
-    # export doesn't take the CBOR `(reqCbor, reqCborLen)` shape); drop them so
-    # the generators don't emit a broken CBOR caller for them.
     let genProcs = bindableProcs(ffiProcRegistry)
-    for p in ffiProcRegistry:
-      if p.scalarFastPath:
-        hint(
-          "genBindings: skipping scalar-fast-path proc '" & p.procName &
-            "' (no foreign-binding codegen for the scalar shape yet)"
-        )
+    reportScalarFastPathDrops(ffiProcRegistry)
     case lang
     of "rust":
       generateRustCrate(

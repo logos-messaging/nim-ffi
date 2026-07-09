@@ -111,6 +111,17 @@ The default wire format is `cbor`. Override the library default with
 `declareLibrary("lib", Lib, defaultABIFormat = "c")`, or per annotation with an
 `"abi = ..."` spec, e.g. `{.ffi: "abi = c".}`.
 
+An `abi = c` proc whose whole signature is scalar — fixed-width integer, float,
+or bool params (a `string` return is fine, a `string` param is not) and no
+structs, handles, or pointers — dispatches through a CBOR-free scalar fast path.
+Foreign-binding codegen for that shape isn't implemented yet, so
+under `-d:ffiGenBindings` such a proc would be omitted from the generated
+bindings — and `genBindings()` fails with an error naming the affected procs.
+Resolve it by switching the proc to `abi = cbor`, adding a non-scalar param so it
+takes the CBOR wire shape, or passing `-d:ffiAllowScalarSkip` to accept the
+omission (the proc still works over the scalar fast path; it's just absent from
+the generated foreign bindings).
+
 ## Placement of `genBindings()`
 
 `genBindings()` reads the compile-time registries that the pragmas populate as

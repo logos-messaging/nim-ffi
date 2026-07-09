@@ -172,3 +172,8 @@ const ffiOutputDir* {.strdefine.} = ""
 # Nim source path (relative to outputDir) embedded in generated build files;
 # set with -d:ffiSrcPath=../relative/path.nim
 const ffiSrcPath* {.strdefine.} = ""
+
+# When set to true, scalar-only `abi = c` procs (which have no foreign-binding codegen
+# yet) are silently omitted from the generated bindings instead of failing the
+# build. Off by default so the drop is loud; see genBindings().
+const ffiAllowScalarSkip* {.booldefine.} = false
