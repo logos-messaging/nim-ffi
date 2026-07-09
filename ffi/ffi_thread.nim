@@ -150,6 +150,12 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
     onFFIThread = false
     # Free handle refs on the FFI thread that allocated them (refc heap is thread-local).
     ctx[].handles.releaseAll()
+    # Teardown has run and no more events will be emitted from this thread; let
+    # the event thread stop draining and exit. Wake it so it notices without
+    # waiting a full tick.
+    ctx.ffiThreadExited.store(true)
+    ctx.eventQueueSignal.fireSync().isOkOr:
+      error "failed to wake event thread on FFI thread exit", err = error
     # Unblocks destroyFFIContext's bounded wait so cleanup can proceed.
     let fireRes = ctx.threadExitSignal.fireSync()
     if fireRes.isErr():
@@ -209,5 +215,16 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
         await allFutures(pending)
       except CatchableError as e:
         error "draining pending FFI requests on shutdown raised", error = e.msg
+
+    # In-flight requests drained; run the library's async shutdown (e.g.
+    # `switch.stop()`) on this event loop before the thread joins. Only if a
+    # `{.ffiDtor.}` registered a hook and a request populated `myLib`. Exceptions
+    # are logged, never propagated: the thread must still fire threadExitSignal.
+    let teardown = ffiTeardownHook[T]()
+    if not teardown.isNil() and not ctx.myLib.isNil():
+      try:
+        await teardown(ctx.myLib)
+      except CatchableError as e:
+        error "library teardown raised on shutdown", error = e.msg
 
   waitFor ffiRun(ctx)
