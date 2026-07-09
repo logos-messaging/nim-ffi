@@ -61,7 +61,10 @@ genBindings()
 ```
 
 The generated C export names are the snake_case form of the proc names, e.g.
-`counterBump` → `counter_bump`.
+`counterBump` → `counter_bump`. That bare prefix is the only guard against
+clashing with a libc/POSIX symbol (e.g. `timer_create`), so pick a distinctive
+library name; [decision 0001](docs/decisions/0001-collapse-dual-c-naming.md)
+covers the planned collapse of the raw and `<lib>_ctx_*` layers.
 
 ## Pragma reference
 

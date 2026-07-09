@@ -403,6 +403,7 @@ proc emitEventMachinery(
 proc emitContextStruct(
     lines: var seq[string], ctxType: string, events: seq[FFIEventMeta]
 ) =
+  # The <lib>_ctx_* layer emitted below is the one a future major keeps — docs/decisions/0001-collapse-dual-c-naming.md.
   lines.add("/* ============================================================ */")
   lines.add("/* High-level context wrapper                                   */")
   lines.add("/* ============================================================ */")
@@ -804,6 +805,7 @@ proc generateCLibHeader*(
     lines.add(codec)
   lines.add("")
 
+  # Raw <lib>_* exports duplicate the <lib>_ctx_* wrappers; collapsing them is a deferred breaking change — docs/decisions/0001-collapse-dual-c-naming.md.
   lines.add("/* ============================================================ */")
   lines.add("/* C ABI declarations (symbols exported by the Nim dylib)       */")
   lines.add("/* ============================================================ */")
