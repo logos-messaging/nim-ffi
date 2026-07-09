@@ -1,4 +1,6 @@
 import std/[macros, tables, strutils]
+from std/os import `/`, relativePath
+from std/compilesettings import querySetting, SingleValueSetting
 import chronos
 import ../ffi_types
 import ../ffi_thread_request
@@ -1867,6 +1869,55 @@ proc reportScalarFastPathDrops(procs: seq[FFIProcMeta]) {.compileTime.} =
       "CBOR wire shape, or\n" & "  - pass -d:ffiAllowScalarSkip to accept the omission."
   )
 
+proc bindingsOutputDir(lang, explicit: string): string {.compileTime.} =
+  ## Output dir for `lang`. Defaults to `<lang>_bindings/` next to the source
+  ## file being compiled (`querySetting(projectPath)`); an explicit
+  ## -d:ffiOutputDir override wins.
+  if explicit.len > 0:
+    explicit
+  else:
+    querySetting(SingleValueSetting.projectPath) / (lang & "_bindings")
+
+proc bindingsSrcPath(outDir, explicit: string): string {.compileTime.} =
+  ## Nim source path embedded in generated build files, expressed relative to
+  ## the output dir. Defaults to the compiled file (`querySetting(projectFull)`)
+  ## made relative to `outDir`; an explicit -d:ffiSrcPath override wins.
+  if explicit.len > 0:
+    explicit
+  else:
+    relativePath(querySetting(SingleValueSetting.projectFull), outDir)
+
+when defined(ffiGenBindings):
+  proc emitBindingsFor(
+      lang: string, genProcs: seq[FFIProcMeta], libName, outDir, srcRel: string
+  ) {.compileTime.} =
+    ## Route one language token to its generator; unknown tokens are a compile
+    ## error listing the valid set.
+    case lang
+    of "rust":
+      generateRustCrate(
+        genProcs, ffiTypeRegistry, libName, outDir, srcRel, ffiEventRegistry
+      )
+    of "cpp", "c++":
+      generateCppBindings(
+        genProcs, ffiTypeRegistry, libName, outDir, srcRel, ffiEventRegistry
+      )
+    of "c":
+      generateCBindings(
+        genProcs, ffiTypeRegistry, libName, outDir, srcRel, ffiEventRegistry
+      )
+    of "c_abi":
+      generateCAbiBindings(
+        genProcs, ffiTypeRegistry, libName, outDir, srcRel, ffiEventRegistry
+      )
+    of "cddl":
+      generateCddlBindings(genProcs, ffiTypeRegistry, libName, outDir, srcRel)
+    else:
+      error(
+        "genBindings: unknown targetLang '" & lang &
+          "'. Use 'rust', 'cpp', 'c', 'c_abi', or 'cddl'."
+      )
+
 macro genBindings*(
     outputDir: static[string] = ffiOutputDir, nimSrcRelPath: static[string] = ffiSrcPath
 ): untyped =
@@ -1883,54 +1934,35 @@ macro genBindings*(
   ## In a multi-file library, import all sub-modules first and call
   ## genBindings() once at the bottom of the top-level compilation-root file.
   ##
-  ## Supported languages (-d:targetLang): "rust" (default), "cpp", "c", "cddl".
-  ## Output path and nim source path default to -d:ffiOutputDir and
-  ## -d:ffiSrcPath, or can be passed as explicit arguments.
+  ## Supported languages (-d:targetLang): "rust" (default), "cpp", "c",
+  ## "c_abi", "cddl". Pass a comma-separated list to emit several at once from
+  ## a single compile — the backend dispatch loops over each language.
+  ##
+  ## Output dir defaults to `<lang>_bindings/` next to the compiled source; the
+  ## embedded nim source path is derived by making that source relative to the
+  ## output dir. Both can be overridden with -d:ffiOutputDir / -d:ffiSrcPath
+  ## (or the explicit arguments) — an override applies to every language.
   ## Foreign-binding file emission is a no-op unless -d:ffiGenBindings is set;
   ## the `abi = c` `_CWire` companions are emitted unconditionally (runtime
   ## code, not generated files).
   ##
   ## Example (all via compile flags):
   ##   genBindings()
-  ##   # nim c -d:ffiGenBindings -d:targetLang=rust \
-  ##   #        -d:ffiOutputDir=examples/timer/rust_bindings \
-  ##   #        -d:ffiSrcPath=../timer.nim mylib.nim
+  ##   # nim c -d:ffiGenBindings -d:targetLang=rust,cpp,c mylib.nim
 
   genBindingsEmitted = true
 
   when defined(ffiGenBindings):
-    if outputDir.len == 0:
-      error(
-        "genBindings: output directory is empty." &
-          " Pass it as an argument or set -d:ffiOutputDir=path/to/output"
-      )
-    let lang = string_helpers.toLower(targetLang)
     let libName = deriveLibName(ffiProcRegistry)
     let genProcs = bindableProcs(ffiProcRegistry)
     reportScalarFastPathDrops(ffiProcRegistry)
-    case lang
-    of "rust":
-      generateRustCrate(
-        genProcs, ffiTypeRegistry, libName, outputDir, nimSrcRelPath, ffiEventRegistry
-      )
-    of "cpp", "c++":
-      generateCppBindings(
-        genProcs, ffiTypeRegistry, libName, outputDir, nimSrcRelPath, ffiEventRegistry
-      )
-    of "c":
-      generateCBindings(
-        genProcs, ffiTypeRegistry, libName, outputDir, nimSrcRelPath, ffiEventRegistry
-      )
-    of "c_abi":
-      generateCAbiBindings(
-        genProcs, ffiTypeRegistry, libName, outputDir, nimSrcRelPath, ffiEventRegistry
-      )
-    of "cddl":
-      generateCddlBindings(genProcs, ffiTypeRegistry, libName, outputDir, nimSrcRelPath)
-    else:
-      error(
-        "genBindings: unknown targetLang '" & lang &
-          "'. Use 'rust', 'cpp', 'c', 'c_abi', or 'cddl'."
+    for rawLang in targetLang.split(','):
+      let lang = string_helpers.toLower(rawLang.strip())
+      if lang.len == 0:
+        continue
+      let outDir = bindingsOutputDir(lang, outputDir)
+      emitBindingsFor(
+        lang, genProcs, libName, outDir, bindingsSrcPath(outDir, nimSrcRelPath)
       )
 
   let emitted = flushCWireCompanions()

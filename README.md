@@ -196,26 +196,26 @@ library and nothing else.
 nim c --app:lib --noMain --nimMainPrefix:libmylib mylib.nim
 ```
 
-**2. Emit the foreign bindings** — same flags, plus the binding defines. This
-compile runs the generators as a compile-time side effect and produces no
-runnable output, so send the binary to `/dev/null`. The generated files (for
-`targetLang=c`/`c_abi`: the `<name>.h` header your host includes, plus a
-`CMakeLists.txt`) land in `-d:ffiOutputDir`:
+**2. Emit the foreign bindings** — add the binding defines and `--compileOnly`,
+which stops after codegen: the binding files are written during macro expansion,
+so there's no library to link (no `--app:lib`/`-o:/dev/null` needed). The
+generated files (for `targetLang=c`/`c_abi`: the `<name>.h` header your host
+includes, plus a `CMakeLists.txt`) land in `-d:ffiOutputDir`:
 
 ```sh
-nim c --app:lib --noMain --nimMainPrefix:libmylib \
-      -d:ffiGenBindings -d:targetLang=c \
-      -d:ffiOutputDir=path/to/output -d:ffiSrcPath=../mylib.nim \
-      -o:/dev/null mylib.nim
+nim c -d:ffiGenBindings -d:targetLang=rust,cpp,c --compileOnly mylib.nim
 ```
 
-- `-d:targetLang` — which generator runs. Two kinds:
+- `-d:targetLang` — which generator(s) run; pass a comma-separated list to emit
+  several from one compile. Two kinds:
   - **Language bindings over the CBOR wire:** `rust` (default), `cpp`, `c`.
   - **Non-peer generators:** `c_abi` — C bindings that speak the flat `abi = c`
     wire instead of CBOR; `cddl` — a CDDL schema of the CBOR wire, not a
     language binding at all.
-- `-d:ffiOutputDir` — where the generated files land.
-- `-d:ffiSrcPath` — the Nim source path embedded in the generated build files.
+- `-d:ffiOutputDir` — override where the generated files land. Defaults to
+  `<lang>_bindings/` next to the compiled source.
+- `-d:ffiSrcPath` — override the Nim source path embedded in the generated build
+  files. Defaults to the compiled source made relative to the output dir.
 
 ### The `--nimMainPrefix:lib<name>` rule
 

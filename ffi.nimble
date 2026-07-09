@@ -16,6 +16,9 @@ requires "cbor_serialization == 0.3.0"
 const nimFlagsOrc = "--mm:orc -d:chronicles_log_level=WARN"
 const nimFlagsRefc = "--mm:refc -d:chronicles_log_level=WARN"
 
+const timerSrc = "examples/timer/timer.nim"
+const echoSrc = "examples/echo/echo.nim"
+
 import std/[algorithm, os, strutils]
 
 proc discoverUnitTests(): seq[string] =
@@ -92,6 +95,18 @@ proc applyTsanSuppressions() =
     putEnv("TSAN_OPTIONS", "suppressions=" & suppPath)
   elif "suppressions=" notin existing:
     putEnv("TSAN_OPTIONS", existing & ":suppressions=" & suppPath)
+
+proc genBindingsCmd(flags, src: string, langs = "rust", outDir = ""): string =
+  ## One `nim c` that emits `langs` (comma-separated) from `src`. Output dir and
+  ## embedded source path default to `<lang>_bindings/` next to `src`; `outDir`
+  ## overrides every language. `--compileOnly` is enough because the binding
+  ## files are written during macro expansion — nothing is linked.
+  var cmd =
+    "nim c " & flags & " -d:ffiGenBindings -d:targetLang=" & langs & " --compileOnly"
+  if outDir.len > 0:
+    cmd.add " -d:ffiOutputDir=" & outDir
+  cmd.add " " & src
+  cmd
 
 proc removeStaleEchoLib() =
   ## The CBOR and `abi = c` echo e2e suites both compile examples/echo/echo.nim
@@ -210,75 +225,42 @@ task test_c_abi_e2e_sanitized,
   runOrQuit "ctest --test-dir tests/e2e/c_abi/build --output-on-failure -C Debug"
 
 task genbindings_example, "Generate Rust bindings for the timer example":
-  exec "nim c " & nimFlagsOrc &
-    " --app:lib --noMain --nimMainPrefix:libmy_timer -d:ffiGenBindings -o:/dev/null examples/timer/timer.nim"
-  exec "nim c " & nimFlagsRefc &
-    " --app:lib --noMain --nimMainPrefix:libmy_timer -d:ffiGenBindings -o:/dev/null examples/timer/timer.nim"
+  exec genBindingsCmd(nimFlagsOrc, timerSrc)
+  exec genBindingsCmd(nimFlagsRefc, timerSrc)
 
 task genbindings_rust, "Generate Rust bindings for the timer example":
-  exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
-    " -d:ffiGenBindings -d:targetLang=rust" &
-    " -d:ffiOutputDir=examples/timer/rust_bindings" & " -d:ffiSrcPath=../timer.nim" &
-    " -o:/dev/null examples/timer/timer.nim"
-  exec "nim c " & nimFlagsRefc & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
-    " -d:ffiGenBindings -d:targetLang=rust" &
-    " -d:ffiOutputDir=examples/timer/rust_bindings" & " -d:ffiSrcPath=../timer.nim" &
-    " -o:/dev/null examples/timer/timer.nim"
+  exec genBindingsCmd(nimFlagsOrc, timerSrc, "rust")
+  exec genBindingsCmd(nimFlagsRefc, timerSrc, "rust")
 
 task genbindings_cddl, "Generate CDDL schema for the timer example":
-  exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
-    " -d:ffiGenBindings -d:targetLang=cddl" &
-    " -d:ffiOutputDir=examples/timer/cddl_bindings" & " -d:ffiSrcPath=../timer.nim" &
-    " -o:/dev/null examples/timer/timer.nim"
+  exec genBindingsCmd(nimFlagsOrc, timerSrc, "cddl")
 
 task genbindings_cpp, "Generate C++ bindings for the timer example":
-  exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
-    " -d:ffiGenBindings -d:targetLang=cpp" &
-    " -d:ffiOutputDir=examples/timer/cpp_bindings" & " -d:ffiSrcPath=../timer.nim" &
-    " -o:/dev/null examples/timer/timer.nim"
-  exec "nim c " & nimFlagsRefc & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
-    " -d:ffiGenBindings -d:targetLang=cpp" &
-    " -d:ffiOutputDir=examples/timer/cpp_bindings" & " -d:ffiSrcPath=../timer.nim" &
-    " -o:/dev/null examples/timer/timer.nim"
+  exec genBindingsCmd(nimFlagsOrc, timerSrc, "cpp")
+  exec genBindingsCmd(nimFlagsRefc, timerSrc, "cpp")
 
 task genbindings_cpp_echo, "Generate C++ bindings for the echo example":
-  exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libecho" &
-    " -d:ffiGenBindings -d:targetLang=cpp" &
-    " -d:ffiOutputDir=examples/echo/cpp_bindings" & " -d:ffiSrcPath=../echo.nim" &
-    " -o:/dev/null examples/echo/echo.nim"
-  exec "nim c " & nimFlagsRefc & " --app:lib --noMain --nimMainPrefix:libecho" &
-    " -d:ffiGenBindings -d:targetLang=cpp" &
-    " -d:ffiOutputDir=examples/echo/cpp_bindings" & " -d:ffiSrcPath=../echo.nim" &
-    " -o:/dev/null examples/echo/echo.nim"
+  exec genBindingsCmd(nimFlagsOrc, echoSrc, "cpp")
+  exec genBindingsCmd(nimFlagsRefc, echoSrc, "cpp")
 
 task genbindings_c, "Generate C bindings for the timer example":
-  exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
-    " -d:ffiGenBindings -d:targetLang=c" & " -d:ffiOutputDir=examples/timer/c_bindings" &
-    " -d:ffiSrcPath=../timer.nim" & " -o:/dev/null examples/timer/timer.nim"
-  exec "nim c " & nimFlagsRefc & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
-    " -d:ffiGenBindings -d:targetLang=c" & " -d:ffiOutputDir=examples/timer/c_bindings" &
-    " -d:ffiSrcPath=../timer.nim" & " -o:/dev/null examples/timer/timer.nim"
+  exec genBindingsCmd(nimFlagsOrc, timerSrc, "c")
+  exec genBindingsCmd(nimFlagsRefc, timerSrc, "c")
 
 task genbindings_c_echo, "Generate C bindings for the echo example":
-  exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libecho" &
-    " -d:ffiGenBindings -d:targetLang=c" & " -d:ffiOutputDir=examples/echo/c_bindings" &
-    " -d:ffiSrcPath=../echo.nim" & " -o:/dev/null examples/echo/echo.nim"
-  exec "nim c " & nimFlagsRefc & " --app:lib --noMain --nimMainPrefix:libecho" &
-    " -d:ffiGenBindings -d:targetLang=c" & " -d:ffiOutputDir=examples/echo/c_bindings" &
-    " -d:ffiSrcPath=../echo.nim" & " -o:/dev/null examples/echo/echo.nim"
+  exec genBindingsCmd(nimFlagsOrc, echoSrc, "c")
+  exec genBindingsCmd(nimFlagsRefc, echoSrc, "c")
 
 task genbindings_c_abi_echo, "Generate CBOR-free abi=c C bindings for the echo example":
   # echoVersion is all-scalar under the abi=c default, so it has no foreign
   # codegen yet and is omitted from the bindings; -d:ffiAllowScalarSkip accepts
   # that omission instead of failing the build (see genBindings()).
-  exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libecho" &
-    " -d:ffiEchoAbiC -d:ffiGenBindings -d:targetLang=c_abi -d:ffiAllowScalarSkip" &
-    " -d:ffiOutputDir=examples/echo/c_abi_bindings" & " -d:ffiSrcPath=../echo.nim" &
-    " -o:/dev/null examples/echo/echo.nim"
-  exec "nim c " & nimFlagsRefc & " --app:lib --noMain --nimMainPrefix:libecho" &
-    " -d:ffiEchoAbiC -d:ffiGenBindings -d:targetLang=c_abi -d:ffiAllowScalarSkip" &
-    " -d:ffiOutputDir=examples/echo/c_abi_bindings" & " -d:ffiSrcPath=../echo.nim" &
-    " -o:/dev/null examples/echo/echo.nim"
+  exec genBindingsCmd(
+    nimFlagsOrc & " -d:ffiEchoAbiC -d:ffiAllowScalarSkip", echoSrc, "c_abi"
+  )
+  exec genBindingsCmd(
+    nimFlagsRefc & " -d:ffiEchoAbiC -d:ffiAllowScalarSkip", echoSrc, "c_abi"
+  )
 
 task check_bindings_rust, "Verify checked-in Rust bindings match Nim source":
   runOrQuit "nimble genbindings_rust"

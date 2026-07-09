@@ -12,20 +12,24 @@ requires "https://github.com/logos-messaging/nim-ffi >= 0.2.0"
 
 const nimFlags = "--mm:orc -d:chronicles_log_level=WARN"
 
+proc genBindingsCmd(langs: string): string =
+  ## One `nim c` that emits `langs` (comma-separated) from timer.nim, each into
+  ## `<lang>_bindings/`. `--compileOnly` is enough — the files are written during
+  ## macro expansion, nothing is linked.
+  "nim c " & nimFlags & " -d:ffiGenBindings -d:targetLang=" & langs &
+    " --compileOnly timer.nim"
+
 task build, "Compile the timer library":
   exec "nim c " & nimFlags & " --app:lib --noMain --nimMainPrefix:libmy_timer timer.nim"
 
+task genbindings, "Generate Rust, C++ and C bindings for the timer example":
+  exec genBindingsCmd("rust,cpp,c")
+
 task genbindings_rust, "Generate Rust bindings for the timer example":
-  exec "nim c " & nimFlags & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
-    " -d:ffiGenBindings -d:targetLang=rust" & " -d:ffiOutputDir=rust_bindings" &
-    " -d:ffiSrcPath=timer.nim" & " -o:/dev/null timer.nim"
+  exec genBindingsCmd("rust")
 
 task genbindings_cpp, "Generate C++ bindings for the timer example":
-  exec "nim c " & nimFlags & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
-    " -d:ffiGenBindings -d:targetLang=cpp" & " -d:ffiOutputDir=cpp_bindings" &
-    " -d:ffiSrcPath=timer.nim" & " -o:/dev/null timer.nim"
+  exec genBindingsCmd("cpp")
 
 task genbindings_c, "Generate C bindings for the timer example":
-  exec "nim c " & nimFlags & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
-    " -d:ffiGenBindings -d:targetLang=c" & " -d:ffiOutputDir=c_bindings" &
-    " -d:ffiSrcPath=timer.nim" & " -o:/dev/null timer.nim"
+  exec genBindingsCmd("c")
