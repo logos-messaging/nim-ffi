@@ -26,6 +26,7 @@ examples/**/cpp_bindings/build/
 
 # Cargo build artifacts (rust clients / harnesses)
 examples/**/rust_client/target/
+tests/e2e/rust/target/
 
 # Development plans (local only — match PLAN.md and any `*-plan.md` notes)
 PLAN.md

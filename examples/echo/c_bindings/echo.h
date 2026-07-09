@@ -1,6 +1,7 @@
 #ifndef NIM_FFI_LIB_ECHO_H_INCLUDED
 #define NIM_FFI_LIB_ECHO_H_INCLUDED
 #include "nim_ffi_cbor.h"
+#include "nim_ffi_sync.h"
 
 /* ============================================================ */
 /* Generated types (user-declared + per-proc request envelopes) */
@@ -287,6 +288,67 @@ static inline int echo_ctx_create(const EchoConfig* config, EchoCreateFn on_crea
     return 0;
 }
 
+static inline int echo_ctx_create_sync(const EchoConfig* config, EchoCtx** out, char* err_buf, size_t err_len, uint32_t timeout_ms) {
+    EchoCreateCtorReq ffi_req;
+    memset(&ffi_req, 0, sizeof(ffi_req));
+    ffi_req.config = *config;
+    uint8_t* req_buf = NULL;
+    size_t req_len = 0;
+    char* enc_err = NULL;
+    if (nimffi_encode_to_buf(echo_encv_EchoCreateCtorReq, &ffi_req, &req_buf, &req_len, &enc_err) != 0) {
+        nimffi_copy_err(err_buf, err_len, enc_err ? enc_err : "encode failed");
+        free(enc_err);
+        return -1;
+    }
+    NimFfiSyncState* st = nimffi_sync_state_new();
+    if (!st) {
+        free(req_buf);
+        nimffi_copy_err(err_buf, err_len, "out of memory");
+        return -1;
+    }
+    (void)echo_create(req_buf, req_len, nimffi_sync_cb, st);
+    free(req_buf);
+    if (!nimffi_sync_wait(st, timeout_ms)) {
+        nimffi_copy_err(err_buf, err_len, "FFI create timed out");
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    if (!st->ok) {
+        nimffi_copy_err(err_buf, err_len, st->err ? st->err : "FFI create failed");
+        int rc = st->ret_code ? st->ret_code : -1;
+        nimffi_sync_state_release(st);
+        return rc;
+    }
+    NimFfiStr addr;
+    memset(&addr, 0, sizeof(addr));
+    char* dec_err = NULL;
+    if (nimffi_decode_from_buf(echo_decv_Str, st->bytes, st->bytes_len, &addr, &dec_err) != 0) {
+        nimffi_copy_err(err_buf, err_len, dec_err ? dec_err : "decode failed");
+        free(dec_err);
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    char* endp = NULL;
+    unsigned long long a = addr.data ? strtoull(addr.data, &endp, 10) : 0;
+    bool ok = addr.data && addr.len > 0 && endp && *endp == '\0';
+    nimffi_free_str(&addr);
+    if (!ok) {
+        nimffi_copy_err(err_buf, err_len, "FFI create returned non-numeric address");
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    EchoCtx* c = (EchoCtx*)calloc(1, sizeof(EchoCtx));
+    if (!c) {
+        nimffi_copy_err(err_buf, err_len, "out of memory");
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    c->ptr = (void*)(uintptr_t)a;
+    *out = c;
+    nimffi_sync_state_release(st);
+    return 0;
+}
+
 static inline void echo_ctx_destroy(EchoCtx* ctx) {
     if (!ctx) return;
     if (ctx->ptr) { echo_destroy(ctx->ptr); ctx->ptr = NULL; }
@@ -353,6 +415,57 @@ static inline int echo_ctx_shout(const EchoCtx* ctx, const ShoutRequest* req, Ec
     return 0;
 }
 
+static inline int echo_ctx_shout_sync(const EchoCtx* ctx, const ShoutRequest* req, ShoutResponse* out, char* err_buf, size_t err_len, uint32_t timeout_ms) {
+    EchoShoutReq ffi_req;
+    memset(&ffi_req, 0, sizeof(ffi_req));
+    ffi_req.req = *req;
+    uint8_t* req_buf = NULL;
+    size_t req_len = 0;
+    char* enc_err = NULL;
+    if (nimffi_encode_to_buf(echo_encv_EchoShoutReq, &ffi_req, &req_buf, &req_len, &enc_err) != 0) {
+        nimffi_copy_err(err_buf, err_len, enc_err ? enc_err : "encode failed");
+        free(enc_err);
+        return -1;
+    }
+    NimFfiSyncState* st = nimffi_sync_state_new();
+    if (!st) {
+        free(req_buf);
+        nimffi_copy_err(err_buf, err_len, "out of memory");
+        return -1;
+    }
+    int ret = echo_shout(ctx->ptr, nimffi_sync_cb, st, req_buf, req_len);
+    free(req_buf);
+    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
+        nimffi_copy_err(err_buf, err_len, "RET_MISSING_CALLBACK (internal error)");
+        nimffi_sync_state_release(st);
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    if (!nimffi_sync_wait(st, timeout_ms)) {
+        nimffi_copy_err(err_buf, err_len, "FFI call timed out");
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    if (!st->ok) {
+        nimffi_copy_err(err_buf, err_len, st->err ? st->err : "FFI call failed");
+        int rc = st->ret_code ? st->ret_code : -1;
+        nimffi_sync_state_release(st);
+        return rc;
+    }
+    memset(out, 0, sizeof(*out));
+    char* dec_err = NULL;
+    int dec = nimffi_decode_from_buf(echo_decv_ShoutResponse, st->bytes, st->bytes_len, out, &dec_err);
+    if (dec != 0) {
+        nimffi_copy_err(err_buf, err_len, dec_err ? dec_err : "decode failed");
+        free(dec_err);
+        echo_free_ShoutResponse(out);
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    nimffi_sync_state_release(st);
+    return 0;
+}
+
 typedef void (*EchoVersionReplyFn)(int err_code, const NimFfiStr* reply, const char* err_msg, void* user_data);
 typedef struct { EchoVersionReplyFn fn; void* user_data; } EchoVersionCallBox;
 static void echo_version_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
@@ -409,6 +522,56 @@ static inline int echo_ctx_version(const EchoCtx* ctx, EchoVersionReplyFn on_rep
         free(box);
         return -1;
     }
+    return 0;
+}
+
+static inline int echo_ctx_version_sync(const EchoCtx* ctx, NimFfiStr* out, char* err_buf, size_t err_len, uint32_t timeout_ms) {
+    EchoVersionReq ffi_req;
+    memset(&ffi_req, 0, sizeof(ffi_req));
+    uint8_t* req_buf = NULL;
+    size_t req_len = 0;
+    char* enc_err = NULL;
+    if (nimffi_encode_to_buf(echo_encv_EchoVersionReq, &ffi_req, &req_buf, &req_len, &enc_err) != 0) {
+        nimffi_copy_err(err_buf, err_len, enc_err ? enc_err : "encode failed");
+        free(enc_err);
+        return -1;
+    }
+    NimFfiSyncState* st = nimffi_sync_state_new();
+    if (!st) {
+        free(req_buf);
+        nimffi_copy_err(err_buf, err_len, "out of memory");
+        return -1;
+    }
+    int ret = echo_version(ctx->ptr, nimffi_sync_cb, st, req_buf, req_len);
+    free(req_buf);
+    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
+        nimffi_copy_err(err_buf, err_len, "RET_MISSING_CALLBACK (internal error)");
+        nimffi_sync_state_release(st);
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    if (!nimffi_sync_wait(st, timeout_ms)) {
+        nimffi_copy_err(err_buf, err_len, "FFI call timed out");
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    if (!st->ok) {
+        nimffi_copy_err(err_buf, err_len, st->err ? st->err : "FFI call failed");
+        int rc = st->ret_code ? st->ret_code : -1;
+        nimffi_sync_state_release(st);
+        return rc;
+    }
+    memset(out, 0, sizeof(*out));
+    char* dec_err = NULL;
+    int dec = nimffi_decode_from_buf(echo_decv_Str, st->bytes, st->bytes_len, out, &dec_err);
+    if (dec != 0) {
+        nimffi_copy_err(err_buf, err_len, dec_err ? dec_err : "decode failed");
+        free(dec_err);
+        nimffi_free_str(out);
+        nimffi_sync_state_release(st);
+        return -1;
+    }
+    nimffi_sync_state_release(st);
     return 0;
 }
 

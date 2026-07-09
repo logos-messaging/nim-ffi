@@ -3,12 +3,12 @@
  * multi-parameter requests, the error channel and the typed event listener —
  * and aborts (non-zero exit) on the first failure so ctest reports it.
  *
- * The binding is asynchronous: every call takes a result callback and the
- * reply/error are owned by the binding and valid only for the duration of that
- * callback. So each callback *copies out* what it needs into a waiter struct,
- * and the test polls a `done` flag (the same volatile-flag pattern the event
- * listener uses) to turn each async call back into a sequential check. The
- * caller never frees reply data or error strings — that is the whole point. */
+ * Both call surfaces are covered. The async API takes a result callback whose
+ * reply/error are owned by the binding and valid only for that callback, so the
+ * checks below *copy out* what they need into a waiter struct and poll a `done`
+ * flag to sequence each call. The blocking `_sync` API (further down) collapses
+ * that dance into one call whose out-param is caller-owned and freed with the
+ * generated helper. */
 #include "my_timer.h"
 #include <assert.h>
 #include <stdio.h>
@@ -249,6 +249,133 @@ static void test_event(MyTimerCtx* ctx) {
     assert(my_timer_ctx_remove_event_listener(ctx, handle) == true);
 }
 
+/* ── Blocking `_sync` path ──────────────────────────────────────────────────
+ * The generated `_sync` wrappers collapse the submit + wait + copy-out dance
+ * above into a single blocking call: on success `*out` is caller-owned and
+ * released with the generated free helper; on failure the error text lands in
+ * `err`. These mirror the async checks to prove both surfaces round-trip. */
+
+#define SYNC_TIMEOUT_MS 5000
+
+static MyTimerCtx* make_ctx_sync(void) {
+    MyTimerCtx* ctx = NULL;
+    char err[256] = {0};
+    TimerConfig config = {nimffi_str("c-e2e-sync")};
+    int rc = my_timer_ctx_create_sync(&config, &ctx, err, sizeof(err), SYNC_TIMEOUT_MS);
+    if (rc != 0) {
+        fprintf(stderr, "create_sync failed: %s\n", err[0] ? err : "?");
+    }
+    assert(rc == 0);
+    assert(ctx != NULL);
+    return ctx;
+}
+
+static void test_version_sync(MyTimerCtx* ctx) {
+    NimFfiStr version = {0};
+    char err[256] = {0};
+    int rc = my_timer_ctx_version_sync(ctx, &version, err, sizeof(err), SYNC_TIMEOUT_MS);
+    assert(rc == 0);
+    assert(version.data != NULL);
+    assert(strcmp(version.data, "nim-timer v0.1.0") == 0);
+    nimffi_free_str(&version);
+}
+
+static void test_echo_sync(MyTimerCtx* ctx) {
+    EchoRequest req = {nimffi_str("hello-sync"), 10};
+    EchoResponse resp = {0};
+    char err[256] = {0};
+    int rc = my_timer_ctx_echo_sync(ctx, &req, &resp, err, sizeof(err), SYNC_TIMEOUT_MS);
+    assert(rc == 0);
+    assert(resp.echoed.data && strcmp(resp.echoed.data, "hello-sync") == 0);
+    assert(resp.timerName.data && strcmp(resp.timerName.data, "c-e2e-sync") == 0);
+    my_timer_free_EchoResponse(&resp);
+}
+
+static void test_complex_sync(MyTimerCtx* ctx) {
+    EchoRequest items[2] = {{nimffi_str("one"), 1}, {nimffi_str("two"), 2}};
+    NimFfiStr tags[2] = {nimffi_str("a"), nimffi_str("b")};
+    ComplexRequest req;
+    req.messages.data = items;
+    req.messages.len = 2;
+    req.tags.data = tags;
+    req.tags.len = 2;
+    req.note.has_value = true;
+    req.note.value = nimffi_str("note");
+    req.retries.has_value = false;
+    req.retries.value = 0;
+
+    ComplexResponse resp = {0};
+    char err[256] = {0};
+    int rc =
+        my_timer_ctx_complex_sync(ctx, &req, &resp, err, sizeof(err), SYNC_TIMEOUT_MS);
+    assert(rc == 0);
+    assert(resp.itemCount == 2);
+    assert(resp.hasNote == true);
+    assert(resp.summary.data && strstr(resp.summary.data, "note=note") != NULL);
+    my_timer_free_ComplexResponse(&resp);
+}
+
+static void test_schedule_ok_sync(MyTimerCtx* ctx) {
+    NimFfiStr payload[1] = {nimffi_str("p")};
+    JobSpec job;
+    job.name = nimffi_str("rollup");
+    job.payload.data = payload;
+    job.payload.len = 1;
+    job.priority = 1;
+
+    NimFfiStr retry_on[1] = {nimffi_str("timeout")};
+    RetryPolicy retry;
+    retry.maxAttempts = 3;
+    retry.backoffMs = 100;
+    retry.retryOn.data = retry_on;
+    retry.retryOn.len = 1;
+
+    ScheduleConfig sched;
+    sched.startAtMs = 1000;
+    sched.intervalMs = 0;
+    sched.jitter.has_value = false;
+    sched.jitter.value = 0;
+
+    ScheduleResult resp = {0};
+    char err[256] = {0};
+    int rc = my_timer_ctx_schedule_sync(ctx, &job, &retry, &sched, &resp, err,
+                                        sizeof(err), SYNC_TIMEOUT_MS);
+    assert(rc == 0);
+    assert(resp.jobId.data && strcmp(resp.jobId.data, "c-e2e-sync:rollup") == 0);
+    assert(resp.willRunCount == 1);
+    my_timer_free_ScheduleResult(&resp);
+}
+
+static void test_schedule_error_sync(MyTimerCtx* ctx) {
+    NimFfiStr payload[1] = {nimffi_str("p")};
+    JobSpec job;
+    job.name = nimffi_str(""); /* empty name → handler returns err */
+    job.payload.data = payload;
+    job.payload.len = 1;
+    job.priority = 1;
+
+    NimFfiStr retry_on[1] = {nimffi_str("timeout")};
+    RetryPolicy retry;
+    retry.maxAttempts = 3;
+    retry.backoffMs = 100;
+    retry.retryOn.data = retry_on;
+    retry.retryOn.len = 1;
+
+    ScheduleConfig sched;
+    sched.startAtMs = 0;
+    sched.intervalMs = 0;
+    sched.jitter.has_value = false;
+    sched.jitter.value = 0;
+
+    ScheduleResult resp = {0};
+    char err[256] = {0};
+    int rc = my_timer_ctx_schedule_sync(ctx, &job, &retry, &sched, &resp, err,
+                                        sizeof(err), SYNC_TIMEOUT_MS);
+    assert(rc != 0);
+    assert(err[0] != '\0');
+    assert(strstr(err, "job name") != NULL);
+}
+
 int main(void) {
     MyTimerCtx* ctx = make_ctx();
     test_version(ctx);
@@ -258,6 +385,15 @@ int main(void) {
     test_schedule_error(ctx);
     test_event(ctx);
     my_timer_ctx_destroy(ctx);
+
+    MyTimerCtx* sctx = make_ctx_sync();
+    test_version_sync(sctx);
+    test_echo_sync(sctx);
+    test_complex_sync(sctx);
+    test_schedule_ok_sync(sctx);
+    test_schedule_error_sync(sctx);
+    my_timer_ctx_destroy(sctx);
+
     printf("all C e2e checks passed\n");
     return 0;
 }

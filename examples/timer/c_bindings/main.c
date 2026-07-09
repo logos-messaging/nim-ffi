@@ -2,15 +2,12 @@
 #include <stdio.h>
 #include <string.h>
 
-#if defined(__STDC_NO_ATOMICS__)
-#  error "C11 atomics required (or provide a mutex/condvar fallback)"
-#endif
-#include <stdatomic.h>
+/* Uses the generated blocking `_sync` API: each call submits, waits up to
+ * `timeout_ms`, deep-copies the reply into a caller-owned out-param (released
+ * with the generated <lib>_free_<Type>() helper) and returns 0, or fills `err`
+ * and returns non-zero — no hand-rolled waiters. Events still arrive async on
+ * the dispatch thread, so the typed listener records into globals below. */
 
-/* The `done` flags below are written from the library's dispatch thread and
- * polled from main, so they cross a thread boundary — atomics, not `volatile`,
- * give the visibility guarantee. sleep_ms wraps the platform nap so the demo
- * builds on Windows too. */
 #if defined(_WIN32)
 #  include <windows.h>
 static void sleep_ms(unsigned ms) { Sleep(ms); }
@@ -22,152 +19,51 @@ static void sleep_ms(unsigned ms) {
 }
 #endif
 
-/* The generated bindings are asynchronous: each call takes a result callback
- * and returns immediately. The reply and any error string handed to that
- * callback are owned by the binding and valid only while the callback runs —
- * the caller never frees them; it copies out whatever it wants to keep. This
- * demo turns each async call back into a sequential step by polling a `done`
- * flag (the same pattern the typed event listener already uses). */
+#define TIMEOUT_MS 5000
 
-/* Poll up to ~5s for a callback to fire. Returns false if it never did, so the
- * caller can report a stuck call instead of treating it as an empty success. */
-static bool wait_done(atomic_int* done) {
-    for (int i = 0; i < 500 && !atomic_load(done); i++) {
-        sleep_ms(10);
-    }
-    return atomic_load(done) != 0;
-}
-
-static atomic_int g_echo_count = 0;
+static int g_echo_count;
 static char g_echo_message[256];
 
 static void on_echo_fired(const EchoEvent* evt, void* user_data) {
     (void)user_data;
-    atomic_store(&g_echo_count, (int)evt->echoCount);
+    g_echo_count = (int)evt->echoCount;
     snprintf(g_echo_message, sizeof(g_echo_message), "%s",
              evt->message.data ? evt->message.data : "");
 }
 
-typedef struct {
-    atomic_int done;
-    int err_code;
-    MyTimerCtx* ctx;
-    char err[256];
-} CreateWaiter;
-
-static void on_created(int ec, MyTimerCtx* ctx, const char* em, void* ud) {
-    CreateWaiter* w = (CreateWaiter*)ud;
-    w->err_code = ec;
-    w->ctx = ctx;
-    if (em) snprintf(w->err, sizeof(w->err), "%s", em);
-    atomic_store(&w->done, 1);
-}
-
-/* Generic reply sink: each step copies the fields it cares about out of its
- * typed reply into these slots (text_a/text_b for strings, num_a/num_b for
- * integers, flag for a boolean) before the binding reclaims the reply. */
-typedef struct {
-    atomic_int done;
-    int err_code;
-    char err[256];
-    char text_a[256];
-    char text_b[256];
-    long long num_a;
-    long long num_b;
-    int flag;
-} ReplyWaiter;
-
-static void on_version(int ec, const NimFfiStr* reply, const char* em, void* ud) {
-    ReplyWaiter* w = (ReplyWaiter*)ud;
-    w->err_code = ec;
-    if (reply && reply->data) snprintf(w->text_a, sizeof(w->text_a), "%s", reply->data);
-    if (em) snprintf(w->err, sizeof(w->err), "%s", em);
-    atomic_store(&w->done, 1);
-}
-
-static void on_echo(int ec, const EchoResponse* reply, const char* em, void* ud) {
-    ReplyWaiter* w = (ReplyWaiter*)ud;
-    w->err_code = ec;
-    if (reply) {
-        if (reply->echoed.data)
-            snprintf(w->text_a, sizeof(w->text_a), "%s", reply->echoed.data);
-        if (reply->timerName.data)
-            snprintf(w->text_b, sizeof(w->text_b), "%s", reply->timerName.data);
-    }
-    if (em) snprintf(w->err, sizeof(w->err), "%s", em);
-    atomic_store(&w->done, 1);
-}
-
-static void on_complex(int ec, const ComplexResponse* reply, const char* em, void* ud) {
-    ReplyWaiter* w = (ReplyWaiter*)ud;
-    w->err_code = ec;
-    if (reply) {
-        w->num_a = (long long)reply->itemCount;
-        w->flag = (int)reply->hasNote;
-        if (reply->summary.data)
-            snprintf(w->text_a, sizeof(w->text_a), "%s", reply->summary.data);
-    }
-    if (em) snprintf(w->err, sizeof(w->err), "%s", em);
-    atomic_store(&w->done, 1);
-}
-
-static void on_schedule(int ec, const ScheduleResult* reply, const char* em, void* ud) {
-    ReplyWaiter* w = (ReplyWaiter*)ud;
-    w->err_code = ec;
-    if (reply) {
-        w->num_a = (long long)reply->willRunCount;
-        w->num_b = (long long)reply->firstRunAtMs;
-        if (reply->jobId.data)
-            snprintf(w->text_a, sizeof(w->text_a), "%s", reply->jobId.data);
-    }
-    if (em) snprintf(w->err, sizeof(w->err), "%s", em);
-    atomic_store(&w->done, 1);
-}
-
-/* Fire an async call, block until its callback lands, and bail to cleanup on a
- * timeout or error. Relies on `ctx` being in scope for that cleanup — these
- * steps all run against the one context created in main(). */
-#define RUN(call, w)                                                  \
-    do {                                                              \
-        memset(&(w), 0, sizeof(w));                                   \
-        call;                                                         \
-        const char* run_err = NULL;                                   \
-        if (!wait_done(&(w).done))                                    \
-            run_err = "FFI call did not complete";                    \
-        else if ((w).err_code != 0)                                   \
-            run_err = (w).err[0] ? (w).err : "unknown";               \
-        if (run_err) {                                                \
-            fprintf(stderr, "Error: %s\n", run_err);                  \
-            my_timer_ctx_destroy(ctx);                                \
-            return 1;                                                 \
-        }                                                             \
+/* Run a blocking `_sync` call; on failure print the error it wrote into `err`,
+ * tear the context down and bail. `ctx` and `err` are in scope in main(). */
+#define RUN(call)                                        \
+    do {                                                 \
+        if ((call) != 0) {                               \
+            fprintf(stderr, "Error: %s\n", err);         \
+            my_timer_ctx_destroy(ctx);                   \
+            return 1;                                     \
+        }                                                \
     } while (0)
 
 int main(void) {
-    CreateWaiter cw;
-    memset(&cw, 0, sizeof(cw));
+    char err[256] = {0};
+    MyTimerCtx* ctx = NULL;
     TimerConfig config = {nimffi_str("c-demo")};
-    my_timer_ctx_create(&config, on_created, &cw);
-    if (!wait_done(&cw.done) || cw.err_code != 0 || !cw.ctx) {
-        fprintf(stderr, "Error: %s\n",
-                cw.err[0] ? cw.err : "create did not complete");
+    if (my_timer_ctx_create_sync(&config, &ctx, err, sizeof(err), TIMEOUT_MS) != 0) {
+        fprintf(stderr, "Error: %s\n", err);
         return 1;
     }
-    MyTimerCtx* ctx = cw.ctx;
     printf("[1] Context created\n");
 
-    ReplyWaiter w;
-    RUN(my_timer_ctx_version(ctx, on_version, &w), w);
-    printf("[2] Version: %s\n", w.text_a);
+    NimFfiStr version = {0};
+    RUN(my_timer_ctx_version_sync(ctx, &version, err, sizeof(err), TIMEOUT_MS));
+    printf("[2] Version: %s\n", version.data ? version.data : "");
+    nimffi_free_str(&version);
 
     EchoRequest echo_req = {nimffi_str("hello from C"), 50};
-    RUN(my_timer_ctx_echo(ctx, &echo_req, on_echo, &w), w);
-    printf("[3] Echo: echoed=%s, timerName=%s\n", w.text_a, w.text_b);
+    EchoResponse echo = {0};
+    RUN(my_timer_ctx_echo_sync(ctx, &echo_req, &echo, err, sizeof(err), TIMEOUT_MS));
+    printf("[3] Echo: echoed=%s, timerName=%s\n", echo.echoed.data, echo.timerName.data);
+    my_timer_free_EchoResponse(&echo);
 
-    EchoRequest items[2] = {
-        {nimffi_str("one"), 10},
-        {nimffi_str("two"), 20},
-    };
+    EchoRequest items[2] = {{nimffi_str("one"), 10}, {nimffi_str("two"), 20}};
     NimFfiStr tags[2] = {nimffi_str("fast"), nimffi_str("c")};
     ComplexRequest complex_req;
     complex_req.messages.data = items;
@@ -179,9 +75,12 @@ int main(void) {
     complex_req.retries.has_value = true;
     complex_req.retries.value = 3;
 
-    RUN(my_timer_ctx_complex(ctx, &complex_req, on_complex, &w), w);
-    printf("[4] Complex: summary=%s, itemCount=%lld, hasNote=%d\n", w.text_a, w.num_a,
-           w.flag);
+    ComplexResponse complex = {0};
+    RUN(my_timer_ctx_complex_sync(ctx, &complex_req, &complex, err, sizeof(err),
+                                  TIMEOUT_MS));
+    printf("[4] Complex: summary=%s, itemCount=%lld, hasNote=%d\n", complex.summary.data,
+           (long long)complex.itemCount, (int)complex.hasNote);
+    my_timer_free_ComplexResponse(&complex);
 
     NimFfiStr job_payload[2] = {nimffi_str("rollup"), nimffi_str("v2")};
     JobSpec job;
@@ -203,21 +102,23 @@ int main(void) {
     schedule.jitter.has_value = true;
     schedule.jitter.value = 250;
 
-    RUN(my_timer_ctx_schedule(ctx, &job, &retry, &schedule, on_schedule, &w), w);
+    ScheduleResult sched = {0};
+    RUN(my_timer_ctx_schedule_sync(ctx, &job, &retry, &schedule, &sched, err,
+                                   sizeof(err), TIMEOUT_MS));
     printf("[5] Schedule: jobId=%s, willRunCount=%lld, firstRunAtMs=%lld\n",
-           w.text_a, w.num_a, w.num_b);
+           sched.jobId.data, (long long)sched.willRunCount,
+           (long long)sched.firstRunAtMs);
+    my_timer_free_ScheduleResult(&sched);
 
-    uint64_t handle =
-        my_timer_ctx_add_on_echo_fired_listener(ctx, on_echo_fired, NULL);
+    uint64_t handle = my_timer_ctx_add_on_echo_fired_listener(ctx, on_echo_fired, NULL);
     EchoRequest evt_req = {nimffi_str("event-demo"), 1};
-    memset(&w, 0, sizeof(w));
-    my_timer_ctx_echo(ctx, &evt_req, on_echo, &w);
-    wait_done(&w.done);
+    EchoResponse evt_echo = {0};
+    RUN(my_timer_ctx_echo_sync(ctx, &evt_req, &evt_echo, err, sizeof(err), TIMEOUT_MS));
+    my_timer_free_EchoResponse(&evt_echo);
     /* The event fires from the library's dispatch thread; give it a moment. */
     sleep_ms(500);
-    printf("[6] typed event onEchoFired: message=%s, echoCount=%d\n",
-           g_echo_message, atomic_load(&g_echo_count));
-
+    printf("[6] typed event onEchoFired: message=%s, echoCount=%d\n", g_echo_message,
+           g_echo_count);
     my_timer_ctx_remove_event_listener(ctx, handle);
 
     my_timer_ctx_destroy(ctx);
