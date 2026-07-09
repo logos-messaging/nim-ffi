@@ -232,6 +232,16 @@ task genbindings_cpp, "Generate C++ bindings for the timer example":
     " -d:ffiOutputDir=examples/timer/cpp_bindings" & " -d:ffiSrcPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
 
+task genbindings_cpp_skeleton, "Generate C++ bindings for the skeleton example":
+  exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libskeleton" &
+    " -d:ffiGenBindings -d:targetLang=cpp" &
+    " -d:ffiOutputDir=examples/skeleton/cpp_bindings" & " -d:ffiSrcPath=../skeleton.nim" &
+    " -o:/dev/null examples/skeleton/skeleton.nim"
+  exec "nim c " & nimFlagsRefc & " --app:lib --noMain --nimMainPrefix:libskeleton" &
+    " -d:ffiGenBindings -d:targetLang=cpp" &
+    " -d:ffiOutputDir=examples/skeleton/cpp_bindings" & " -d:ffiSrcPath=../skeleton.nim" &
+    " -o:/dev/null examples/skeleton/skeleton.nim"
+
 task genbindings_cpp_echo, "Generate C++ bindings for the echo example":
   exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libecho" &
     " -d:ffiGenBindings -d:targetLang=cpp" &
@@ -296,8 +306,15 @@ task check_bindings_c_abi, "Verify checked-in abi=c C bindings match Nim source"
   exec "git diff --exit-code --" & " examples/echo/c_abi_bindings/echo.h" &
     " examples/echo/c_abi_bindings/CMakeLists.txt"
 
+task check_bindings_skeleton,
+  "Verify checked-in skeleton template bindings match Nim source":
+  exec "nimble genbindings_cpp_skeleton"
+  exec "git diff --exit-code --" & " examples/skeleton/cpp_bindings/skeleton.hpp" &
+    " examples/skeleton/cpp_bindings/CMakeLists.txt"
+
 task check_bindings, "Verify all checked-in example bindings match Nim source":
   exec "nimble check_bindings_rust"
   exec "nimble check_bindings_cpp"
   exec "nimble check_bindings_c"
   exec "nimble check_bindings_c_abi"
+  exec "nimble check_bindings_skeleton"

@@ -1,0 +1,615 @@
+#pragma once
+// Generated bindings require C++20 (designated initializers and other
+// C++20 constructs are used throughout the emitted code).
+// MSVC keeps __cplusplus at 199711L unless /Zc:__cplusplus is passed,
+// so consult _MSVC_LANG when present (it always reflects the active
+// /std:c++XX level).
+#if defined(_MSVC_LANG)
+#  if _MSVC_LANG < 202002L
+#    error "nim-ffi generated headers require C++20 or later (use /std:c++20)"
+#  endif
+#elif !defined(__cplusplus) || __cplusplus < 202002L
+#  error "nim-ffi generated headers require C++20 or later"
+#endif
+#include <string>
+#include <cstdint>
+#include <chrono>
+#include <charconv>
+#include <mutex>
+#include <condition_variable>
+#include <memory>
+#include <functional>
+#include <future>
+#include <vector>
+#include <optional>
+#include <type_traits>
+#include <cstring>
+#include <cassert>
+extern "C" {
+#include <tinycbor/cbor.h>
+}
+
+#include <unordered_map>
+// ============================================================
+// Result<T> — exception-free error channel
+// ============================================================
+// The generated bindings never throw: every fallible entry point (create,
+// instance methods, and their *Async futures) returns a Result<T>. Callers
+// branch on isOk()/isErr() (or the explicit bool conversion) and read
+// value()/error(). This mirrors the Nim side's Result[T, string] and keeps
+// us off C++23's std::expected.
+#ifndef NIM_FFI_RESULT_HPP_INCLUDED
+#define NIM_FFI_RESULT_HPP_INCLUDED
+
+template <typename T>
+class Result {
+    std::optional<T> value_;
+    std::string error_;
+public:
+    static Result<T> ok(T value) {
+        Result<T> r;
+        r.value_ = std::move(value);
+        return r;
+    }
+    static Result<T> err(std::string message) {
+        Result<T> r;
+        r.error_ = std::move(message);
+        return r;
+    }
+    bool isOk() const { return value_.has_value(); }
+    bool isErr() const { return !value_.has_value(); }
+    explicit operator bool() const { return isOk(); }
+    const T& value() const         { assert(value_.has_value() && "Result::value() called on err Result — check isOk() first"); return *value_; }
+    T& value()                     { assert(value_.has_value() && "Result::value() called on err Result — check isOk() first"); return *value_; }
+    const T& operator*() const     { assert(value_.has_value() && "Result::operator*() called on err Result — check isOk() first"); return *value_; }
+    const T* operator->() const    { assert(value_.has_value() && "Result::operator->() called on err Result — check isOk() first"); return &*value_; }
+    T&& take()                     { assert(value_.has_value() && "Result::take() called on err Result — check isOk() first"); return std::move(*value_); }
+    const std::string& error() const { assert(!value_.has_value() && "Result::error() called on ok Result — check isErr() first"); return error_; }
+};
+
+template <>
+class Result<void> {
+    bool ok_ = true;
+    std::string error_;
+public:
+    static Result<void> ok() {
+        Result<void> r;
+        r.ok_ = true;
+        return r;
+    }
+    static Result<void> err(std::string message) {
+        Result<void> r;
+        r.ok_ = false;
+        r.error_ = std::move(message);
+        return r;
+    }
+    Result() = default;
+    bool isOk() const { return ok_; }
+    bool isErr() const { return !ok_; }
+    explicit operator bool() const { return isOk(); }
+    const std::string& error() const { assert(!ok_ && "Result<void>::error() called on ok Result — check isErr() first"); return error_; }
+};
+
+#endif // NIM_FFI_RESULT_HPP_INCLUDED
+
+// ── encode_cbor overloads (primitives + containers) ─────────────────────
+// Per-struct encode_cbor / decode_cbor are emitted by cpp.nim next to each
+// generated struct; these helpers cover the leaf types they defer into.
+// Guarded so two nim-ffi headers can share a translation unit.
+#ifndef NIM_FFI_CBOR_HELPERS_HPP_INCLUDED
+#define NIM_FFI_CBOR_HELPERS_HPP_INCLUDED
+
+inline CborError encode_cbor(CborEncoder& e, bool v) {
+    return cbor_encode_boolean(&e, v);
+}
+inline CborError encode_cbor(CborEncoder& e, int64_t v) {
+    return cbor_encode_int(&e, v);
+}
+inline CborError encode_cbor(CborEncoder& e, int32_t v) {
+    return cbor_encode_int(&e, static_cast<int64_t>(v));
+}
+inline CborError encode_cbor(CborEncoder& e, uint64_t v) {
+    return cbor_encode_uint(&e, v);
+}
+inline CborError encode_cbor(CborEncoder& e, double v) {
+    return cbor_encode_double(&e, v);
+}
+inline CborError encode_cbor(CborEncoder& e, const std::string& v) {
+    return cbor_encode_text_string(&e, v.data(), v.size());
+}
+
+template<typename T>
+inline CborError encode_cbor(CborEncoder& e, const std::vector<T>& v) {
+    CborEncoder arr;
+    CborError err = cbor_encoder_create_array(&e, &arr, v.size());
+    if (err) return err;
+    for (const auto& item : v) {
+        err = encode_cbor(arr, item);
+        if (err) return err;
+    }
+    return cbor_encoder_close_container(&e, &arr);
+}
+
+// `seq[byte]` rides the wire as a CBOR byte string (major type 2), matching
+// Nim's cbor_serialization. This non-template overload beats the std::vector<T>
+// template in overload resolution, so std::vector<std::uint8_t> fields use it
+// automatically.
+inline CborError encode_cbor(CborEncoder& e, const std::vector<std::uint8_t>& v) {
+    return cbor_encode_byte_string(&e, v.data(), v.size());
+}
+
+template<typename T>
+inline CborError encode_cbor(CborEncoder& e, const std::optional<T>& v) {
+    if (!v) return cbor_encode_null(&e);
+    return encode_cbor(e, *v);
+}
+
+// ── decode_cbor overloads ───────────────────────────────────────────────
+
+// After reading a leaf value, the parser must advance past it; both steps
+// short-circuit on the same CborError, so they always travel together.
+inline CborError advance_if_ok(CborValue& it, CborError err) {
+    if (err) return err;
+    return cbor_value_advance(&it);
+}
+
+inline CborError decode_cbor(CborValue& it, bool& out) {
+    if (!cbor_value_is_boolean(&it)) return CborErrorImproperValue;
+    return advance_if_ok(it, cbor_value_get_boolean(&it, &out));
+}
+inline CborError decode_cbor(CborValue& it, int64_t& out) {
+    if (!cbor_value_is_integer(&it)) return CborErrorImproperValue;
+    return advance_if_ok(it, cbor_value_get_int64_checked(&it, &out));
+}
+inline CborError decode_cbor(CborValue& it, int32_t& out) {
+    int64_t tmp = 0;
+    CborError err = decode_cbor(it, tmp);
+    if (err) return err;
+    out = static_cast<int32_t>(tmp);
+    return CborNoError;
+}
+inline CborError decode_cbor(CborValue& it, uint64_t& out) {
+    if (!cbor_value_is_unsigned_integer(&it)) return CborErrorImproperValue;
+    return advance_if_ok(it, cbor_value_get_uint64(&it, &out));
+}
+inline CborError decode_cbor(CborValue& it, double& out) {
+    if (cbor_value_is_double(&it)) {
+        return advance_if_ok(it, cbor_value_get_double(&it, &out));
+    }
+    if (cbor_value_is_float(&it)) {
+        float f = 0.0f;
+        CborError err = cbor_value_get_float(&it, &f);
+        if (err) return err;
+        out = static_cast<double>(f);
+        return cbor_value_advance(&it);
+    }
+    return CborErrorImproperValue;
+}
+inline CborError decode_cbor(CborValue& it, std::string& out) {
+    if (!cbor_value_is_text_string(&it)) return CborErrorImproperValue;
+    size_t len = 0;
+    CborError err = cbor_value_get_string_length(&it, &len);
+    if (err) return err;
+    out.resize(len);
+    return advance_if_ok(
+        it, cbor_value_copy_text_string(&it, out.empty() ? nullptr : &out[0], &len, nullptr));
+}
+
+template<typename T>
+inline CborError decode_cbor(CborValue& it, std::vector<T>& out) {
+    if (!cbor_value_is_array(&it)) return CborErrorImproperValue;
+    size_t len = 0;
+    CborError err = cbor_value_get_array_length(&it, &len);
+    if (err) return err;
+    out.clear();
+    out.resize(len);
+    CborValue inner;
+    err = cbor_value_enter_container(&it, &inner);
+    if (err) return err;
+    for (size_t i = 0; i < len; ++i) {
+        err = decode_cbor(inner, out[i]);
+        if (err) return err;
+    }
+    return cbor_value_leave_container(&it, &inner);
+}
+
+// Counterpart to the byte-string encoder above: decode a CBOR byte string
+// (major type 2) back into std::vector<std::uint8_t>.
+inline CborError decode_cbor(CborValue& it, std::vector<std::uint8_t>& out) {
+    if (!cbor_value_is_byte_string(&it)) return CborErrorImproperValue;
+    size_t len = 0;
+    CborError err = cbor_value_get_string_length(&it, &len);
+    if (err) return err;
+    out.resize(len);
+    return advance_if_ok(
+        it, cbor_value_copy_byte_string(&it, out.empty() ? nullptr : out.data(), &len, nullptr));
+}
+
+template<typename T>
+inline CborError decode_cbor(CborValue& it, std::optional<T>& out) {
+    if (cbor_value_is_null(&it)) {
+        out = std::nullopt;
+        return cbor_value_advance(&it);
+    }
+    T tmp{};
+    CborError err = decode_cbor(it, tmp);
+    if (err) return err;
+    out = std::move(tmp);
+    return CborNoError;
+}
+
+// ── Public entry points ─────────────────────────────────────────────────
+
+template<typename T>
+inline Result<std::vector<std::uint8_t>> encodeCborFFI(const T& value) {
+    // Start with a generous 4 KiB buffer; double on overflow until it fits.
+    std::vector<std::uint8_t> buf(4096);
+    while (true) {
+        CborEncoder enc;
+        cbor_encoder_init(&enc, buf.data(), buf.size(), 0);
+        CborError err = encode_cbor(enc, value);
+        if (err == CborNoError) {
+            const size_t used = cbor_encoder_get_buffer_size(&enc, buf.data());
+            buf.resize(used);
+            return Result<std::vector<std::uint8_t>>::ok(std::move(buf));
+        }
+        if (err == CborErrorOutOfMemory) {
+            const size_t extra = cbor_encoder_get_extra_bytes_needed(&enc);
+            buf.resize(buf.size() + (extra > 0 ? extra : buf.size()));
+            continue;
+        }
+        return Result<std::vector<std::uint8_t>>::err(
+            std::string("FFI CBOR encode failed: ") + cbor_error_string(err));
+    }
+}
+
+template<typename T>
+inline Result<T> decodeCborFFI(const std::vector<std::uint8_t>& bytes) {
+    CborParser parser;
+    CborValue it;
+    CborError err = cbor_parser_init(bytes.data(), bytes.size(), 0, &parser, &it);
+    if (err != CborNoError) {
+        return Result<T>::err(std::string("FFI CBOR parse init failed: ") +
+                              cbor_error_string(err));
+    }
+    T out{};
+    err = decode_cbor(it, out);
+    if (err != CborNoError) {
+        return Result<T>::err(std::string("FFI CBOR decode failed: ") +
+                              cbor_error_string(err));
+    }
+    return Result<T>::ok(std::move(out));
+}
+
+#endif // NIM_FFI_CBOR_HELPERS_HPP_INCLUDED
+
+// ============================================================
+// User-declared FFI types
+// ============================================================
+
+struct SkeletonConfig {
+    std::string greeting;
+};
+inline CborError encode_cbor(CborEncoder& e, const SkeletonConfig& v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(&e, &m, 1);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "greeting"); if (err) return err;
+    err = encode_cbor(m, v.greeting);              if (err) return err;
+    return cbor_encoder_close_container(&e, &m);
+}
+inline CborError decode_cbor(CborValue& it, SkeletonConfig& v) {
+    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(&it, "greeting", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.greeting); if (err) return err;
+    return cbor_value_advance(&it);
+}
+
+struct HelloRequest {
+    std::string name;
+};
+inline CborError encode_cbor(CborEncoder& e, const HelloRequest& v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(&e, &m, 1);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "name"); if (err) return err;
+    err = encode_cbor(m, v.name);              if (err) return err;
+    return cbor_encoder_close_container(&e, &m);
+}
+inline CborError decode_cbor(CborValue& it, HelloRequest& v) {
+    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(&it, "name", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.name); if (err) return err;
+    return cbor_value_advance(&it);
+}
+
+struct HelloResponse {
+    std::string message;
+};
+inline CborError encode_cbor(CborEncoder& e, const HelloResponse& v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(&e, &m, 1);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "message"); if (err) return err;
+    err = encode_cbor(m, v.message);              if (err) return err;
+    return cbor_encoder_close_container(&e, &m);
+}
+inline CborError decode_cbor(CborValue& it, HelloResponse& v) {
+    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(&it, "message", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.message); if (err) return err;
+    return cbor_value_advance(&it);
+}
+
+struct HelloEvent {
+    std::string name;
+};
+inline CborError encode_cbor(CborEncoder& e, const HelloEvent& v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(&e, &m, 1);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "name"); if (err) return err;
+    err = encode_cbor(m, v.name);              if (err) return err;
+    return cbor_encoder_close_container(&e, &m);
+}
+inline CborError decode_cbor(CborValue& it, HelloEvent& v) {
+    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(&it, "name", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.name); if (err) return err;
+    return cbor_value_advance(&it);
+}
+
+// ============================================================
+// Per-proc request envelopes (CBOR encoded on the wire)
+// ============================================================
+
+struct SkeletonCreateCtorReq {
+    SkeletonConfig config;
+};
+inline CborError encode_cbor(CborEncoder& e, const SkeletonCreateCtorReq& v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(&e, &m, 1);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "config"); if (err) return err;
+    err = encode_cbor(m, v.config);              if (err) return err;
+    return cbor_encoder_close_container(&e, &m);
+}
+inline CborError decode_cbor(CborValue& it, SkeletonCreateCtorReq& v) {
+    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(&it, "config", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.config); if (err) return err;
+    return cbor_value_advance(&it);
+}
+
+struct SkeletonHelloReq {
+    HelloRequest req;
+};
+inline CborError encode_cbor(CborEncoder& e, const SkeletonHelloReq& v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(&e, &m, 1);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "req"); if (err) return err;
+    err = encode_cbor(m, v.req);              if (err) return err;
+    return cbor_encoder_close_container(&e, &m);
+}
+inline CborError decode_cbor(CborValue& it, SkeletonHelloReq& v) {
+    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(&it, "req", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.req); if (err) return err;
+    return cbor_value_advance(&it);
+}
+
+// ============================================================
+// C FFI declarations
+// ============================================================
+
+extern "C" {
+typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_data);
+
+void* skeleton_create(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback callback, void* user_data);
+int skeleton_hello(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int skeleton_destroy(void* ctx);
+uint64_t skeleton_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
+int skeleton_remove_event_listener(void* ctx, uint64_t listener_id);
+} // extern "C"
+
+// ============================================================
+// Synchronous call helper
+// ============================================================
+// Guarded so two nim-ffi headers can share a translation unit.
+#ifndef NIM_FFI_SYNC_CALL_HELPER_HPP_INCLUDED
+#define NIM_FFI_SYNC_CALL_HELPER_HPP_INCLUDED
+
+namespace {
+
+struct FFICallState_ {
+    std::mutex              mtx;
+    std::condition_variable cv;
+    bool                    done{false};
+    bool                    ok{false};
+    std::vector<std::uint8_t> bytes;
+    std::string             err;
+};
+
+inline void ffi_cb_(int ret, const char* msg, size_t len, void* ud) {
+    // ffi_call_ heap-allocated a shared_ptr and passed its address as ud;
+    // take ownership here so it's freed on every exit path.
+    std::unique_ptr<std::shared_ptr<FFICallState_>> handle(
+        static_cast<std::shared_ptr<FFICallState_>*>(ud));
+    FFICallState_& s = **handle;
+
+    std::lock_guard<std::mutex> lock(s.mtx);
+    s.ok = (ret == 0);
+    if (msg && len > 0) {
+        const auto* p = reinterpret_cast<const std::uint8_t*>(msg);
+        if (s.ok) s.bytes.assign(p, p + len);
+        else      s.err.assign(msg, len);
+    }
+    s.done = true;
+    s.cv.notify_one();
+}
+
+inline Result<std::vector<std::uint8_t>> ffi_call_(
+        std::function<int(FFICallback, void*)> f,
+        std::chrono::milliseconds timeout) {
+    using Bytes = std::vector<std::uint8_t>;
+    auto state = std::make_shared<FFICallState_>();
+    auto* cb_ref = new std::shared_ptr<FFICallState_>(state);
+    const int ret = f(ffi_cb_, cb_ref);
+    if (ret == 2) {
+        delete cb_ref;
+        return Result<Bytes>::err("RET_MISSING_CALLBACK (internal error)");
+    }
+    std::unique_lock<std::mutex> lock(state->mtx);
+    const bool fired = state->cv.wait_for(lock, timeout, [&]{ return state->done; });
+    if (!fired)
+        return Result<Bytes>::err("FFI call timed out after " +
+                                  std::to_string(timeout.count()) + "ms");
+    if (!state->ok)
+        return Result<Bytes>::err(state->err);
+    return Result<Bytes>::ok(std::move(state->bytes));
+}
+
+} // anonymous namespace
+
+#endif // NIM_FFI_SYNC_CALL_HELPER_HPP_INCLUDED
+
+// ============================================================
+// High-level C++ context class
+// ============================================================
+
+class SkeletonCtx {
+public:
+    static Result<std::unique_ptr<SkeletonCtx>> create(const SkeletonConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
+        const auto ffi_req_ = SkeletonCreateCtorReq{config};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) return Result<std::unique_ptr<SkeletonCtx>>::err(ffi_enc_.error());
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
+            (void)skeleton_create(ffi_req_bytes_.data(), ffi_req_bytes_.size(), cb, ud);
+            return 0;
+        }, timeout);
+        if (ffi_raw_.isErr()) return Result<std::unique_ptr<SkeletonCtx>>::err(ffi_raw_.error());
+        auto ffi_addr_ = decodeCborFFI<std::string>(ffi_raw_.value());
+        if (ffi_addr_.isErr()) return Result<std::unique_ptr<SkeletonCtx>>::err(ffi_addr_.error());
+        const auto& addr_str = ffi_addr_.value();
+        std::uint64_t addr = 0;
+        const char* addr_begin = addr_str.data();
+        const char* addr_end = addr_begin + addr_str.size();
+        const auto fc_ = std::from_chars(addr_begin, addr_end, addr);
+        if (fc_.ec != std::errc() || fc_.ptr != addr_end) {
+            return Result<std::unique_ptr<SkeletonCtx>>::err("FFI create returned non-numeric address: " + addr_str);
+        }
+        return Result<std::unique_ptr<SkeletonCtx>>::ok(std::unique_ptr<SkeletonCtx>(new SkeletonCtx(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout)));
+    }
+
+    static std::future<Result<std::unique_ptr<SkeletonCtx>>> createAsync(const SkeletonConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
+        return std::async(std::launch::async, [config, timeout]() { return create(config, timeout); });
+    }
+
+    // Special-member policy: this class owns a skeleton context, which in
+    // turn owns the library's worker thread(s) and internal state. Moving
+    // such an object out from under a caller silently tears that state
+    // down and is easy to misuse (e.g. storing in a container that
+    // relocates its elements). It also has no clean analogue in the other
+    // binding languages we generate. So copies and moves are both
+    // deleted; ownership is transferred via SkeletonCtx::create returning a
+    // std::unique_ptr<SkeletonCtx>. The destructor still releases the
+    // context.
+    ~SkeletonCtx() {
+        if (ptr_) {
+            skeleton_destroy(ptr_);
+            ptr_ = nullptr;
+        }
+    }
+
+    SkeletonCtx(const SkeletonCtx&) = delete;
+    SkeletonCtx& operator=(const SkeletonCtx&) = delete;
+    SkeletonCtx(SkeletonCtx&&) = delete;
+    SkeletonCtx& operator=(SkeletonCtx&&) = delete;
+
+    // ── Event listener API ──────────────────────────────────
+    struct ListenerHandle { std::uint64_t id = 0; };
+
+    ListenerHandle addOnHelloListener(std::function<void(const HelloEvent&)> handler) {
+        auto owned = std::make_unique<TypedListener<HelloEvent>>(std::move(handler));
+        auto* raw = owned.get();
+        const auto id = skeleton_add_event_listener(
+            ptr_, "on_hello", &SkeletonCtx::typedTrampoline<HelloEvent>, raw);
+        if (id == 0) return ListenerHandle{0};
+        listeners_.emplace(id, std::move(owned));
+        return ListenerHandle{id};
+    }
+
+    bool removeEventListener(ListenerHandle handle) {
+        if (handle.id == 0) return false;
+        const auto rc = skeleton_remove_event_listener(ptr_, handle.id);
+        listeners_.erase(handle.id);
+        return rc == 0;
+    }
+
+    Result<HelloResponse> hello(const HelloRequest& req) const {
+        const auto ffi_req_ = SkeletonHelloReq{req};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) return Result<HelloResponse>::err(ffi_enc_.error());
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
+            return skeleton_hello(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        }, timeout_);
+        if (ffi_raw_.isErr()) return Result<HelloResponse>::err(ffi_raw_.error());
+        return decodeCborFFI<HelloResponse>(ffi_raw_.value());
+    }
+
+    std::future<Result<HelloResponse>> helloAsync(const HelloRequest& req) const {
+        return std::async(std::launch::async, [this, req]() { return this->hello(req); });
+    }
+
+private:
+    struct ListenerBase {
+        virtual ~ListenerBase() = default;
+    };
+
+    template <class T>
+    struct TypedListener : ListenerBase {
+        std::function<void(const T&)> fn;
+        explicit TypedListener(std::function<void(const T&)> f) : fn(std::move(f)) {}
+    };
+
+    template <class T>
+    static void typedTrampoline(int ret, const char* msg, std::size_t len, void* ud) {
+        if (!ud || ret != 0 || !msg || len == 0) return;
+        auto* listener = static_cast<TypedListener<T>*>(ud);
+        if (!listener->fn) return;
+        CborParser parser; CborValue it;
+        if (cbor_parser_init(reinterpret_cast<const std::uint8_t*>(msg), len, 0, &parser, &it) != CborNoError) return;
+        if (!cbor_value_is_map(&it)) return;
+        CborValue payloadField;
+        if (cbor_value_map_find_value(&it, "payload", &payloadField) != CborNoError) return;
+        T payload{};
+        if (decode_cbor(payloadField, payload) != CborNoError) return;
+        listener->fn(payload);
+    }
+
+    void* ptr_;
+    std::chrono::milliseconds timeout_;
+    std::unordered_map<std::uint64_t, std::unique_ptr<ListenerBase>> listeners_;
+    explicit SkeletonCtx(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}
+};

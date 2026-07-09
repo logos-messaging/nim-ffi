@@ -20,6 +20,12 @@ All notable changes to this project are documented in this file.
   where `-install_name` requires `-dynamiclib`.
 
 ### Added
+- `examples/skeleton/` — a minimal, compilable new-library template (constructor,
+  one async method, a `{.ffiEvent.}`, a destructor, and `genBindings()`) with a
+  copy-rename checklist README, so starting a library no longer means
+  reverse-engineering the feature-tour `examples/timer/`. Its C++ bindings are
+  checked in and diff-verified by CI via new `genbindings_cpp_skeleton` /
+  `check_bindings_skeleton` tasks wired into `nimble check_bindings`.
 - `{.ffiEvent.}` no longer requires an explicit wire-name string: when omitted
   it is derived from the proc name via `camelToSnakeCase`
   (`onPeerConnected` → `on_peer_connected`), matching how `{.ffi.}` derives its
