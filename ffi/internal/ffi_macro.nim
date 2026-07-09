@@ -1585,6 +1585,10 @@ macro ffiDtor*(args: varargs[untyped]): untyped =
   ## The wire format follows the library default and can be overridden with
   ## `{.ffiDtor: "abi = c".}` / `{.ffiDtor: "abi = cbor".}`.
   ##
+  ## Example (sync):
+  ##   proc echo_destroy*(e: Echo) {.ffiDtor.} =
+  ##     e.close()
+  ##
   ## Example (async):
   ##   proc waku_destroy*(w: Waku): Future[void] {.ffiDtor.} =
   ##     await w.stop()

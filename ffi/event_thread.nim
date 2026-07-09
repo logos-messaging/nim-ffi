@@ -116,20 +116,24 @@ proc eventRun[T](ctx: ptr FFIContext[T]) {.async.} =
   var hb = HeartbeatMonitor.init(ctx)
   var notifiedStuck = false # latched forever — eventQueueStuck is sticky terminal.
 
-  while ctx.running.load():
+  # Keep draining after `running` flips false until the FFI thread has exited, so
+  # events emitted by an async {.ffiDtor.} teardown are still dispatched.
+  while ctx.running.load() or not ctx.ffiThreadExited.load():
     # Wake on enqueue or tick — whichever first.
     discard await ctx.eventQueueSignal.wait().withTimeout(EventThreadTickInterval)
 
     ctx.drainEventQueue()
 
-    # Fire after drain so reg.lock is free — FFI-thread would deadlock here.
-    if not notifiedStuck and ctx.eventQueueStuck.load():
-      onNotResponding(ctx)
-      notifiedStuck = true
+    # Liveness only applies while running; skip it during the teardown drain.
+    if ctx.running.load():
+      # Fire after drain so reg.lock is free — FFI-thread would deadlock here.
+      if not notifiedStuck and ctx.eventQueueStuck.load():
+        onNotResponding(ctx)
+        notifiedStuck = true
+      hb.check(ctx)
 
-    if not ctx.running.load():
-      break
-    hb.check(ctx)
+  # Catch anything enqueued between the last drain and the FFI thread's exit.
+  ctx.drainEventQueue()
 
 proc eventThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ## Drains the event queue and runs the FFI-thread heartbeat check.

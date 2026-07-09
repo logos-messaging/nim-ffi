@@ -37,6 +37,9 @@ type FFIContext*[T] = object
   ffiHeartbeat*: Atomic[int64]
     # advanced each FFI-thread loop; event thread reads for liveness
   eventQueueStuck*: Atomic[bool] # sticky overflow flag
+  ffiThreadExited*: Atomic[bool]
+    # set once the FFI thread (including any async {.ffiDtor.} teardown) is done;
+    # keeps the event thread draining until then so teardown-emitted events land
   running: Atomic[bool] # To control when the threads are running
   registeredRequests: ptr Table[cstring, FFIRequestProc]
   requestTimeouts: ptr Table[cstring, int]
@@ -126,6 +129,7 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   initEventQueue(ctx[].eventQueue)
   ctx.ffiHeartbeat.store(0)
   ctx.eventQueueStuck.store(false)
+  ctx.ffiThreadExited.store(false)
   ctx.defaultRequestTimeout = DefaultRequestTimeout
 
   var success = false
@@ -199,7 +203,7 @@ proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
 ## connections) on the FFI thread before it exits — a graceful shutdown can
 ## outlast the default, and being cut short leaks the context instead of waiting.
 ## Override at compile time with `-d:ffiThreadExitTimeoutMs=<ms>`.
-const ThreadExitTimeoutMs* {.intdefine.} = 1500
+const ThreadExitTimeoutMs* {.intdefine: "ffiThreadExitTimeoutMs".} = 1500
 const ThreadExitTimeout* = ThreadExitTimeoutMs.milliseconds
 
 proc stopAndJoinThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
