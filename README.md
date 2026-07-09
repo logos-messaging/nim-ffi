@@ -171,13 +171,17 @@ header shape from the library's ABI format. It carries two honest limits today:
 An `abi = c` proc whose whole signature is scalar — fixed-width integer, float,
 or bool params (a `string` return is fine, a `string` param is not) and no
 structs, handles, or pointers — dispatches through a CBOR-free scalar fast path.
-Foreign-binding codegen for that shape isn't implemented yet, so
-under `-d:ffiGenBindings` such a proc would be omitted from the generated
-bindings — and `genBindings()` fails with an error naming the affected procs.
-Resolve it by switching the proc to `abi = cbor`, adding a non-scalar param so it
-takes the CBOR wire shape, or passing `-d:ffiAllowScalarSkip` to accept the
-omission (the proc still works over the scalar fast path; it's just absent from
-the generated foreign bindings).
+The `-d:targetLang=c_abi` generator emits real bindings for that shape: the
+wrapper passes the scalar args inline (no request struct) and adapts the
+raw-bytes reply into the same typed callback surface the flat-struct methods
+use. The CBOR-speaking targets (`c`, `cpp`, `rust`, `cddl`) have no scalar
+codegen, so under `-d:ffiGenBindings` they would omit such a proc from the
+generated bindings — and `genBindings()` fails with an error naming the
+affected procs. Resolve it by generating with `-d:targetLang=c_abi`, switching
+the proc to `abi = cbor`, adding a non-scalar param so it takes the CBOR wire
+shape, or passing `-d:ffiAllowScalarSkip` to accept the omission (the proc
+still works over the scalar fast path; it's just absent from the generated
+foreign bindings).
 
 ## Placement of `genBindings()`
 

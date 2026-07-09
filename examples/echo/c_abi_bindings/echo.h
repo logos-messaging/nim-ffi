@@ -34,14 +34,20 @@ typedef struct {
 } EchoShoutReq;
 
 typedef void (*EchoShoutReplyFn)(int err_code, const ShoutResponse* reply, const char* err_msg, void* user_data);
+typedef void (*EchoVersionReplyFn)(int err_code, const char* reply, const char* err_msg, void* user_data);
 
 typedef void (*EchoCreateRawFn)(int err_code, const char* ctx_addr, const char* err_msg, void* user_data);
+/* Raw reply of a scalar-fast-path export: `msg`/`len` are raw bytes (a
+   string return's UTF-8, or the 8-byte native-endian scalar image), not
+   NUL-terminated and valid only for the duration of the call. */
+typedef void (*EchoScalarRawFn)(int caller_ret, char* msg, size_t len, void* user_data);
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 void* echo_create(const EchoCreateCtorReq* req, EchoCreateRawFn on_created, void* user_data);
 int echo_shout(void* ctx, EchoShoutReplyFn on_reply, void* user_data, const EchoShoutReq* req);
+int echo_version(void* ctx, EchoScalarRawFn callback, void* user_data);
 int echo_destroy(void* ctx);
 
 #ifdef __cplusplus
@@ -110,6 +116,46 @@ static inline int echo_ctx_shout(const EchoCtx* ctx, const ShoutRequest* req, Ec
     memset(&ffi_req, 0, sizeof(ffi_req));
     ffi_req.req = *req;
     return echo_shout(ctx->ptr, on_reply, user_data, &ffi_req);
+}
+
+typedef struct { EchoVersionReplyFn fn; void* user_data; } EchoVersionScalarBox;
+static void echo_version_scalar_reply(int caller_ret, char* msg, size_t len, void* ud) {
+    EchoVersionScalarBox* box = (EchoVersionScalarBox*)ud;
+    if (!box) return;
+    EchoVersionReplyFn fn = box->fn;
+    void* user_data = box->user_data;
+    free(box);
+    if (!fn) return;
+    if (caller_ret != NIMFFI_RET_OK) {
+        char* em = (char*)malloc(len + 1);
+        if (em) {
+            if (len > 0) memcpy(em, msg, len);
+            em[len] = '\0';
+        }
+        fn(caller_ret, "", em ? em : "FFI call failed", user_data);
+        free(em);
+        return;
+    }
+    char* reply = (char*)malloc(len + 1);
+    if (!reply) {
+        fn(NIMFFI_RET_ERR, "", "out of memory", user_data);
+        return;
+    }
+    if (len > 0) memcpy(reply, msg, len);
+    reply[len] = '\0';
+    fn(NIMFFI_RET_OK, reply, "", user_data);
+    free(reply);
+}
+
+static inline int echo_ctx_version(const EchoCtx* ctx, EchoVersionReplyFn on_reply, void* user_data) {
+    EchoVersionScalarBox* box = (EchoVersionScalarBox*)malloc(sizeof(EchoVersionScalarBox));
+    if (!box) {
+        if (on_reply) on_reply(-1, "", "out of memory", user_data);
+        return -1;
+    }
+    box->fn = on_reply;
+    box->user_data = user_data;
+    return echo_version(ctx->ptr, echo_version_scalar_reply, box);
 }
 
 #endif /* NIM_FFI_LIB_ECHO_C_ABI_H_INCLUDED */

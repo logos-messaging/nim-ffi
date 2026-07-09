@@ -32,8 +32,11 @@ type
     returnIsHandle*: bool
     abiFormat*: ABIFormat
     scalarFastPath*: bool
-      ## `abi = c` proc with an all-scalar signature: uses the CBOR-free fast
-      ## path and is skipped by the foreign-binding generators.
+      ## True for an `abi = c` proc whose whole signature is scalar (see
+      ## `isScalarOnly`): dispatches through the CBOR-free scalar fast path.
+      ## Only the `c_abi` generator emits foreign bindings for it (inline
+      ## scalar args + raw-bytes reply trampoline); the CBOR-speaking
+      ## generators drop it (see `bindableProcs`).
 
   FFIFieldMeta* = object
     name*: string

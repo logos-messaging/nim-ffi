@@ -1,6 +1,8 @@
-## Compile fixture for the scalar-fast-path drop error (see
-## tests/unit/test_scalar_skip_gen.nim): the scalar `abi = c` proc has no
-## foreign-binding codegen, so genBindings() fails unless -d:ffiAllowScalarSkip.
+## Compile fixture for the scalar-fast-path genBindings() behavior (see
+## tests/unit/test_scalar_skip_gen.nim). Under `-d:ffiGenBindings` only the
+## `c_abi` target has foreign-binding codegen for the scalar `abi = c` proc
+## below; any other target must fail — unless `-d:ffiAllowScalarSkip` is
+## passed, which downgrades the drop to a hint.
 
 import ffi, chronos
 
@@ -18,7 +20,8 @@ proc scalarskip_create*(cfg: SkipConfig): Future[Result[SkipLib, string]] {.ffiC
 proc scalarskip_add*(
     lib: SkipLib, a: int, b: int
 ): Future[Result[int, string]] {.ffi: "abi = c".} =
-  ## All-scalar signature: CBOR-free fast path, no foreign-binding codegen yet.
+  ## All-scalar signature: dispatches through the CBOR-free fast path; only the
+  ## `c_abi` target generates a foreign binding for it.
   return ok(lib.base + a + b)
 
 genBindings()

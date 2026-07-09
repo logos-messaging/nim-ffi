@@ -1519,8 +1519,9 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
   return generated
 
 proc reportScalarFastPathDrops(procs: seq[FFIProcMeta]) {.compileTime.} =
-  ## Scalar-fast-path procs have no foreign-binding codegen yet; fail loudly
-  ## naming them unless `-d:ffiAllowScalarSkip` downgrades it to a hint.
+  ## Only the `c_abi` generator emits foreign bindings for scalar-fast-path
+  ## procs; every other target drops them. Fail loudly, naming them, unless
+  ## `-d:ffiAllowScalarSkip` opts into the silent omission (then just hint).
   var skipped: seq[string] = @[]
   for p in procs:
     if p.scalarFastPath:
@@ -1535,9 +1536,11 @@ proc reportScalarFastPathDrops(procs: seq[FFIProcMeta]) {.compileTime.} =
       )
     return
   error(
-    "genBindings: no foreign-binding codegen for scalar-fast-path `abi = c` " &
-      "procs yet, so these would be silently omitted from the generated " & "bindings: " &
+    "genBindings: this target has no foreign-binding codegen for " &
+      "scalar-fast-path `abi = c` procs (only -d:targetLang=c_abi emits them), " &
+      "so these would be silently omitted from the generated bindings: " &
       skipped.join(", ") & ".\n" & "Fix by one of:\n" &
+      "  - generate with -d:targetLang=c_abi, or\n" &
       "  - switch the proc to `abi = cbor`, or\n" &
       "  - add a non-scalar param (e.g. a struct or handle) so it takes the " &
       "CBOR wire shape, or\n" & "  - pass -d:ffiAllowScalarSkip to accept the omission."
@@ -1595,12 +1598,19 @@ macro genBindings*(
 
   when defined(ffiGenBindings):
     let libName = deriveLibName(ffiProcRegistry)
-    let genProcs = bindableProcs(ffiProcRegistry)
-    reportScalarFastPathDrops(ffiProcRegistry)
     for rawLang in targetLang.split(','):
       let lang = string_helpers.toLower(rawLang.strip())
       if lang.len == 0:
         continue
+      # `c_abi` is the one target with scalar-fast-path codegen, so it binds the
+      # full registry; the others drop scalar procs (loudly, unless skipped).
+      let genProcs =
+        if lang == "c_abi":
+          ffiProcRegistry
+        else:
+          bindableProcs(ffiProcRegistry)
+      if lang != "c_abi":
+        reportScalarFastPathDrops(ffiProcRegistry)
       let outDir = bindingsOutputDir(lang, outputDir)
       emitBindingsFor(
         lang, genProcs, libName, outDir, bindingsSrcPath(outDir, nimSrcRelPath)
