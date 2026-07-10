@@ -1,9 +1,58 @@
-import std/[macros, atomics, sysatomics], strformat, chronicles, chronos
+import
+  std/[macros, atomics, sysatomics, compilesettings], strformat, chronicles, chronos
+import strutils
 import ../codegen/meta
+
+func nimMainPrefixOnCmdLine(cmdLine: string): tuple[found: bool, value: string] =
+  ## Scan the compiler command line for `--nimMainPrefix:X` (last one wins) and
+  ## return its value. Switch names in Nim are style-insensitive, so the name
+  ## is matched lowercased and with underscores stripped; the separator may be
+  ## `:` or `=`. Returns `(false, "")` when the flag is absent — note config.nims
+  ## switches may not surface here, so absence is not proof it was never set.
+  var found = false
+  var value = ""
+  for tok in cmdLine.splitWhitespace():
+    let body = tok.strip(trailing = false, chars = {'-'})
+    let sep = body.find({':', '='})
+    if sep < 0:
+      continue
+    if body[0 ..< sep].toLowerAscii().replace("_", "") == "nimmainprefix":
+      found = true
+      value = body[sep + 1 .. ^1]
+  (found, value)
+
+proc validateNimMainPrefix(libraryName: string) {.compileTime.} =
+  ## The Nim runtime init symbol is importc'd as `lib{libraryName}NimMain`, so
+  ## the build must pass `--nimMainPrefix:lib{libraryName}`; a mismatch otherwise
+  ## surfaces only at link time as an obscure undefined-symbol error. Absence
+  ## can't be an error — config.nims may set the prefix without it showing on
+  ## `commandLine` — so it only warrants a hint, and only for the `--app:lib`
+  ## build where the prefix actually matters.
+  let expectedPrefix = "lib" & libraryName
+  let (prefixFound, prefixValue) =
+    nimMainPrefixOnCmdLine(querySetting(SingleValueSetting.commandLine))
+  if prefixFound and prefixValue != expectedPrefix:
+    error(
+      "declareLibrary(\"" & libraryName &
+        "\"): the Nim runtime init symbol is importc'd as " & expectedPrefix &
+        "NimMain, so the build needs --nimMainPrefix:" & expectedPrefix &
+        ", but the command line passes --nimMainPrefix:" & prefixValue &
+        ". Change the flag to --nimMainPrefix:" & expectedPrefix &
+        " (it must be \"lib\" followed by the declareLibrary name)."
+    )
+  elif not prefixFound and compileOption("app", "lib"):
+    hint(
+      "declareLibrary(\"" & libraryName & "\"): pass --nimMainPrefix:" & expectedPrefix &
+        " so the Nim runtime init symbol " & expectedPrefix &
+        "NimMain resolves; without it the build may fail with an undefined-symbol" &
+        " link error (ignore this hint if the prefix is set in config.nims)."
+    )
 
 macro declareLibraryBase*(libraryName: static[string]): untyped =
   # Record the library name for binding generation
   currentLibName = libraryName
+
+  validateNimMainPrefix(libraryName)
 
   var res = newStmtList()
 

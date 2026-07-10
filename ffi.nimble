@@ -226,7 +226,7 @@ task genbindings_rust, "Generate Rust bindings for the timer example":
     " -o:/dev/null examples/timer/timer.nim"
 
 task genbindings_cddl, "Generate CDDL schema for the timer example":
-  exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libtimer" &
+  exec "nim c " & nimFlagsOrc & " --app:lib --noMain --nimMainPrefix:libmy_timer" &
     " -d:ffiGenBindings -d:targetLang=cddl" &
     " -d:ffiOutputDir=examples/timer/cddl_bindings" & " -d:ffiSrcPath=../timer.nim" &
     " -o:/dev/null examples/timer/timer.nim"
