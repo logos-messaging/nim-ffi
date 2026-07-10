@@ -251,9 +251,28 @@ proc fireCallback*(res: Result[seq[byte], string], request: ptr FFIThreadRequest
         RET_OK, cast[ptr cchar](addr sentinel), 1.csize_t, request[].userData
       )
 
+proc fireStaleWarn*(request: ptr FFIThreadRequest, elapsedMs: int64) =
+  ## Non-terminal progress signal telling the caller its request is still in
+  ## flight after `elapsedMs`. Unlike `fireCallback` it deliberately does NOT set
+  ## `responded` and may fire many times — the one terminal RET_OK/RET_ERR is
+  ## still owed. Skipped once a terminal response has gone out. Runs on the FFI
+  ## thread, so the plain `responded` read needs no synchronization. The payload
+  ## is the elapsed milliseconds as a decimal UTF-8 string.
+  if request[].responded:
+    return
+  foreignThreadGc:
+    let msg = $elapsedMs
+    request[].callback(
+      RET_STALE_WARN,
+      cast[ptr cchar](unsafeAddr msg[0]),
+      cast[csize_t](msg.len),
+      request[].userData,
+    )
+
 proc handleRes*(res: Result[seq[byte], string], request: ptr FFIThreadRequest) =
-  ## Terminal step of every request: delivers the response (unless a timeout
-  ## already did) and frees the request exactly once.
+  ## Terminal step of every request: delivers the response and frees the request
+  ## exactly once. Any RET_STALE_WARN progress signals have already gone out; the
+  ## `responded` guard in `fireStaleWarn` keeps this terminal answer the last one.
   defer:
     deleteRequest(request)
   fireCallback(res, request)

@@ -222,6 +222,8 @@ typedef void (*EchoCreateFn)(int err_code, EchoCtx* ctx, const char* err_msg, vo
 typedef struct { EchoCreateFn fn; void* user_data; } EchoCreateBox;
 static void echo_create_trampoline(int ret, const char* msg, size_t len, void* ud) {
     EchoCreateBox* box = (EchoCreateBox*)ud;
+    /* Non-terminal progress ping: keep the box for the terminal reply. */
+    if (ret == NIMFFI_RET_STALE_WARN) return;
     if (!box->fn) {
         free(box);
         return;
@@ -297,6 +299,8 @@ typedef void (*EchoShoutReplyFn)(int err_code, const ShoutResponse* reply, const
 typedef struct { EchoShoutReplyFn fn; void* user_data; } EchoShoutCallBox;
 static void echo_shout_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
     EchoShoutCallBox* box = (EchoShoutCallBox*)ud;
+    /* Non-terminal progress ping: keep the box for the terminal reply. */
+    if (ret == NIMFFI_RET_STALE_WARN) return;
     if (!box->fn) {
         free(box);
         return;
@@ -357,6 +361,8 @@ typedef void (*EchoVersionReplyFn)(int err_code, const NimFfiStr* reply, const c
 typedef struct { EchoVersionReplyFn fn; void* user_data; } EchoVersionCallBox;
 static void echo_version_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
     EchoVersionCallBox* box = (EchoVersionCallBox*)ud;
+    /* Non-terminal progress ping: keep the box for the terminal reply. */
+    if (ret == NIMFFI_RET_STALE_WARN) return;
     if (!box->fn) {
         free(box);
         return;

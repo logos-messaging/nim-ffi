@@ -41,6 +41,11 @@ unsafe extern "C" fn on_result(
     len: usize,
     user_data: *mut c_void,
 ) {
+    // NIMFFI_RET_STALE_WARN (3) is a non-terminal progress ping: the request
+    // is still running. This wrapper only delivers the final result, so ignore
+    // it WITHOUT reclaiming the box — a terminal callback still owns the Sender.
+    if ret == 3 { return; }
+
     // Take ownership of the boxed Sender — dropping it at end of scope
     // releases the only outstanding handle.
     let tx = Box::from_raw(user_data as *mut FFISender);

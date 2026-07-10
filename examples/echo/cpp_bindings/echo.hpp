@@ -448,6 +448,12 @@ struct FFICallState_ {
 };
 
 inline void ffi_cb_(int ret, const char* msg, size_t len, void* ud) {
+    // NIMFFI_RET_STALE_WARN (3) is a non-terminal progress ping: the request is
+    // still running. This blocking wrapper only reports the final result, so
+    // ignore it WITHOUT touching `ud` — a terminal callback still owns the
+    // shared handle and will free it.
+    if (ret == 3) return;
+
     // ffi_call_ heap-allocated a shared_ptr and passed its address as ud;
     // take ownership here so it's freed on every exit path.
     std::unique_ptr<std::shared_ptr<FFICallState_>> handle(

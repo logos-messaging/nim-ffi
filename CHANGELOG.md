@@ -42,16 +42,17 @@ All notable changes to this project are documented in this file.
   `nimble genbindings_c` / `genbindings_c_echo` / `check_bindings_c` /
   `test_c_e2e` tasks, a `tests/e2e/c` ctest harness, and a
   `tests/unit/test_c_codegen.nim` unit suite.
-- Configurable per-request handler timeout with a finite default: each
-  `FFIContext` now carries a `defaultRequestTimeout` (5s) applied to every
-  handler, replacing the previous unbounded wait so a wedged handler can no
-  longer hang a foreign caller forever. On trip the caller is unblocked with an
-  `ffi request timed out after <n>ms` err; the handler is left running (not
-  cancelled, since a hard-cancel mid-call into the underlying library can leave
-  it partial), and the callback still fires exactly once. Override per proc with
-  a `"timeout = <ms>"` spec (e.g. `{.ffi: "timeout = 30000".}`), parsed like the
-  `abi = ...` spec; runtime-only, codegen ignores it
-  ([#93](https://github.com/logos-messaging/nim-ffi/issues/93)).
+- Non-terminal `RET_STALE_WARN` (3) progress callback in place of a handler
+  timeout: nim-ffi never times a handler out (a hard-cancel mid-call into the
+  underlying library can leave it half-applied). Instead, while a request is
+  still in flight its result callback receives a `RET_STALE_WARN` every 5s
+  (Android's ANR interval; override with `-d:ffiStaleWarnIntervalMs=<ms>`), with
+  the payload carrying the elapsed milliseconds as a decimal string. The request
+  always ends with exactly one terminal `RET_OK` / `RET_ERR`; the dev decides
+  what to do with a slow one. Replaces the never-released per-proc
+  `{.ffi: "timeout = <ms>".}` override and the `defaultRequestTimeout` context
+  field ([#126](https://github.com/logos-messaging/nim-ffi/issues/126),
+  supersedes [#93](https://github.com/logos-messaging/nim-ffi/issues/93)).
 - Per-interaction ABI-format annotations: `declareLibrary` now takes an
   optional `defaultABIFormat` (`"cbor"` default, or `"c"`) that every
   `{.ffi.}` / `{.ffiCtor.}` / `{.ffiDtor.}` / `{.ffiRaw.}` / `{.ffiEvent.}`

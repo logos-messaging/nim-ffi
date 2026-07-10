@@ -80,34 +80,8 @@ proc abiCodegenImplemented*(fmt: ABIFormat): bool =
 
 proc overrideKey*(override: string): string =
   ## Lowercased key of a `key = value` pragma override (the text before `=`),
-  ## used to route it to its parser. `"timeout = 30000"` → `"timeout"`.
+  ## used to route it to its parser. `"abi = c"` → `"abi"`.
   override.split('=')[0].strip().toLowerAscii()
-
-proc parseTimeoutSpec*(override: string): tuple[ok: bool, ms: int, err: string] =
-  ## Parse a `"timeout = <milliseconds>"` override (whitespace/case tolerant).
-  ## The value must be a positive integer number of milliseconds. On bad
-  ## grammar or value, returns `ok = false` with a human-readable `err`.
-  let parts = override.split('=')
-  if parts.len != 2 or overrideKey(override) != "timeout":
-    return (
-      false,
-      0,
-      "invalid timeout override: '" & override & "'; expected `timeout = <ms>`",
-    )
-  let raw = parts[1].strip()
-  let ms =
-    try:
-      parseInt(raw)
-    except ValueError:
-      return (
-        false,
-        0,
-        "invalid timeout value: '" & raw &
-          "'; expected a positive integer of milliseconds",
-      )
-  if ms <= 0:
-    return (false, 0, "timeout must be a positive number of milliseconds, got: " & raw)
-  (true, ms, "")
 
 proc parseABIFormatName*(name: string): tuple[ok: bool, fmt: ABIFormat] =
   ## Bare format name (`"c"`/`"cbor"`, case-insensitive) → `ABIFormat`;

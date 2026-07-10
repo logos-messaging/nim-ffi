@@ -271,6 +271,8 @@ proc emitCtxAndCtor(
   )
   lines.add("    " & createBox & "* box = (" & createBox & "*)ud;")
   lines.add("    if (!box) return;")
+  lines.add("    /* Non-terminal progress ping: keep the box for the terminal reply. */")
+  lines.add("    if (ret == NIMFFI_RET_STALE_WARN) return;")
   lines.add("    if (!box->fn) { free(box); return; }")
   lines.add("    if (ret != 0) {")
   lines.add(
@@ -402,6 +404,14 @@ proc generateCAbiLibHeader*(
   lines.add("#define NIMFFI_RET_OK 0")
   lines.add("#define NIMFFI_RET_ERR 1")
   lines.add("#define NIMFFI_RET_MISSING_CALLBACK 2")
+  lines.add(
+    "/* Non-terminal: the request is still running. Fires every ~5s with `msg`"
+  )
+  lines.add(
+    "   carrying the elapsed milliseconds as decimal text; always followed by a"
+  )
+  lines.add("   terminal RET_OK/RET_ERR. Ignore it unless you want progress. */")
+  lines.add("#define NIMFFI_RET_STALE_WARN 3")
   lines.add("")
   lines.add("/* Flat wire structs — the C ABI. Strings are borrowed, NUL-terminated")
   lines.add("   `const char*` valid only for the duration of the call they cross. */")

@@ -433,6 +433,8 @@ proc emitReplyTrampolineHead(lines: var seq[string], tramp, boxType, fallback: s
     "static void " & tramp & "(int ret, const char* msg, size_t len, void* ud) {"
   )
   lines.add("    " & boxType & "* box = (" & boxType & "*)ud;")
+  lines.add("    /* Non-terminal progress ping: keep the box for the terminal reply. */")
+  lines.add("    if (ret == NIMFFI_RET_STALE_WARN) return;")
   lines.add("    if (!box->fn) {")
   lines.add("        free(box);")
   lines.add("        return;")

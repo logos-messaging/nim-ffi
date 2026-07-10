@@ -42,12 +42,10 @@ type FFIContext*[T] = object
     # keeps the event thread draining until then so teardown-emitted events land
   running: Atomic[bool] # To control when the threads are running
   registeredRequests: ptr Table[cstring, FFIRequestProc]
-  requestTimeouts: ptr Table[cstring, int]
-    # Per-proc timeout overrides (ms). Points at the compile-time-filled global,
-    # like registeredRequests, so the FFI thread reads it GC-safely via ctx.
-  defaultRequestTimeout*: Duration
-    # Per-handler deadline unless a `{.ffi: "timeout = <ms>".}` override raises
-    # it; `InfiniteDuration` opts out. See processRequest for the trip behavior.
+  staleWarnInterval*: Duration
+    # Cadence of the non-terminal RET_STALE_WARN progress callback; defaults to
+    # `StaleWarnInterval`. An internal runtime seam (tests tune it) — it is NOT
+    # exposed to the ffi dev, there is no per-proc override.
 
 var onFFIThread* {.threadvar.}: bool
   # Re-entrant dispatch guard for `sendRequestToFFIThread`.
@@ -58,8 +56,13 @@ const
   EventThreadTickInterval* = 1.seconds
   FFIHeartbeatStartDelay* = 10.seconds # grace window for library startup
   FFIHeartbeatStaleThreshold* = 1.seconds
-  DefaultRequestTimeout* = 5.seconds
-    # Finite fallback (issue #93) so a wedged handler can't hang a caller forever.
+
+const StaleWarnIntervalMs* {.intdefine: "ffiStaleWarnIntervalMs".} = 5000
+  ## Cadence at which an in-flight request re-notifies its caller with a
+  ## non-terminal `RET_STALE_WARN`. Fires without limit — nim-ffi never times a
+  ## handler out; the caller decides what to do. 5s mirrors Android's ANR input
+  ## timeout. Override with `-d:ffiStaleWarnIntervalMs=<ms>`.
+const StaleWarnInterval* = StaleWarnIntervalMs.milliseconds
 
 type FFITeardownProc*[T] = proc(lib: ptr T): Future[void] {.async.}
 
@@ -130,7 +133,7 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ctx.ffiHeartbeat.store(0)
   ctx.eventQueueStuck.store(false)
   ctx.ffiThreadExited.store(false)
-  ctx.defaultRequestTimeout = DefaultRequestTimeout
+  ctx.staleWarnInterval = StaleWarnInterval
 
   var success = false
   defer:
@@ -146,7 +149,6 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   newSignalOrErr(ctx.eventThreadExitSignal, "eventThreadExitSignal")
 
   ctx.registeredRequests = addr ffi_types.registeredRequests
-  ctx.requestTimeouts = addr ffi_types.requestTimeoutsMs
 
   ctx.running.store(true)
 

@@ -829,6 +829,8 @@ typedef void (*MyTimerCreateFn)(int err_code, MyTimerCtx* ctx, const char* err_m
 typedef struct { MyTimerCreateFn fn; void* user_data; } MyTimerCreateBox;
 static void my_timer_create_trampoline(int ret, const char* msg, size_t len, void* ud) {
     MyTimerCreateBox* box = (MyTimerCreateBox*)ud;
+    /* Non-terminal progress ping: keep the box for the terminal reply. */
+    if (ret == NIMFFI_RET_STALE_WARN) return;
     if (!box->fn) {
         free(box);
         return;
@@ -940,6 +942,8 @@ typedef void (*MyTimerEchoReplyFn)(int err_code, const EchoResponse* reply, cons
 typedef struct { MyTimerEchoReplyFn fn; void* user_data; } MyTimerEchoCallBox;
 static void my_timer_echo_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
     MyTimerEchoCallBox* box = (MyTimerEchoCallBox*)ud;
+    /* Non-terminal progress ping: keep the box for the terminal reply. */
+    if (ret == NIMFFI_RET_STALE_WARN) return;
     if (!box->fn) {
         free(box);
         return;
@@ -1000,6 +1004,8 @@ typedef void (*MyTimerVersionReplyFn)(int err_code, const NimFfiStr* reply, cons
 typedef struct { MyTimerVersionReplyFn fn; void* user_data; } MyTimerVersionCallBox;
 static void my_timer_version_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
     MyTimerVersionCallBox* box = (MyTimerVersionCallBox*)ud;
+    /* Non-terminal progress ping: keep the box for the terminal reply. */
+    if (ret == NIMFFI_RET_STALE_WARN) return;
     if (!box->fn) {
         free(box);
         return;
@@ -1059,6 +1065,8 @@ typedef void (*MyTimerComplexReplyFn)(int err_code, const ComplexResponse* reply
 typedef struct { MyTimerComplexReplyFn fn; void* user_data; } MyTimerComplexCallBox;
 static void my_timer_complex_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
     MyTimerComplexCallBox* box = (MyTimerComplexCallBox*)ud;
+    /* Non-terminal progress ping: keep the box for the terminal reply. */
+    if (ret == NIMFFI_RET_STALE_WARN) return;
     if (!box->fn) {
         free(box);
         return;
@@ -1119,6 +1127,8 @@ typedef void (*MyTimerScheduleReplyFn)(int err_code, const ScheduleResult* reply
 typedef struct { MyTimerScheduleReplyFn fn; void* user_data; } MyTimerScheduleCallBox;
 static void my_timer_schedule_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
     MyTimerScheduleCallBox* box = (MyTimerScheduleCallBox*)ud;
+    /* Non-terminal progress ping: keep the box for the terminal reply. */
+    if (ret == NIMFFI_RET_STALE_WARN) return;
     if (!box->fn) {
         free(box);
         return;

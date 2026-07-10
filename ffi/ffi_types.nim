@@ -7,10 +7,22 @@ import chronos
 type FFICallBack* = proc(
   callerRet: cint, msg: ptr cchar, len: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].}
+  ## Result-delivery callback. `callerRet` is one of the `RET_*` codes below.
+  ## `RET_OK`/`RET_ERR` are *terminal*: they fire exactly once and end the
+  ## request. `RET_STALE_WARN` is *non-terminal*: it may fire repeatedly while a
+  ## handler is still running (see below) and is always followed by a terminal
+  ## code. Consumers that only care about the final answer should ignore it.
 
 const RET_OK*: cint = 0
 const RET_ERR*: cint = 1
 const RET_MISSING_CALLBACK*: cint = 2
+const RET_STALE_WARN*: cint = 3
+  ## Non-terminal progress signal: the request is still in flight. Delivered
+  ## every `StaleWarnInterval` (default 5s) for as long as the handler runs, with
+  ## `msg` carrying the elapsed milliseconds as a decimal ASCII string. nim-ffi
+  ## never times a handler out — it always ends with a terminal `RET_OK`/
+  ## `RET_ERR`; `RET_STALE_WARN` just lets the caller decide whether to keep
+  ## waiting.
 
 ### End of exported types
 ################################################################################
@@ -36,12 +48,6 @@ template foreignThreadGc*(body: untyped) =
 ## The key represents the request type name as cstring, e.g., "CreateNodeRequest".
 ## The value is a proc that handles the request asynchronously.
 var registeredRequests*: Table[cstring, FFIRequestProc]
-
-## Per-request handler-timeout overrides in milliseconds, keyed by the same Req
-## type name as `registeredRequests`. Populated at compile time from a
-## `{.ffi: "timeout = <ms>".}` spec; an absent key means "use the context's
-## `defaultRequestTimeout`". Like `registeredRequests`, never mutated at run time.
-var requestTimeoutsMs*: Table[cstring, int]
 
 ### End of FFI utils
 ################################################################################

@@ -378,6 +378,17 @@ proc generateApiRs*(
   lines.add("    len: usize,")
   lines.add("    user_data: *mut c_void,")
   lines.add(") {")
+  lines.add(
+    "    // NIMFFI_RET_STALE_WARN (3) is a non-terminal progress ping: the request"
+  )
+  lines.add(
+    "    // is still running. This wrapper only delivers the final result, so ignore"
+  )
+  lines.add(
+    "    // it WITHOUT reclaiming the box — a terminal callback still owns the Sender."
+  )
+  lines.add("    if ret == 3 { return; }")
+  lines.add("")
   lines.add("    // Take ownership of the boxed Sender — dropping it at end of scope")
   lines.add("    // releases the only outstanding handle.")
   lines.add("    let tx = Box::from_raw(user_data as *mut FFISender);")
