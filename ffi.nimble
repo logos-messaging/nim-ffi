@@ -88,10 +88,11 @@ proc removeStaleEchoLib() =
   ## The CBOR and `abi = c` echo e2e suites both compile examples/echo/echo.nim
   ## to the same repo-root `libecho.so`, differing only by `-d:ffiEchoAbiC`.
   ## CMake keys the dylib rebuild on echo.nim's mtime, not the ABI flag, so a
-  ## `libecho.so` left by an earlier CBOR e2e step is silently reused by the
-  ## abi=c build — the flat-struct C caller then reaches the CBOR entry points
-  ## (wrong arity/ABI) and segfaults. Delete it first to force a fresh rebuild
-  ## with the right ABI.
+  ## `libecho.so` left by an earlier run is silently reused when the ABI flips —
+  ## in *either* direction. The caller then reaches entry points of the wrong
+  ## ABI (CBOR bytes decoded as a flat struct, or vice versa) and segfaults.
+  ## Every echo-building e2e task must delete it first to force a fresh rebuild
+  ## with the ABI its bindings expect.
   for name in ["libecho.so", "libecho.dylib", "echo.dll"]:
     let path = thisDir() / name
     if fileExists(path):
@@ -137,6 +138,9 @@ task test_cpp_e2e, "Build and run the C++ end-to-end tests for the timer example
   # Regenerate the C++ bindings so the suite always runs against fresh codegen.
   runOrQuit "nimble genbindings_cpp"
   runOrQuit "nimble genbindings_cpp_echo"
+  # Force a fresh CBOR libecho: a prior abi=c run leaves a same-named dylib that
+  # cmake would otherwise reuse, mismatching the CBOR bindings (segfault).
+  removeStaleEchoLib()
   runOrQuit "cmake -S tests/e2e/cpp -B tests/e2e/cpp/build"
   runOrQuit "cmake --build tests/e2e/cpp/build --config Debug"
   # `-C Debug` is required on Windows multi-config generators because
@@ -175,6 +179,9 @@ task test_cpp_e2e_sanitized,
   let san = getEnv("NIM_FFI_SAN", "none")
   runOrQuit "nimble genbindings_cpp"
   runOrQuit "nimble genbindings_cpp_echo"
+  # See test_cpp_e2e: force a fresh CBOR libecho so a prior abi=c dylib can't be
+  # reused against the CBOR bindings.
+  removeStaleEchoLib()
   runOrQuit "cmake -S tests/e2e/cpp -B tests/e2e/cpp/build" & " -DNIM_FFI_MM=" & mm &
     " -DNIM_FFI_SANITIZER=" & san
   runOrQuit "cmake --build tests/e2e/cpp/build --config Debug -j"
