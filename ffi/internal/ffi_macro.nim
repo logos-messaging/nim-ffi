@@ -1876,7 +1876,7 @@ proc bindingsOutputDir(lang, explicit: string): string {.compileTime.} =
   if explicit.len > 0:
     explicit
   else:
-    querySetting(SingleValueSetting.projectPath) / (lang & "_bindings")
+    return querySetting(SingleValueSetting.projectPath) / (lang & "_bindings")
 
 proc bindingsSrcPath(outDir, explicit: string): string {.compileTime.} =
   ## Nim source path embedded in generated build files, expressed relative to
