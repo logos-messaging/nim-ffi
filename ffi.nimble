@@ -45,6 +45,15 @@ proc runOrQuit(cmd: string) =
     echo "error: ", e.msg
     quit(QuitFailure)
 
+proc checkBindingsDiff(regenCmd: string, paths: openArray[string]) =
+  # On a diff, print a remediation hint instead of a bare diff wall. Re-quitting
+  # non-zero also dodges the nimble ≥2.2.10 exit-0-on-failure footgun (runOrQuit).
+  try:
+    exec "git diff --exit-code -- " & paths.join(" ")
+  except OSError:
+    echo "Checked-in bindings are stale. Run `" & regenCmd & "` and commit the result."
+    quit(QuitFailure)
+
 proc sanFlags(san: string): string =
   # Each --passC / --passL adds one literal flag to the C compiler / linker
   # invocation — avoids any quoting ambiguity that arises from putting
@@ -272,32 +281,52 @@ task genbindings_c_abi_echo, "Generate CBOR-free abi=c C bindings for the echo e
     " -o:/dev/null examples/echo/echo.nim"
 
 task check_bindings_rust, "Verify checked-in Rust bindings match Nim source":
-  exec "nimble genbindings_rust"
-  exec "git diff --exit-code --" & " examples/timer/rust_bindings/Cargo.toml" &
-    " examples/timer/rust_bindings/build.rs" & " examples/timer/rust_bindings/src"
+  runOrQuit "nimble genbindings_rust"
+  checkBindingsDiff(
+    "nimble genbindings_rust",
+    [
+      "examples/timer/rust_bindings/Cargo.toml",
+      "examples/timer/rust_bindings/build.rs", "examples/timer/rust_bindings/src",
+    ],
+  )
 
 task check_bindings_cpp, "Verify checked-in C++ bindings match Nim source":
-  exec "nimble genbindings_cpp"
-  exec "nimble genbindings_cpp_echo"
-  exec "git diff --exit-code --" & " examples/timer/cpp_bindings/my_timer.hpp" &
-    " examples/timer/cpp_bindings/CMakeLists.txt" &
-    " examples/echo/cpp_bindings/echo.hpp" & " examples/echo/cpp_bindings/CMakeLists.txt"
+  runOrQuit "nimble genbindings_cpp"
+  runOrQuit "nimble genbindings_cpp_echo"
+  checkBindingsDiff(
+    "nimble genbindings_cpp && nimble genbindings_cpp_echo",
+    [
+      "examples/timer/cpp_bindings/my_timer.hpp",
+      "examples/timer/cpp_bindings/CMakeLists.txt",
+      "examples/echo/cpp_bindings/echo.hpp", "examples/echo/cpp_bindings/CMakeLists.txt",
+    ],
+  )
 
 task check_bindings_c, "Verify checked-in C bindings match Nim source":
-  exec "nimble genbindings_c"
-  exec "nimble genbindings_c_echo"
-  exec "git diff --exit-code --" & " examples/timer/c_bindings/my_timer.h" &
-    " examples/timer/c_bindings/nim_ffi_prelude.h" &
-    " examples/timer/c_bindings/nim_ffi_cbor.h" &
-    " examples/timer/c_bindings/CMakeLists.txt" & " examples/echo/c_bindings/echo.h" &
-    " examples/echo/c_bindings/nim_ffi_prelude.h" &
-    " examples/echo/c_bindings/nim_ffi_cbor.h" &
-    " examples/echo/c_bindings/CMakeLists.txt"
+  runOrQuit "nimble genbindings_c"
+  runOrQuit "nimble genbindings_c_echo"
+  checkBindingsDiff(
+    "nimble genbindings_c && nimble genbindings_c_echo",
+    [
+      "examples/timer/c_bindings/my_timer.h",
+      "examples/timer/c_bindings/nim_ffi_prelude.h",
+      "examples/timer/c_bindings/nim_ffi_cbor.h",
+      "examples/timer/c_bindings/CMakeLists.txt", "examples/echo/c_bindings/echo.h",
+      "examples/echo/c_bindings/nim_ffi_prelude.h",
+      "examples/echo/c_bindings/nim_ffi_cbor.h",
+      "examples/echo/c_bindings/CMakeLists.txt",
+    ],
+  )
 
 task check_bindings_c_abi, "Verify checked-in abi=c C bindings match Nim source":
-  exec "nimble genbindings_c_abi_echo"
-  exec "git diff --exit-code --" & " examples/echo/c_abi_bindings/echo.h" &
-    " examples/echo/c_abi_bindings/CMakeLists.txt"
+  runOrQuit "nimble genbindings_c_abi_echo"
+  checkBindingsDiff(
+    "nimble genbindings_c_abi_echo",
+    [
+      "examples/echo/c_abi_bindings/echo.h",
+      "examples/echo/c_abi_bindings/CMakeLists.txt",
+    ],
+  )
 
 task check_bindings, "Verify all checked-in example bindings match Nim source":
   exec "nimble check_bindings_rust"
