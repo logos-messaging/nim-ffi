@@ -7,6 +7,14 @@ worker thread, a request channel, CBOR (de)serialization, an event queue and a
 context/handle registry — and generates the foreign-language bindings for you.
 No hand-written `.h` files, no manual request enums, no shared-memory plumbing.
 
+## Install
+
+Add nim-ffi to your library's `.nimble`, then `import ffi`:
+
+```nim
+requires "https://github.com/logos-messaging/nim-ffi >= 0.2.0"
+```
+
 ## Mental model
 
 - You **declare a library** once with `declareLibrary(name, LibType)`.
@@ -83,6 +91,27 @@ Every `{.ffi.}` / `{.ffiCtor.}` proc must have an explicit
 `return ok(...)` without awaiting). The `Result`'s error string is delivered to
 the foreign caller as the failure message.
 
+### Request timeouts
+
+Every handler runs under a deadline. The default is `DefaultRequestTimeout`
+(5s, `ffi/ffi_context.nim`), applied to every proc so a wedged handler can't
+hang a foreign caller forever. On trip the caller is unblocked with an `ffi
+request timed out after <n>ms` error; the handler is **not** cancelled — a
+hard cancel mid-call into the underlying library can leave it half-applied — so
+it keeps running, and the caller's callback still fires exactly once.
+
+Raise or lower the deadline per proc with a `"timeout = <ms>"` spec, parsed
+like the `abi = ...` spec below:
+
+```nim
+proc slowOp*(
+    c: Counter, req: BumpRequest
+): Future[Result[BumpResponse, string]] {.ffi: "timeout = 30000".} =
+  ...
+```
+
+The timeout is runtime-only; binding codegen ignores it.
+
 ### Events
 
 An event is a proc with an empty body annotated `{.ffiEvent.}`. You fire it by
@@ -107,9 +136,30 @@ you need a name that differs from the proc.
 
 ### ABI format
 
-The default wire format is `cbor`. Override the library default with
-`declareLibrary("lib", Lib, defaultABIFormat = "c")`, or per annotation with an
-`"abi = ..."` spec, e.g. `{.ffi: "abi = c".}`.
+The wire format is chosen **in code**, never by a compile flag. Override the
+library default with `declareLibrary("lib", Lib, defaultABIFormat = "c")`, or
+per annotation with an `"abi = ..."` spec, e.g. `{.ffi: "abi = c".}`. The
+`-d:targetLang` flag (below) picks which *language* the bindings are emitted
+for; it does not change the wire.
+
+`cbor` is the default and fully-supported format: every proc, ctor, dtor and
+event serializes through the generic CBOR path, and all binding generators emit
+working callers for it.
+
+`abi = c` is a newer, flat C-struct wire (no CBOR round-trip). Callers for it
+are emitted only by the dedicated `c_abi` generator (`-d:targetLang=c_abi`). It
+carries two honest limits today:
+
+- **Events are CBOR-only.** Applying `abi = c` to an `{.ffiEvent.}` proc is a
+  hard compile error; declare events with `abi = cbor` (they ride CBOR
+  internally regardless of the library default).
+- **All-scalar `abi = c` procs are dropped from the foreign bindings.** A
+  `{.ffi: "abi = c".}` method whose every param and return is a plain scalar
+  takes the CBOR-free scalar fast path at runtime, but the foreign codegen for
+  that inline-args shape is a follow-up (tracked in #120) — such procs are
+  omitted from the generated `.h`. Give a proc at least one non-scalar
+  (struct / `seq` / `Option`) param or return, or use `abi = cbor`, if you need
+  it in the bindings.
 
 An `abi = c` proc whose whole signature is scalar — fixed-width integer, float,
 or bool params (a `string` return is fine, a `string` param is not) and no
@@ -133,19 +183,55 @@ once at the bottom of the top-level root file.
 An annotation that expands *after* `genBindings()` is now a **compile error**
 (previously it was silently dropped from the bindings).
 
-## Generating bindings
+## Building — the two-compile model
 
-Binding emission is gated behind `-d:ffiGenBindings`; without it, `genBindings()`
-is a no-op and the library just builds normally.
+A nim-ffi library ships from **two separate compiles of the same source**,
+because binding emission is gated behind `-d:ffiGenBindings`: without that
+define `genBindings()` is a no-op, so the normal build just produces the shared
+library and nothing else.
+
+**1. Build the shared library** (the artifact your host loads):
 
 ```sh
-nim c -d:ffiGenBindings -d:targetLang=c \
-      -d:ffiOutputDir=path/to/output -d:ffiSrcPath=../mylib.nim mylib.nim
+nim c --app:lib --noMain --nimMainPrefix:libmylib mylib.nim
 ```
 
-- `-d:targetLang` — `rust` (default), `cpp`, `c`, or `cddl`.
+**2. Emit the foreign bindings** — same flags, plus the binding defines. This
+compile runs the generators as a compile-time side effect and produces no
+runnable output, so send the binary to `/dev/null`. The generated files (for
+`targetLang=c`/`c_abi`: the `<name>.h` header your host includes, plus a
+`CMakeLists.txt`) land in `-d:ffiOutputDir`:
+
+```sh
+nim c --app:lib --noMain --nimMainPrefix:libmylib \
+      -d:ffiGenBindings -d:targetLang=c \
+      -d:ffiOutputDir=path/to/output -d:ffiSrcPath=../mylib.nim \
+      -o:/dev/null mylib.nim
+```
+
+- `-d:targetLang` — which generator runs. Two kinds:
+  - **Language bindings over the CBOR wire:** `rust` (default), `cpp`, `c`.
+  - **Non-peer generators:** `c_abi` — C bindings that speak the flat `abi = c`
+    wire instead of CBOR; `cddl` — a CDDL schema of the CBOR wire, not a
+    language binding at all.
 - `-d:ffiOutputDir` — where the generated files land.
 - `-d:ffiSrcPath` — the Nim source path embedded in the generated build files.
+
+### The `--nimMainPrefix:lib<name>` rule
+
+`--app:lib` builds a shared library; `--noMain` hands program entry to the
+foreign host rather than Nim's own `main`. To initialize the Nim runtime,
+`declareLibrary("<name>", …)` emits an `initializeLibrary()` export that calls
+`lib<name>NimMain()` — the symbol Nim's `NimMain` is renamed to by
+`--nimMainPrefix`. So the prefix **must be exactly `lib` + the `declareLibrary`
+name**, on *both* compiles above, or the library fails to link. For
+`declareLibrary("my_timer", …)` that is `--nimMainPrefix:libmy_timer`.
+
+**Library-naming collisions.** When several nim-ffi libraries are loaded into
+one process (as the C++ end-to-end test does with `timer` + `echo`), each must
+use a **distinct** library name — and therefore a distinct `--nimMainPrefix` —
+so their exported `NimMain`, `initializeLibrary` and per-symbol names don't
+clash. The example libraries deliberately differ: `libmy_timer` vs `libecho`.
 
 ## Examples
 
