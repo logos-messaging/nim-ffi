@@ -163,14 +163,19 @@ proc returnRidesAsPtr*(p: FFIProcMeta): bool =
   ## True if the return crosses the wire as an opaque uint64 (raw `ptr` or handle).
   p.returnIsPtr or p.returnIsHandle
 
-# Target language for binding generation; override with -d:targetLang=cpp
+# Target language(s) for binding generation; override with -d:targetLang=cpp.
+# Accepts a comma-separated list (e.g. -d:targetLang=rust,cpp,c) to emit
+# several languages from a single compile.
 const targetLang* {.strdefine.} = "rust"
 
-# Output directory for generated bindings; set with -d:ffiOutputDir=path/to/dir
+# Output directory override for generated bindings; set with
+# -d:ffiOutputDir=path/to/dir. Empty (the default) derives `<lang>_bindings/`
+# next to the compiled source.
 const ffiOutputDir* {.strdefine.} = ""
 
-# Nim source path (relative to outputDir) embedded in generated build files;
-# set with -d:ffiSrcPath=../relative/path.nim
+# Nim source path override (relative to outputDir) embedded in generated build
+# files; set with -d:ffiSrcPath=../relative/path.nim. Empty (the default)
+# derives it from the compiled source relative to the output dir.
 const ffiSrcPath* {.strdefine.} = ""
 
 # When set to true, scalar-only `abi = c` procs (which have no foreign-binding codegen
