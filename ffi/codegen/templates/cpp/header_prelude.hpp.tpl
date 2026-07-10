@@ -28,3 +28,13 @@
 extern "C" {
 #include <tinycbor/cbor.h>
 }
+
+// nim-ffi result-callback status codes (mirror ffi/ffi_types.nim and the C
+// header). Guarded so a translation unit that also pulls in the C header keeps
+// a single definition.
+#ifndef NIMFFI_RET_OK
+#define NIMFFI_RET_OK 0
+#define NIMFFI_RET_ERR 1
+#define NIMFFI_RET_MISSING_CALLBACK 2
+#define NIMFFI_RET_STALE_WARN 3
+#endif

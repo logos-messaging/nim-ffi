@@ -29,6 +29,16 @@ extern "C" {
 #include <tinycbor/cbor.h>
 }
 
+// nim-ffi result-callback status codes (mirror ffi/ffi_types.nim and the C
+// header). Guarded so a translation unit that also pulls in the C header keeps
+// a single definition.
+#ifndef NIMFFI_RET_OK
+#define NIMFFI_RET_OK 0
+#define NIMFFI_RET_ERR 1
+#define NIMFFI_RET_MISSING_CALLBACK 2
+#define NIMFFI_RET_STALE_WARN 3
+#endif
+
 #include <unordered_map>
 // ============================================================
 // Result<T> — exception-free error channel
@@ -752,7 +762,7 @@ inline void ffi_cb_(int ret, const char* msg, size_t len, void* ud) {
     // still running. This blocking wrapper only reports the final result, so
     // ignore it WITHOUT touching `ud` — a terminal callback still owns the
     // shared handle and will free it.
-    if (ret == 3) return;
+    if (ret == NIMFFI_RET_STALE_WARN) return;
 
     // ffi_call_ heap-allocated a shared_ptr and passed its address as ud;
     // take ownership here so it's freed on every exit path.
@@ -761,7 +771,7 @@ inline void ffi_cb_(int ret, const char* msg, size_t len, void* ud) {
     FFICallState_& s = **handle;
 
     std::lock_guard<std::mutex> lock(s.mtx);
-    s.ok = (ret == 0);
+    s.ok = (ret == NIMFFI_RET_OK);
     if (msg && len > 0) {
         const auto* p = reinterpret_cast<const std::uint8_t*>(msg);
         if (s.ok) s.bytes.assign(p, p + len);
@@ -778,7 +788,7 @@ inline Result<std::vector<std::uint8_t>> ffi_call_(
     auto state = std::make_shared<FFICallState_>();
     auto* cb_ref = new std::shared_ptr<FFICallState_>(state);
     const int ret = f(ffi_cb_, cb_ref);
-    if (ret == 2) {
+    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
         delete cb_ref;
         return Result<Bytes>::err("RET_MISSING_CALLBACK (internal error)");
     }
