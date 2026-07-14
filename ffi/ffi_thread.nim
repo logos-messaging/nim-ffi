@@ -50,13 +50,11 @@ proc awaitWithStaleWarnings(
     interval: Duration,
     reqId: string,
 ): Future[Result[seq[byte], string]] {.async.} =
-  ## Awaits the handler, delivering a non-terminal RET_STALE_WARN to the caller
-  ## every `interval` for as long as it keeps running, and returns the handler's
-  ## real result. nim-ffi never times a handler out — a hard-cancel mid-call into
-  ## the underlying library (Waku/libp2p) can leave it partially applied — so the
-  ## caller is kept informed and decides for itself. The timer lives entirely in
-  ## this frame, so nothing references the request once the handler resolves and
-  ## the terminal callback frees it.
+  ## Pings the caller with RET_STALE_WARN every `interval` while the handler
+  ## runs, then returns its real result. Never cancels it: a hard-cancel mid-call
+  ## into the underlying library (Waku/libp2p) can leave it partially applied, so
+  ## the caller is kept informed and decides for itself. The timer lives entirely
+  ## in this frame, so nothing references the request once the handler resolves.
   let intervalMs = interval.milliseconds
   if intervalMs <= 0:
     # A non-positive / infinite interval opts out of progress pings entirely.
@@ -92,13 +90,11 @@ proc processRequest[T](
     else:
       ctx[].registeredRequests[][reqIdCs](cast[pointer](request), ctx)
 
-  # CatchableError covers CancelledError from the shutdown drain; handleRes must
-  # still run, so the stale-warn loop and the handler await share one try — a
-  # cancel mid-loop must not skip the response-and-free below.
+  # CatchableError covers CancelledError from the shutdown drain. The warn loop
+  # and the handler share one try so that a cancel mid-loop still reaches the
+  # response-and-free below.
   let res =
     try:
-      # Emits RET_STALE_WARN every ctx.staleWarnInterval while the handler runs,
-      # then returns its real result.
       await awaitWithStaleWarnings(retFut, request, ctx.staleWarnInterval, reqId)
     except CatchableError as e:
       Result[seq[byte], string].err(

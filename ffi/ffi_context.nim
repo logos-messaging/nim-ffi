@@ -43,9 +43,8 @@ type FFIContext*[T] = object
   running: Atomic[bool] # To control when the threads are running
   registeredRequests: ptr Table[cstring, FFIRequestProc]
   staleWarnInterval*: Duration
-    # Cadence of the non-terminal RET_STALE_WARN progress callback; defaults to
-    # `StaleWarnInterval`. An internal runtime seam (tests tune it) — it is NOT
-    # exposed to the ffi dev, there is no per-proc override.
+    # RET_STALE_WARN cadence. An internal seam (tests tune it) — deliberately
+    # not exposed to the ffi dev, and there is no per-proc override.
 
 var onFFIThread* {.threadvar.}: bool
   # Re-entrant dispatch guard for `sendRequestToFFIThread`.
@@ -58,10 +57,9 @@ const
   FFIHeartbeatStaleThreshold* = 1.seconds
 
 const StaleWarnIntervalMs* {.intdefine: "ffiStaleWarnIntervalMs".} = 5000
-  ## Cadence at which an in-flight request re-notifies its caller with a
-  ## non-terminal `RET_STALE_WARN`. Fires without limit — nim-ffi never times a
-  ## handler out; the caller decides what to do. 5s mirrors Android's ANR input
-  ## timeout. Override with `-d:ffiStaleWarnIntervalMs=<ms>`.
+  ## `RET_STALE_WARN` cadence, fired without limit — nim-ffi never times a
+  ## handler out. 5s mirrors Android's ANR input timeout. Override with
+  ## `-d:ffiStaleWarnIntervalMs=<ms>`.
 const StaleWarnInterval* = StaleWarnIntervalMs.milliseconds
 
 type FFITeardownProc*[T] = proc(lib: ptr T): Future[void] {.async.}

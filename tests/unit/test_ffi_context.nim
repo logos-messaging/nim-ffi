@@ -27,10 +27,8 @@ proc deinitCallbackData(d: var CallbackData) =
 proc testCallback(
     retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
-  # RET_STALE_WARN is a progress ping, not an answer: a slow handler (or a slow
-  # CI runner) trips it before the terminal code arrives.  Waking `waitCallback`
-  # here would hand the test a non-terminal retCode and let it tear the context
-  # down mid-flight.  Tests that assert on the pings use `staleCallback`.
+  # A progress ping is not an answer: waking waitCallback here would report a
+  # non-terminal code as the result. Tests asserting on pings use staleCallback.
   if retCode == RET_STALE_WARN:
     return
   let d = cast[ptr CallbackData](userData)
