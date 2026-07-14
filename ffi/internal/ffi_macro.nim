@@ -68,8 +68,7 @@ proc resolveFFISpecs(specs: seq[NimNode]): ABIFormat {.compileTime.} =
   for override in specs:
     if override.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
       error(
-        "FFI override must be a string literal like \"abi = c\", got: " &
-          override.repr
+        "FFI override must be a string literal like \"abi = c\", got: " & override.repr
       )
     case overrideKey($override)
     of "abi":
@@ -1519,9 +1518,7 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
       # The flat-struct exported wrapper is emitted at genBindings() time (see
       # flushCAbiDispatch); the CBOR `ffiProc` is not.
       registerCAbiCtor(cExportName, libTypeName, reqTypeName, paramNames, paramTypes)
-      newStmtList(
-        typeDef, ffiNewReqProc, helperProc, processProc, addToReg, poolDecl
-      )
+      newStmtList(typeDef, ffiNewReqProc, helperProc, processProc, addToReg, poolDecl)
     else:
       newStmtList(
         typeDef, ffiNewReqProc, helperProc, processProc, addToReg, poolDecl, ffiProc
