@@ -1,11 +1,10 @@
-## Unit tests for the CBOR-free `abi = c` C binding generator. Drives
-## generateCAbiLibHeader directly against a synthetic registry (no macro
-## pipeline, no files written) and asserts on the emitted text — same approach
-## as test_c_codegen / test_cddl_codegen.
+## Unit tests for the CBOR-free (`abi = c`) C binding shape. Drives
+## generateCAbiLibHeader against a synthetic registry (no macro pipeline, no
+## files written), asserting on the emitted text.
 
 import std/strutils
 import unittest2
-import ffi/codegen/[meta, c_abi]
+import ffi/codegen/[meta, c]
 
 proc field(n, t: string): FFIFieldMeta =
   FFIFieldMeta(name: n, typeName: t)
@@ -69,7 +68,7 @@ suite "generateCAbiLibHeader":
     check "CborError" notin header
     check "tinycbor" notin header.toLowerAscii()
 
-  test "flat wire structs mirror the _CWire layout":
+  test "abi = c wire structs mirror the _CWire layout":
     # string -> const char*; POD unchanged.
     check "const char* message;" in header
     check "int64_t delayMs;" in header
@@ -78,14 +77,14 @@ suite "generateCAbiLibHeader":
     check "ptrdiff_t messages_len;" in header
     # Option[string] -> pointer to the element wire type (NULL = none).
     check "const char** note;" in header
-    # nested {.ffi.} type rides as its flat struct.
+    # nested {.ffi.} type rides as its _CWire struct.
     check "EchoRequest config;" in header
 
   test "per-proc Req envelopes are emitted as structs":
     check "} TimerEchoReq;" in header
     check "} TimerCreateCtorReq;" in header
 
-  test "exported symbols use the flat structs, not CBOR buffers":
+  test "exported symbols use the _CWire structs, not CBOR buffers":
     check "req_cbor" notin header
     check "const TimerEchoReq* req" in header
     check "void* timer_create(const TimerCreateCtorReq* req," in header

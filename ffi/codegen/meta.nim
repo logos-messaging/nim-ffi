@@ -6,7 +6,7 @@ import std/strutils
 type
   ABIFormat* {.pure.} = enum
     ## Wire format for an FFI payload. Only `Cbor` is wired end-to-end; `C`
-    ## (flat C-struct) has a type codec but no proc-dispatch path yet.
+    ## (`abi = c` C-struct) has a type codec but no proc-dispatch path yet.
     Cbor = "cbor"
     C = "c"
 
@@ -74,7 +74,7 @@ var currentDefaultABIFormat* {.compileTime.}: ABIFormat = ABIFormat.Cbor
 
 proc abiCodegenImplemented*(fmt: ABIFormat): bool =
   ## Whether `fmt` has a working proc-dispatch path. Both `Cbor` and `C` are
-  ## wired: `Cbor` rides the generic overloads, `C` rides the flat `_CWire`
+  ## wired: `Cbor` rides the generic overloads, `C` rides the `_CWire`
   ## companions (a CBOR-free foreign surface with CBOR transport internally).
   fmt in {ABIFormat.Cbor, ABIFormat.C}
 

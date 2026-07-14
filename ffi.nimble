@@ -109,14 +109,9 @@ proc genBindingsCmd(flags, src: string, langs = "rust", outDir = ""): string =
   cmd
 
 proc removeStaleEchoLib() =
-  ## The CBOR and `abi = c` echo e2e suites both compile examples/echo/echo.nim
-  ## to the same repo-root `libecho.so`, differing only by `-d:ffiEchoAbiC`.
-  ## CMake keys the dylib rebuild on echo.nim's mtime, not the ABI flag, so a
-  ## `libecho.so` left by an earlier run is silently reused when the ABI flips —
-  ## in *either* direction. The caller then reaches entry points of the wrong
-  ## ABI (CBOR bytes decoded as a flat struct, or vice versa) and segfaults.
-  ## Every echo-building e2e task must delete it first to force a fresh rebuild
-  ## with the ABI its bindings expect.
+  ## CMake keys the shared `libecho.so` rebuild on echo.nim's mtime, not on
+  ## `-d:ffiEchoAbiC`, so a stale lib from the other ABI is reused and segfaults.
+  ## Every echo e2e task deletes it first to force a fresh rebuild.
   for name in ["libecho.so", "libecho.dylib", "echo.dll"]:
     let path = thisDir() / name
     if fileExists(path):
@@ -180,7 +175,6 @@ task test_c_e2e, "Build and run the C end-to-end tests for the timer example":
   runOrQuit "ctest --test-dir tests/e2e/c/build --output-on-failure -C Debug"
 
 task test_c_abi_e2e, "Build and run the CBOR-free abi=c C end-to-end test (echo)":
-  # Regenerate the abi=c bindings so the suite always runs against fresh codegen.
   runOrQuit "nimble genbindings_c_abi_echo"
   removeStaleEchoLib()
   runOrQuit "cmake -S tests/e2e/c_abi -B tests/e2e/c_abi/build"
@@ -259,15 +253,12 @@ task genbindings_c_echo, "Generate C bindings for the echo example":
   exec genBindingsCmd(nimFlagsRefc, echoSrc, "c")
 
 task genbindings_c_abi_echo, "Generate CBOR-free abi=c C bindings for the echo example":
-  # echoVersion is all-scalar under the abi=c default, so it has no foreign
-  # codegen yet and is omitted from the bindings; -d:ffiAllowScalarSkip accepts
-  # that omission instead of failing the build (see genBindings()).
-  exec genBindingsCmd(
-    nimFlagsOrc & " -d:ffiEchoAbiC -d:ffiAllowScalarSkip", echoSrc, "c_abi"
-  )
-  exec genBindingsCmd(
-    nimFlagsRefc & " -d:ffiEchoAbiC -d:ffiAllowScalarSkip", echoSrc, "c_abi"
-  )
+  # ffiAllowScalarSkip omits echoVersion (all-scalar, no foreign codegen yet);
+  # abiOut forces output beside the CBOR `c_bindings/` instead of overwriting it.
+  const abiOut = "examples/echo/c_abi_bindings"
+  const abiFlags = " -d:ffiEchoAbiC -d:ffiAllowScalarSkip -d:ffiSrcPath=../echo.nim"
+  exec genBindingsCmd(nimFlagsOrc & abiFlags, echoSrc, "c", abiOut)
+  exec genBindingsCmd(nimFlagsRefc & abiFlags, echoSrc, "c", abiOut)
 
 task check_bindings_rust, "Verify checked-in Rust bindings match Nim source":
   runOrQuit "nimble genbindings_rust"

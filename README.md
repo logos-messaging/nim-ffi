@@ -153,9 +153,9 @@ for; it does not change the wire.
 event serializes through the generic CBOR path, and all binding generators emit
 working callers for it.
 
-`abi = c` is a newer, flat C-struct wire (no CBOR round-trip). Callers for it
-are emitted only by the dedicated `c_abi` generator (`-d:targetLang=c_abi`). It
-carries two honest limits today:
+`abi = c` is a newer, native C-struct wire (no CBOR round-trip). The single `c`
+generator (`-d:targetLang=c`) emits its callers, choosing the `abi = c` or CBOR
+header shape from the library's ABI format. It carries two honest limits today:
 
 - **Events are CBOR-only.** Applying `abi = c` to an `{.ffiEvent.}` proc is a
   hard compile error; declare events with `abi = cbor` (they ride CBOR
@@ -206,19 +206,19 @@ nim c --app:lib --noMain --nimMainPrefix:libmylib mylib.nim
 **2. Emit the foreign bindings** — add the binding defines and `--compileOnly`,
 which stops after codegen: the binding files are written during macro expansion,
 so there's no library to link (no `--app:lib`/`-o:/dev/null` needed). The
-generated files (for `targetLang=c`/`c_abi`: the `<name>.h` header your host
-includes, plus a `CMakeLists.txt`) land in `-d:ffiOutputDir`:
+generated files (for `targetLang=c`: the `<name>.h` header your host includes,
+plus a `CMakeLists.txt`) land in `-d:ffiOutputDir`:
 
 ```sh
 nim c -d:ffiGenBindings -d:targetLang=rust,cpp,c --compileOnly mylib.nim
 ```
 
 - `-d:targetLang` — which generator(s) run; pass a comma-separated list to emit
-  several from one compile. Two kinds:
-  - **Language bindings over the CBOR wire:** `rust` (default), `cpp`, `c`.
-  - **Non-peer generators:** `c_abi` — C bindings that speak the flat `abi = c`
-    wire instead of CBOR; `cddl` — a CDDL schema of the CBOR wire, not a
-    language binding at all.
+  several from one compile:
+  - **Language bindings:** `rust` (default), `cpp`, `c`. The `c` target follows
+    the library's ABI format — an `abi = c` C-struct header for `abi = c`, a CBOR
+    header otherwise; `rust`/`cpp` speak CBOR.
+  - **`cddl`** — a CDDL schema of the CBOR wire, not a language binding at all.
 - `-d:ffiOutputDir` — override where the generated files land. Defaults to
   `<lang>_bindings/` next to the compiled source.
 - `-d:ffiSrcPath` — override the Nim source path embedded in the generated build

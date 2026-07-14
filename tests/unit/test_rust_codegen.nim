@@ -2,7 +2,7 @@
 ## own scalar table that had drifted from C/C++ — `int8`/`int16`/`uint8`/
 ## `uint16`/`uint32`/`byte`/`float32` fell through to `capitalizeFirstLetter`
 ## and emitted invalid Rust. It now renders through the shared `parseFFIType`
-## IR, so the full scalar set is pinned here.
+## intermediate representation, so the full scalar set is pinned here.
 
 import unittest2
 import ffi/codegen/rust

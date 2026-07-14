@@ -57,7 +57,7 @@ wire-format codecs head-to-head on identical payloads:
 
 - **cbor** — `cborEncode` / `cborDecode`, self-describing bytes over
   `seq[byte]`. The codec the `cbor` ABI uses on every boundary crossing.
-- **c (cwire)** — `cwirePack` / `cwireUnpack` / `cwireFree`, flat C-struct
+- **c (cwire)** — `cwirePack` / `cwireUnpack` / `cwireFree`, `abi = c` C-struct
   shared-memory packing. The codec the `c` ABI uses, emitted for every
   `{.ffi: "abi = c".}` type as its `<T>_CWire` companion.
 

@@ -1,6 +1,7 @@
-## Unit tests for the shared type IR that the C / C++ / Rust binding generators
-## parse Nim type strings through. `parseFFIType` is the single source of truth
-## the three backends consume, so its shape mappings are pinned here directly.
+## Unit tests for the shared type intermediate representation that the C / C++ /
+## Rust binding generators parse Nim type strings through. `parseFFIType` is the
+## single source of truth the three backends consume, so its shape mappings are
+## pinned here directly.
 
 import unittest2
 import ffi/codegen/types_ir
@@ -83,7 +84,7 @@ suite "parseFFIType: structs":
     check t.kind == ftStruct
     check t.name == "EchoRequest"
 
-suite "renderNative: walks the IR with a backend map":
+suite "renderNative: walks the intermediate representation with a backend map":
   let rustish = NativeTypeMap(
     scalar: proc(s: ScalarKind): string =
       (

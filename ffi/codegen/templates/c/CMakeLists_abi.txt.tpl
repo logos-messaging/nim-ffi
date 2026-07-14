@@ -4,8 +4,8 @@ project({{LIB}}_c_abi_bindings C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# The CBOR-free `abi = c` binding links no TinyCBOR — the flat structs in the
-# generated header are the ABI. Only the Nim dylib is built.
+# The CBOR-free `abi = c` binding links no TinyCBOR — the generated header
+# structs are the ABI. Only the Nim dylib is built.
 
 set(_search_dir "${CMAKE_CURRENT_SOURCE_DIR}")
 set(REPO_ROOT "")

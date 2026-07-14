@@ -14,7 +14,7 @@
    terminal RET_OK/RET_ERR. Ignore it unless you want progress. */
 #define NIMFFI_RET_STALE_WARN 3
 
-/* Flat wire structs — the C ABI. Strings are borrowed, NUL-terminated
+/* `abi = c` wire structs — the C ABI. Strings are borrowed, NUL-terminated
    `const char*` valid only for the duration of the call they cross. */
 typedef struct {
     const char* prefix;
@@ -58,7 +58,6 @@ typedef struct { EchoCreateFn fn; void* user_data; } EchoCreateBox;
 static void echo_create_trampoline(int ret, const char* ctx_addr, const char* err_msg, void* ud) {
     EchoCreateBox* box = (EchoCreateBox*)ud;
     if (!box) return;
-    /* Non-terminal progress ping: keep the box for the terminal reply. */
     if (ret == NIMFFI_RET_STALE_WARN) return;
     if (!box->fn) { free(box); return; }
     if (ret != 0) {

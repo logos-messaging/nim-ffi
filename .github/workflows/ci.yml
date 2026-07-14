@@ -170,7 +170,7 @@ jobs:
 
       # The CBOR-free abi=c C binding (issue #105). Linux-only: the generated
       # header is platform-checked by the check-bindings job, and the runtime
-      # path only needs one OS to exercise the flat-struct dispatch.
+      # path only needs one OS to exercise the abi=c struct dispatch.
       - name: Run abi=c C e2e test
         if: matrix.label == 'Linux'
         shell: bash
