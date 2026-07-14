@@ -686,6 +686,11 @@ proc objectTrampBody(boxName, respType, respWire: NimNode): NimNode =
     let box = cast[ptr `boxName`](ud)
     if box.isNil():
       return
+    if ret == RET_STALE_WARN:
+      # Non-terminal progress signal: keep the box for the eventual terminal
+      # reply and don't decode (there's no reply payload yet). Typed wrappers
+      # don't surface it; the raw FFICallBack boundary does.
+      return
     defer:
       freeBox(box)
     if box.fn.isNil():
@@ -718,6 +723,11 @@ proc stringTrampBody(boxName: NimNode): NimNode =
   quote:
     let box = cast[ptr `boxName`](ud)
     if box.isNil():
+      return
+    if ret == RET_STALE_WARN:
+      # Non-terminal progress signal: keep the box for the eventual terminal
+      # reply and don't decode. Typed wrappers don't surface it; the raw
+      # FFICallBack boundary does.
       return
     defer:
       freeBox(box)

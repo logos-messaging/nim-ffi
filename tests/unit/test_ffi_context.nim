@@ -27,6 +27,10 @@ proc deinitCallbackData(d: var CallbackData) =
 proc testCallback(
     retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
+  # A progress ping is not an answer: waking waitCallback here would report a
+  # non-terminal code as the result. Tests asserting on pings use staleCallback.
+  if retCode == RET_STALE_WARN:
+    return
   let d = cast[ptr CallbackData](userData)
   acquire(d[].lock)
   d[].retCode = retCode
@@ -227,12 +231,6 @@ suite "destroyFFIContext refc workaround":
     let ctx = pool.createFFIContext().valueOr:
       check false
       return
-
-    # This case stresses the refc destroy workaround, not the request timeout:
-    # the 50k-allocation handler can outrun the finite default deadline on a slow
-    # sanitizer/ARM runner, tripping a spurious timeout err. Opt out so the check
-    # below observes the handler's real result.
-    ctx.defaultRequestTimeout = InfiniteDuration
 
     var d: CallbackData
     initCallbackData(d)
@@ -619,25 +617,18 @@ suite "reentrancy guard (PR #23 review, item 6)":
     check nestedMsg.startsWith("err:")
     check "reentrant ffi call" in nestedMsg
 
-# Per-proc handler timeout (issue #93): a `{.ffi: "timeout = <ms>".}` override
-# bounds how long a handler may run before the caller is unblocked with an err.
-# The handler is NOT cancelled — it keeps running — so the callback must still
-# fire exactly once.
+# Non-terminal RET_STALE_WARN progress signal: while a handler runs, the caller
+# is pinged every `ctx.staleWarnInterval` with the elapsed time, then still gets
+# exactly one terminal RET_OK/RET_ERR. nim-ffi never times the handler out.
 
-type TimeoutConfig {.ffi.} = object
+type StaleConfig {.ffi.} = object
   dummy: int
 
-proc testlib_slow_timeout*(
-    lib: SimpleLib, cfg: TimeoutConfig
-): Future[Result[string, string]] {.ffi: "timeout = 100".} =
-  await sleepAsync(500.milliseconds)
-  return ok("slow-timeout-done")
-
-proc testlib_under_deadline*(
-    lib: SimpleLib, cfg: TimeoutConfig
-): Future[Result[string, string]] {.ffi: "timeout = 1000".} =
-  await sleepAsync(50.milliseconds)
-  return ok("under-deadline-done")
+proc testlib_slow_stale*(
+    lib: SimpleLib, cfg: StaleConfig
+): Future[Result[string, string]] {.ffi.} =
+  await sleepAsync(350.milliseconds)
+  return ok("slow-stale-done")
 
 proc createSimpleCtx(): ptr FFIContext[SimpleLib] =
   ## Spins up a SimpleLib context via the ctor and returns it (nil on failure).
@@ -658,51 +649,86 @@ proc createSimpleCtx(): ptr FFIContext[SimpleLib] =
     return nil
   cast[ptr FFIContext[SimpleLib]](ctxAddr)
 
-suite "per-proc request timeout (issue #93)":
-  test "handler past its deadline yields a timeout err, fired exactly once":
+## Callback that keeps the non-terminal stale pings apart from the one terminal
+## answer, so a test can assert on both.
+type StaleData = object
+  lock: Lock
+  cond: Cond
+  staleCount: int
+  lastElapsed: string
+  terminalDone: bool
+  terminalRet: cint
+  terminalBytes: seq[byte]
+
+proc initStaleData(d: var StaleData) =
+  d.lock.initLock()
+  d.cond.initCond()
+
+proc deinitStaleData(d: var StaleData) =
+  d.cond.deinitCond()
+  d.lock.deinitLock()
+
+proc staleCallback(
+    retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
+) {.cdecl, gcsafe, raises: [].} =
+  let d = cast[ptr StaleData](userData)
+  let n = int(len)
+  acquire(d[].lock)
+  if retCode == RET_STALE_WARN:
+    var s = newString(n)
+    if n > 0 and not msg.isNil:
+      copyMem(addr s[0], msg, n)
+    inc d[].staleCount
+    d[].lastElapsed = s
+  else:
+    var b = newSeq[byte](n)
+    if n > 0 and not msg.isNil:
+      copyMem(addr b[0], msg, n)
+    d[].terminalRet = retCode
+    d[].terminalBytes = b
+    d[].terminalDone = true
+    signal(d[].cond)
+  release(d[].lock)
+
+proc waitTerminal(d: var StaleData) =
+  acquire(d.lock)
+  while not d.terminalDone:
+    wait(d.cond, d.lock)
+  release(d.lock)
+
+suite "non-terminal RET_STALE_WARN progress signal":
+  test "a slow handler pings the caller, then delivers one terminal RET_OK":
     let ctx = createSimpleCtx()
     check not ctx.isNil()
     defer:
       check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
 
-    var d: CallbackData
-    initCallbackData(d)
-    defer:
-      deinitCallbackData(d)
+    # Tune the cadence down so the 350 ms handler trips several pings quickly.
+    ctx.staleWarnInterval = 80.milliseconds
 
-    var reqBytes = cborEncode(TestlibSlowTimeoutReq(cfg: TimeoutConfig(dummy: 0)))
-    let ret = testlib_slow_timeout(
-      ctx, testCallback, addr d, encodedPtr(reqBytes), reqBytes.len.csize_t
+    var d: StaleData
+    initStaleData(d)
+    defer:
+      deinitStaleData(d)
+
+    var reqBytes = cborEncode(TestlibSlowStaleReq(cfg: StaleConfig(dummy: 0)))
+    let ret = testlib_slow_stale(
+      ctx, staleCallback, addr d, encodedPtr(reqBytes), reqBytes.len.csize_t
     )
     check ret == RET_OK
 
-    waitCallback(d)
-    check d.retCode == RET_ERR
-    check "timed out" in callbackErr(d)
+    waitTerminal(d)
 
-    # The handler (500 ms) is still running past the 100 ms deadline; once it
-    # finishes it must NOT deliver a second callback.
-    os.sleep(700)
-    check d.callCount == 1
+    # A 350 ms handler at an 80 ms cadence trips at least a couple of pings, and
+    # the k-th ping reports exactly k*80 ms of elapsed time.
+    check d.staleCount >= 2
+    check parseInt(d.lastElapsed) == d.staleCount * 80
 
-  test "handler finishing under its deadline returns normally":
-    let ctx = createSimpleCtx()
-    check not ctx.isNil()
-    defer:
-      check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
+    # Exactly one terminal answer carrying the handler's real result.
+    check d.terminalRet == RET_OK
+    check cborDecode(d.terminalBytes, string).value == "slow-stale-done"
 
-    var d: CallbackData
-    initCallbackData(d)
-    defer:
-      deinitCallbackData(d)
-
-    var reqBytes = cborEncode(TestlibUnderDeadlineReq(cfg: TimeoutConfig(dummy: 0)))
-    let ret = testlib_under_deadline(
-      ctx, testCallback, addr d, encodedPtr(reqBytes), reqBytes.len.csize_t
-    )
-    check ret == RET_OK
-
-    waitCallback(d)
-    check d.retCode == RET_OK
-    check cborDecode(callbackBytes(d), string).value == "under-deadline-done"
-    check d.callCount == 1
+    # Nothing trails the terminal callback.
+    let staleAtTerminal = d.staleCount
+    os.sleep(200)
+    check d.staleCount == staleAtTerminal

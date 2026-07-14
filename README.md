@@ -91,26 +91,33 @@ Every `{.ffi.}` / `{.ffiCtor.}` proc must have an explicit
 `return ok(...)` without awaiting). The `Result`'s error string is delivered to
 the foreign caller as the failure message.
 
-### Request timeouts
+### The result callback contract
 
-Every handler runs under a deadline. The default is `DefaultRequestTimeout`
-(5s, `ffi/ffi_context.nim`), applied to every proc so a wedged handler can't
-hang a foreign caller forever. On trip the caller is unblocked with an `ffi
-request timed out after <n>ms` error; the handler is **not** cancelled — a
-hard cancel mid-call into the underlying library can leave it half-applied — so
-it keeps running, and the caller's callback still fires exactly once.
+Each request carries a result callback. It receives one of these status codes
+(`ret` / `err_code`):
 
-Raise or lower the deadline per proc with a `"timeout = <ms>"` spec, parsed
-like the `abi = ...` spec below:
+| Code | Value | Terminal? | Meaning |
+| --- | --- | --- | --- |
+| `RET_OK` | 0 | yes | Success; the payload carries the encoded result. |
+| `RET_ERR` | 1 | yes | Failure; the payload carries the UTF-8 error string. |
+| `RET_MISSING_CALLBACK` | 2 | — | No callback was passed; the request path reports this itself. |
+| `RET_STALE_WARN` | 3 | **no** | Progress ping — the handler is still running. |
 
-```nim
-proc slowOp*(
-    c: Counter, req: BumpRequest
-): Future[Result[BumpResponse, string]] {.ffi: "timeout = 30000".} =
-  ...
-```
+**nim-ffi never times a handler out.** A slow request runs to its natural
+`RET_OK` / `RET_ERR`; it is never cancelled (a hard-cancel mid-call into the
+underlying library can leave it half-applied). Instead, while a handler is still
+in flight the callback receives a **non-terminal** `RET_STALE_WARN` every 5s
+(Android's ANR interval; override at build time with
+`-d:ffiStaleWarnIntervalMs=<ms>`), with the payload carrying the elapsed
+milliseconds as a decimal string. The dev decides what to do with a slow request
+— keep waiting, surface a spinner, tear the context down — nim-ffi does not
+decide for them.
 
-The timeout is runtime-only; binding codegen ignores it.
+`RET_STALE_WARN` may fire any number of times and is **always** followed by
+exactly one terminal `RET_OK` / `RET_ERR`. A caller that only wants the final
+answer must ignore it (do not treat a non-zero code as an error without checking
+for `RET_STALE_WARN` first). The generated higher-level typed wrappers currently
+ignore it; the progress signal is delivered at the raw result-callback boundary.
 
 ### Events
 

@@ -368,9 +368,14 @@ proc generateApiRs*(
   lines.add("    } else {")
   lines.add("        slice::from_raw_parts(msg as *const u8, len).to_vec()")
   lines.add("    };")
-  lines.add("    if ret == 0 { Ok(bytes) }")
+  lines.add("    if ret == NIMFFI_RET_OK { Ok(bytes) }")
   lines.add("    else        { Err(String::from_utf8_lossy(&bytes).into_owned()) }")
   lines.add("}")
+  lines.add("")
+  lines.add("// nim-ffi result-callback status codes (mirror ffi/ffi_types.nim).")
+  lines.add("const NIMFFI_RET_OK: c_int = 0;")
+  lines.add("const NIMFFI_RET_MISSING_CALLBACK: c_int = 2;")
+  lines.add("const NIMFFI_RET_STALE_WARN: c_int = 3;")
   lines.add("")
   lines.add("unsafe extern \"C\" fn on_result(")
   lines.add("    ret: c_int,")
@@ -378,6 +383,17 @@ proc generateApiRs*(
   lines.add("    len: usize,")
   lines.add("    user_data: *mut c_void,")
   lines.add(") {")
+  lines.add(
+    "    // NIMFFI_RET_STALE_WARN (3) is a non-terminal progress ping: the request"
+  )
+  lines.add(
+    "    // is still running. This wrapper only delivers the final result, so ignore"
+  )
+  lines.add(
+    "    // it WITHOUT reclaiming the box — a terminal callback still owns the Sender."
+  )
+  lines.add("    if ret == NIMFFI_RET_STALE_WARN { return; }")
+  lines.add("")
   lines.add("    // Take ownership of the boxed Sender — dropping it at end of scope")
   lines.add("    // releases the only outstanding handle.")
   lines.add("    let tx = Box::from_raw(user_data as *mut FFISender);")
@@ -419,7 +435,7 @@ proc generateApiRs*(
   lines.add("    let (tx, rx) = flume::bounded::<FFIResult>(1);")
   lines.add("    let raw = Box::into_raw(Box::new(tx)) as *mut c_void;")
   lines.add("    let ret = f(on_result, raw);")
-  lines.add("    if ret == 2 {")
+  lines.add("    if ret == NIMFFI_RET_MISSING_CALLBACK {")
   lines.add("        // Callback will never fire; reclaim the box to avoid a leak.")
   lines.add("        drop(unsafe { Box::from_raw(raw as *mut FFISender) });")
   lines.add("        return Err(\"RET_MISSING_CALLBACK (internal error)\".into());")
@@ -442,7 +458,7 @@ proc generateApiRs*(
   lines.add("    let (tx, rx) = flume::bounded::<FFIResult>(1);")
   lines.add("    let raw = Box::into_raw(Box::new(tx)) as *mut c_void;")
   lines.add("    let ret = f(on_result, raw);")
-  lines.add("    if ret == 2 {")
+  lines.add("    if ret == NIMFFI_RET_MISSING_CALLBACK {")
   lines.add("        drop(unsafe { Box::from_raw(raw as *mut FFISender) });")
   lines.add("        return Err(\"RET_MISSING_CALLBACK (internal error)\".into());")
   lines.add("    }")

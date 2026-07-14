@@ -44,46 +44,36 @@ proc sendRequestToFFIThread*(
 
   ok()
 
-func resolveRequestTimeout[T](reqIdCs: cstring, ctx: ptr FFIContext[T]): Duration =
-  ## Per-proc `{.ffi: "timeout = <ms>".}` override if one was registered for this
-  ## request type, otherwise the context-wide default.
-  let ms = ctx[].requestTimeouts[].getOrDefault(reqIdCs, 0)
-  if ms > 0: ms.milliseconds else: ctx.defaultRequestTimeout
-
-proc reportTimeoutIfTripped(
+proc awaitWithStaleWarnings(
     retFut: Future[Result[seq[byte], string]],
     request: ptr FFIThreadRequest,
-    deadline: Duration,
+    interval: Duration,
     reqId: string,
-) {.async.} =
-  ## Waits for the handler or its deadline, whichever comes first. On a trip we
-  ## deliberately do NOT cancel the handler: a hard-cancel mid-call into the
-  ## underlying library (Waku/libp2p) can leave it partially applied, so we
-  ## unblock the caller with a timeout err now and let the handler run to
-  ## completion. `fireCallback`'s once-only guard keeps the two paths from
-  ## answering twice.
-  if deadline == InfiniteDuration:
-    return
-  # Handlers that already completed (e.g. a sync body) skip the timer entirely,
-  # keeping the per-request cost off the fast path.
-  if retFut.finished():
-    return
-  let timer = sleepAsync(deadline)
-  # `race` returns the first to finish WITHOUT cancelling the loser, so the
-  # handler keeps running when the timer wins.
-  discard await race(retFut, timer)
-  if not timer.finished():
-    await timer.cancelAndWait()
-  if retFut.finished():
-    return
-  warn "ffi request timed out; caller unblocked, handler left running",
-    reqId = reqId, timeoutMs = deadline.milliseconds
-  fireCallback(
-    Result[seq[byte], string].err(
-      "ffi request timed out after " & $deadline.milliseconds & "ms"
-    ),
-    request,
-  )
+): Future[Result[seq[byte], string]] {.async.} =
+  ## Pings the caller with RET_STALE_WARN every `interval` while the handler
+  ## runs, then returns its real result. Never cancels it: a hard-cancel mid-call
+  ## into the underlying library (Waku/libp2p) can leave it partially applied, so
+  ## the caller is kept informed and decides for itself. The timer lives entirely
+  ## in this frame, so nothing references the request once the handler resolves.
+  let intervalMs = interval.milliseconds
+  if intervalMs <= 0:
+    # A non-positive / infinite interval opts out of progress pings entirely.
+    return await retFut
+  var elapsed = 0'i64
+  while not retFut.finished():
+    let timer = sleepAsync(interval)
+    # `race` returns the first to finish WITHOUT cancelling the loser, so the
+    # handler keeps running when the timer wins.
+    discard await race(retFut, timer)
+    if retFut.finished():
+      if not timer.finished():
+        await timer.cancelAndWait()
+      break
+    elapsed += intervalMs
+    warn "ffi request still in flight; caller notified via RET_STALE_WARN",
+      reqId = reqId, elapsedMs = elapsed
+    fireStaleWarn(request, elapsed)
+  return await retFut
 
 proc processRequest[T](
     request: ptr FFIThreadRequest, ctx: ptr FFIContext[T]
@@ -100,16 +90,12 @@ proc processRequest[T](
     else:
       ctx[].registeredRequests[][reqIdCs](cast[pointer](request), ctx)
 
-  # CatchableError covers CancelledError from the shutdown drain; handleRes must
-  # still run, so the timeout race and the handler await share one try — a cancel
-  # mid-race must not skip the response-and-free below.
+  # CatchableError covers CancelledError from the shutdown drain. The warn loop
+  # and the handler share one try so that a cancel mid-loop still reaches the
+  # response-and-free below.
   let res =
     try:
-      # May answer the caller early with a timeout err; the handler keeps running.
-      await reportTimeoutIfTripped(
-        retFut, request, resolveRequestTimeout(reqIdCs, ctx), reqId
-      )
-      await retFut
+      await awaitWithStaleWarnings(retFut, request, ctx.staleWarnInterval, reqId)
     except CatchableError as e:
       Result[seq[byte], string].err(
         "Error in processRequest for " & reqId & ": " & e.msg

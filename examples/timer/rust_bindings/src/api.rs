@@ -31,9 +31,14 @@ unsafe fn ffi_payload(ret: c_int, msg: *const c_char, len: usize) -> FFIResult {
     } else {
         slice::from_raw_parts(msg as *const u8, len).to_vec()
     };
-    if ret == 0 { Ok(bytes) }
+    if ret == NIMFFI_RET_OK { Ok(bytes) }
     else        { Err(String::from_utf8_lossy(&bytes).into_owned()) }
 }
+
+// nim-ffi result-callback status codes (mirror ffi/ffi_types.nim).
+const NIMFFI_RET_OK: c_int = 0;
+const NIMFFI_RET_MISSING_CALLBACK: c_int = 2;
+const NIMFFI_RET_STALE_WARN: c_int = 3;
 
 unsafe extern "C" fn on_result(
     ret: c_int,
@@ -41,6 +46,11 @@ unsafe extern "C" fn on_result(
     len: usize,
     user_data: *mut c_void,
 ) {
+    // NIMFFI_RET_STALE_WARN (3) is a non-terminal progress ping: the request
+    // is still running. This wrapper only delivers the final result, so ignore
+    // it WITHOUT reclaiming the box — a terminal callback still owns the Sender.
+    if ret == NIMFFI_RET_STALE_WARN { return; }
+
     // Take ownership of the boxed Sender — dropping it at end of scope
     // releases the only outstanding handle.
     let tx = Box::from_raw(user_data as *mut FFISender);
@@ -66,7 +76,7 @@ where
     let (tx, rx) = flume::bounded::<FFIResult>(1);
     let raw = Box::into_raw(Box::new(tx)) as *mut c_void;
     let ret = f(on_result, raw);
-    if ret == 2 {
+    if ret == NIMFFI_RET_MISSING_CALLBACK {
         // Callback will never fire; reclaim the box to avoid a leak.
         drop(unsafe { Box::from_raw(raw as *mut FFISender) });
         return Err("RET_MISSING_CALLBACK (internal error)".into());
@@ -87,7 +97,7 @@ where
     let (tx, rx) = flume::bounded::<FFIResult>(1);
     let raw = Box::into_raw(Box::new(tx)) as *mut c_void;
     let ret = f(on_result, raw);
-    if ret == 2 {
+    if ret == NIMFFI_RET_MISSING_CALLBACK {
         drop(unsafe { Box::from_raw(raw as *mut FFISender) });
         return Err("RET_MISSING_CALLBACK (internal error)".into());
     }
