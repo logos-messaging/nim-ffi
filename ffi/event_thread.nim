@@ -1,13 +1,6 @@
-## Event-thread body and FFI-thread liveness monitoring.
-##
-## Included from `ffi_context.nim` — inherits its imports, FFIContext type,
-## and the heartbeat-timing constants. Lives alongside `ffi_thread.nim`
-## so each thread's machinery is readable on its own.
-##
-## Responsibilities:
-## - Drain queued events into listener callbacks.
-## - Watch `ctx.ffiHeartbeat` and emit `NotRespondingEvent` / `RespondingEvent`
-##   on FFI-thread stall and recovery transitions.
+## Event-thread body and FFI-thread liveness monitoring. Included from
+## `ffi_context.nim`. Drains queued events into listeners and emits
+## NotResponding/Responding on FFI-heartbeat stall/recovery.
 
 type
   NotRespondingEvent* = object
@@ -20,8 +13,8 @@ const
 proc dispatchToListeners[T](
     ctx: ptr FFIContext[T], eventName: string, data: pointer, dataLen: int
 ) =
-  ## Holds reg.lock for the entire snapshot + invocation so concurrent
-  ## add/remove on this registry blocks until dispatch returns.
+  ## Holds reg.lock across snapshot + invocation so concurrent add/remove blocks
+  ## until dispatch returns.
   withLock ctx[].eventRegistry.lock:
     let listeners = ctx[].eventRegistry.byEvent.getOrDefault(eventName)
     if listeners.len == 0:
@@ -37,8 +30,7 @@ proc dispatchToListeners[T](
         )
 
 proc emitLivenessEvent[T, P](ctx: ptr FFIContext[T], name: string, payload: P) =
-  ## Encodes a liveness event and dispatches directly to listeners (bypassing
-  ## the queue, which may be wedged). Runs on the event thread.
+  ## Dispatches directly to listeners, bypassing the (possibly wedged) queue.
   let event =
     try:
       EventEnvelope[P](eventType: name, payload: payload).cborEncode()
@@ -57,18 +49,15 @@ proc onNotResponding*(ctx: ptr FFIContext) =
 
 proc onResponding*(ctx: ptr FFIContext) =
   ## Fired once when the heartbeat resumes after a NotRespondingEvent.
-  ## Lets consumers clear any "library hung" UI state without polling.
   emitLivenessEvent(ctx, RespondingEventName, RespondingEvent())
 
 proc dispatchQueuedEvent[T](ctx: ptr FFIContext[T], qe: QueuedEvent) =
-  ## Reads the borrowed slab payload; `commitDequeue` (not this proc) frees any
-  ## heap-fallback buffer once the read has returned.
+  ## Reads the borrowed slab payload; `commitDequeue` frees any heap fallback.
   ctx.dispatchToListeners($qe.name, qe.data, qe.dataLen)
 
 proc drainOneEvent[T](ctx: ptr FFIContext[T]): bool =
-  ## Peek → dispatch → commit for a single event. The slot stays pinned across
-  ## dispatch so the producer can't reuse its slab buffer mid-read; `defer`
-  ## commits even if a listener raises. Returns false when the queue is empty.
+  ## Peek → dispatch → commit; slot stays pinned across dispatch, `defer` commits
+  ## even if a listener raises. False when the queue is empty.
   let opt = ctx.eventQueue.peekEvent()
   if opt.isNone():
     return false
@@ -97,8 +86,7 @@ proc init(T: type HeartbeatMonitor, ctx: ptr FFIContext): T =
   )
 
 proc check[T](hb: var HeartbeatMonitor, ctx: ptr FFIContext[T]) =
-  ## Fires onNotResponding / onResponding on heartbeat stall / recovery.
-  ## Both transitions latch — each fires at most once per stall episode.
+  ## Fires onNotResponding/onResponding on stall/recovery; each latches once per episode.
   if Moment.now() - hb.startedAt <= FFIHeartbeatStartDelay:
     return
   let cur = ctx.ffiHeartbeat.load()
@@ -116,17 +104,15 @@ proc eventRun[T](ctx: ptr FFIContext[T]) {.async.} =
   var hb = HeartbeatMonitor.init(ctx)
   var notifiedStuck = false # latched forever — eventQueueStuck is sticky terminal.
 
-  # Keep draining after `running` flips false until the FFI thread has exited, so
-  # events emitted by an async {.ffiDtor.} teardown are still dispatched.
+  # Keep draining after `running` flips false until the FFI thread exits, so events from an async {.ffiDtor.} teardown are still dispatched.
   while ctx.running.load() or not ctx.ffiThreadExited.load():
-    # Wake on enqueue or tick — whichever first.
     discard await ctx.eventQueueSignal.wait().withTimeout(EventThreadTickInterval)
 
     ctx.drainEventQueue()
 
-    # Liveness only applies while running; skip it during the teardown drain.
+    # Liveness only while running; skip during the teardown drain.
     if ctx.running.load():
-      # Fire after drain so reg.lock is free — FFI-thread would deadlock here.
+      # Fire after drain so reg.lock is free (FFI thread would deadlock here).
       if not notifiedStuck and ctx.eventQueueStuck.load():
         onNotResponding(ctx)
         notifiedStuck = true
@@ -137,8 +123,6 @@ proc eventRun[T](ctx: ptr FFIContext[T]) {.async.} =
 
 proc eventThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ## Drains the event queue and runs the FFI-thread heartbeat check.
-  ## Borrows each queued slab payload until dispatch returns, then releases
-  ## any heap-fallback buffer.
   defer:
     let fireRes = ctx.eventThreadExitSignal.fireSync()
     if fireRes.isErr():

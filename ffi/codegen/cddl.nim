@@ -1,7 +1,5 @@
-## CDDL (RFC 8610) schema generator for the nim-ffi framework.
-## Mirrors the CBOR wire format produced by ffi/cbor_serial.nim: every
-## user-declared {.ffi.} type becomes a CDDL rule, every {.ffi.} / {.ffiCtor.}
-## proc gets a request envelope rule plus a response shape rule.
+## CDDL (RFC 8610) schema generator mirroring the CBOR wire format from
+## ffi/cbor_serial.nim: types become rules, procs get request/response rules.
 
 import std/[os, strutils, unicode]
 import ./meta
@@ -25,22 +23,18 @@ proc toCamelCase(s: string): string =
   return res
 
 proc nimTypeToCddl*(typeName: string): string =
-  ## Maps a Nim type name (as recorded in the compile-time registries) to its
-  ## CDDL equivalent. Unknown PascalCase names are passed through as references
-  ## to other CDDL rules in the same document.
+  ## Nim type name → CDDL equivalent; unknown names pass through as rule refs.
   let t = typeName.strip()
   let seqI = innerOf(t, "seq[")
   if seqI.len > 0:
     let inner = seqI.strip()
     if inner == "byte" or inner == "uint8":
-      # `seq[byte]` rides the wire as a CBOR byte string, matching the Nim
-      # cbor_serialization writer — reflect that in the schema.
+      # seq[byte] rides the wire as a CBOR byte string.
       return "bytes"
     return "[* " & nimTypeToCddl(inner) & "]"
   let arrI = innerOf(t, "array[")
   if arrI.len > 0:
-    # CDDL has no fixed-length array literal as ergonomic as Nim's array; emit
-    # an unbounded array whose element type is the user-declared element type.
+    # Emit an unbounded array of the element type (CDDL lacks a fixed-length literal).
     let commaIdx = arrI.find(',')
     let elemT =
       if commaIdx >= 0:
@@ -63,7 +57,6 @@ proc nimTypeToCddl*(typeName: string): string =
   of "float32": "float32"
   of "pointer": "uint"
   else: t
-    # reference to another rule in this CDDL document
 
 proc reqStructName(p: FFIProcMeta): string =
   ## Mirrors the Nim macro: <CamelCase(procName)>{Ctor}Req.
@@ -101,14 +94,13 @@ proc emitReqFields(p: FFIProcMeta): string =
   emitMap(fields)
 
 proc responseRule(p: FFIProcMeta): string =
-  ## CDDL shape of the success payload returned by the FFI callback.
-  ## Error payloads stay as raw UTF-8 and are intentionally absent from the schema.
+  ## CDDL shape of the success payload; error payloads are raw UTF-8, absent here.
   case p.kind
   of FFIKind.CTOR:
-    # The ctor returns the FFI context address as a CBOR-encoded decimal string.
+    # Ctor returns the FFI context address as a CBOR decimal string.
     "tstr"
   of FFIKind.DTOR:
-    # The dtor has no meaningful payload — handleRes sends a CBOR null sentinel.
+    # Dtor payload is a CBOR null sentinel.
     "nil"
   of FFIKind.FFI:
     if p.returnRidesAsPtr():

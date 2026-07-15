@@ -1,6 +1,5 @@
-## Structured type model shared by the C / C++ / Rust binding generators: one
-## parser (`parseFFIType`) for the Nim type strings each backend used to slice
-## by hand, plus `renderNative` to walk the result into a backend's type string.
+## Structured type model shared by the C / C++ / Rust binding generators:
+## `parseFFIType` parses a Nim type string, `renderNative` walks it per backend.
 
 import std/[strutils, options]
 
@@ -39,8 +38,7 @@ type
       discard
 
   NativeTypeMap* = object
-    ## A backend's answer to "what do you call this kind?". `seqOf`/`optOf`
-    ## wrap an already-rendered element; `structName` maps a user type name.
+    ## Per-backend type names; `structName` nil ⇒ user type name passes through.
     scalar*: proc(s: ScalarKind): string {.noSideEffect, nimcall.}
     str*: string
     bytes*: string
@@ -48,17 +46,14 @@ type
     seqOf*: proc(elem: string): string {.noSideEffect, nimcall.}
     optOf*: proc(elem: string): string {.noSideEffect, nimcall.}
     structName*: proc(name: string): string {.noSideEffect, nimcall.}
-      ## nil ⇒ the user type name passes through unchanged
 
 func genericInnerType*(typeName, prefix: string): string =
-  ## Inner type of a single-parameter generic `Prefix[Inner]`, e.g.
-  ## `genericInnerType("seq[int]", "seq[")` → `"int"`; "" if not that shape.
+  ## Inner type of `Prefix[Inner]`, e.g. ("seq[int]", "seq[") → "int"; "" if no match.
   if typeName.startsWith(prefix) and typeName.endsWith("]"):
     return typeName[prefix.len .. ^2]
   return ""
 
 func scalarKind(t: string): Option[ScalarKind] =
-  ## Single source of truth for the scalar leaf set every backend shares.
   case t
   of "bool":
     some(skBool)
@@ -86,9 +81,8 @@ func scalarKind(t: string): Option[ScalarKind] =
     none(ScalarKind)
 
 func parseFFIType*(typeName: string): FFIType =
-  ## Single source of truth for turning a Nim type string into the shared
-  ## intermediate representation:
-  ## ptr/pointer, seq[byte]→bytes, seq/Option/Maybe, scalars, string, else struct.
+  ## Nim type string → shared `FFIType`: ptr/pointer, seq[byte]→bytes, seq/Option/Maybe,
+  ## scalars, string, else struct.
   let t = typeName.strip()
   if t.startsWith("ptr ") or t == "pointer":
     return FFIType(kind: ftPtr)
@@ -114,7 +108,7 @@ func parseFFIType*(typeName: string): FFIType =
   FFIType(kind: ftStruct, name: t)
 
 func renderNative*(m: NativeTypeMap, t: FFIType): string =
-  ## Recursively walks `t` into a native type string for the backend `m`.
+  ## Recursively walks `t` into a native type string for backend `m`.
   case t.kind
   of ftScalar:
     m.scalar(t.scalar)

@@ -1,8 +1,6 @@
-## Demonstrates the Nim-native side of the {.ffi.} / {.ffiCtor.} macros:
-## every annotated proc remains callable from Nim with its declared signature
-## (`Future[Result[T, string]]`), no callbacks or CBOR buffers involved. The
-## C-exported wrapper exists in parallel as an overload distinguishable by
-## arity — see `test_ffi_context.nim` for the C-shape callers.
+## Nim-native side of {.ffi.} / {.ffiCtor.}: every annotated proc stays callable
+## from Nim with its declared `Future[Result[T, string]]` signature, no callbacks
+## or CBOR. The C-exported wrapper lives in parallel (see test_ffi_context.nim).
 
 import std/options
 import unittest2
@@ -12,7 +10,7 @@ import ffi
 type Counter = object
   start: int
 
-# Stub the dylib NimMain importc that declareLibrary emits (this links as a plain exe).
+# Stub the dylib NimMain importc that declareLibrary emits (links as an exe).
 {.emit: "void libcounterlibNimMain(void) {}".}
 
 declareLibrary("counterlib", Counter)
@@ -32,8 +30,7 @@ proc counter_create*(cfg: CounterConfig): Future[Result[Counter, string]] {.ffiC
   return ok(Counter(start: cfg.initial))
 
 proc counter_value*(c: Counter): Future[Result[CounterState, string]] {.ffi.} =
-  ## Sync body (no `await`); the Nim-facing wrapper still returns
-  ## Future[Result[...]] so the source-level shape is preserved.
+  ## Sync body (no `await`); the wrapper still returns Future[Result[...]].
   return ok(CounterState(value: c.start))
 
 proc counter_add*(
@@ -61,10 +58,7 @@ proc counter_fail*(c: Counter, reason: string): Future[Result[string, string]] {
 proc counter_chain*(
     c: Counter, steps: int
 ): Future[Result[CounterState, string]] {.ffi.} =
-  ## Real async work: multiple awaits composing other {.ffi.} procs.
-  ## Shows that the Nim-facing wrapper for an {.ffi.} proc is itself
-  ## awaitable, so {.ffi.} procs can be composed naturally without ever
-  ## touching the C-export shape.
+  ## Multiple awaits composing other {.ffi.} procs — the wrapper is awaitable.
   var current = c
   for i in 0 ..< steps:
     await sleepAsync(1.milliseconds)
@@ -94,9 +88,7 @@ type QueryReport {.ffi.} = object
 proc counter_query*(
     c: Counter, filter: RangeFilter, page: Pagination, projection: Projection
 ): Future[Result[QueryReport, string]] {.ffi.} =
-  ## Three independent object-typed parameters: `filter`, `page`, `projection`.
-  ## Verifies that the macro packs all three into one CBOR Req envelope on the
-  ## wire and unpacks them back into the typed locals before this body runs.
+  ## Three object-typed params packed into one CBOR Req envelope and unpacked back.
   if filter.hi < filter.lo:
     return err("filter range is empty")
   if page.limit <= 0:

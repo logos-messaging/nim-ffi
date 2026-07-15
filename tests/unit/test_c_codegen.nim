@@ -1,7 +1,5 @@
-## Unit-tests for the C binding generator. Drives generateCLibHeader (and the
-## shared-header generators) directly against a synthetic registry (no macro
-## pipeline, no files written) and asserts on the emitted text — the same
-## approach as test_cddl_codegen.
+## Unit-tests for the C binding generator: drives generateCLibHeader (and the
+## shared-header generators) against a synthetic registry and asserts on the text.
 
 import std/[strutils, sequtils]
 import unittest2
@@ -81,8 +79,7 @@ suite "generateCLibHeader: types and codecs":
     check "bool has_value;" in header
 
   test "a struct whose fields own no heap memory gets no free helper":
-    # EchoResponse has only a string field, so it does get a free; assert the
-    # inverse with the per-proc Version-less example via the int-only check:
+    # EchoResponse has a string field, so it gets a free helper.
     check "timer_free_EchoResponse(" in header
 
 suite "generateCLibHeader: ABI declarations and context API":
@@ -257,10 +254,7 @@ suite "generateCLibHeader: scalar-fast-path procs are excluded":
     check "int calc_add(" notin header # note: calc_add_event_listener is unrelated
 
   test "unfiltered, the generator would emit a wrong-ABI CBOR caller for it":
-    # Regression guard for the bug bindableProcs prevents: handed the raw
-    # registry, the C generator declares calc_add with the CBOR
-    # (req_cbor, req_cbor_len) prototype, which mismatches its real inline-arg
-    # export. genBindings must feed the filtered set (see the `of "c":` branch).
+    # Unfiltered, the generator emits a wrong-ABI CBOR prototype for the scalar proc.
     let header = generateCLibHeader(procs, types, "calc")
     check "int calc_add(void* ctx, FFICallback callback, void* user_data, " &
       "const uint8_t* req_cbor, size_t req_cbor_len);" in header

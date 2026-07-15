@@ -3,15 +3,11 @@ import unittest2
 import results
 import ffi
 
-# Exercises the async `{.ffiDtor.}` teardown hook: a non-empty dtor body is
-# lifted into an `ffiTeardown` overload the FFI thread awaits on its own event
-# loop right before it exits. `destroyFFIContext` must block until that
-# teardown finishes.
+# Exercises async {.ffiDtor.}: destroyFFIContext must block until teardown finishes.
 
 type TeardownLib = object
 
-# declareLibrary emits an importc `lib<name>NimMain`; this test links as a plain
-# exe, so stub it (mirrors test_ffi_context.nim).
+# Stub the importc NimMain declareLibrary emits (plain-exe link).
 {.emit: "void libteardownlibNimMain(void) {}".}
 
 declareLibrary("teardownlib", TeardownLib)
@@ -28,9 +24,7 @@ proc teardownlib_create*(
   return ok(TeardownLib())
 
 proc teardownlib_destroy*(lib: TeardownLib): Future[void] {.ffiDtor.} =
-  ## Async teardown: sleeps on the FFI event loop, then records that it ran and
-  ## on which thread. If destroy didn't wait, `gTeardownRan` would still be false
-  ## when the test checks it.
+  ## Async teardown: sleeps, then records that it ran and on which thread.
   await sleepAsync(200.milliseconds)
   gTeardownThreadId.store(getThreadId())
   gTeardownRan.store(true)
@@ -47,8 +41,7 @@ proc encodedPtr(bytes: var seq[byte]): ptr byte =
     cast[ptr byte](addr bytes[0])
 
 proc createCtxWithLib(): ptr FFIContext[TeardownLib] =
-  ## Spins up a context via the ctor and waits until `myLib` is populated (set on
-  ## the FFI thread when the ctor request is dispatched), so teardown has a lib.
+  ## Spins up a context via the ctor and waits until `myLib` is populated.
   var cfg = cborEncode(TeardownlibCreateCtorReq(config: NoopConfig(dummy: 0)))
   let ret = teardownlib_create(encodedPtr(cfg), cfg.len.csize_t, noopCallback, nil)
   if ret.isNil():
@@ -72,9 +65,7 @@ suite "async {.ffiDtor.} teardown hook":
 
     check TeardownlibFFIPool.destroyFFIContext(ctx).isOk()
 
-    # If destroy returned before awaiting the teardown, this would be false.
     check gTeardownRan.load()
-    # And it must have run on the FFI thread, not the caller's.
     check gTeardownThreadId.load() != 0
     check gTeardownThreadId.load() != callerTid
 

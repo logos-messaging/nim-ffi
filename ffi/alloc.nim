@@ -1,24 +1,13 @@
 ## Cross-thread allocation helpers backed by libc `malloc`/`free`.
-##
-## We deliberately avoid Nim's `allocShared`/`deallocShared` here. Under
-## `--mm:orc` they delegate to the per-thread `allocator` MemRegion stored
-## in TLS; freeing such a buffer from a different thread later walks
-## `chunk.owner` back to that MemRegion. If the original thread has exited
-## by then (e.g. a `std::async` worker that produced the FFI request and
-## was destroyed before the FFI thread ran `deleteRequest`), `chunk.owner`
-## dangles into reclaimed TLS and `addToSharedFreeList` segfaults — TSan on
-## ARM reproduces this from `TimerE2E.ThreadedHammer`. `malloc`/`free` are
-## process-global and thread-lifetime-independent, so freeing on a different
-## thread is safe.
+## Avoids Nim `allocShared` whose TLS-owned MemRegion segfaults when freed from a
+## thread other than the one that allocated (and may have since exited); libc is process-global.
 
 import system/ansi_c
 
-## Can be shared safely between threads
 type SharedSeq*[T] = tuple[data: ptr UncheckedArray[T], len: int]
 
 proc alloc*(str: cstring): cstring =
-  ## Allocates a fresh null-terminated copy of `str` via `c_malloc`. The
-  ## returned pointer must be released with `dealloc(cstring)`.
+  ## Fresh null-terminated `c_malloc` copy of `str`; free with `dealloc(cstring)`.
   if str.isNil():
     var ret = cast[cstring](c_malloc(1))
     ret[0] = '\0'
@@ -29,8 +18,6 @@ proc alloc*(str: cstring): cstring =
   return ret
 
 proc alloc*(str: string): cstring =
-  ## Allocates a fresh null-terminated copy of `str` via `c_malloc`. The
-  ## returned pointer must be released with `dealloc(cstring)`.
   var ret = cast[cstring](c_malloc(csize_t(str.len + 1)))
   let s = cast[seq[char]](str)
   for i in 0 ..< str.len:
@@ -39,20 +26,15 @@ proc alloc*(str: string): cstring =
   return ret
 
 proc dealloc*(p: cstring) {.inline.} =
-  ## Frees a buffer obtained from one of the `alloc(...)` overloads above.
-  ## Nil-safe.
+  ## Frees an `alloc(...)` buffer. Nil-safe.
   if not p.isNil():
     c_free(cast[pointer](p))
 
 proc allocBox*(size: int): pointer =
-  ## `c_malloc` block for a cross-thread callback box (allocated on the foreign
-  ## caller thread, freed on the FFI thread). Uses libc for the same
-  ## thread-lifetime safety reason as the rest of this module. Free with
-  ## `freeBox`.
+  ## `c_malloc` block for a cross-thread callback box; free with `freeBox`.
   c_malloc(csize_t(size))
 
 proc freeBox*(p: pointer) =
-  ## Releases a block from `allocBox`. Nil-safe.
   if not p.isNil():
     c_free(p)
 
@@ -70,8 +52,6 @@ proc deallocSharedSeq*[T](s: var SharedSeq[T]) =
   s.len = 0
 
 proc toSeq*[T](s: SharedSeq[T]): seq[T] =
-  ## Creates a seq[T] from a SharedSeq[T]. No explicit dealloc is required
-  ## as req[T] is a GC managed type.
   var ret = newSeq[T]()
   for i in 0 ..< s.len:
     ret.add(s.data[i])

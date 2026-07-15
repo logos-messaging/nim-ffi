@@ -1,18 +1,11 @@
-## C++ binding generator for the nim-ffi framework.
-## Generates a header-only C++ binding and CMakeLists.txt. Requests/responses
-## travel as CBOR (encoded with vendored TinyCBOR on the C++ side, matching
-## the Nim-side cbor_serial codec on the wire — both ends speak RFC 8949).
+## C++ binding generator: header-only binding + CMakeLists, CBOR over the wire.
 
 import std/[os, strutils]
 import ./meta, ./string_helpers, ./c_cpp_common, ./types_ir
 
-## Wire-format C++ type used for any Nim `ptr T` / `pointer`. Fixed 64-bit so
-## the CBOR payload size is stable regardless of host architecture.
+## Fixed 64-bit wire type for any Nim `ptr T` / `pointer`.
 const CppPtrType* = "uint64_t"
 
-## Static template blocks live as real C++ / CMake files under templates/cpp/
-## and are slurped into the binary at compile time. Edits to those files are
-## reflected in the generated bindings without touching this codegen.
 const
   HeaderPreludeTpl = staticRead("templates/cpp/header_prelude.hpp.tpl")
   ResultTpl = staticRead("templates/cpp/result.hpp.tpl")
@@ -56,14 +49,9 @@ proc nimTypeToCpp*(typeName: string): string =
 proc emitStructCborCodec(
     lines: var seq[string], structName: string, fields: seq[(string, string)]
 ) =
-  ## Appends per-struct TinyCBOR encode_cbor + decode_cbor free functions for
-  ## `structName`. `fields` is a sequence of (field-name, ignored C++ type)
-  ## pairs — the type is unused at the codec layer because the generic
-  ## encode_cbor / decode_cbor overloads in cbor_helpers.hpp.tpl dispatch on
-  ## the struct member's type. We emit a CBOR map with text-string keys to
-  ## match the wire format produced by Nim's cbor_serialization.
+  ## Appends per-struct TinyCBOR encode_cbor + decode_cbor functions emitting a
+  ## text-keyed CBOR map. The C++ type in `fields` is unused (overloads dispatch).
   let n = fields.len
-  # ── encode ────────────────────────────────────────────────────────────────
   if n == 0:
     lines.add(
       "inline CborError encode_cbor(CborEncoder& e, const $1&) {" % [structName]
@@ -84,7 +72,6 @@ proc emitStructCborCodec(
     )
   lines.add("    return cbor_encoder_close_container(&e, &m);")
   lines.add("}")
-  # ── decode ────────────────────────────────────────────────────────────────
   if n == 0:
     lines.add("inline CborError decode_cbor(CborValue& it, $1&) {" % [structName])
     lines.add("    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;")
@@ -106,44 +93,15 @@ proc emitStructCborCodec(
   lines.add("}")
 
 proc cppBracedInit(structName: string, fieldNames: seq[string]): string =
-  ## Produces a C++ braced-init expression for a per-proc Req struct.
-  ## Used to construct the request value before CBOR-encoding it for the wire,
-  ## as in `const auto req = TimerEchoReq{message, count};` in the generated
-  ## header. The field order must match the struct's declaration order, which
-  ## in turn mirrors the user's Nim FFI signature.
-  ##
-  ## Examples:
-  ##   cppBracedInit("TimerEchoReq", @["message", "count"])
-  ##     → "TimerEchoReq{message, count}"
-  ##   cppBracedInit("TimerVersionReq", @[])
-  ##     → "TimerVersionReq{}"
-  ##   cppBracedInit("TimerCreateCtorReq", @["config"])
-  ##     → "TimerCreateCtorReq{config}"
-  ##
-  ## Empty `fieldNames` collapses cleanly because `join` on an empty seq
-  ## returns "", so the result is the well-formed empty-init `Name{}`.
+  ## C++ braced-init for a Req struct, e.g. `TimerEchoReq{message, count}`.
   return structName & "{" & fieldNames.join(", ") & "}"
 
 proc emitEventDispatcher(
     lines: var seq[string], ctxTypeName, libName: string, events: seq[FFIEventMeta]
 ) =
-  ## Public listener-registration API in the generated context class:
-  ##
-  ## - `addOn<X>Listener(std::function<void(const T&)>) -> ListenerHandle`
-  ##   per declared `{.ffiEvent.}`. Internally registers under the wire
-  ##   event name; the per-listener trampoline decodes the CBOR
-  ##   envelope's `payload` field as `T` and invokes the user handler.
-  ##   Callers subscribe to each event separately.
-  ## - `removeEventListener(ListenerHandle) -> bool` drops a listener by
-  ##   handle. After it returns true, no further callbacks for that id
-  ##   are in flight on the FFI side (the Nim-side registry lock plus
-  ##   snapshot copy guarantees this).
-  ##
-  ## Ownership: each listener's callable is held by a
-  ## `std::unique_ptr<ListenerBase>` in `listeners_`, keyed by id; the
-  ## raw pointer is handed to the dylib as `user_data`. The map entry
-  ## (and therefore the callable) survives at a stable heap address
-  ## until `removeEventListener` removes it.
+  ## Emits the public per-event `addOn<X>Listener` / `removeEventListener` API.
+  ## Callables are owned by `listeners_` (unique_ptr keyed by id); the raw
+  ## pointer is the dylib's `user_data`, stable until removal.
   if events.len == 0:
     return
   lines.add(
@@ -151,7 +109,6 @@ proc emitEventDispatcher(
   )
   lines.add("    struct ListenerHandle { std::uint64_t id = 0; };")
   lines.add("")
-  # Per-event typed registration helpers.
   for ev in events:
     let methodName =
       "addOn" & capitalizeFirstLetter(ev.nimProcName).substr(2) & "Listener"
@@ -174,7 +131,6 @@ proc emitEventDispatcher(
     lines.add("        return ListenerHandle{id};")
     lines.add("    }")
     lines.add("")
-  # Remove by handle.
   lines.add("    bool removeEventListener(ListenerHandle handle) {")
   lines.add("        if (handle.id == 0) return false;")
   lines.add(
@@ -186,14 +142,8 @@ proc emitEventDispatcher(
   lines.add("")
 
 proc emitEventTrampoline(lines: var seq[string], events: seq[FFIEventMeta]) =
-  ## Private listener machinery for the public API emitted by
-  ## `emitEventDispatcher`:
-  ##
-  ## - `ListenerBase` is a polymorphic base so the context's
-  ##   `listeners_` map can own typed listeners under a single value type.
-  ## - `TypedListener<T>` holds the user's `std::function<void(const T&)>`
-  ##   and is the target of `typedTrampoline<T>`, which CBOR-decodes the
-  ##   envelope's `payload` field as `T` and invokes the handler.
+  ## Private listener machinery for `emitEventDispatcher`: polymorphic
+  ## `ListenerBase`, `TypedListener<T>` and the `typedTrampoline<T>` decoder.
   if events.len == 0:
     return
   lines.add("    struct ListenerBase {")
@@ -208,7 +158,6 @@ proc emitEventTrampoline(lines: var seq[string], events: seq[FFIEventMeta]) =
   )
   lines.add("    };")
   lines.add("")
-  # Typed trampoline — one instantiation per payload type, all sharing a body.
   lines.add("    template <class T>")
   lines.add(
     "    static void typedTrampoline(int ret, const char* msg, std::size_t len, void* ud) {"
@@ -241,24 +190,13 @@ proc generateCppHeader*(
 
   lines.add(HeaderPreludeTpl)
   if events.len > 0:
-    # Only pulled in when the library declares `{.ffiEvent.}` procs —
-    # `<unordered_map>` backs the `listeners_` map.
     lines.add("#include <unordered_map>")
 
-  # Result<T> is the exception-free return channel used by every generated
-  # entry point. It must precede the CBOR helpers and sync-call helper below,
-  # which now hand their failures back as Result rather than throwing.
   lines.add(ResultTpl)
 
-  # CBOR primitive / container helpers must precede the per-struct codecs
-  # below, because each emitted `encode_cbor`/`decode_cbor(T)` calls the
-  # generic overloads for the struct's fields (std::string, std::vector,
-  # std::optional, primitives). The struct codecs are non-template `inline`
-  # functions, so name lookup happens at parse time — the overloads must be
-  # in scope before the struct codecs are parsed.
+  # Generic CBOR overloads must precede the non-template struct codecs that call them (parse-time name lookup).
   lines.add(CborHelpersTpl)
 
-  # ── Types ──────────────────────────────────────────────────────────────────
   if types.len > 0:
     lines.add("// ============================================================")
     lines.add("// User-declared FFI types")
@@ -275,7 +213,6 @@ proc generateCppHeader*(
       emitStructCborCodec(lines, t.name, fields)
       lines.add("")
 
-  # ── Per-proc Req structs (CBOR transport units) ───────────────────────────
   lines.add("// ============================================================")
   lines.add("// Per-proc request envelopes (CBOR encoded on the wire)")
   lines.add("// ============================================================")
@@ -304,7 +241,6 @@ proc generateCppHeader*(
     emitStructCborCodec(lines, reqName, fields)
     lines.add("")
 
-  # ── C FFI declarations ─────────────────────────────────────────────────────
   lines.add("// ============================================================")
   lines.add("// C FFI declarations")
   lines.add("// ============================================================")
@@ -328,8 +264,7 @@ proc generateCppHeader*(
       )
     of FFIKind.DTOR:
       lines.add("int $1(void* ctx);" % [p.procName])
-  # `declareLibrary` always exports the listener-registration ABI. Declare
-  # it here so the typed event-handler wiring below can call into it.
+  # Listener-registration ABI is always exported.
   lines.add(
     "uint64_t $1_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);" %
       [libName]
@@ -342,7 +277,6 @@ proc generateCppHeader*(
 
   lines.add(SyncCallHelperTpl)
 
-  # ── High-level C++ context class ──────────────────────────────────────────
   let classified = classifyProcs(procs)
   let ctors = classified.ctors
   let methods = classified.methods
@@ -355,7 +289,6 @@ proc generateCppHeader*(
   lines.add("class $1 {" % [ctxTypeName])
   lines.add("public:")
 
-  # ── Constructors ────────────────────────────────────────────────────────
   for ctor in ctors:
     let reqName = reqStructName(ctor)
     var ctorParams: seq[string] = @[]
@@ -377,18 +310,7 @@ proc generateCppHeader*(
 
     let reqInit = cppBracedInit(reqName, epNames)
 
-    # Same `ffi_*_` underscore convention as instance methods so that a ctor
-    # parameter cannot collide with the local Req envelope name.
-    #
-    # The ctor's C symbol returns `void*` (the ctx pointer) synchronously, but
-    # `ffi_call_` expects an int-returning lambda — and we want the callback
-    # path anyway since it carries the CBOR-encoded ctx address. Discard the
-    # synchronous return and yield 0 from the lambda; the address comes back
-    # through the callback's CBOR text-string payload.
-    # `create` returns std::unique_ptr<Ctx> rather than a Ctx by value: the
-    # context owns library threads, so we forbid copy/move on the class
-    # itself (see ContextRuleOf5Tpl) and hand out ownership through a
-    # smart pointer that callers can move, store in containers, etc.
+    # `create` yields the ctx via the callback's CBOR address (sync void* return discarded), owned as a unique_ptr since the class forbids copy/move.
     let createRet = "Result<std::unique_ptr<$1>>" % [ctxTypeName]
     lines.add("    static $1 create($2) {" % [createRet, ctorParamsWithTimeout])
     lines.add("        const auto ffi_req_ = $1;" % [reqInit])
@@ -412,9 +334,7 @@ proc generateCppHeader*(
       "        if (ffi_addr_.isErr()) return $1::err(ffi_addr_.error());" % [createRet]
     )
     lines.add("        const auto& addr_str = ffi_addr_.value();")
-    # Parse the ctx address without exceptions: std::stoull would throw on a
-    # non-numeric payload, so use std::from_chars and surface the failure as
-    # an err() Result instead.
+    # from_chars (not stoull) so a bad payload is an err() Result, not a throw.
     lines.add("        std::uint64_t addr = 0;")
     lines.add("        const char* addr_begin = addr_str.data();")
     lines.add("        const char* addr_end = addr_begin + addr_str.size();")
@@ -425,7 +345,7 @@ proc generateCppHeader*(
         [createRet]
     )
     lines.add("        }")
-    # Use `new` directly (not std::make_unique) so the ctor can stay private.
+    # `new` (not make_unique) so the ctor can stay private.
     lines.add(
       "        return $1::ok(std::unique_ptr<$2>(new $2(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout)));" %
         [createRet, ctxTypeName]
@@ -454,15 +374,12 @@ proc generateCppHeader*(
     lines.add("    }")
     lines.add("")
 
-  # ── Rule of 5 ──────────────────────────────────────────────────────────
   lines.add(
     ContextRuleOf5Tpl.multiReplace(("{{CTX}}", ctxTypeName), ("{{LIB}}", libName))
   )
 
-  # ── Typed event handlers (public section) ───────────────────────────────
   emitEventDispatcher(lines, ctxTypeName, libName, events)
 
-  # ── Instance methods ────────────────────────────────────────────────────
   for m in methods:
     let methodName = stripLibPrefix(m.procName, libName)
     let retCppType =
@@ -488,8 +405,6 @@ proc generateCppHeader*(
     let reqInit = cppBracedInit(reqName, methParamNames)
 
     let methRet = "Result<$1>" % [retCppType]
-    # Use a single-underscore-suffixed local for the Req envelope so it can't
-    # shadow a method parameter whose name happens to be `req` (or similar).
     lines.add("    $1 $2($3) const {" % [methRet, methodName, methParamsStr])
     lines.add("        const auto ffi_req_ = $1;" % [reqInit])
     lines.add("        auto ffi_enc_ = encodeCborFFI(ffi_req_);")
@@ -509,10 +424,7 @@ proc generateCppHeader*(
     lines.add("        return decodeCborFFI<$1>(ffi_raw_.value());" % [retCppType])
     lines.add("    }")
     lines.add("")
-    # The async wrapper calls the sync method via `this->methodName(...)` so
-    # a method param that happens to share the method's name doesn't shadow
-    # the call target (e.g. `schedule(job, retry, schedule)` would otherwise
-    # parse as invoking the `schedule` parameter).
+    # `this->methodName(...)` so a same-named param can't shadow the call target.
     if methParamsStr.len > 0:
       lines.add(
         "    std::future<$1> $2Async($3) const {" % [methRet, methodName, methParamsStr]
@@ -532,20 +444,11 @@ proc generateCppHeader*(
     lines.add("")
 
   lines.add("private:")
-  # Listener machinery (`ListenerBase`, `TypedListener<T>`, plus the
-  # static trampolines) must appear before the `listeners_` data member
-  # declaration — C++ requires the value type of a member to be complete
-  # at point of declaration. The public add*/remove methods above also
-  # reference these types, but member function bodies see the full class
-  # scope regardless of declaration order, so emitting here is sufficient
-  # for both.
+  # Listener machinery must precede the `listeners_` member (its value type must be complete at declaration).
   emitEventTrampoline(lines, events)
   lines.add("    void* ptr_;")
   lines.add("    std::chrono::milliseconds timeout_;")
   if events.len > 0:
-    # One owning entry per live listener, keyed by id. Destroyed after
-    # the destructor body runs `<lib>_destroy(ptr_)`, by which point the
-    # FFI side has joined its threads so no callback is mid-flight.
     lines.add(
       "    std::unordered_map<std::uint64_t, std::unique_ptr<ListenerBase>> listeners_;"
     )

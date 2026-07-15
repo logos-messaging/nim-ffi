@@ -1,10 +1,7 @@
 import std/[os, strutils]
 import unittest2
 
-# The validation only fires when --nimMainPrefix is on the command line, so we
-# capture a real `nim check` of the fixture at this test's compile time.
-# `mainprefix_fixture.nim` deliberately lacks the `test_` prefix so the nimble
-# runner never compiles it standalone.
+# Captures a real `nim check` of the fixture at compile time, with/without --nimMainPrefix.
 const
   nimExe = getCurrentCompilerExe()
   fixture = currentSourcePath.parentDir / "mainprefix_fixture.nim"
@@ -15,8 +12,7 @@ const
 suite "compile-time --nimMainPrefix validation":
   test "a mismatched prefix errors and names the expected flag":
     check "Error:" in wrongPrefixOutput
-    # naming the expected flag is what distinguishes our error from any other
-    # compile failure, so assert on it rather than the bare "Error:".
+    # Assert on the flag name to distinguish our error from any other compile failure.
     check "needs --nimMainPrefix:libmpfixture" in wrongPrefixOutput
 
   test "the matching prefix compiles without error":

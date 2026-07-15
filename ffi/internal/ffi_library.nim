@@ -4,11 +4,8 @@ import strutils
 import ../codegen/meta
 
 func nimMainPrefixOnCmdLine(cmdLine: string): tuple[found: bool, value: string] =
-  ## Scan the compiler command line for `--nimMainPrefix:X` (last one wins) and
-  ## return its value. Switch names in Nim are style-insensitive, so the name
-  ## is matched lowercased and with underscores stripped; the separator may be
-  ## `:` or `=`. Returns `(false, "")` when the flag is absent — note config.nims
-  ## switches may not surface here, so absence is not proof it was never set.
+  ## Last `--nimMainPrefix:X` on the command line (style-insensitive match, `:`
+  ## or `=`); absence isn't proof it was never set (config.nims may not surface).
   var found = false
   var value = ""
   for tok in cmdLine.splitWhitespace():
@@ -22,12 +19,9 @@ func nimMainPrefixOnCmdLine(cmdLine: string): tuple[found: bool, value: string] 
   (found, value)
 
 proc validateNimMainPrefix(libraryName: string) {.compileTime.} =
-  ## The Nim runtime init symbol is importc'd as `lib{libraryName}NimMain`, so
-  ## the build must pass `--nimMainPrefix:lib{libraryName}`; a mismatch otherwise
-  ## surfaces only at link time as an obscure undefined-symbol error. Absence
-  ## can't be an error — config.nims may set the prefix without it showing on
-  ## `commandLine` — so it only warrants a hint, and only for the `--app:lib`
-  ## build where the prefix actually matters.
+  ## The init symbol is importc'd as `lib{libraryName}NimMain`, so the build must
+  ## pass `--nimMainPrefix:lib{libraryName}`; a mismatch errors, absence only
+  ## hints (config.nims may set it) and only under `--app:lib`.
   let expectedPrefix = "lib" & libraryName
   let (prefixFound, prefixValue) =
     nimMainPrefixOnCmdLine(querySetting(SingleValueSetting.commandLine))
@@ -49,14 +43,13 @@ proc validateNimMainPrefix(libraryName: string) {.compileTime.} =
     )
 
 macro declareLibraryBase*(libraryName: static[string]): untyped =
-  # Record the library name for binding generation
   currentLibName = libraryName
 
   validateNimMainPrefix(libraryName)
 
   var res = newStmtList()
 
-  ## Generate {.pragma: exported, exportc, cdecl, raises: [].}
+  # {.pragma: exported, exportc, cdecl, raises: [].}
   res.add nnkPragma.newTree(
     nnkExprColonExpr.newTree(ident"pragma", ident"exported"),
     ident"exportc",
@@ -64,7 +57,7 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
     nnkExprColonExpr.newTree(ident"raises", nnkBracket.newTree()),
   )
 
-  ## Generate {.pragma: callback, cdecl, raises: [], gcsafe.}
+  # {.pragma: callback, cdecl, raises: [], gcsafe.}
   res.add nnkPragma.newTree(
     nnkExprColonExpr.newTree(ident"pragma", ident"callback"),
     ident"cdecl",
@@ -72,14 +65,12 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
     ident"gcsafe",
   )
 
-  ## Generate {.passc: "-fPIC".}
+  # {.passc: "-fPIC".}
   res.add nnkPragma.newTree(nnkExprColonExpr.newTree(ident"passc", newLit("-fPIC")))
 
-  # soname / install_name only apply to a shared library and break an executable
-  # link (fatally on macOS), so emit them only under `--app:lib`.
+  # soname / install_name only apply to a shared library and break an executable link (fatally on macOS), so emit them only under `--app:lib`.
   if compileOption("app", "lib"):
     when defined(linux):
-      ## Generates {.passl: "-Wl,-soname,libwaku.so".} (considering libraryName=="waku", for example)
       let soName = fmt"-Wl,-soname,lib{libraryName}.so"
       res.add(
         newNimNode(nnkPragma).add(
@@ -87,14 +78,13 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
         )
       )
     elif defined(macosx):
-      ## Generates {.passl: "-install_name @rpath/libwaku.dylib".}
       let installName = fmt"-install_name @rpath/lib{libraryName}.dylib"
       res.add(
         newNimNode(nnkPragma).add(
           nnkExprColonExpr.newTree(ident"passl", newStrLitNode(installName))
         )
       )
-  ## proc lib{libraryName}NimMain() {.importc.}
+  # proc lib{libraryName}NimMain() {.importc.}
   let libNimMainName = ident(fmt"lib{libraryName}NimMain")
   let importcPragma = nnkPragma.newTree(ident"importc")
   let procDef = newProc(
@@ -105,19 +95,14 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
   )
   res.add(procDef)
 
-  # Create: var initState: Atomic[int]
-  #   0 = not started, 1 = in progress (some thread is running nimMainName),
-  #   2 = done. A boolean flag flipped before nimMainName runs would let a
-  #   second concurrent caller skip past the gate while module init was
-  #   still in flight — on Windows that surfaces as "WSAStartup failed"
-  #   from chronos's later async dispatcher init on a watchdog thread.
+  # initState: 0=not started, 1=in progress, 2=done. Atomic (not a bool) so a racing caller can't skip past the gate mid-init (else Windows WSAStartup fails).
   let atomicType = nnkBracketExpr.newTree(ident("Atomic"), ident("int"))
   let varStmt = nnkVarSection.newTree(
     nnkIdentDefs.newTree(ident("initState"), atomicType, newEmptyNode())
   )
   res.add(varStmt)
 
-  ## Android chronicles redirection
+  # Android chronicles redirection
   let chroniclesBlock = quote:
     when defined(android) and compiles(defaultChroniclesStream.outputs[0].writer):
       defaultChroniclesStream.outputs[0].writer = proc(
@@ -131,16 +116,9 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
 
   let initializeLibraryProc = quote:
     proc `procName`*() {.exported.} =
-      ## Every Nim library needs to call `<yourprefix>NimMain` once exactly,
-      ## to initialize the Nim runtime.
-      ## Being `<yourprefix>` the value given in the optional
-      ## compilation flag --nimMainPrefix:yourprefix.
-      ##
-      ## Concurrent callers must NOT proceed past nimMainName until it has
-      ## fully returned: chronos's module-level globalInit (which calls
-      ## WSAStartup on Windows) runs as part of nimMainName, and a thread
-      ## that races past would later see "WSAStartup failed" when its
-      ## watchdog spins up a chronos dispatcher.
+      ## Calls `<prefix>NimMain` exactly once to init the Nim runtime. Concurrent
+      ## callers must block until it returns (its chronos globalInit runs
+      ## WSAStartup on Windows; racing past yields "WSAStartup failed" later).
       var expected: int = 0
       if initState.compareExchange(expected, 1):
         `nimMainName`()
@@ -164,22 +142,9 @@ macro declareLibrary*(
     libType: untyped,
     defaultABIFormat: static[string] = "cbor",
 ): untyped =
-  ## Declares a library with the given name and emits the C-exported event
-  ## ABI on its `FFIContext`:
-  ##
-  ## - `{libraryName}_add_event_listener(ctx, event_name, cb, ud) -> uint64`
-  ##   — registers `cb` for `event_name` and returns its stable id. `cb`
-  ##   only receives events dispatched under `event_name`; subscribe to
-  ##   each event separately.
-  ## - `{libraryName}_remove_event_listener(ctx, id) -> cint` — returns 0 on
-  ##   success, non-zero if no listener with that id exists.
-  ##
-  ## `libType` is the Nim type of the main library object, used to type
-  ## the `ctx: ptr FFIContext[libType]` parameter. See
-  ## `examples/timer/timer.nim` for a working call site.
-  ##
-  ## `defaultABIFormat` (`"cbor"` default, or `"c"`) is the wire format every
-  ## annotation inherits unless it overrides with an `"abi = ..."` spec.
+  ## Declares a library and emits the C-exported event ABI (`_add_event_listener` /
+  ## `_remove_event_listener`) on its `FFIContext`. `defaultABIFormat` (`"cbor"`/`"c"`)
+  ## is inherited unless an annotation overrides via `"abi = ..."`.
   currentLibType = $libType # so handle-receiver `.ffi.` procs can resolve the pool
 
   let (abiOk, abiFmt) = parseABIFormatName(defaultABIFormat)
@@ -193,10 +158,9 @@ macro declareLibrary*(
 
   var stmts = newStmtList()
 
-  # Emit the base bootstrap (pragmas, linker flags, NimMain, initializeLibrary)
   stmts.add(newCall(ident("declareLibraryBase"), newStrLitNode(libraryName)))
 
-  # The pool the generated wrappers validate against; ffiCtor/ffiDtor guard alike.
+  # The pool the generated wrappers validate against.
   let poolIdent = ident($libType & "FFIPool")
   stmts.add quote do:
     when not declared(`poolIdent`):
@@ -242,10 +206,7 @@ macro declareLibrary*(
     )
   )
 
-  # --- {libraryName}_remove_event_listener --------------------------------
-  # Param is `listenerId`, not `id` — `id` collides with chronos's
-  # `futures.id` template under quote injection rules and the captured
-  # symbol wins over the injected one.
+  # Param is `listenerId`, not `id`: `id` collides with chronos's `futures.id` template under quote injection and the captured symbol wins.
   let removeName = libraryName & "_remove_event_listener"
   let removeErr = "error: invalid context in " & removeName
   let removeBody = quote:

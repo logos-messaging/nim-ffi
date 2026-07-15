@@ -1,11 +1,6 @@
-## Drives the scalar-fast-path drop error end to end: compiles
-## `fixtures/scalar_skip_fixture.nim` (a library with an all-scalar `abi = c`
-## proc) with `-d:ffiGenBindings` and asserts genBindings() fails loudly, and
-## that `-d:ffiAllowScalarSkip` downgrades the drop to a clean build.
-##
-## The fixture is compiled in a child `nim check` (search paths and compiler
-## captured at compile time) so its expected failure is observed as a test
-## assertion, not this file's own compile error.
+## Compiles fixtures/scalar_skip_fixture.nim (all-scalar `abi = c`) in a child
+## `nim check` under `-d:ffiGenBindings`, asserting genBindings() fails loudly
+## and that `-d:ffiAllowScalarSkip` downgrades the drop to a clean build.
 
 import std/[os, osproc, strutils, compilesettings]
 import unittest2

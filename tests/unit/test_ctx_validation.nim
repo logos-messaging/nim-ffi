@@ -5,7 +5,7 @@ import ffi
 
 type TestLib = object
 
-# Stub the dylib NimMain importc that declareLibrary emits (this links as a plain exe).
+# Stub the importc NimMain declareLibrary emits (plain-exe link).
 {.emit: "void libctxvaltestNimMain(void) {}".}
 
 declareLibrary("ctxvaltest", TestLib)
@@ -38,11 +38,7 @@ proc validationCallback(
   s[].called.store(true)
 
 suite "ctx pointer validation at the FFI entry point":
-  # The macro-generated FFI entry point validates ctx via
-  # <LibType>FFIPool.isValidCtx. Any caller — C or Nim — that passes a nil or
-  # offset-invalid ctx with a valid callback should receive RET_ERR via the
-  # callback and the proc should return RET_ERR, never crash.
-
+  # A nil or offset-invalid ctx must yield RET_ERR via callback and return, never crash.
   test "nil ctx with valid callback returns RET_ERR via callback, no crash":
     var s: CallbackState
     initCbState(s)

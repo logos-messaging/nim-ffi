@@ -1,8 +1,4 @@
 ## FFIContext type plus lifecycle (init / signal-stop / join / destroy).
-##
-## The per-thread bodies live in `ffi_thread.nim` and `event_thread.nim`,
-## included below so the thread code can access the private FFIContext
-## fields without forcing them through a public surface.
 
 {.passc: "-fPIC".}
 
@@ -23,55 +19,42 @@ type FFIContext*[T] = object
   myLib*: ptr T # main library object (Waku, LibP2P, SDS, …)
   ffiThread: Thread[(ptr FFIContext[T])]
   eventThread: Thread[(ptr FFIContext[T])]
-  reqQueueBank: RequestQueueBank # mutex-guarded MPSC ingress from foreign threads
-  reqSignal: ThreadSignalPtr # wakes the FFI thread on enqueue
+  reqQueueBank: RequestQueueBank
+  reqSignal: ThreadSignalPtr
   stopSignal: ThreadSignalPtr
   threadExitSignal: ThreadSignalPtr
-    # bounds destroyFFIContext's wait so a blocked loop cannot hang the caller
-  eventQueueSignal: ThreadSignalPtr # wakes the event thread on enqueue
-  eventThreadExitSignal: ThreadSignalPtr # mirrors threadExitSignal for the event thread
+  eventQueueSignal: ThreadSignalPtr
+  eventThreadExitSignal: ThreadSignalPtr
   userData*: pointer
   eventRegistry*: FFIEventRegistry
-  handles*: FFIHandleRegistry # live {.ffiHandle.} objects, keyed by uint64 id
+  handles*: FFIHandleRegistry
   eventQueue*: EventQueue
   ffiHeartbeat*: Atomic[int64]
-    # advanced each FFI-thread loop; event thread reads for liveness
-  eventQueueStuck*: Atomic[bool] # sticky overflow flag
+  eventQueueStuck*: Atomic[bool]
   ffiThreadExited*: Atomic[bool]
-    # set once the FFI thread (including any async {.ffiDtor.} teardown) is done;
-    # keeps the event thread draining until then so teardown-emitted events land
-  running: Atomic[bool] # To control when the threads are running
+    # set once FFI thread (incl. async {.ffiDtor.}) is done; event thread drains until then
+  running: Atomic[bool]
   registeredRequests: ptr Table[cstring, FFIRequestProc]
   staleWarnInterval*: Duration
-    # RET_STALE_WARN cadence. An internal seam (tests tune it) — deliberately
-    # not exposed to the ffi dev, and there is no per-proc override.
 
 var onFFIThread* {.threadvar.}: bool
-  # Re-entrant dispatch guard for `sendRequestToFFIThread`.
 
 const git_version* {.strdefine.} = "n/a"
 
 const
   EventThreadTickInterval* = 1.seconds
-  FFIHeartbeatStartDelay* = 10.seconds # grace window for library startup
+  FFIHeartbeatStartDelay* = 10.seconds
   FFIHeartbeatStaleThreshold* = 1.seconds
 
 const StaleWarnIntervalMs* {.intdefine: "ffiStaleWarnIntervalMs".} = 5000
-  ## `RET_STALE_WARN` cadence, fired without limit — nim-ffi never times a
-  ## handler out. 5s mirrors Android's ANR input timeout. Override with
-  ## `-d:ffiStaleWarnIntervalMs=<ms>`.
+  ## `RET_STALE_WARN` cadence; handlers are never timed out.
 const StaleWarnInterval* = StaleWarnIntervalMs.milliseconds
 
 type FFITeardownProc*[T] = proc(lib: ptr T): Future[void] {.async.}
 
 proc ffiTeardownHook*[T](): var FFITeardownProc[T] =
-  ## Per-library teardown slot (one `{.global.}` per `T`), assigned at module init
-  ## by a non-empty `{.ffiDtor.}` and awaited by the FFI thread before it exits.
-  ##
-  ## A runtime slot, not an overloaded `ffiTeardown` resolved via `mixin`: the
-  ## constructor force-instantiates the FFI thread body before the dtor (declared
-  ## later in the source) is visible, so an overload would bind the no-op default
-  ## and the teardown would silently never run.
+  ## Per-library teardown slot (one `{.global.}` per `T`), awaited by the FFI thread before exit.
+  ## Runtime slot not an overload: an overload would bind the no-op default before the dtor is visible.
   var hook {.global.}: FFITeardownProc[T]
   hook
 
@@ -84,18 +67,13 @@ template closeAndNil(field: untyped) =
     field = nil
 
 proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## Mirror of `initContextResources`. Threads MUST be joined first (FFI thread
-  ## drained); fields are nil'd after close so re-init on the same slot is safe.
-  ## `deinitRequestQueue` frees any request raced in after the final drain.
+  ## Mirror of `initContextResources`. Threads MUST be joined first; fields nil'd after close.
   deinitRequestQueue(ctx[].reqQueueBank)
   deinitEventRegistry(ctx[].eventRegistry)
   deinitHandleRegistry(ctx[].handles)
   deinitEventQueue(ctx[].eventQueue)
   when defined(gcRefc):
-    # ThreadSignalPtr.close() under refc traps in safeUnregisterAndCloseFd
-    # → newDispatcher → rawNewObj → signal-handler re-entry (process hangs).
-    # See tests/test_ffi_context.nim "destroyFFIContext refc workaround".
-    # Fd leak is bounded — destroy runs once per process lifetime.
+    # ThreadSignalPtr.close() under refc hangs via signal-handler re-entry; leak the bounded fd.
     discard
   else:
     closeAndNil(ctx.reqSignal)
@@ -106,7 +84,6 @@ proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ok()
 
 proc cleanUpResources[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## Deinit + free for heap-allocated contexts.
   defer:
     freeShared(ctx)
   ctx.deinitContextResources()
@@ -116,8 +93,7 @@ template newSignalOrErr(field: untyped, name: string) =
     return err("couldn't create ThreadSignalPtr: " & name & ": " & $error)
 
 proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## On failure, the deferred cleanup closes partial state; caller releases
-  ## the slot (freeShared or pool.releaseSlot).
+  ## On failure, deferred cleanup closes partial state; caller releases the slot.
   # Nil first so deferred cleanup can't double-close a reused pool slot.
   ctx.reqSignal = nil
   ctx.stopSignal = nil
@@ -187,28 +163,21 @@ proc waitExitOrErr(
   ok()
 
 proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  # Skip onNotResponding on error: it takes reg.lock, which a back-pressuring
-  # listener may hold — would deepen the stuck state into a deadlock.
+  # Skip onNotResponding on error: it takes reg.lock a stuck listener may hold (deadlock risk).
   ctx.running.store(false)
   ?ctx.reqSignal.fireOrErr("reqSignal")
   ?ctx.stopSignal.fireOrErr("stopSignal")
-  # Non-fatal: event thread sees running==false on the next tick anyway.
   ctx.eventQueueSignal.fireOrErr("eventQueueSignal").isOkOr:
     error "failed to signal eventQueueSignal in signalStop", error = error
   ok()
 
-## Bound on how long stopAndJoinThreads waits for a worker thread to exit before
-## leaking ctx rather than hanging the caller. Configurable because an async
-## `{.ffiDtor.}` runs its teardown (e.g. `switch.stop()` over many live
-## connections) on the FFI thread before it exits — a graceful shutdown can
-## outlast the default, and being cut short leaks the context instead of waiting.
-## Override at compile time with `-d:ffiThreadExitTimeoutMs=<ms>`.
+## Per-thread exit wait before stopAndJoinThreads leaks ctx rather than hanging; async
+## `{.ffiDtor.}` teardown can outlast the default. Override `-d:ffiThreadExitTimeoutMs=<ms>`.
 const ThreadExitTimeoutMs* {.intdefine: "ffiThreadExitTimeoutMs".} = 1500
 const ThreadExitTimeout* = ThreadExitTimeoutMs.milliseconds
 
 proc stopAndJoinThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## On timeout, returns err and skips remaining joins (leaves threads live).
-  ## Caller owns resource cleanup. Skips onNotResponding (same reason as signalStop).
+  ## On timeout, returns err and skips remaining joins (leaves threads live); caller cleans up.
   ctx.signalStop().isOkOr:
     return err("signalStop failed: " & $error)
 
@@ -219,7 +188,6 @@ proc stopAndJoinThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ok()
 
 proc clearContext[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## Stops a heap-allocated FFI context.
   ctx.stopAndJoinThreads().isOkOr:
     return err("clearContext: " & $error)
   ctx.cleanUpResources().isOkOr:

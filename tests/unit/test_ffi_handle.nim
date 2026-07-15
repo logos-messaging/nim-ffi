@@ -1,6 +1,4 @@
-## {.ffiHandle.} round-trip through the full C-shape dispatch path: a handle
-## returned by one `.ffi.` proc crosses as a uint64 and is reconstituted as the
-## live object by another; stale/forged/null ids miss cleanly with RET_ERR.
+## {.ffiHandle.} round-trip: a handle crosses as uint64; stale/forged/null ids RET_ERR.
 
 import std/[locks, strutils]
 import unittest2
@@ -10,7 +8,7 @@ import ffi
 type HandleLib = object
   base: int
 
-# Stub the dylib NimMain importc that declareLibrary emits (this links as a plain exe).
+# Stub the importc NimMain declareLibrary emits (plain-exe link).
 {.emit: "void libhandletestNimMain(void) {}".}
 
 declareLibrary("handletest", HandleLib)
@@ -33,7 +31,7 @@ proc handletest_token*(
   s.hits.inc()
   return ok(s.token & "#" & $s.hits)
 
-# Handle as the receiver (first param) — lib type comes from declareLibrary.
+# Handle as the receiver (first param).
 proc handletest_session_bump*(s: Session): Future[Result[int, string]] {.ffi.} =
   s.hits.inc()
   return ok(s.hits)
@@ -93,7 +91,6 @@ proc encodedPtr(b: var seq[byte]): ptr byte =
     cast[ptr byte](addr b[0])
 
 template runCall(d, ctx, reqBytes, exportProc) =
-  ## Fires `exportProc` with `reqBytes` and blocks until the callback lands in `d`.
   initCallbackData(d)
   var rb = reqBytes
   check exportProc(ctx, testCallback, addr d, encodedPtr(rb), rb.len.csize_t) == RET_OK
@@ -118,7 +115,7 @@ suite "{.ffiHandle.} round-trip":
       deinitCallbackData(od)
     check od.retCode == RET_OK
     let handle = cborDecode(payload(od), uint64).value
-    check handle == 1'u64 # ids start at 1
+    check handle == 1'u64
 
     var td: CallbackData
     runCall(td, ctx, cborEncode(HandletestTokenReq(s: handle)), handletest_token)

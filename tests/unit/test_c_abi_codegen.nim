@@ -1,6 +1,5 @@
-## Unit tests for the CBOR-free (`abi = c`) C binding shape. Drives
-## generateCAbiLibHeader against a synthetic registry (no macro pipeline, no
-## files written), asserting on the emitted text.
+## Unit tests for the CBOR-free (`abi = c`) C binding shape: drives
+## generateCAbiLibHeader against a synthetic registry, asserting on the text.
 
 import std/strutils
 import unittest2

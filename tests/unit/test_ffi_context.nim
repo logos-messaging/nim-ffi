@@ -5,8 +5,6 @@ import ffi
 
 type TestLib = object
 
-## Per-request callback state.  The test thread blocks on `cond` until the
-## FFI thread signals it — no polling, no CPU waste.
 type CallbackData = object
   lock: Lock
   cond: Cond
@@ -27,8 +25,7 @@ proc deinitCallbackData(d: var CallbackData) =
 proc testCallback(
     retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
-  # A progress ping is not an answer: waking waitCallback here would report a
-  # non-terminal code as the result. Tests asserting on pings use staleCallback.
+  # A progress ping is not a terminal answer; skip it here.
   if retCode == RET_STALE_WARN:
     return
   let d = cast[ptr CallbackData](userData)
@@ -56,7 +53,6 @@ proc callbackBytes(d: var CallbackData): seq[byte] =
   return bytes
 
 proc callbackErr(d: var CallbackData): string =
-  ## Reads the error payload (sent as raw UTF-8 bytes on RET_ERR).
   var msg = newString(d.msgLen)
   if d.msgLen > 0:
     copyMem(addr msg[0], addr d.msg[0], d.msgLen)
@@ -286,7 +282,6 @@ suite "sendRequestToFFIThread":
     check sendRequestToFFIThread(ctx, FailRequest.ffiNewReq(testCallback, addr d)).isOk()
     waitCallback(d)
     check d.retCode == RET_ERR
-    # Errors are raw UTF-8 — not CBOR.
     check callbackErr(d) == "intentional failure"
 
   test "empty ok response delivers empty message":
@@ -306,7 +301,6 @@ suite "sendRequestToFFIThread":
       .isOk()
     waitCallback(d)
     check d.retCode == RET_OK
-    # CBOR-encoded "" is a single byte (text string of length 0): 0x60
     check cborDecode(callbackBytes(d), string).value == ""
 
   test "sequential requests are all processed":
@@ -333,7 +327,7 @@ suite "sendRequestToFFIThread":
 type SimpleLib = object
   value: int
 
-# Stub the dylib NimMain importc that declareLibrary emits (this links as a plain exe).
+# Stub the importc NimMain declareLibrary emits (plain-exe link).
 {.emit: "void libtestlibNimMain(void) {}".}
 
 declareLibrary("testlib", SimpleLib)
@@ -353,7 +347,6 @@ proc encodedPtr(bytes: var seq[byte]): ptr byte =
     cast[ptr byte](addr bytes[0])
 
 proc ctorAddrFromCbor(bytes: seq[byte]): uint =
-  ## The ctor success payload is a CBOR text string of the decimal address.
   let addrStr = cborDecode(bytes, string).valueOr:
     return 0
   cast[uint](parseBiggestUInt(addrStr))
@@ -416,7 +409,6 @@ suite "simplified .ffi. macro":
     defer:
       deinitCallbackData(d)
 
-    # The .ffi. macro packs all extra params into one CBOR Req struct.
     var reqBytes = cborEncode(TestlibSendReq(cfg: SendConfig(message: "hello")))
     let ret = testlib_send(
       ctx, testCallback, addr d, encodedPtr(reqBytes), reqBytes.len.csize_t
@@ -432,10 +424,7 @@ proc testlib_version*(lib: SimpleLib): Future[Result[string, string]] {.ffi.} =
   return ok("v" & $lib.value)
 
 suite "sync-body .ffi. is dispatched on FFI thread":
-  ## Before PR #23 (items 1–5), a `.ffi.` body without `await` was emitted as
-  ## an inline-on-foreign-thread fast path. That was deleted; all `.ffi.`
-  ## procs now go through the FFI thread. This test asserts the round-trip
-  ## still produces the expected payload via the callback.
+  ## All `.ffi.` procs go through the FFI thread, even sync bodies (PR #23).
   test "sync body still produces correct payload via callback":
     var ctorD: CallbackData
     initCallbackData(ctorD)
@@ -461,42 +450,31 @@ suite "sync-body .ffi. is dispatched on FFI thread":
     defer:
       deinitCallbackData(d2)
 
-    # No-extra-param .ffi. proc; pack an empty Req.
     var emptyBytes = cborEncode(TestlibVersionReq())
     let ret = testlib_version(
       ctx, testCallback, addr d2, encodedPtr(emptyBytes), emptyBytes.len.csize_t
     )
     check ret == RET_OK
-    waitCallback(d2) # always asynchronous now
+    waitCallback(d2)
     check d2.retCode == RET_OK
     check cborDecode(callbackBytes(d2), string).value == "v3"
-
-# Nim-native API (no callbacks, no CBOR buffers): the original proc name
-# resolves to the user's declared async signature and is callable directly.
 
 suite "Nim-native .ffi. / .ffiCtor. API":
   test "user proc names retain their declared Future[Result[T,string]] shape":
     let lib = SimpleLib(value: 9)
-    # Async {.ffi.} proc — call directly without ctx/callback dance.
     let echoed = waitFor testlib_send(lib, SendConfig(message: "direct"))
     check echoed.isOk
     check echoed.value == "echo:direct:9"
 
-    # Sync {.ffi.} body — still typed as Future[Result[T,string]] per the
-    # user's source-level declaration (b): completed-future wrapper.
     let v = waitFor testlib_version(lib)
     check v.isOk
     check v.value == "v9"
 
-    # The ctor body is similarly callable from Nim with its declared signature.
     let ctorRes = waitFor testlib_create(SimpleConfig(initialValue: 21))
     check ctorRes.isOk
     check ctorRes.value.value == 21
 
-# A sync `.ffi.` body (no `await`) must run on the FFI thread, not the caller's,
-# so it goes through `foreignThreadGc`, the MPSC ingress hand-off, and chronos's
-# single-thread invariant. Records `getThreadId()` in a sync body and asserts it.
-
+# Records getThreadId() to prove a sync `.ffi.` body runs on the FFI thread.
 var gRecordedHandlerTid: Atomic[int]
 
 type RecordTidReq {.ffi.} = object
@@ -505,8 +483,6 @@ type RecordTidReq {.ffi.} = object
 proc testlib_record_tid*(
     lib: SimpleLib, req: RecordTidReq
 ): Future[Result[int, string]] {.ffi.} =
-  ## Sync body — used to live on the inline fast-path; must now run on the
-  ## FFI thread.
   let tid = getThreadId()
   gRecordedHandlerTid.store(tid)
   return ok(tid)
@@ -548,23 +524,13 @@ suite "sync-body .ffi. runs on FFI thread (PR #23 regression)":
 
     let handlerTid = gRecordedHandlerTid.load()
     check handlerTid != 0
-    # The whole point of the fix: even a sync-body handler is dispatched off
-    # the caller thread. If this fails the inline fast-path is back.
     check handlerTid != callerTid
-    # And the callback payload (the recorded tid) matches what the handler stored.
     check cborDecode(callbackBytes(d), int).value == handlerTid
 
-# Reentrancy guard on sendRequestToFFIThread: a handler running on the FFI thread
-# that re-dispatches through it would enqueue work onto the very queue its blocked
-# dispatcher can never drain, so the guard returns an Err immediately.
-
+# Reentrancy guard: a handler re-dispatching gets an Err, not a deadlock.
 var gReentrantNestedRes: Channel[string]
 gReentrantNestedRes.open()
 
-# Handler runs on the FFI thread; it nests a send back into the same ctx and
-# reports the outcome through gReentrantNestedRes. Carrying the ctx address
-# via the request payload sidesteps the cross-thread visibility issue of
-# thread-local pointers.
 registerReqFFI(ReentrantTriggerReq, lib: ptr TestLib):
   proc(ctxAddr: int): Future[Result[string, string]] {.async.} =
     let ctx = cast[ptr FFIContext[TestLib]](cast[uint](ctxAddr))
@@ -607,8 +573,6 @@ suite "reentrancy guard (PR #23 review, item 6)":
     )
       .isOk()
 
-    # The outer callback only fires once the handler — including its nested
-    # send attempt — has finished. No polling/sleep needed.
     waitCallback(d)
     check d.retCode == RET_OK
     check cborDecode(callbackBytes(d), string).value == "guard-fired"
@@ -617,10 +581,7 @@ suite "reentrancy guard (PR #23 review, item 6)":
     check nestedMsg.startsWith("err:")
     check "reentrant ffi call" in nestedMsg
 
-# Non-terminal RET_STALE_WARN progress signal: while a handler runs, the caller
-# is pinged every `ctx.staleWarnInterval` with the elapsed time, then still gets
-# exactly one terminal RET_OK/RET_ERR. nim-ffi never times the handler out.
-
+# RET_STALE_WARN pings every ctx.staleWarnInterval, then one terminal result.
 type StaleConfig {.ffi.} = object
   dummy: int
 
@@ -631,7 +592,6 @@ proc testlib_slow_stale*(
   return ok("slow-stale-done")
 
 proc createSimpleCtx(): ptr FFIContext[SimpleLib] =
-  ## Spins up a SimpleLib context via the ctor and returns it (nil on failure).
   var ctorD: CallbackData
   initCallbackData(ctorD)
   defer:
@@ -649,8 +609,7 @@ proc createSimpleCtx(): ptr FFIContext[SimpleLib] =
     return nil
   cast[ptr FFIContext[SimpleLib]](ctxAddr)
 
-## Callback that keeps the non-terminal stale pings apart from the one terminal
-## answer, so a test can assert on both.
+## Keeps stale pings apart from the one terminal answer so a test can assert both.
 type StaleData = object
   lock: Lock
   cond: Cond
@@ -703,7 +662,6 @@ suite "non-terminal RET_STALE_WARN progress signal":
     defer:
       check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
 
-    # Tune the cadence down so the 350 ms handler trips several pings quickly.
     ctx.staleWarnInterval = 80.milliseconds
 
     var d: StaleData
@@ -719,16 +677,12 @@ suite "non-terminal RET_STALE_WARN progress signal":
 
     waitTerminal(d)
 
-    # A 350 ms handler at an 80 ms cadence trips at least a couple of pings, and
-    # the k-th ping reports exactly k*80 ms of elapsed time.
     check d.staleCount >= 2
     check parseInt(d.lastElapsed) == d.staleCount * 80
 
-    # Exactly one terminal answer carrying the handler's real result.
     check d.terminalRet == RET_OK
     check cborDecode(d.terminalBytes, string).value == "slow-stale-done"
 
-    # Nothing trails the terminal callback.
     let staleAtTerminal = d.staleCount
     os.sleep(200)
     check d.staleCount == staleAtTerminal
