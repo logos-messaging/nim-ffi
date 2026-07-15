@@ -27,7 +27,6 @@ proc deinitCallbackData(d: var CallbackData) =
   d.lock.deinitLock()
 
 template setupCallbackData(name: untyped) =
-  ## Declares `name`, inits it, and defers its deinit in the caller's scope.
   var name: CallbackData
   initCallbackData(name)
   defer:
@@ -59,7 +58,6 @@ proc resetCalled(d: var CallbackData) =
   release(d.lock)
 
 proc waitCallbackTimeout(d: var CallbackData, timeoutMs: int): bool =
-  ## Polls under `d.lock` so the load syncs with the `captureCb` writer.
   let deadline = Moment.now() + timeoutMs.milliseconds
   while true:
     acquire(d.lock)
@@ -72,7 +70,6 @@ proc waitCallbackTimeout(d: var CallbackData, timeoutMs: int): bool =
     os.sleep(10)
 
 template withPool(ctxIdent: untyped, body: untyped) =
-  ## Sets up a pool + ctx, runs body, destroys on exit.
   var pool: FFIContextPool[TestEvtLib]
   let ctxIdent = pool.createFFIContext().valueOr:
     check false
@@ -90,7 +87,6 @@ registerReqFFI(PingEvent, lib: ptr TestEvtLib):
   proc(): Future[Result[string, string]] {.async.} =
     return ok("pong")
 
-# Atomic switch so the wedge fires deterministically per test.
 var gBlockingEnabled: Atomic[bool]
 gBlockingEnabled.store(false)
 
@@ -123,9 +119,7 @@ registerReqFFI(CaptureFfiTidRequest, lib: ptr TestEvtLib):
 
 suite "event delivery is asynchronous":
   test "listener runs on the event thread, not the FFI thread":
-    # CallbackData defers declared first run last (LIFO): pool-destroy joins
-    # the event thread before any still-held mutex is torn down. TSan otherwise
-    # flags `captureCb` on a destroyed mutex.
+    # LIFO defer order: pool-destroy joins the event thread before mutex teardown.
     setupCallbackData(evt)
     setupCallbackData(rsp)
 
@@ -172,8 +166,6 @@ suite "FFI thread independence":
       waitCallback(rsp)
       resetCalled(rsp)
 
-      # chronos's `Moment` — std/times exports a `milliseconds` that
-      # shadows chronos's at this generic-instantiation site.
       let started = Moment.now()
       check sendRequestToFFIThread(ctx, PingEvent.ffiNewReq(captureCb, addr rsp)).isOk()
       waitCallback(rsp)
@@ -182,8 +174,7 @@ suite "FFI thread independence":
       check elapsed < 100.milliseconds # under the 150 ms slow-listener sleep
 
 when not defined(gcRefc):
-  ## Skipped under refc: sleeping the FFI thread inside a sync handler
-  ## interacts badly with refc + existing destroy-on-time policies.
+  ## Skipped under refc: sleeping the FFI thread in a sync handler misbehaves there.
   suite "FFI heartbeat staleness":
     test "wedged FFI thread triggers onNotResponding via heartbeat":
       setupCallbackData(notif)
@@ -194,7 +185,7 @@ when not defined(gcRefc):
         check false
         return
       defer:
-        # Disable wedge first so destroy isn't blocked by the still-sleeping handler.
+        # Disable wedge first so destroy isn't blocked by the sleeping handler.
         gBlockingEnabled.store(false)
         discard pool.destroyFFIContext(ctx)
 
@@ -205,9 +196,9 @@ when not defined(gcRefc):
       # Wait out the start-delay so the heartbeat check is armed.
       os.sleep(FFIHeartbeatStartDelay.milliseconds.int + 200)
 
-      # Wedge long enough to cross at least one tick boundary.
       gBlockingEnabled.store(true)
       let wedgeMs =
+        # long enough to cross a tick boundary
         (EventThreadTickInterval + FFIHeartbeatStaleThreshold).milliseconds.int + 1500
       check sendRequestToFFIThread(
         ctx, BlockingRequest.ffiNewReq(captureCb, addr rsp, wedgeMs)
@@ -241,8 +232,7 @@ proc deinitBackpressure(b: var BackpressureState) =
 proc backpressureCb(
     retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
-  ## First call signals entered then blocks under reg.lock to back-pressure
-  ## subsequent dispatches — gives a deterministic way to fill the queue.
+  ## First call signals entered then blocks under reg.lock to fill the queue.
   let b = cast[ptr BackpressureState](userData)
   if not b[].entered.exchange(true):
     acquire(b[].enteredLock)
@@ -277,8 +267,7 @@ suite "queue overflow":
         ctx[].eventRegistry, NotRespondingEventName, captureCb, addr notif
       )
 
-      # Kick one event so the listener holds reg.lock; subsequent enqueues
-      # pile up undrained.
+      # Listener holds reg.lock so later enqueues pile up undrained.
       check sendRequestToFFIThread(
         ctx, EmitLatchEvent.ffiNewReq(captureCb, addr rsp, -1)
       )
@@ -290,7 +279,6 @@ suite "queue overflow":
         wait(bp.enteredCond, bp.enteredLock)
       release(bp.enteredLock)
 
-      # Burst > capacity in one request; tail enqueues flip the stuck flag.
       resetCalled(rsp)
       check sendRequestToFFIThread(
         ctx, BurstEmit.ffiNewReq(captureCb, addr rsp, EventQueueCapacity + 8)
@@ -305,8 +293,6 @@ suite "queue overflow":
       check res.isErr()
       check res.error.contains("stuck")
 
-      # Release backpressure so drain advances and the stuck flag fires
-      # not_responding.
       acquire(bp.releaseLock)
       bp.release.store(true)
       signal(bp.releaseCond)

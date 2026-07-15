@@ -1,7 +1,4 @@
 ## Unit tests for the identifier-casing helpers used by the codegen.
-## These names map identifier conventions between Nim (camelCase),
-## Rust (snake_case) and C++ (PascalCase types), and they're load-bearing
-## for binding generation, so it's worth pinning their behaviour with tests.
 
 import unittest
 import ffi/codegen/string_helpers
@@ -82,6 +79,5 @@ suite "snakeToPascalCase":
     check snakeToPascalCase("_foo") == "Foo"
 
   test "already-mixed parts preserve their existing case after the first":
-    # split on '_', capitalize first letter of each part; "HasCaps" first
-    # letter is already 'H' so it's untouched.
+    # Existing caps after the first letter of each part are preserved.
     check snakeToPascalCase("already_HasCaps") == "AlreadyHasCaps"

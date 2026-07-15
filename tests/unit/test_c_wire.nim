@@ -1,15 +1,4 @@
-## Round-trip correctness for the `c` (`abi = c` C-struct) ABI codec.
-##
-## Each `{.ffi: "abi = c".}` type gets a `<T>_CWire` companion plus
-## `cwirePack` / `cwireUnpack` / `cwireFree`. This asserts
-## `cwireUnpack(cwirePack(x)) == x` across the supported field shapes —
-## scalars, strings, `seq`, `Option`, `array`, named `tuple`, nested {.ffi.}
-## structs, and nested composites (`seq[Option[T]]`, `array[N, tuple[...]]`,
-## `Option[array[...]]`, ...) — including the empty/none/empty-string edge
-## cases the cstring/pointer encoding must handle.
-##
-## `genBindings()` flushes the cwire companions for every abi=c type declared
-## above it (a type-pragma macro can't splice them in at the type site).
+## c (abi = c) ABI codec: asserts cwireUnpack(cwirePack(x)) == x across all field shapes.
 
 import std/options
 import unittest2
@@ -34,9 +23,7 @@ type Outer {.ffi: "abi = c".} = object
   optTags: seq[Option[string]]
 
 type Shapes {.ffi: "abi = c".} = object
-  ## Exercises array/tuple wire shapes and their cross-nestings (array of
-  ## array, tuple in array, array in Option, tuple in seq) alongside GC'd and
-  ## nested-{.ffi.} element types.
+  ## Exercises array/tuple wire shapes and their cross-nestings.
   coords: array[3, int]
   labels: array[2, string]
   cells: array[2, Inner]
@@ -50,8 +37,6 @@ type Shapes {.ffi: "abi = c".} = object
 genBindings()
 
 proc roundTrip(o: Outer): Outer =
-  ## Pack into the wire struct, copy back out, then release the wire
-  ## allocations — the exact lifecycle a boundary crossing would use.
   var wire: Outer_CWire
   cwirePack(wire, o)
   let back = cwireUnpack(wire)
@@ -59,8 +44,6 @@ proc roundTrip(o: Outer): Outer =
   return back
 
 proc roundTrip(o: Shapes): Shapes =
-  ## Same pack/unpack/free lifecycle as the `Outer` overload, for the
-  ## array/tuple shapes.
   var wire: Shapes_CWire
   cwirePack(wire, o)
   let back = cwireUnpack(wire)
@@ -114,7 +97,7 @@ suite "c-ABI cwire round-trip":
       name: "n",
       inner: Inner(label: "i", weight: 9),
       items: @[Inner(label: "alpha", weight: 10), Inner(label: "beta", weight: 20)],
-      note: some(""), # some-of-empty-string must stay `some`, not collapse to none
+      note: some(""), # some-of-empty must stay `some`
     )
     let back = roundTrip(o)
     check back.items.len == 2

@@ -1,6 +1,4 @@
-## Unit-tests for the CDDL schema generator. Drives it directly against a
-## synthetic `ffiProcRegistry` / `ffiTypeRegistry` so we don't need to invoke
-## the macro pipeline (and thus don't write any files).
+## Unit-tests for the CDDL schema generator, driven against a synthetic registry.
 
 import std/strutils
 import unittest2

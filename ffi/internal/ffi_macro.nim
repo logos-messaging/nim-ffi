@@ -14,8 +14,7 @@ when defined(ffiGenBindings):
   import ../codegen/cddl
 
 proc requireLibraryDeclared(where: string) {.compileTime.} =
-  ## Enforce that `declareLibrary(...)` (which records name/type/default-ABI)
-  ## ran before this annotation.
+  ## Enforce that `declareLibrary(...)` ran before this annotation.
   if not libraryDeclared:
     error(
       where &
@@ -25,9 +24,8 @@ proc requireLibraryDeclared(where: string) {.compileTime.} =
 proc resolveEventWireName(
     leading: seq[NimNode], userProcName: NimNode
 ): tuple[wireName: string, abiSpecStart: int] {.compileTime.} =
-  ## A leading string that doesn't parse as an `"abi = ..."` spec is the explicit
-  ## wire name; anything else means derive the name from the proc. Returns the
-  ## resolved name and the index where the trailing ABI specs begin.
+  ## A leading string that isn't an `"abi = ..."` spec is the explicit wire name;
+  ## otherwise derive from the proc. Returns name and index where ABI specs begin.
   if leading.len > 0 and leading[0].kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit} and
       ($leading[0]).len > 0 and not parseAbiSpec($leading[0]).ok:
     ($leading[0], 1)
@@ -35,9 +33,8 @@ proc resolveEventWireName(
     (camelToSnakeCase($userProcName), 0)
 
 proc requireBeforeGenBindings(where: string) {.compileTime.} =
-  ## Enforce that this annotation expands before `genBindings()`. Anything
-  ## registered afterwards never reaches the generator, so turn what used to be
-  ## a silent drop into a loud error pointing at the fix.
+  ## Enforce this annotation expands before `genBindings()`; anything registered
+  ## afterwards never reaches the generator.
   if genBindingsEmitted:
     error(
       where &
@@ -45,8 +42,7 @@ proc requireBeforeGenBindings(where: string) {.compileTime.} =
     )
 
 proc resolveABIFormat(abiSpecs: seq[NimNode]): ABIFormat {.compileTime.} =
-  ## Resolve one annotation's ABI from its optional `"abi = ..."` string specs
-  ## (last wins), inheriting the library default when absent.
+  ## Resolve ABI from optional `"abi = ..."` specs (last wins), else lib default.
   var fmt = currentDefaultABIFormat
   for override in abiSpecs:
     if override.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
@@ -61,8 +57,7 @@ proc resolveABIFormat(abiSpecs: seq[NimNode]): ABIFormat {.compileTime.} =
   fmt
 
 proc resolveFFISpecs(specs: seq[NimNode]): ABIFormat {.compileTime.} =
-  ## Resolve an annotation's `"abi = ..."` string specs (last wins), inheriting
-  ## the library-default ABI when absent.
+  ## Resolve `"abi = ..."` specs (last wins), else the library-default ABI.
   var abi = currentDefaultABIFormat
   for override in specs:
     if override.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
@@ -80,8 +75,7 @@ proc resolveFFISpecs(specs: seq[NimNode]): ABIFormat {.compileTime.} =
   abi
 
 proc gateABIFormat(fmt: ABIFormat, where: string) {.compileTime.} =
-  ## Abort if the selected ABI's codegen isn't wired yet (only `Cbor` is), so a
-  ## `c` request fails loudly instead of emitting CBOR mislabeled as C.
+  ## Abort if the selected ABI's codegen isn't wired yet, failing loudly.
   if not abiCodegenImplemented(fmt):
     error(
       where &
@@ -90,30 +84,18 @@ proc gateABIFormat(fmt: ABIFormat, where: string) {.compileTime.} =
     )
 
 proc gateFFITypeABIFormat(fmt: ABIFormat, where: string) {.compileTime.} =
-  ## Type annotations only register metadata. `cbor` uses the generic CBOR
-  ## overloads, while `c` emits its `_CWire` companion from `genBindings()`.
+  ## Type annotations only register metadata; both ABIs are valid.
   case fmt
   of ABIFormat.Cbor, ABIFormat.C: discard
 
 proc isPtr(typ: NimNode): bool =
-  ## True iff `typ` is a `ptr T` type expression — i.e. an `nnkPtrTy` AST node.
-  ## Used by the binding-generator metadata path to flag pointer-typed params
-  ## and return types so the foreign side can render them as opaque addresses.
+  ## True iff `typ` is a `ptr T` type expression.
   typ.kind == nnkPtrTy
 
 proc rejectRawPtrType(typ: NimNode, where: string) =
-  ## Errors out at macro-expansion time if `typ` is `pointer` or `ptr T`.
-  ## Raw addresses must not cross the FFI boundary in user-declared fields,
-  ## parameters, or return types: the only pointer that legitimately crosses
-  ## the boundary is the opaque ctx handle returned by `.ffiCtor.` and passed
-  ## back as the first C-ABI argument, which the framework validates via
-  ## FFIContextPool.isValidCtx before dereferencing. Any other raw pointer
-  ## would hand the foreign caller an address with no way to validate its
-  ## memory state — see PR #23 review (discussion_r3236531712).
-  ##
-  ## `object` and `ref T` are not rejected: they flow as value copies through
-  ## cbor_serialization (the library's default `ref T` writer dereferences
-  ## and encodes the pointee, so no address crosses the boundary).
+  ## Reject `pointer`/`ptr T` at macro time: no unvalidatable raw address may
+  ## cross the FFI boundary (only the framework-managed ctx handle may). `object`
+  ## and `ref T` are fine — they flow as value copies through cbor_serialization.
   if typ.kind == nnkPtrTy:
     error(
       where & ": raw `ptr T` is not allowed across the FFI boundary " &
@@ -128,9 +110,7 @@ proc rejectRawPtrType(typ: NimNode, where: string) =
 proc registerFFITypeInfo(
     typeDef: NimNode, abiFormat: ABIFormat
 ): NimNode {.compileTime.} =
-  ## Registers the type in ffiTypeRegistry for binding generation and returns
-  ## the clean typeDef. Serialization is handled by the generic overloads in
-  ## cbor_serial.nim.
+  ## Registers the type in ffiTypeRegistry and returns the clean typeDef.
   let typeName =
     if typeDef[0].kind == nnkPostfix:
       typeDef[0][1]
@@ -164,8 +144,7 @@ proc registerFFITypeInfo(
   return typeDef
 
 proc nimTypeNameRepr(typ: NimNode): string =
-  ## Stringifies a parameter or field type for the binding-generator registry.
-  ## `$ident` works for simple types; bracket/dot/expression types need `repr`.
+  ## Stringifies a parameter or field type for the registry.
   case typ.kind
   of nnkIdent:
     $typ
@@ -179,8 +158,7 @@ proc isHandleType(typ: NimNode): bool =
   typ.kind == nnkIdent and isFFIHandleTypeName($typ)
 
 proc storageType(typ: NimNode): NimNode =
-  ## In-Req-struct storage type. `cstring` rides as `string`; an {.ffiHandle.}
-  ## type rides as its `uint64` id; everything else as-is.
+  ## In-Req-struct storage type: `cstring`->`string`, handle->`uint64`, else as-is.
   if typ.kind == nnkIdent and $typ == "cstring":
     return ident("string")
   if isHandleType(typ):
@@ -188,19 +166,9 @@ proc storageType(typ: NimNode): NimNode =
   typ
 
 proc unpackReqField*(fieldIdent, userType, decodedIdent: NimNode): NimNode =
-  ## Emits AST for unpacking one field from a CBOR-decoded Req struct into a
-  ## local typed as the user's original param type.
-  ##
-  ## `cstring` params are stored as `string` in the Req (per storageType)
-  ## and cast back via `.cstring` on unpack — safe because `decodedIdent`
-  ## outlives the cstring use within the generated proc body.
-  ##
-  ## Produces one of:
-  ##   let <field>: cstring = (<decoded>.<field>).cstring   # for cstring
-  ##   let <field> = <decoded>.<field>                       # for everything else
-  ##
-  ## Built with the runtime AST API rather than `quote do:` so the proc is
-  ## callable from both macro context and ordinary code (e.g. unit tests).
+  ## Emits AST unpacking one field of a CBOR-decoded Req into a local of the
+  ## user's original type. `cstring` (stored as `string`) is cast back on unpack,
+  ## safe because `decodedIdent` outlives the cstring use in the generated body.
   let storedAsString = userType.kind == nnkIdent and $userType == "cstring"
   if not storedAsString:
     return newLetStmt(fieldIdent, newDotExpr(decodedIdent, fieldIdent))
@@ -213,8 +181,7 @@ proc unpackReqField*(fieldIdent, userType, decodedIdent: NimNode): NimNode =
 proc unpackHandleField*(
     fieldIdent, userType, ctxIdent, decodedIdent: NimNode
 ): NimNode =
-  ## Reconstitutes a handle param from its wire `uint64` via the ctx registry,
-  ## returning `RET_ERR` (Result.err) on a stale/forged/wrong-type id.
+  ## Reconstitutes a handle param from its wire `uint64` via the ctx registry.
   let errPrefix = "ffiHandle for parameter '" & $fieldIdent & "': "
   quote:
     let `fieldIdent` = block:
@@ -223,9 +190,7 @@ proc unpackHandleField*(
       cast[`userType`](ffiH)
 
 proc cExportedParams(ctxType: NimNode): seq[NimNode] =
-  ## Standard parameter list for the C-exported wrapper of a .ffi. proc:
-  ##   (returns cint; ctx, callback, userData, reqCbor, reqCborLen)
-  ## Shared by the async and sync paths so both wrappers carry the same ABI.
+  ## C-exported wrapper param list (cint; ctx, callback, userData, reqCbor, reqCborLen).
   var params: seq[NimNode] = @[]
   params.add(ident("cint"))
   params.add(newIdentDefs(ident("ctx"), ctxType))
@@ -238,34 +203,9 @@ proc cExportedParams(ctxType: NimNode): seq[NimNode] =
 proc buildReqTypeFromFields(
     reqTypeName: NimNode, paramNames: seq[string], paramTypes: seq[NimNode]
 ): NimNode =
-  ## Builds the per-proc Req `nnkTypeSection` (exported) from explicit
-  ## parallel lists of parameter names and types. The result is the AST for
-  ## a `type Foo* = object` declaration that the codegen later emits.
-  ##
-  ## `cstring` parameter types are rewritten to `string` (via storageType)
-  ## so the request can ride a plain CBOR text string on the wire. Empty
-  ## parameter lists get a single `_placeholder: uint8` field so the object
-  ## type is well-formed (Nim won't accept an empty `object` body here).
-  ##
-  ## Examples (in pseudo-Nim, showing the AST this proc produces):
-  ##
-  ##   buildReqTypeFromFields(
-  ##     reqTypeName = ident("EchoReq"),
-  ##     paramNames  = @["message", "delayMs"],
-  ##     paramTypes  = @[ident("cstring"), ident("int")])
-  ##   # → type EchoReq* = object
-  ##   #     message: string   # cstring rewritten to string
-  ##   #     delayMs: int
-  ##
-  ##   buildReqTypeFromFields(
-  ##     reqTypeName = ident("VersionReq"),
-  ##     paramNames  = @[],
-  ##     paramTypes  = @[])
-  ##   # → type VersionReq* = object
-  ##   #     _placeholder: uint8   # placeholder for the empty-params case
-  ##
-  ## If `reqTypeName` is already a postfix node (e.g. `EchoReq*`) it is used
-  ## as-is; otherwise the `*` export marker is added.
+  ## Builds the exported per-proc Req `type Foo* = object` from parallel name/type
+  ## lists. `cstring` fields become `string`; an empty param list gets a single
+  ## `_placeholder: uint8` field since Nim rejects an empty object body here.
   var fields: seq[NimNode] = @[]
   for i in 0 ..< paramNames.len:
     let storedType = storageType(paramTypes[i])
@@ -292,20 +232,8 @@ proc buildReqTypeFromFields(
     newNimNode(nnkTypeSection).add(newTree(nnkTypeDef, typeName, newEmptyNode(), objTy))
 
 proc buildRequestType(reqTypeName: NimNode, body: NimNode): NimNode =
-  ## Builds the per-proc Req object type from a registerReqFFI lambda body.
-  ## Field names match the lambda params; field types match the user-typed
-  ## param types (with `cstring` rewritten to `string` for transport).
-  ##
-  ## Builds:
-  ##   type <reqTypeName>* = object
-  ##     <lambdaParam1Name>: <lambdaParam1Type>
-  ##     ...
-  ##
-  ## e.g.:
-  ##   type EchoRequest* = object
-  ##     message: string
-  ##     delayMs: int
-
+  ## Builds the per-proc Req object type from a registerReqFFI lambda body,
+  ## mirroring its param names and types (`cstring` -> `string`).
   var procNode = body
   if procNode.kind == nnkStmtList and procNode.len == 1:
     procNode = procNode[0]
@@ -326,10 +254,8 @@ proc buildRequestType(reqTypeName: NimNode, body: NimNode): NimNode =
   return typeSection
 
 proc buildFFINewReqProc(reqTypeName, body: NimNode): NimNode =
-  ## Builds ffiNewReq: takes the user's typed params, packs them into a Req
-  ## object, CBOR-encodes the Req into one byte buffer, and constructs the
-  ## FFIThreadRequest that owns the buffer.
-
+  ## Builds ffiNewReq: packs the user's typed params into a Req, CBOR-encodes it,
+  ## and constructs the FFIThreadRequest that owns the buffer.
   var formalParams = newSeq[NimNode]()
 
   var procNode: NimNode
@@ -341,7 +267,6 @@ proc buildFFINewReqProc(reqTypeName, body: NimNode): NimNode =
   if procNode.kind != nnkLambda and procNode.kind != nnkProcDef:
     error "registerReqFFI expects a lambda definition. Found: " & $procNode.kind
 
-  # T: typedesc[XxxReq]
   let typedescParam =
     newIdentDefs(ident("T"), nnkBracketExpr.newTree(ident("typedesc"), reqTypeName))
   formalParams.add(typedescParam)
@@ -386,8 +311,7 @@ proc buildFFINewReqProc(reqTypeName, body: NimNode): NimNode =
   newBody.add(
     quote do:
       let typeStr = $T
-      # Encode directly into shared memory and hand ownership to the request,
-      # avoiding the seq[byte] → allocShared+copyMem second copy.
+      # Encode into shared memory, avoiding a second seq[byte] copy.
       let (sharedData, sharedLen) = cborEncodeShared(`reqObjIdent`)
       return FFIThreadRequest.initFromOwnedShared(
         callback, userData, typeStr.cstring, sharedData, sharedLen
@@ -406,10 +330,7 @@ proc buildFFINewReqProc(reqTypeName, body: NimNode): NimNode =
   return newReqProc
 
 proc buildProcessFFIRequestProc(reqTypeName, reqHandler, body: NimNode): NimNode =
-  ## Generates the FFI-thread-side processor for the Req type.
-  ## Decodes the CBOR payload into a Req struct, unpacks each field into a
-  ## local, then runs the user lambda body.
-
+  ## FFI-thread processor: decodes the CBOR Req, unpacks fields, runs user body.
   if reqHandler.kind != nnkExprColonExpr:
     error(
       "Second argument must be a typed parameter, e.g., waku: ptr Waku. Found: " &
@@ -431,10 +352,10 @@ proc buildProcessFFIRequestProc(reqTypeName, reqHandler, body: NimNode): NimNode
 
   let procParams = procNode[3]
   var formalParams: seq[NimNode] = @[]
-  formalParams.add(procParams[0]) # return type
+  formalParams.add(procParams[0])
   formalParams.add(typedescParam)
   formalParams.add(newIdentDefs(ident("request"), ident("pointer")))
-  formalParams.add(newIdentDefs(reqHandler[0], rhs)) # e.g. waku: ptr Waku
+  formalParams.add(newIdentDefs(reqHandler[0], rhs))
 
   let bodyNode =
     if procNode.body.kind == nnkStmtList:
@@ -455,7 +376,6 @@ proc buildProcessFFIRequestProc(reqTypeName, reqHandler, body: NimNode): NimNode
     ).valueOr:
       return err("CBOR decode failed for " & $T & ": " & $error)
 
-  # Unpack each field as a local typed as the user's original param type.
   for p in procParams[1 ..^ 1]:
     if isHandleType(p[1]):
       newBody.add unpackHandleField(p[0], p[1], reqHandler[0], decodedIdent)
@@ -481,10 +401,8 @@ proc buildProcessFFIRequestProc(reqTypeName, reqHandler, body: NimNode): NimNode
   return processProc
 
 proc addNewRequestToRegistry(reqTypeName, reqHandler: NimNode): NimNode =
-  ## Generates the dispatcher that the FFI thread calls: it invokes
-  ## processFFIRequest (which returns the user's typed Result[T, string]) and
-  ## encodes a successful T value with cborEncode into the seq[byte] payload.
-
+  ## Dispatcher the FFI thread calls: runs processFFIRequest and cborEncodes the
+  ## typed T value into the seq[byte] payload.
   let returnType = nnkBracketExpr.newTree(
     ident("Future"),
     nnkBracketExpr.newTree(
@@ -551,33 +469,9 @@ proc addNewRequestToRegistry(reqTypeName, reqHandler: NimNode): NimNode =
   return regAssign
 
 macro registerReqFFI*(reqTypeName, reqHandler, body: untyped): untyped =
-  ## Registers a request that will be handled by the FFI/working thread.
-  ## The request should be sent from the ffi consumer thread.
-  ##
-  ## The lambda passed to this macro must:
-  ##   - Only have no-GC'ed types as parameters (cstring is allowed; it gets
-  ##     transported as `string` in the per-proc Req struct).
-  ##   - Return Future[Result[string, string]] and be annotated with {.async.}
-  ##     The returned values are sent back to the ffi consumer thread.
-  ##
-  ## Example:
-  ##   registerReqFFI(CreateNodeRequest, ctx: ptr FFIContext[Waku]):
-  ##     proc(
-  ##         config: NodeConfig, appCallbacks: AppCallbacks
-  ##     ): Future[Result[string, string]] {.async.} =
-  ##       ctx.myLib[] = (await createWaku(config, appCallbacks)).valueOr:
-  ##         return err($error)
-  ##       return ok("")
-  ##
-  ## The created FFI request is then dispatched from the ffi consumer thread
-  ## (generally the main thread) following something like:
-  ##
-  ##   ffi.sendRequestToFFIThread(
-  ##     ctx, CreateNodeRequest.ffiNewReq(callback, userData, config, appCallbacks)
-  ##   ).isOkOr:
-  ##     ...
-
-  # Extract lambda params to generate fields
+  ## Registers a request handled by the FFI/working thread. The lambda takes only
+  ## no-GC'ed params (cstring travels as `string`) and must return
+  ## Future[Result[string, string]] {.async.}.
   let typeDef = buildRequestType(reqTypeName, body)
   let ffiNewReqProc = buildFFINewReqProc(reqTypeName, body)
   let processProc = buildProcessFFIRequestProc(reqTypeName, reqHandler, body)
@@ -591,13 +485,8 @@ macro registerReqFFI*(reqTypeName, reqHandler, body: untyped): untyped =
 macro processReq*(
     reqType, ctx, callback, userData: untyped, args: varargs[untyped]
 ): untyped =
-  ## Expands T.processReq(ctx, callback, userData, a, b, ...) into a
-  ## sendRequestToFFIThread call that wraps the args in a freshly-built
-  ## FFIThreadRequest, with inline error reporting via `callback`.
-  ##
-  ## e.g.:
-  ##   waku_dial_peerReq.processReq(ctx, callback, userData, peerMultiAddr, protocol, timeoutMs)
-
+  ## Expands T.processReq(ctx, callback, userData, args...) into a
+  ## sendRequestToFFIThread call, reporting errors via `callback`.
   var callArgs = @[reqType, callback, userData]
   for a in args:
     callArgs.add a
@@ -622,32 +511,9 @@ macro processReq*(
   return blockExpr
 
 macro ffiRaw*(args: varargs[untyped]): untyped =
-  ## Defines an FFI-exported proc that registers a request handler to be executed
-  ## asynchronously in the FFI thread.
-  ##
-  ## This is the "raw" / legacy form of the macro where the developer writes
-  ## the ctx, callback, and userData parameters explicitly. Additional parameters
-  ## travel as one CBOR blob.
-  ##
-  ## {.ffiRaw.} implicitly implies a Future[Result[string, string]] {.async.}
-  ## return type.
-  ##
-  ## When using {.ffiRaw.}, the first three parameters must be:
-  ##  - ctx: ptr FFIContext[T]  <-- T is the type that handles the FFI requests
-  ##  - callback: FFICallBack
-  ##  - userData: pointer
-  ## Then, additional parameters may be defined as needed, after these first
-  ## three, always considering that only no-GC'ed (or C-like) types are allowed.
-  ##
-  ## The wire format follows the library default and can be overridden with
-  ## `{.ffiRaw: "abi = c".}` / `{.ffiRaw: "abi = cbor".}`.
-  ##
-  ## e.g.:
-  ##   proc waku_version(
-  ##       ctx: ptr FFIContext[Waku], callback: FFICallBack, userData: pointer
-  ##   ) {.ffiRaw.} =
-  ##     return ok(WakuNodeVersionString)
-
+  ## Raw/legacy FFI proc: first three params (ctx, callback, userData) are explicit,
+  ## extra no-GC'ed params travel as one CBOR blob, return is implied
+  ## Future[Result[string, string]] {.async.}. Override abi via `{.ffiRaw: "abi = c".}`.
   requireBeforeGenBindings("`.ffiRaw.`")
   requireLibraryDeclared("`.ffiRaw.`")
   let prc = args[^1]
@@ -732,14 +598,9 @@ macro ffiRaw*(args: varargs[untyped]): untyped =
   return stmts
 
 macro ffiHandle*(args: varargs[untyped]): untyped =
-  ## Marks a `ref object` as an opaque FFI handle. Its wire form is a `uint64`
-  ## id; the live object stays in the per-ctx handle registry and never crosses.
-  ##
-  ##   type Kernel {.ffiHandle.} = ref object
-  ##     ...
-  ##
-  ## An optional `"abi = ..."` spec is accepted for surface parity but only
-  ## validated — a handle always rides as an abi-agnostic `uint64` id.
+  ## Marks a `ref object` as an opaque FFI handle: it rides as a `uint64` id while
+  ## the live object stays in the per-ctx registry. An `"abi = ..."` spec is
+  ## accepted but only validated (a handle is abi-agnostic).
   requireBeforeGenBindings("`.ffiHandle.`")
   requireLibraryDeclared("`.ffiHandle.`")
   let prc = args[^1]
@@ -773,37 +634,15 @@ macro ffiHandle*(args: varargs[untyped]): untyped =
   return clean
 
 macro ffi*(args: varargs[untyped]): untyped =
-  ## Simplified FFI macro — applies to procs or types.
-  ##
-  ## On a type: `type Foo {.ffi.} = object` registers Foo for binding generation
-  ## and lets the generic cborEncode/cborDecode overloads handle serialization.
-  ##
-  ## On a proc: the annotated proc must have a first parameter of the library
-  ## type, optionally additional Nim-typed parameters, and return
-  ## Future[Result[RetType, string]]. It must NOT include ctx, callback, or
-  ## userData in its signature — the macro generates a C-exported wrapper that
-  ## takes one CBOR-encoded buffer as the call payload and fires the callback.
-  ##
-  ## The wire format defaults to the library's `defaultABIFormat` and can be
-  ## overridden per annotation with `{.ffi: "abi = c".}` / `{.ffi: "abi = cbor".}`.
-  ##
-  ## Example (type):
-  ##   type EchoRequest {.ffi.} = object
-  ##     message: string
-  ##     delayMs: int
-  ##
-  ## Example (proc):
-  ##   proc mylib_send*(w: MyLib, cfg: SendConfig): Future[Result[string, string]] {.ffi.} =
-  ##     return ok("done")
-
+  ## Simplified FFI macro for procs or types: a type registers for binding gen; a
+  ## proc takes a library-type param plus optional Nim params, returns
+  ## Future[Result[RetType, string]], and gets a C wrapper taking one CBOR buffer.
   requireBeforeGenBindings("`.ffi.`")
   # Annotated node is the last vararg; leading args are `"abi = ..."` specs.
   let prc = args[^1]
   let abiFormat = resolveFFISpecs(args[0 ..^ 2])
 
-  # A value type stands alone (no library required). Its `c` companion is
-  # emitted later by `genBindings()`, since a type-pragma macro can only return
-  # a TypeDef; `cbor` rides the generic overloads. Both abis are valid here.
+  # A value type stands alone (no library required); its `c` companion is emitted later by `genBindings()`, since a type-pragma macro can only return a TypeDef.
   if prc.kind == nnkTypeDef:
     gateFFITypeABIFormat(abiFormat, "`.ffi.` type")
     var cleanTypeDef = prc.copyNimTree()
@@ -881,10 +720,7 @@ macro ffi*(args: varargs[untyped]): untyped =
   var userProcName = procName
   if procName.kind == nnkPostfix:
     userProcName = procName[1]
-  ## Both the user-facing Nim proc and the C-exported wrapper share the user's
-  ## original name; their signatures differ so Nim resolves the call by
-  ## overload. The C wrapper additionally carries `{.exportc.}` so the foreign
-  ## ABI symbol is unchanged.
+  # Nim proc and C wrapper share the user's name (resolved by overload); the wrapper's `{.exportc.}` keeps the foreign ABI symbol.
   let cExportProcName = userProcName
 
   let ctxType =
@@ -913,8 +749,7 @@ macro ffi*(args: varargs[untyped]): untyped =
     else:
       nimTypeNameRepr(retTypeInner)
 
-  # Built once, registered by whichever path runs (only `scalarFastPath` differs
-  # between them) and reused for the fast-path eligibility check below.
+  # Built once, registered by whichever path runs; reused for the check below.
   let procMeta = FFIProcMeta(
     procName: cExportName,
     libName: currentLibName,
@@ -927,10 +762,7 @@ macro ffi*(args: varargs[untyped]): untyped =
     abiFormat: abiFormat,
   )
 
-  # Does this proc qualify for the CBOR-free scalar fast path? Only `abi = c`
-  # opts in, and only when every wire param + the return is a plain scalar
-  # (see `isScalarOnly`) and the args fit the inline slots. A non-scalar
-  # `abi = c` proc rides the `_CWire` C-dispatch emitted by `asyncPath`.
+  # CBOR-free scalar fast path: only `abi = c` with all-scalar params/return that fit the inline slots; non-scalar `abi = c` rides the `_CWire` C-dispatch.
   let scalarEligible =
     abiFormat == ABIFormat.C and isScalarOnly(procMeta) and
     extraParamNames.len <= MaxScalarArgs
@@ -938,8 +770,7 @@ macro ffi*(args: varargs[untyped]): untyped =
   let poolIdent = ident($libTypeName & "FFIPool")
 
   proc buildCtxGuard(): NimNode =
-    ## Nil-checks the callback and validates `ctx` against the lib's FFI pool,
-    ## replying `RET_ERR` before any request is built. Shared by both wire paths.
+    ## Nil-checks callback and validates `ctx`, replying `RET_ERR` before build.
     quote:
       if callback.isNil:
         return RET_MISSING_CALLBACK
@@ -949,9 +780,7 @@ macro ffi*(args: varargs[untyped]): untyped =
         return RET_ERR
 
   proc buildSendAndReply(reqPtrIdent: NimNode): NimNode =
-    ## Hands `reqPtrIdent` to the FFI thread and maps the outcome to a C return
-    ## code, reporting any enqueue failure through the callback. Shared by both
-    ## wire paths.
+    ## Hands `reqPtrIdent` to the FFI thread and maps the outcome to a C return code.
     let sendResIdent = genSym(nskLet, "sendRes")
     quote:
       let `sendResIdent` =
@@ -966,8 +795,7 @@ macro ffi*(args: varargs[untyped]): untyped =
       return RET_OK
 
   proc buildCExportProc(params: seq[NimNode], body: NimNode): NimNode =
-    ## The dynlib/exportc/cdecl C-ABI wrapper both wire paths emit; only the
-    ## params and body differ.
+    ## The dynlib/exportc/cdecl C-ABI wrapper both wire paths emit.
     newProc(
       name = postfix(cExportProcName, "*"),
       params = params,
@@ -998,9 +826,7 @@ macro ffi*(args: varargs[untyped]): untyped =
     )
 
   proc asyncPath(): NimNode =
-    ## Emits the C-exported wrapper and registers the handler. Every `.ffi.` proc
-    ## dispatches through the FFI thread and replies via its callback, honouring
-    ## `foreignThreadGc`, the MPSC ingress hand-off, and chronos's invariant.
+    ## Emits the C-exported wrapper and registers the FFI-thread handler.
     let helperProc = buildAsyncHelperProc()
 
     # registerReqFFI lambda: typed params, returns user's typed Result.
@@ -1009,7 +835,7 @@ macro ffi*(args: varargs[untyped]): untyped =
       nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), libTypeName))
 
     var lambdaParams = newSeq[NimNode]()
-    lambdaParams.add(retTypeNode) # Future[Result[RetType, string]]
+    lambdaParams.add(retTypeNode)
     for i in 0 ..< extraParamNames.len:
       lambdaParams.add(newIdentDefs(ident(extraParamNames[i]), extraParamTypes[i]))
 
@@ -1038,15 +864,12 @@ macro ffi*(args: varargs[untyped]): untyped =
       registerReqFFI(`reqTypeName`, `ctxHandlerName`: `ptrFFICtx`):
         `lambdaNode`
 
-    # -------------------------------------------------------------------------
-    # C-exported wrapper: takes (ctx, callback, userData, reqCbor, reqCborLen)
-    # -------------------------------------------------------------------------
+    # C-exported wrapper: (ctx, callback, userData, reqCbor, reqCborLen).
     let exportedParams = cExportedParams(ctxType)
 
     let ffiBody = newStmtList()
     ffiBody.add buildCtxGuard()
 
-    # Build the FFIThreadRequest payload directly from the incoming bytes.
     let reqPtrIdent = genSym(nskLet, "reqPtr")
     ffiBody.add quote do:
       let typeStr = $`reqTypeName`
@@ -1060,8 +883,7 @@ macro ffi*(args: varargs[untyped]): untyped =
     ffiProcRegistry.add(procMeta)
 
     if abiFormat == ABIFormat.C:
-      # The `abi = c` exported wrapper + reply trampoline are emitted at
-      # genBindings() time (see flushCAbiDispatch); the CBOR `ffiProc` is not.
+      # The `abi = c` wrapper + reply trampoline are emitted at genBindings() time (flushCAbiDispatch); the CBOR `ffiProc` is not.
       registerCAbiMethod(
         cExportName, libTypeName, reqTypeName, extraParamNames, extraParamTypes,
         resultRetType,
@@ -1071,9 +893,8 @@ macro ffi*(args: varargs[untyped]): untyped =
     return newStmtList(helperProc, registerReq, ffiProc)
 
   proc scalarPath(): NimNode =
-    ## The scalar fast path lives in `ffi_scalar`; here we only build the shared
-    ## dispatch pieces (same helpers the usual path uses) and hand them over, so
-    ## the base macro carries none of the inline pack/unpack machinery.
+    ## Scalar fast path lives in `ffi_scalar`; here we only build the shared
+    ## dispatch pieces and hand them over.
     let reqPtrIdent = genSym(nskLet, "reqPtr")
     buildScalarPath(
       helperProc = buildAsyncHelperProc(),
@@ -1196,9 +1017,7 @@ proc buildCtorProcessFFIRequestProc(
     paramTypes: seq[NimNode],
     libTypeName: NimNode,
 ): NimNode =
-  ## Decodes the CBOR payload, unpacks fields, runs the user body, and stores
-  ## the resulting library value in ctx.myLib.
-
+  ## Decodes the Req, runs the user body, stores the library value in ctx.myLib.
   let returnType = nnkBracketExpr.newTree(
     ident("Future"),
     nnkBracketExpr.newTree(ident("Result"), ident("string"), ident("string")),
@@ -1263,10 +1082,8 @@ proc buildCtorProcessFFIRequestProc(
   return processProc
 
 proc addCtorRequestToRegistry(reqTypeName, libTypeName: NimNode): NimNode =
-  ## Wraps the ctor processFFIRequest result in a seq[byte] dispatcher.
-  ## The ctor uniquely returns the ctx address as a decimal string; we wrap
-  ## it as raw UTF-8 bytes so the foreign side can read it back uniformly.
-
+  ## Wraps the ctor processFFIRequest result in a seq[byte] dispatcher; the ctor
+  ## returns the ctx address as a decimal string, CBOR-encoded for the foreign side.
   let ctxType =
     nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), libTypeName))
 
@@ -1291,8 +1108,6 @@ proc addCtorRequestToRegistry(reqTypeName, libTypeName: NimNode): NimNode =
     let `resIdent` = await `callExpr`
     if `resIdent`.isErr:
       return err(`resIdent`.error)
-    # The ctor returns the ctx address as a decimal string; encode it as CBOR text
-    # for uniform decoding on the foreign side.
     return ok(cborEncode(`resIdent`.value))
 
   let asyncProc = newProc(
@@ -1315,31 +1130,9 @@ proc addCtorRequestToRegistry(reqTypeName, libTypeName: NimNode): NimNode =
   return regAssign
 
 macro ffiCtor*(args: varargs[untyped]): untyped =
-  ## Defines a C-exported constructor that creates an FFIContext and populates
-  ## ctx.myLib asynchronously in the FFI thread.
-  ##
-  ## The annotated proc must:
-  ##   - Have Nim-typed parameters (carried over the wire as a single CBOR blob)
-  ##   - Return Future[Result[LibType, string]]
-  ##   - NOT include ctx, callback, or userData in its signature
-  ##
-  ## The wire format follows the library default and can be overridden with
-  ## `{.ffiCtor: "abi = c".}` / `{.ffiCtor: "abi = cbor".}`.
-  ##
-  ## Example:
-  ##   proc mylib_create*(config: SimpleConfig): Future[Result[SimpleLib, string]] {.ffiCtor.} =
-  ##     return ok(SimpleLib(value: config.initialValue))
-  ##
-  ## The generated C-exported proc has the signature:
-  ##   proc mylib_create(reqCbor: ptr byte, reqCborLen: csize_t,
-  ##                     callback: FFICallBack, userData: pointer): pointer
-  ##                    {.exportc, cdecl, raises: [].}
-  ##
-  ## Returns the context pointer synchronously, NULL on failure. The callback
-  ## also fires when async initialization completes, passing the ctx address as
-  ## a decimal string on success. The caller should hold the returned pointer
-  ## and pass it to subsequent .ffi. calls.
-
+  ## C-exported constructor: creates an FFIContext and fills ctx.myLib async on the
+  ## FFI thread. Takes Nim params (one CBOR blob), no ctx/callback/userData. Wrapper
+  ## returns the ctx pointer sync (NULL on failure); callback fires with its address.
   requireBeforeGenBindings("`.ffiCtor.`")
   requireLibraryDeclared("`.ffiCtor.`")
   let prc = args[^1]
@@ -1389,14 +1182,10 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
 
   let typeDef = buildCtorRequestType(reqTypeName, paramNames, paramTypes)
   let ffiNewReqProc = buildCtorFFINewReqProc(reqTypeName, paramNames)
-  # The user-facing Nim proc keeps the user's original name with their declared
-  # signature; the C-exported wrapper moves to `<userProcName>ExportC` and
-  # binds the snake_case C symbol via `{.exportc.}`.
   var userProcName = procName
   if procName.kind == nnkPostfix:
     userProcName = procName[1]
-  # Both the Nim-facing async ctor and the C-exported wrapper share the user's
-  # name as overloads; the C wrapper's `{.exportc.}` keeps the ABI symbol.
+  # Nim ctor and C wrapper share the user's name as overloads; the wrapper's `{.exportc.}` keeps the ABI symbol.
   let cExportProcName = userProcName
   let helperProc =
     buildCtorBodyProc(userProcName, paramNames, paramTypes, libTypeName, bodyNode)
@@ -1514,8 +1303,7 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
 
   let stmts =
     if abiFormat == ABIFormat.C:
-      # The `abi = c` exported wrapper is emitted at genBindings() time (see
-      # flushCAbiDispatch); the CBOR `ffiProc` is not.
+      # The `abi = c` wrapper is emitted at genBindings() time; CBOR `ffiProc` isn't.
       registerCAbiCtor(cExportName, libTypeName, reqTypeName, paramNames, paramTypes)
       newStmtList(typeDef, ffiNewReqProc, helperProc, processProc, addToReg, poolDecl)
     else:
@@ -1528,39 +1316,9 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
   return stmts
 
 macro ffiDtor*(args: varargs[untyped]): untyped =
-  ## Defines a C-exported destructor that tears down the FFIContext.
-  ##
-  ## The annotated proc must have exactly one parameter of the library type. It
-  ## may be sync (no return type) or async (`Future[void]`) — an async dtor can
-  ## `await` a graceful library shutdown (e.g. `switch.stop()`) whose futures
-  ## live on the FFI event loop.
-  ##
-  ## The wire format follows the library default and can be overridden with
-  ## `{.ffiDtor: "abi = c".}` / `{.ffiDtor: "abi = cbor".}`.
-  ##
-  ## Example (sync):
-  ##   proc echo_destroy*(e: Echo) {.ffiDtor.} =
-  ##     e.close()
-  ##
-  ## Example (async):
-  ##   proc waku_destroy*(w: Waku): Future[void] {.ffiDtor.} =
-  ##     await w.stop()
-  ##
-  ## The generated C-exported proc has the signature:
-  ##   int waku_destroy(void* ctx)
-  ##
-  ## A non-empty body is lifted into an async impl registered in the library's
-  ## `ffiTeardownHook` slot; the FFI thread awaits it on its own event loop, after
-  ## draining in-flight requests and just before it exits — so the body runs on
-  ## the worker thread, not the host (calling) thread. The C wrapper signals the
-  ## thread to stop and blocks (up to `ThreadExitTimeout`) until it, and the
-  ## teardown, finish, then frees the context. An empty/`discard` body registers
-  ## no hook.
-  ##
-  ## Returns RET_OK on success, RET_ERR on failure (null/invalid ctx, or
-  ## destroyFFIContext failure — e.g. a teardown that outlasts ThreadExitTimeout,
-  ## which leaks the context rather than hanging the caller).
-
+  ## C-exported FFIContext destructor. Sync (no return) or async (`Future[void]`);
+  ## a non-empty body becomes an async `ffiTeardownHook` the FFI thread awaits at
+  ## shutdown, so teardown runs on the worker thread. RET_ERR on null/invalid ctx.
   requireBeforeGenBindings("`.ffiDtor.`")
   requireLibraryDeclared("`.ffiDtor.`")
   let prc = args[^1]
@@ -1577,8 +1335,7 @@ macro ffiDtor*(args: varargs[untyped]): untyped =
   let libParamName = formalParams[1][0]
   let libTypeName = formalParams[1][1]
 
-  # A dtor is sync (no return type) or async (`Future[void]`); reject anything
-  # else up front rather than emitting an obscure downstream error.
+  # A dtor is sync (no return) or async (`Future[void]`); reject anything else.
   let retTypeNode = formalParams[0]
   let retIsFutureVoid =
     retTypeNode.kind == nnkBracketExpr and $retTypeNode[0] == "Future" and
@@ -1596,10 +1353,7 @@ macro ffiDtor*(args: varargs[untyped]): untyped =
     else:
       raw
   let cExportName = camelToSnakeCase(procNameStr)
-  # The dtor only needs a C-exported wrapper; rename to a synthetic Nim ident
-  # so it doesn't shadow the user's chosen name (consistent with .ffi. / .ffiCtor.).
-  # The dtor only generates a C-exported wrapper; it uses the user's name
-  # directly (no overload needed — there's no Nim-facing helper here).
+  # The dtor only emits a C wrapper and uses the user's name directly (no Nim-facing helper to overload against).
   var cExportProcName = procName
   if procName.kind == nnkPostfix:
     cExportProcName = procName[1]
@@ -1622,9 +1376,7 @@ macro ffiDtor*(args: varargs[untyped]): untyped =
       bodyNode[0].kind == nnkDiscardStmt
     )
 
-  # Lift the body into an async impl registered in the per-library
-  # `ffiTeardownHook`, which the FFI thread awaits at shutdown (see ffi_thread.nim
-  # and ffiTeardownHook's docstring). The C wrapper no longer runs the body.
+  # Lift the body into an async `ffiTeardownHook` the FFI thread awaits at shutdown; the C wrapper no longer runs the body.
   let teardownImplName = genSym(nskProc, "ffiTeardownImpl")
   let teardownRegistration =
     if isNoop:
@@ -1684,36 +1436,9 @@ macro ffiDtor*(args: varargs[untyped]): untyped =
   return stmts
 
 macro ffiEvent*(args: varargs[untyped]): untyped =
-  ## Declares a library-initiated event. The annotated proc has an empty
-  ## body — the macro fills it with a `dispatchFFIEventCbor` call so the
-  ## Nim author dispatches the event by calling the proc with a typed
-  ## payload, and the per-target codegens emit a typed handler dispatcher
-  ## on the foreign side.
-  ##
-  ## The wire-format event name is optional: when omitted it is derived from
-  ## the proc name via `camelToSnakeCase` (matching how {.ffi.} derives its C
-  ## export symbol), so `proc onPeerConnected(...)` becomes `on_peer_connected`.
-  ## Pass a string literal to override it verbatim (no case conversion). That
-  ## name appears in the CBOR `eventType` field and is the single source of
-  ## truth across Nim / C++ / Rust bindings.
-  ##
-  ## The wire format follows the library default and can be overridden by
-  ## passing an `"abi = ..."` spec (after the optional event name), e.g.
-  ## `{.ffiEvent("on_peer_connected", "abi = cbor").}`.
-  ##
-  ## Example:
-  ##   type PeerInfo {.ffi.} = object
-  ##     id: string
-  ##     address: string
-  ##
-  ##   proc onPeerConnected*(peer: PeerInfo) {.ffiEvent.}  # -> "on_peer_connected"
-  ##
-  ##   # ... then from inside any {.ffi.} handler:
-  ##   onPeerConnected(PeerInfo(id: "p-1", address: "127.0.0.1"))
-  ##
-  ## Restriction (first pass): exactly one parameter. Multi-param events
-  ## need a synthesised envelope struct; planned for a follow-up.
-
+  ## Declares a library-initiated event: the empty-bodied proc is filled with a
+  ## `dispatchFFIEventCbor` call. Wire name defaults to `camelToSnakeCase` of the
+  ## proc name (a string literal overrides it) and is the cross-binding source of truth.
   requireBeforeGenBindings("`.ffiEvent.`")
   requireLibraryDeclared("`.ffiEvent.`")
   if args.len < 1:
@@ -1757,13 +1482,12 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
     else:
       payloadTypeNode.repr
 
-  # The generated body: dispatchFFIEventCbor("wire_name", payload).
   let wireNameLit = newStrLitNode(wireName)
   let dispatchBody =
     newStmtList(newCall(ident("dispatchFFIEventCbor"), wireNameLit, payloadParamName))
 
   var newParams = newSeq[NimNode]()
-  newParams.add(formalParams[0]) # return type (typically empty/void)
+  newParams.add(formalParams[0])
   newParams.add(paramDef)
 
   let pragmas =
@@ -1795,9 +1519,8 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
   return generated
 
 proc reportScalarFastPathDrops(procs: seq[FFIProcMeta]) {.compileTime.} =
-  ## Scalar-fast-path procs have no foreign-binding codegen yet, so they can't
-  ## ride the generated bindings. Fail loudly, naming them, unless
-  ## `-d:ffiAllowScalarSkip` opts into the silent omission (then just hint).
+  ## Scalar-fast-path procs have no foreign-binding codegen yet; fail loudly
+  ## naming them unless `-d:ffiAllowScalarSkip` downgrades it to a hint.
   var skipped: seq[string] = @[]
   for p in procs:
     if p.scalarFastPath:
@@ -1821,18 +1544,16 @@ proc reportScalarFastPathDrops(procs: seq[FFIProcMeta]) {.compileTime.} =
   )
 
 proc bindingsOutputDir(lang, explicit: string): string {.compileTime.} =
-  ## Output dir for `lang`. Defaults to `<lang>_bindings/` next to the source
-  ## file being compiled (`querySetting(projectPath)`); an explicit
-  ## -d:ffiOutputDir override wins.
+  ## Output dir for `lang`; defaults to `<lang>_bindings/` next to the compiled
+  ## source, or an explicit -d:ffiOutputDir override.
   if explicit.len > 0:
     explicit
   else:
     return querySetting(SingleValueSetting.projectPath) / (lang & "_bindings")
 
 proc bindingsSrcPath(outDir, explicit: string): string {.compileTime.} =
-  ## Nim source path embedded in generated build files, expressed relative to
-  ## the output dir. Defaults to the compiled file (`querySetting(projectFull)`)
-  ## made relative to `outDir`; an explicit -d:ffiSrcPath override wins.
+  ## Nim source path embedded in build files, relative to `outDir`; defaults to
+  ## the compiled file, or an explicit -d:ffiSrcPath override.
   if explicit.len > 0:
     explicit
   else:
@@ -1842,8 +1563,7 @@ when defined(ffiGenBindings):
   proc emitBindingsFor(
       lang: string, genProcs: seq[FFIProcMeta], libName, outDir, srcRel: string
   ) {.compileTime.} =
-    ## Route one language token to its generator; unknown tokens are a compile
-    ## error listing the valid set.
+    ## Route one language token to its generator; unknown tokens error.
     case lang
     of "rust":
       generateRustCrate(
@@ -1868,36 +1588,9 @@ when defined(ffiGenBindings):
 macro genBindings*(
     outputDir: static[string] = ffiOutputDir, nimSrcRelPath: static[string] = ffiSrcPath
 ): untyped =
-  ## Emits C++ or Rust binding files from the compile-time FFI registries.
-  ## The foreign-side wrapper encodes one CBOR buffer per request.
-  ##
-  ## PLACEMENT REQUIREMENT: genBindings() must be called AFTER every {.ffi.},
-  ## {.ffiCtor.} and {.ffiDtor.} annotation in the compilation unit. Each
-  ## pragma populates ffiProcRegistry / ffiTypeRegistry as the compiler
-  ## expands the AST; calling genBindings() earlier produces incomplete
-  ## bindings.
-  ##
-  ## In a single-file library, place it at the bottom of the file.
-  ## In a multi-file library, import all sub-modules first and call
-  ## genBindings() once at the bottom of the top-level compilation-root file.
-  ##
-  ## Supported languages (-d:targetLang): "rust" (default), "cpp", "c", "cddl".
-  ## Pass a comma-separated list to emit several at once from a single compile —
-  ## the backend dispatch loops over each language. The `c` target emits the
-  ## `abi = c` or CBOR C shape based on the library's ABI format (`defaultABIFormat`).
-  ##
-  ## Output dir defaults to `<lang>_bindings/` next to the compiled source; the
-  ## embedded nim source path is derived by making that source relative to the
-  ## output dir. Both can be overridden with -d:ffiOutputDir / -d:ffiSrcPath
-  ## (or the explicit arguments) — an override applies to every language.
-  ## Foreign-binding file emission is a no-op unless -d:ffiGenBindings is set;
-  ## the `abi = c` `_CWire` companions are emitted unconditionally (runtime
-  ## code, not generated files).
-  ##
-  ## Example (all via compile flags):
-  ##   genBindings()
-  ##   # nim c -d:ffiGenBindings -d:targetLang=rust,cpp,c mylib.nim
-
+  ## Emits binding files from the compile-time FFI registries. MUST be called AFTER
+  ## every {.ffi.}/{.ffiCtor.}/{.ffiDtor.} annotation, so place it at the compilation
+  ## root's bottom. -d:targetLang picks languages; emission needs -d:ffiGenBindings.
   genBindingsEmitted = true
 
   when defined(ffiGenBindings):

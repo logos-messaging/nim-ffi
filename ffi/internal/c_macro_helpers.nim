@@ -1,11 +1,6 @@
-## Compile-time helpers used by `ffi_macro.nim` for the `c` (`abi = c` C-struct) ABI.
-## For each `{.ffi: "abi = c".}` object T, emits a `T_CWire` companion plus
-## `cwirePack` / `cwireUnpack` / `cwireFree`. Field mapping: `string`→`cstring`,
-## `seq[T]`→`<name>_items`+`<name>_len`, `Option[T]`/`Maybe[T]`→`ptr T_w`
-## (nil=none), nested {.ffi.}→`T_CWire`, `array[N, T]`→inline `array[N, T_w]`,
-## `tuple[a: T, ...]`→`tuple[a: T_w, ...]`, POD unchanged. seq/Option/array/tuple
-## nest to any depth, but a `seq` may not nest inside another container (it has
-## no single-field wire form — only the top-level `_items`/`_len` split).
+## Compile-time helpers for the `abi = c` C-struct ABI: for each `{.ffi: "abi = c".}`
+## object T, emits a `T_CWire` companion plus `cwirePack`/`cwireUnpack`/`cwireFree`.
+## A `seq` may only be a top-level field (no single-field wire form to nest).
 
 import std/macros
 import ../codegen/meta
@@ -17,8 +12,7 @@ const
 var emittedCWireTypes {.compileTime.}: seq[string]
 
 proc isCWireEmitted(typeName: string): bool {.compileTime.} =
-  ## Indexed scan: works around a Nim 2.2 compile-time VM quirk where `for x in
-  ## seq` over a freshly-mutated `{.compileTime.}` seq goes stale.
+  # Indexed scan: `for x in seq` over a freshly-mutated compileTime seq goes stale on the Nim 2.2 VM.
   for i in 0 ..< emittedCWireTypes.len:
     if emittedCWireTypes[i] == typeName:
       return true
@@ -29,15 +23,12 @@ proc markCWireEmitted(typeName: string) {.compileTime.} =
     emittedCWireTypes.add(typeName)
 
 proc cwireTypeName(userTypeName: string): string =
-  ## Companion-type naming convention; stable so generated tests reach in by name.
   userTypeName & "_CWire"
 
 proc seqItemsField(obj, field: NimNode): NimNode =
-  ## `obj.<field>_items` — the buffer half of a seq's two-field wire split.
   newDotExpr(obj, ident($field & cwireItemsSuffix))
 
 proc seqLenField(obj, field: NimNode): NimNode =
-  ## `obj.<field>_len` — the count half of a seq's two-field wire split.
   newDotExpr(obj, ident($field & cwireLenSuffix))
 
 proc isStringType(t: NimNode): bool =
@@ -59,8 +50,7 @@ proc isTupleType(t: NimNode): bool =
   t.kind == nnkTupleTy
 
 proc tupleComponents(t: NimNode): seq[tuple[name: string, typ: NimNode]] =
-  ## Flatten a named-tuple type into `(name, type)` pairs, expanding grouped
-  ## declarations like `tuple[a, b: int]` into one entry per name.
+  ## Flatten a named tuple into `(name, type)` pairs, one per name.
   var comps: seq[tuple[name: string, typ: NimNode]] = @[]
   for defs in t:
     if defs.kind != nnkIdentDefs:
@@ -80,9 +70,7 @@ proc isNestedFFIType(t: NimNode): bool =
   t.kind == nnkIdent and isKnownFFIType($t)
 
 proc cwireNeedsFree(t: NimNode): bool =
-  ## Whether the wire form of `t` owns shared-memory allocations that
-  ## `cwireFree` must release. POD scalars (and aggregates entirely of POD)
-  ## own nothing, so their free is elided.
+  ## Whether the wire form of `t` owns allocations `cwireFree` must release.
   if isStringType(t) or isNestedFFIType(t) or isOptionType(t) or isSeqType(t):
     return true
   if isArrayType(t):
@@ -95,18 +83,13 @@ proc cwireNeedsFree(t: NimNode): bool =
   false
 
 proc rejectNestedSeq(t: NimNode) =
-  ## `seq` has no single-field wire form (only the top-level `_items`/`_len`
-  ## split), so it can't sit inside another container. One message, one place.
   error(
     "cwire: `seq` has no single-field wire form, so it can't nest inside " &
       "another container (use it only as a top-level field): " & t.repr
   )
 
 proc wireValueType(t: NimNode): NimNode =
-  ## Single-field wire form of value type `t`: `string`→`cstring`, nested
-  ## {.ffi.}→`T_CWire`, `Option[T]`→`ptr <wireOf T>`, `array[N, T]`→
-  ## `array[N, <wireOf T>]`, `tuple[a: T, ...]`→`tuple[a: <wireOf T>, ...]`,
-  ## POD unchanged. `seq` has no single-field form, so it errors here.
+  ## Single-field wire form of value type `t`; `seq` has none, so it errors here.
   if isStringType(t):
     return ident("cstring")
   if isNestedFFIType(t):
@@ -126,8 +109,7 @@ proc wireValueType(t: NimNode): NimNode =
   t
 
 proc wireFieldsFor(fieldName: string, fieldType: NimNode): seq[NimNode] =
-  ## IdentDefs for one field. `seq[T]` splits into `<name>_items: ptr
-  ## UncheckedArray[<wireOf T>]` + `<name>_len: int`; else a single IdentDef.
+  ## IdentDefs for one field; `seq[T]` splits into `_items` + `_len`.
   if isSeqType(fieldType):
     let elemWire = wireValueType(fieldType[1])
     let itemsField = newIdentDefs(
@@ -143,8 +125,7 @@ proc wireFieldsFor(fieldName: string, fieldType: NimNode): seq[NimNode] =
 proc buildCWireTypeDef(
     userTypeName: string, fieldNames: seq[string], fieldTypes: seq[NimNode]
 ): NimNode =
-  ## Build the bare `nnkTypeDef` (no enclosing TypeSection) for the wire
-  ## companion of `userTypeName`.
+  ## Build the bare `nnkTypeDef` for the wire companion of `userTypeName`.
   let wireName = ident(cwireTypeName(userTypeName))
   var fields: seq[NimNode] = @[]
   for i in 0 ..< fieldNames.len:
@@ -171,8 +152,7 @@ proc emitTupleUnpack(dstAccess, srcAccess, tupType: NimNode): NimNode
 proc emitTupleFree(dstAccess, tupType: NimNode): NimNode
 
 proc emitElemPack(dstElem, srcElem, elemType: NimNode): NimNode =
-  ## Pack one value: cstring for `string`, recursive `cwirePack` for nested
-  ## ffi types, recursive Option/array/tuple handling, direct copy for POD.
+  ## Pack one value; recurses through nested ffi/Option/array/tuple, POD copied.
   if isStringType(elemType):
     return newAssignment(dstElem, newCall(ident("cwireAllocStr"), srcElem))
   if isNestedFFIType(elemType):
@@ -188,7 +168,7 @@ proc emitElemPack(dstElem, srcElem, elemType: NimNode): NimNode =
   newAssignment(dstElem, srcElem)
 
 proc emitElemUnpack(dstElem, srcElem, elemType: NimNode): NimNode =
-  ## Inverse of `emitElemPack`: copy one value back into Nim-managed memory.
+  ## Inverse of `emitElemPack`: copy one value back into Nim memory.
   if isStringType(elemType):
     return newAssignment(dstElem, newCall(ident("$"), srcElem))
   if isNestedFFIType(elemType):
@@ -204,7 +184,7 @@ proc emitElemUnpack(dstElem, srcElem, elemType: NimNode): NimNode =
   newAssignment(dstElem, srcElem)
 
 proc emitElemFree(elemAccess, elemType: NimNode): NimNode =
-  ## Free one value, or `nnkEmpty` for POD (nothing to free).
+  ## Free one value, or `nnkEmpty` for POD.
   if isStringType(elemType):
     return newCall(ident("cwireFreeStr"), elemAccess)
   if isNestedFFIType(elemType):
@@ -220,15 +200,13 @@ proc emitElemFree(elemAccess, elemType: NimNode): NimNode =
   newEmptyNode()
 
 proc maybeStmt(n: NimNode): NimNode =
-  ## `n` as a one-statement list, or an empty list when `n` is `nnkEmpty`
-  ## (nothing to do) — keeps the surrounding `quote` block well-formed.
+  ## `n` as a one-statement list, empty list when `nnkEmpty`.
   if n.kind == nnkEmpty:
     return newStmtList()
   newStmtList(n)
 
 proc indexLoop(access, idx, body: NimNode): NimNode =
-  ## `for <idx> in low(access) .. high(access): body` — `low`/`high` so any
-  ## array index range (not just 0-based) is covered.
+  ## `for <idx> in low(access) .. high(access): body` (covers non-0-based ranges).
   nnkForStmt.newTree(
     idx,
     nnkInfix.newTree(
@@ -238,8 +216,7 @@ proc indexLoop(access, idx, body: NimNode): NimNode =
   )
 
 proc emitArrayPack(dstAccess, srcAccess, arrType: NimNode): NimNode =
-  ## Pack a fixed `array[N, T]` element-by-element into the inline wire array;
-  ## the array itself needs no allocation, only its GC'd element contents do.
+  ## Pack a fixed `array[N, T]` element-by-element into the inline wire array.
   let idx = genSym(nskForVar, "i")
   let body = emitElemPack(
     nnkBracketExpr.newTree(dstAccess, idx),
@@ -249,7 +226,7 @@ proc emitArrayPack(dstAccess, srcAccess, arrType: NimNode): NimNode =
   indexLoop(srcAccess, idx, body)
 
 proc emitArrayUnpack(dstAccess, srcAccess, arrType: NimNode): NimNode =
-  ## Inverse of `emitArrayPack`: copy each wire element back into the Nim array.
+  ## Inverse of `emitArrayPack`.
   let idx = genSym(nskForVar, "i")
   let body = emitElemUnpack(
     nnkBracketExpr.newTree(dstAccess, idx),
@@ -259,7 +236,7 @@ proc emitArrayUnpack(dstAccess, srcAccess, arrType: NimNode): NimNode =
   indexLoop(srcAccess, idx, body)
 
 proc emitArrayFree(dstAccess, arrType: NimNode): NimNode =
-  ## Free each array element; `nnkEmpty` when the element type owns nothing.
+  ## Free each array element; `nnkEmpty` when the element owns nothing.
   if not cwireNeedsFree(arrType[2]):
     return newEmptyNode()
   let idx = genSym(nskForVar, "i")
@@ -275,7 +252,7 @@ proc emitTuplePack(dstAccess, srcAccess, tupType: NimNode): NimNode =
   body
 
 proc emitTupleUnpack(dstAccess, srcAccess, tupType: NimNode): NimNode =
-  ## Inverse of `emitTuplePack`: copy each wire component back out.
+  ## Inverse of `emitTuplePack`.
   let body = newStmtList()
   for c in tupleComponents(tupType):
     let nm = ident(c.name)
@@ -285,7 +262,7 @@ proc emitTupleUnpack(dstAccess, srcAccess, tupType: NimNode): NimNode =
   body
 
 proc emitTupleFree(dstAccess, tupType: NimNode): NimNode =
-  ## Free each tuple component that owns allocations; `nnkEmpty` when none do.
+  ## Free each tuple component that owns allocations.
   if not cwireNeedsFree(tupType):
     return newEmptyNode()
   let body = newStmtList()
@@ -294,8 +271,7 @@ proc emitTupleFree(dstAccess, tupType: NimNode): NimNode =
   body
 
 proc emitSeqPack(dstObj, srcAccess, fieldNameIdent, userType: NimNode): NimNode =
-  ## Pack a seq field into a freshly `allocShared`'d `UncheckedArray`; an empty
-  ## seq encodes as nil items + 0 len.
+  ## Pack a seq into an `allocShared` `UncheckedArray`; empty = nil items + 0 len.
   let elemType = userType[1]
   let wireElem = wireValueType(elemType)
   let items = seqItemsField(dstObj, fieldNameIdent)
@@ -323,9 +299,8 @@ proc emitSeqPack(dstObj, srcAccess, fieldNameIdent, userType: NimNode): NimNode 
       `count` = `srcAccess`.len()
 
 proc emitOptionPack(dstAccess, srcAccess, userType: NimNode): NimNode =
-  ## Pack an Option into a `ptr`: some → `allocShared` a box and pack into it,
-  ## none → nil. The payload is read into a local once, so a composite inner
-  ## type (e.g. `array`/`tuple`) isn't re-`get()`-copied per element.
+  ## Pack an Option into a `ptr`: some → `allocShared` box, none → nil. Payload
+  ## read into a local once so a composite inner type isn't re-`get()` per element.
   let innerType = userType[1]
   let wireInner = wireValueType(innerType)
   let bufType = nnkPtrTy.newTree(wireInner)
@@ -340,8 +315,7 @@ proc emitOptionPack(dstAccess, srcAccess, userType: NimNode): NimNode =
       `dstAccess` = nil
 
 proc emitPackStmt(dstObj, srcObj, fieldNameIdent, userType: NimNode): seq[NimNode] =
-  ## Populate `dstObj.<field>` from `srcObj.<field>`, allocating shared-memory
-  ## cstrings/arrays as the field's natural type requires.
+  ## Populate `dstObj.<field>` from `srcObj.<field>`.
   let srcAccess = newDotExpr(srcObj, fieldNameIdent)
   let dstAccess = newDotExpr(dstObj, fieldNameIdent)
   if isSeqType(userType):
@@ -349,7 +323,7 @@ proc emitPackStmt(dstObj, srcObj, fieldNameIdent, userType: NimNode): seq[NimNod
   @[emitElemPack(dstAccess, srcAccess, userType)]
 
 proc emitSeqUnpack(dstAccess, srcObj, fieldNameIdent, userType: NimNode): NimNode =
-  ## Rebuild a Nim seq from the `<field>_items`/`_len` wire pair.
+  ## Rebuild a Nim seq from the `_items`/`_len` wire pair.
   let elemType = userType[1]
   let items = seqItemsField(srcObj, fieldNameIdent)
   let count = seqLenField(srcObj, fieldNameIdent)
@@ -379,8 +353,7 @@ proc emitOptionUnpack(dstAccess, srcAccess, userType: NimNode): NimNode =
 proc emitUnpackStmt(
     resultObj, srcObj, fieldNameIdent, userType: NimNode
 ): seq[NimNode] =
-  ## Fill `resultObj.<field>` from `srcObj.<field>`, copying back into
-  ## Nim-managed memory.
+  ## Fill `resultObj.<field>` from `srcObj.<field>`.
   let srcAccess = newDotExpr(srcObj, fieldNameIdent)
   let dstAccess = newDotExpr(resultObj, fieldNameIdent)
   if isSeqType(userType):
@@ -388,8 +361,7 @@ proc emitUnpackStmt(
   @[emitElemUnpack(dstAccess, srcAccess, userType)]
 
 proc emitSeqFree(dstObj, fieldNameIdent, userType: NimNode): NimNode =
-  ## Free a seq field: free each element (skipped entirely for POD), then the
-  ## shared buffer.
+  ## Free a seq field: each element (skipped for POD), then the shared buffer.
   let elemType = userType[1]
   let items = seqItemsField(dstObj, fieldNameIdent)
   let count = seqLenField(dstObj, fieldNameIdent)
@@ -412,7 +384,7 @@ proc emitSeqFree(dstObj, fieldNameIdent, userType: NimNode): NimNode =
       `count` = 0
 
 proc emitOptionFree(dstAccess, userType: NimNode): NimNode =
-  ## Free an Option field: free the pointee (skipped for POD), then the box.
+  ## Free an Option field: the pointee (skipped for POD), then the box.
   let innerType = userType[1]
   let freeInner = maybeStmt(emitElemFree(nnkBracketExpr.newTree(dstAccess), innerType))
   quote:
@@ -434,8 +406,7 @@ proc emitFreeStmt(dstObj, fieldNameIdent, userType: NimNode): seq[NimNode] =
 proc buildCWireProcs(
     userTypeName: string, fieldNames: seq[string], fieldTypes: seq[NimNode]
 ): seq[NimNode] =
-  ## Generate cwirePack / cwireUnpack / cwireFree procs for `userTypeName`. All
-  ## three are public (`*`) so the macro-expanded code can call them.
+  ## Generate public cwirePack / cwireUnpack / cwireFree procs for `userTypeName`.
   let userName = ident(userTypeName)
   let wireName = ident(cwireTypeName(userTypeName))
 
@@ -496,8 +467,7 @@ proc buildCWireProcs(
 proc fieldInfoForType(
     typeName: string
 ): tuple[names: seq[string], types: seq[NimNode]] {.compileTime.} =
-  ## Look up an ffi type's fields from the compile-time registry and parse each
-  ## field's recorded type back into a NimNode AST.
+  ## Look up an ffi type's fields from the registry, parsing each recorded type.
   for typeMeta in ffiTypeRegistry:
     if typeMeta.name != typeName:
       continue
@@ -512,8 +482,8 @@ proc fieldInfoForType(
 proc collectNestedFFITypes(
     fieldTypes: seq[NimNode], deps: var seq[string]
 ) {.compileTime.} =
-  ## Append (deduped) the names of nested ffi types referenced anywhere in
-  ## `fieldTypes`, recursing through `seq`/`Option`/`array`/`tuple` to any depth.
+  ## Append (deduped) nested ffi type names in `fieldTypes`, recursing through
+  ## `seq`/`Option`/`array`/`tuple`.
   for t in fieldTypes:
     if isNestedFFIType(t):
       let n = $t
@@ -528,9 +498,8 @@ proc collectNestedFFITypes(
         collectNestedFFITypes(@[c.typ], deps)
 
 proc ensureCWireFor(typeName: string, sink: NimNode) {.compileTime.} =
-  ## Idempotent: if `typeName`'s cwire companion has not yet been emitted,
-  ## append its TypeSection and conversion procs to `sink` and mark it emitted.
-  ## Nested ffi deps are ensured first so the resulting AST is self-contained.
+  ## Idempotent: append `typeName`'s cwire companion + procs to `sink` if not yet
+  ## emitted. Nested ffi deps are ensured first so the AST is self-contained.
   if isCWireEmitted(typeName):
     return
   let info = fieldInfoForType(typeName)
@@ -546,26 +515,16 @@ proc ensureCWireFor(typeName: string, sink: NimNode) {.compileTime.} =
     sink.add(p)
 
 proc flushCWireCompanions*(): NimNode {.compileTime.} =
-  ## Emit the `_CWire` companion + conversion procs for every registered
-  ## `abi = c` type. Called by `genBindings()` (a type-pragma macro can't).
+  ## Emit the `_CWire` companion + procs for every registered `abi = c` type.
   let sink = newStmtList()
   for typeMeta in ffiTypeRegistry:
     if typeMeta.abiFormat == ABIFormat.C:
       ensureCWireFor(typeMeta.name, sink)
   sink
 
-## abi = c proc dispatch. The foreign surface is CBOR-free — the `_CWire`
-## structs are the C ABI — but transport reuses the proven CBOR request path
-## internally: the generated exported wrapper `cwireUnpack`s the request into a
-## Nim object, `cborEncodeShared`s it onto the FFI thread, and a Nim reply
-## trampoline `cborDecode`s the reply and `cwirePack`s it back into a `_CWire`
-## struct delivered to the caller's typed callback. So the C consumer never
-## links CBOR, yet the whole thread/dispatch machinery is unchanged.
-##
-## All of this is emitted at `genBindings()` time (after `flushCWireCompanions`)
-## so the request-envelope companions and their `cwireUnpack` overloads are in
-## scope: the exported wrappers reference them, and a proc must follow the
-## procs it calls.
+## abi = c proc dispatch. The foreign surface is CBOR-free (the `_CWire` structs are
+## the C ABI) but transport reuses the CBOR request path internally. Emitted at
+## `genBindings()` time (after `flushCWireCompanions`) so the companions are in scope.
 
 type
   CAbiKind = enum
@@ -596,10 +555,8 @@ proc registerCAbiMethod*(
     paramTypes: seq[NimNode],
     respType: NimNode,
 ) {.compileTime.} =
-  ## Record an `abi = c` method so `flushCAbiDispatch` can emit its wrapper.
-  ## Nodes are frozen with `copyNimTree` — the originals are shared with the Req
-  ## `type` section, which the compiler later binds to `nnkSym`, and a bound
-  ## type symbol reused in the generated body triggers a compiler ICE.
+  ## Record an `abi = c` method for `flushCAbiDispatch`. Nodes are `copyNimTree`
+  ## frozen: reusing the Req section's originals (bound to `nnkSym`) would ICE.
   cAbiSpecs.add(
     CAbiSpec(
       kind: cakMethod,
@@ -618,8 +575,8 @@ proc registerCAbiCtor*(
     paramNames: seq[string],
     paramTypes: seq[NimNode],
 ) {.compileTime.} =
-  ## Record an `abi = c` constructor so `flushCAbiDispatch` can emit its wrapper.
-  ## See `registerCAbiMethod` for why the nodes are frozen with `copyNimTree`.
+  ## Record an `abi = c` ctor for `flushCAbiDispatch`; see `registerCAbiMethod`
+  ## for why nodes are `copyNimTree` frozen.
   cAbiSpecs.add(
     CAbiSpec(
       kind: cakCtor,
@@ -640,8 +597,7 @@ proc cdeclReplyPragma(): NimNode =
   )
 
 proc cAbiCbType(replyType: NimNode): NimNode =
-  ## `proc(err: cint, reply: <replyType>, errMsg: cstring, ud: pointer)
-  ## {.cdecl, gcsafe, raises: [].}` — the caller's typed reply callback.
+  ## The caller's typed reply callback proc type.
   let fp = nnkFormalParams.newTree(
     newEmptyNode(),
     newIdentDefs(ident("err"), ident("cint")),
@@ -652,8 +608,7 @@ proc cAbiCbType(replyType: NimNode): NimNode =
   nnkProcTy.newTree(fp, cdeclReplyPragma())
 
 proc boxTypeDef(boxName, cbType: NimNode): NimNode =
-  ## `type <boxName> = object` holding the caller's callback + user data, heap
-  ## boxed across the thread hand-off.
+  ## Box object holding the caller's callback + user data across the thread hop.
   let recList = nnkRecList.newTree(
     newIdentDefs(ident("fn"), cbType), newIdentDefs(ident("ud"), ident("pointer"))
   )
@@ -661,8 +616,7 @@ proc boxTypeDef(boxName, cbType: NimNode): NimNode =
   nnkTypeSection.newTree(nnkTypeDef.newTree(boxName, newEmptyNode(), objTy))
 
 proc replyTrampProc(trampName, body: NimNode): NimNode =
-  ## A `FFICallBack`-shaped Nim proc: it runs on the FFI thread inside
-  ## `handleRes`' `foreignThreadGc`, converts the reply, and frees the box.
+  ## `FFICallBack`-shaped proc: runs on the FFI thread, converts the reply, frees the box.
   newProc(
     name = trampName,
     params = @[
@@ -677,19 +631,14 @@ proc replyTrampProc(trampName, body: NimNode): NimNode =
   )
 
 proc objectTrampBody(boxName, respType, respWire: NimNode): NimNode =
-  ## Reply trampoline for an object return: recover the box, deliver a transport
-  ## error as a copied NUL-terminated string, else CBOR-decode the reply,
-  ## `cwirePack` it into the `_CWire` struct, hand a pointer to the caller, and
-  ## release the wire. `err_msg` is always a non-nil string; the `reply` struct
-  ## pointer is nil only on error, gated by a non-`RET_OK` `err_code`.
+  ## Reply trampoline for an object return: decode, `cwirePack` into `_CWire`,
+  ## hand a pointer to the caller, release. `reply` is nil only on error.
   quote:
     let box = cast[ptr `boxName`](ud)
     if box.isNil():
       return
     if ret == RET_STALE_WARN:
-      # Non-terminal progress signal: keep the box for the eventual terminal
-      # reply and don't decode (there's no reply payload yet). Typed wrappers
-      # don't surface it; the raw FFICallBack boundary does.
+      # Non-terminal progress signal: keep the box, don't decode.
       return
     defer:
       freeBox(box)
@@ -716,18 +665,14 @@ proc objectTrampBody(boxName, respType, respWire: NimNode): NimNode =
 
 proc stringTrampBody(boxName: NimNode): NimNode =
   ## Reply trampoline for a `string` return (and the ctor's address string):
-  ## CBOR-decode the reply into a Nim string and hand its (NUL-terminated)
-  ## `cstring` to the caller for the duration of the call. Reply and error
-  ## strings are always non-nil empty strings on the paths they don't apply to,
-  ## so a consumer can `strlen`/print either unconditionally without a nil deref.
+  ## decode and hand the caller a NUL-terminated `cstring`. Reply/error strings
+  ## are always non-nil empty on the paths they don't apply to (no nil deref).
   quote:
     let box = cast[ptr `boxName`](ud)
     if box.isNil():
       return
     if ret == RET_STALE_WARN:
-      # Non-terminal progress signal: keep the box for the eventual terminal
-      # reply and don't decode. Typed wrappers don't surface it; the raw
-      # FFICallBack boundary does.
+      # Non-terminal progress signal: keep the box, don't decode.
       return
     defer:
       freeBox(box)
@@ -752,17 +697,11 @@ proc stringTrampBody(boxName: NimNode): NimNode =
 proc exportedMethodProc(
     spec: CAbiSpec, boxName, envWire, trampName, poolIdent, cbType: NimNode
 ): NimNode =
-  # `cwireUnpack` and `cborEncodeShared` run on the *calling* thread and allocate
-  # GC memory, so the caller must be a GC-registered thread — which the dylib's
-  # load thread already is. Deliberately NOT wrapped in `foreignThreadGc`: its
-  # `tearDownForeignThreadGc` would destroy that thread's live ORC heap (a
-  # use-after-free / nil-read crash), and unlike the CBOR path — which only
-  # memcpy's bytes here — this path genuinely needs the heap intact.
+  # No `foreignThreadGc`: `cwireUnpack`/`cborEncodeShared` alloc on the calling thread (already GC-registered); wrapping would free its live ORC heap.
   let envName = spec.envelope
   let libFFICtx =
     nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), spec.libType))
-  # A string reply is an empty (non-nil) cstring on the error path, matching the
-  # trampoline; an object reply is a nil struct pointer gated by `err_code`.
+  # String reply: empty non-nil cstring on error; object reply: nil ptr gated by err_code.
   let emptyReply =
     if isStringType(spec.respType):
       newDotExpr(newLit(""), ident("cstring"))
@@ -816,10 +755,7 @@ proc exportedCtorProc(
     spec: CAbiSpec, boxName, envWire, trampName, poolIdent, cbType: NimNode
 ): NimNode =
   let envName = spec.envelope
-  # See exportedMethodProc: the request conversion allocates GC on the calling
-  # thread, so no `foreignThreadGc` (its teardown would free that thread's heap).
-  # `when declared(initializeLibrary): initializeLibrary()` — built as raw AST;
-  # a `when` with an undeclared symbol inside `quote` trips a compiler ICE.
+  # No `foreignThreadGc` (see exportedMethodProc). initGuard is built as raw AST because a `when declared` over an undeclared symbol inside `quote` ICEs.
   let initGuard = nnkWhenStmt.newTree(
     nnkElifBranch.newTree(
       newCall(ident("declared"), ident("initializeLibrary")),
@@ -880,9 +816,8 @@ proc exportedCtorProc(
 proc ensureCWireForFields(
     sink: NimNode, typeName: string, names: seq[string], types: seq[NimNode]
 ) {.compileTime.} =
-  ## Emit the `_CWire` companion + conversion procs for a synthetic per-proc Req
-  ## envelope (not a user `{.ffi.}` type, so it isn't in `ffiTypeRegistry`).
-  ## Nested user-type deps are already emitted by `flushCWireCompanions`.
+  ## Emit the `_CWire` companion + procs for a synthetic per-proc Req envelope
+  ## (not a user `{.ffi.}` type, so not in `ffiTypeRegistry`).
   if isCWireEmitted(typeName):
     return
   var deps: seq[string] = @[]
@@ -898,8 +833,7 @@ proc ensureCWireForFields(
 
 proc flushCAbiDispatch*(): NimNode {.compileTime.} =
   ## Emit the exported wrappers + reply trampolines for every registered
-  ## `abi = c` proc. Runs after `flushCWireCompanions` so nested companions and
-  ## their `cwireUnpack`/`cwirePack` overloads are already defined.
+  ## `abi = c` proc. Runs after `flushCWireCompanions`.
   let sink = newStmtList()
   for spec in cAbiSpecs:
     let envName = spec.envelope

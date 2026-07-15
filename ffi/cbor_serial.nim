@@ -1,31 +1,6 @@
-## Thin wrapper around `cbor_serialization` (vacp2p/nim-cbor-serialization) that
-## adapts the library's exception-based API to the `Result[T, string]` shape the
-## FFI plumbing expects, and adds the few transport-only details the FFI layer
-## needs on top:
-##
-##   - `cborEncodeShared` writes into a `c_malloc` buffer so the FFI thread
-##     can take ownership of the bytes without a second copy. `c_malloc`
-##     (not `allocShared`) because the buffer must be freeable from the FFI
-##     thread after the producing thread may have exited — see the note in
-##     `ffi/ffi_thread_request.nim`.
-##   - `CborNullByte` is the canonical "successful but no value" wire sentinel.
-##
-## `cborEncode` / `cborDecode` are the public API the macros and tests use.
-##
-## Type contract for `.ffi.` payloads:
-##
-##   - Plain `object` types flow as value copies — fields are serialized and
-##     the foreign side reconstructs an independent value.
-##   - `ref T` is *also* a value copy: `cbor_serialization`'s default `ref T`
-##     writer dereferences and encodes the pointee, so the receiving side
-##     allocates a fresh `ref` local to its own GC heap. No object identity
-##     is preserved across the boundary — the two sides own independent
-##     copies after decode.
-##   - Raw `pointer` / `ptr T` are rejected at macro-expansion time (see
-##     `rejectRawPtrType` in `internal/ffi_macro.nim`). The only address that
-##     legitimately crosses the boundary is the opaque ctx handle returned by
-##     `.ffiCtor.`, which is validated against `FFIContextPool` on every
-##     re-entry. Arbitrary user pointers would lack that validation.
+## `cbor_serialization` wrapper adapting its exception API to `Result[T, string]` for the FFI layer.
+## `.ffi.` payloads (plain `object` and `ref T`) cross as value copies; raw `pointer`/`ptr T` are
+## rejected at macro-expansion time (see `rejectRawPtrType`).
 
 import system/ansi_c
 import cbor_serialization, cbor_serialization/std/options, results
@@ -33,20 +8,14 @@ import cbor_serialization, cbor_serialization/std/options, results
 export cbor_serialization, options, results
 
 const CborNullByte*: byte = 0xf6'u8
-  ## CBOR encoding of `null` — used as the wire sentinel for empty OK payloads.
+  ## CBOR `null` — wire sentinel for empty OK payloads.
 
 proc cborEncode*[T](x: T): seq[byte] =
-  ## CBOR-encode any cbor_serialization-supported type (plus `pointer` / `ptr T`
-  ## via our custom writers) into a fresh `seq[byte]`.
   return Cbor.encode(x)
 
 proc cborEncodeShared*[T](x: T): tuple[data: ptr UncheckedArray[byte], len: int] =
-  ## Encodes `x` into a `c_malloc` buffer.
-  ##
-  ## The returned `data` is owned by the caller and must be freed exactly
-  ## once via `cborFreeShared`. The
-  ## `FFIThreadRequest deleteRequest` path frees adopted buffers
-  ## automatically. Empty payloads return `(nil, 0)` without allocating.
+  ## Encodes `x` into a caller-owned `c_malloc` buffer (free via `cborFreeShared`).
+  ## Empty payloads return `(nil, 0)` without allocating.
   let bytes = Cbor.encode(x)
   if bytes.len == 0:
     return (nil, 0)
@@ -55,16 +24,13 @@ proc cborEncodeShared*[T](x: T): tuple[data: ptr UncheckedArray[byte], len: int]
   return (buf, bytes.len)
 
 proc cborFreeShared*(data: var ptr UncheckedArray[byte]) =
-  ## Releases a buffer previously returned by `cborEncodeShared` and nils
-  ## the caller's pointer so a stale reference can't be reused after free.
-  ## Safe to call with `nil` (the `(nil, 0)` empty-payload contract).
+  ## Frees a `cborEncodeShared` buffer and nils the pointer. Nil-safe.
   if not data.isNil():
     c_free(data)
     data = nil
 
 proc cborDecode*[T](data: openArray[byte], _: typedesc[T]): Result[T, string] =
-  ## Decode `data` into a `T`, converting any cbor_serialization exception
-  ## into a `Result.err` carrying the exception message.
+  ## Decode `data` into a `T`, mapping any exception to `Result.err`.
   try:
     let v = Cbor.decode(data, T)
     return ok(v)
@@ -74,8 +40,7 @@ proc cborDecode*[T](data: openArray[byte], _: typedesc[T]): Result[T, string] =
 proc cborDecodePtr*[T](
     data: ptr UncheckedArray[byte], dataLen: int, _: typedesc[T]
 ): Result[T, string] =
-  ## Convenience for ptr+len buffers (used by the macro to avoid binding an
-  ## openArray to a `let`).
+  ## Convenience for ptr+len buffers.
   if dataLen <= 0:
     return cborDecode(default(seq[byte]), T)
   cborDecode(toOpenArray(data, 0, dataLen - 1), T)

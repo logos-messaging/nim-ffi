@@ -1,14 +1,4 @@
 ## CBOR-free scalar fast path for all-scalar `{.ffi: "abi = c".}` methods.
-##
-## Kept out of the base `ffi` macro so the usual CBOR/async dispatch path in
-## `ffi_macro.nim` stays simple: the macro only decides eligibility
-## (`isScalarOnly`) and, when it applies, hands the whole codegen to
-## `buildScalarPath`.
-##
-## A scalar proc's C export takes its scalar args directly (no
-## `reqCbor`/`reqCborLen`), packs them inline into the request (no envelope
-## `c_malloc`, no CBOR), and the FFI-thread handler unpacks them, runs the user
-## body, and returns the result as raw bytes (`ffiScalarRetBytes`).
 
 import std/macros
 import ../codegen/meta
@@ -17,26 +7,19 @@ const scalarPodTypeNames = [
   "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32",
   "uint64", "byte", "float", "float32", "float64", "bool",
 ]
-  ## Fixed-width POD scalars that fit one `uint64` slot and survive the async
-  ## hop by value. `cstring`/`string` are intentionally absent as *params*:
-  ## they point to caller memory the FFI thread reads after the call returns,
-  ## so passing them inline by value would be unsafe.
+  ## Fixed-width POD scalars that survive the async hop by value; `cstring`/
+  ## `string` are excluded as params (they alias caller memory read after return).
 
 func isScalarParamTypeName*(name: string): bool =
-  ## A param type eligible for the CBOR-free scalar fast path.
   name in scalarPodTypeNames
 
 func isScalarReturnTypeName*(name: string): bool =
-  ## A return type eligible for the scalar fast path. Unlike params, a
-  ## `string`/`cstring` return is fine: the handler produces the bytes and they
-  ## ride back raw (like the error path), so no caller memory is aliased.
+  ## Unlike params, a `string`/`cstring` return is fine: the bytes ride back raw.
   name in scalarPodTypeNames or name == "string" or name == "cstring"
 
 func isScalarOnly*(p: FFIProcMeta): bool =
-  ## True iff `p` is a plain `{.ffi.}` method whose every wire param and return
-  ## is scalar — the whole signature crosses without CBOR or `_CWire`. Handles
-  ## and raw pointers are excluded (a handle needs a ctx-registry round-trip;
-  ## a pointer never crosses).
+  ## True iff every wire param and return of `p` is scalar. Handles and raw
+  ## pointers are excluded.
   if p.kind != FFIKind.FFI:
     return false
   if p.returnIsPtr or p.returnIsHandle:
@@ -49,10 +32,8 @@ func isScalarOnly*(p: FFIProcMeta): bool =
   true
 
 func bindableProcs*(procs: seq[FFIProcMeta]): seq[FFIProcMeta] =
-  ## The procs the foreign-binding generators emit for. Scalar-fast-path procs
-  ## are dropped: their C export takes inline scalar args, not the CBOR
-  ## `(reqCbor, reqCborLen)` shape the current codegen assumes, so emitting a
-  ## CBOR caller for them would be wrong. Foreign codegen is a follow-up.
+  ## Procs the foreign-binding generators emit for; scalar-fast-path procs are
+  ## dropped (their inline-scalar export doesn't match the CBOR codegen shape).
   var kept: seq[FFIProcMeta] = @[]
   for p in procs:
     if not p.scalarFastPath:
@@ -69,10 +50,8 @@ proc buildScalarPath*(
     extraParamTypes: seq[NimNode],
     procMeta: FFIProcMeta,
 ): NimNode {.compileTime.} =
-  ## Emits the scalar-fast-path codegen for one `.ffi.` proc. The generic
-  ## dispatch pieces (`helperProc`, `ctxGuard`, `sendAndReply`) are built by the
-  ## caller from the same shared helpers the usual path uses, so this only owns
-  ## the scalar-specific inline pack / unpack / raw-bytes wiring.
+  ## Emits the scalar-fast-path codegen for one `.ffi.` proc; the caller supplies
+  ## the generic dispatch pieces, this owns the inline pack/unpack/raw-bytes wiring.
   let scalarReqKey = camelName & "Req"
 
   let reqIdent = genSym(nskLet, "ffiReq")
@@ -162,8 +141,7 @@ proc buildScalarPath*(
     ),
   )
 
-  # Registered (not just skipped) so the compile-time metadata stays
-  # introspectable; `bindableProcs` drops it from foreign codegen.
+  # Registered so metadata stays introspectable; `bindableProcs` drops it later.
   var scalarMeta = procMeta
   scalarMeta.scalarFastPath = true
   ffiProcRegistry.add(scalarMeta)

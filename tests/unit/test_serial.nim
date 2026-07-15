@@ -114,10 +114,7 @@ suite "CBOR object":
     check back.value.point.y == 2
 
 suite "CBOR ref T (value-copy contract)":
-  ## cbor_serialization's default `ref T` writer dereferences and encodes the
-  ## pointee. On decode the receiving side allocates a fresh `ref` local to
-  ## its own GC heap — no address crosses the boundary and the two refs are
-  ## independent. Documented in ffi/cbor_serial.nim's module header.
+  ## Encode dereferences the pointee; decode allocates an independent ref.
 
   test "ref RefBox round-trip produces an independent ref":
     let original = (ref RefBox)(label: "hi", n: 7)
@@ -127,9 +124,7 @@ suite "CBOR ref T (value-copy contract)":
     check back.value != nil
     check back.value.label == "hi"
     check back.value.n == 7
-    # Mutate the decoded copy; the original must be untouched (proving no
-    # aliasing). If the wire format ever switched to identity-preserving
-    # transport, this would fail.
+    # Mutating the decoded copy must not touch the original (no aliasing).
     back.value.label = "mutated"
     check original.label == "hi"
     check cast[pointer](back.value) != cast[pointer](original)
@@ -201,10 +196,7 @@ suite "CBOR error handling":
     let res = cborDecode(truncated, string)
     check res.isErr
 
-# Regression for PR #23 review item 9: cborEncodeShared writes directly into
-# a c_malloc buffer, letting the FFI thread request take ownership without
-# an intermediate seq[byte] copy. The shared-encoder must produce
-# byte-for-byte the same output as the seq-encoder.
+# cborEncodeShared writes into a c_malloc buffer; must match the seq-encoder byte-for-byte.
 
 import system/ansi_c
 
@@ -237,8 +229,7 @@ suite "cborEncodeShared":
     check back.point.y == 4
 
   test "large string growth":
-    # Larger than the initial 16-byte cap so the encoder must grow several
-    # times; verifies the shared-mode grower handles repeated reallocations.
+    # Larger than the initial 16-byte cap so the shared-mode grower reallocates.
     var big = newString(4096)
     for i in 0 ..< big.len:
       big[i] = char(ord('a') + (i mod 26))
@@ -345,9 +336,7 @@ suite "CBOR boundaries":
     check back.value.classify == math.fcSubnormal
 
   test "float32 subnormal (compared by bit pattern)":
-    # The smallest positive float32 subnormal has bit pattern 0x00000001.
-    # `math.classify` widens to float64 and would re-classify this as normal,
-    # so we compare the raw 32-bit bit pattern instead.
+    # classify widens to float64 and misreads this as normal; compare raw bits.
     let v = cast[float32](0x00000001'u32)
     let bytes = cborEncode(v)
     let back = cborDecode(bytes, float32)
@@ -493,8 +482,7 @@ suite "CBOR round-trips":
     check back.value.flags.len == 0
     check back.value.blob.len == 0
 
-  # Sizes chosen to cross the 24/256/65536-byte CBOR length-encoding
-  # boundaries and the encoder's internal buffer-grow thresholds.
+  # Sizes cross the 24/256/65536-byte CBOR length and buffer-grow boundaries.
 
   test "string >64 KiB":
     const n = 70_000
@@ -556,10 +544,7 @@ suite "CBOR round-trips":
     check back.value[n - 1].y == -(n - 1)
 
 suite "CBOR void / null sentinel":
-  ## `CborNullByte` is the wire sentinel used by `ffi_thread_request` to
-  ## carry a "successful but no value" reply (an `.ffi.` proc whose handler
-  ## returns `Result[void, string]`). See `ffi/cbor_serial.nim` and
-  ## `ffi/ffi_thread_request.nim` for the producer side.
+  ## `CborNullByte` is the "successful but no value" (Result[void]) wire sentinel.
 
   test "CborNullByte equals CBOR null (0xf6)":
     check CborNullByte == 0xf6'u8
@@ -576,8 +561,7 @@ suite "CBOR void / null sentinel":
     check back.value.isNone
 
   test "decoding the sentinel as a required object type errors out":
-    # A consumer that expects a real payload but is handed the void sentinel
-    # must fail explicitly rather than silently materializing a zeroed value.
+    # A required-payload consumer handed the void sentinel must fail explicitly.
     let bytes = @[CborNullByte]
     let back = cborDecode(bytes, Point)
     check back.isErr

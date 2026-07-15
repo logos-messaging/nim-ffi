@@ -2,17 +2,11 @@ import ffi, chronos, options
 
 type Maybe[T] = Option[T]
 
-# The library's main state type. The FFI context owns one instance.
-# Named `MyTimer` (not `Timer`) so the C-exported symbols are
-# `my_timer_create` / `my_timer_destroy` / ... — `timer_create` would
-# collide with POSIX `<time.h>`'s `int timer_create(clockid_t, ...)` which
-# `<pthread.h>` transitively drags in on Linux.
+# Named `MyTimer` (not `Timer`) so C symbols like `my_timer_create` don't collide with POSIX `<time.h>`'s `timer_create`.
 type MyTimer = object
   name: string # set at creation time, read back in each response
 
-# `defaultABIFormat` selects the wire format every {.ffi.} / {.ffiEvent.} / ...
-# in this library inherits; "cbor" is the default and can be overridden per
-# annotation with an `"abi = ..."` spec.
+# `defaultABIFormat` is the wire format every annotation inherits (override per-annotation with "abi = ...").
 declareLibrary("my_timer", MyTimer, defaultABIFormat = "cbor")
 
 type TimerConfig {.ffi.} = object
@@ -37,27 +31,19 @@ type ComplexResponse {.ffi.} = object
   itemCount: int
   hasNote: bool
 
-# --- Library-initiated event ----------------------------------------------
-# Demonstrates the {.ffiEvent.} macro: a typed event the library can fire
-# from any {.ffi.} handler, dispatched to the foreign side's registered
-# callback as CBOR. Per-target codegens emit a typed handler-struct +
-# dispatcher so the foreign caller decodes nothing by hand.
+# {.ffiEvent.}: a typed event any {.ffi.} handler can fire to the foreign callback.
 type EchoEvent {.ffi.} = object
   message: string
   echoCount: int
 
 proc onEchoFired*(evt: EchoEvent) {.ffiEvent: "on_echo_fired".}
 
-# --- Constructor -----------------------------------------------------------
-# Called once from Rust. Creates the FFIContext + MyTimer.
-# Uses chronos (await sleepAsync) so the body is async.
+# Constructor: creates the FFIContext + MyTimer; async via chronos.
 proc myTimerCreate*(config: TimerConfig): Future[Result[MyTimer, string]] {.ffiCtor.} =
   await sleepAsync(1.milliseconds) # proves chronos is live on the FFI thread
   return ok(MyTimer(name: config.name))
 
-# --- Async method ----------------------------------------------------------
-# Waits `delayMs` milliseconds (non-blocking, on the chronos event loop)
-# then echoes the message back with a request counter.
+# Async method: sleeps `delayMs` then echoes the message back.
 proc myTimerEcho*(
     timer: MyTimer, req: EchoRequest
 ): Future[Result[EchoResponse, string]] {.ffi.} =
@@ -65,9 +51,7 @@ proc myTimerEcho*(
   onEchoFired(EchoEvent(message: req.message, echoCount: 1))
   return ok(EchoResponse(echoed: req.message, timerName: timer.name))
 
-# --- Sync method -----------------------------------------------------------
-# No await — the macro detects this and fires the callback inline,
-# without going through the request channel.
+# Sync method: no await, so the macro fires the callback inline.
 proc myTimerVersion*(timer: MyTimer): Future[Result[string, string]] {.ffi.} =
   return ok("nim-timer v0.1.0")
 
@@ -82,12 +66,7 @@ proc myTimerComplex*(
   return
     ok(ComplexResponse(summary: summary, itemCount: count, hasNote: req.note.isSome))
 
-# --- Multiple complex parameters -------------------------------------------
-# Demonstrates how a {.ffi.} proc handles several object-typed parameters at
-# once. Each parameter is its own {.ffi.} type, so it lands in the generated
-# foreign-side bindings as a first-class struct/class, and the per-proc Req
-# envelope (MyTimerScheduleReq on the wire) carries all three under field
-# names that match the Nim params.
+# Multiple object-typed params: each is its own {.ffi.} type, all carried in one per-proc Req envelope.
 type JobSpec {.ffi.} = object
   name: string
   payload: seq[string]
@@ -112,10 +91,7 @@ type ScheduleResult {.ffi.} = object
 proc myTimerSchedule*(
     timer: MyTimer, job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig
 ): Future[Result[ScheduleResult, string]] {.ffi.} =
-  ## Composes three independent object-typed parameters (`job`, `retry`,
-  ## `schedule`) into a single scheduling decision. The macro packs them into
-  ## one CBOR-encoded request envelope on the wire and unpacks them back into
-  ## the named locals before this body runs.
+  ## Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
   await sleepAsync(1.milliseconds)
   if job.name.len == 0:
     return err("job name must not be empty")
@@ -137,22 +113,8 @@ proc myTimerSchedule*(
   )
 
 proc my_timer_destroy*(timer: MyTimer) {.ffiDtor.} =
-  ## Tears down the FFI context created by my_timer_create.
-  ## Blocks until the FFI thread and watchdog thread have joined.
+  ## Tears down the FFI context; blocks until FFI + watchdog threads join.
   discard
 
-# genBindings() must be the LAST top-level call in the FFI root file —
-# after every {.ffi.}, {.ffiCtor.} and {.ffiDtor.} pragma. Each pragma
-# fires at compile time and registers its proc into the compile-time
-# ffiProcRegistry / ffiTypeRegistry; genBindings() then reads those
-# registries to emit the language bindings. If genBindings() runs before
-# a pragma, that proc is silently absent from the generated bindings.
-#
-# Multi-file libraries: keep all .ffi./.ffiCtor./.ffiDtor. pragmas in
-# imported sub-modules and call genBindings() once at the bottom of the
-# top-level file that imports them — Nim resolves imports before the
-# importing file's body runs, so the registries are fully populated by
-# the time genBindings() executes.
-#
-# genBindings() is a compile-time no-op unless -d:ffiGenBindings is set.
+# Must be the LAST top-level call, after every pragma registered its proc (no-op unless -d:ffiGenBindings).
 genBindings()

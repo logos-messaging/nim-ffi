@@ -1,17 +1,13 @@
-## Runtime helpers for the macro-generated `*_CWire` companion types: only the
-## `cstring` fields need allocation here (seq/Option are alloc'd inline by the
-## macro), packed on pack and released on free.
+## Runtime cstring alloc/free for the macro-generated `*_CWire` types.
 
 import ../alloc
 
 proc cwireAllocStr*(s: string): cstring {.inline.} =
-  ## NUL-terminated `malloc` copy of `s` (see `ffi/alloc.nim`); pair with
-  ## `cwireFreeStr`. Empty input still yields a valid buffer, never NULL.
+  ## NUL-terminated `malloc` copy of `s`; pair with `cwireFreeStr`.
   alloc.alloc(s)
 
 proc cwireFreeStr*(s: var cstring) {.inline.} =
-  ## Idempotent free for a `cwireAllocStr` cstring; `nil` is a no-op. Taken by
-  ## `var` and reset to `nil` after release so a repeated call can't double-free.
+  ## Idempotent free; reset to `nil` so a repeated call can't double-free.
   if s.isNil():
     return
   alloc.dealloc(s)

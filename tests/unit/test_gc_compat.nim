@@ -1,9 +1,4 @@
-## Verifies correct behaviour under both --mm:orc and --mm:refc.
-##
-## The foreignThreadGc template must set up / tear down the GC for foreign
-## threads under refc and be a no-op under orc/arc.  The handleRes proc
-## holds a string local long enough for the callback to read its cstring
-## -- these tests catch regressions in that lifetime guarantee.
+## foreignThreadGc + string-lifetime guarantees under both orc and refc.
 
 import std/locks
 import unittest2
@@ -62,9 +57,7 @@ proc callbackBytes(d: var CallbackData): seq[byte] =
   return bytes
 
 proc callbackOkString(d: var CallbackData): string =
-  ## Decodes the CBOR success payload as a string. Asserts the request
-  ## actually succeeded — silently treating an error payload as the empty
-  ## string would let a regression slip past the test that calls us.
+  ## Decodes the CBOR success payload as a string, asserting the request succeeded.
   doAssert d.retCode == RET_OK,
     "callbackOkString called on non-OK retCode " & $d.retCode & " (msg=" & callbackMsg(
       d
@@ -72,16 +65,13 @@ proc callbackOkString(d: var CallbackData): string =
   cborDecode(callbackBytes(d), string).valueOr:
     return ""
 
-# Concatenates GC-allocated strings so the result is not a string literal;
-# exercises the resStr lifetime binding inside handleRes.
+# Non-literal result exercises the resStr lifetime binding in handleRes.
 registerReqFFI(StringLifetimeRequest, lib: ptr GcTestLib):
   proc(input: cstring): Future[Result[string, string]] {.async.} =
     let prefix = "lifetime:"
     let suffix = $input
     return ok(prefix & suffix)
 
-# Returns 512 bytes of repeating a-z to stress GC with a moderately large
-# allocation that must survive the cross-thread callback.
 registerReqFFI(LargeStringRequest, lib: ptr GcTestLib):
   proc(): Future[Result[string, string]] {.async.} =
     var s = newString(512)
@@ -89,7 +79,6 @@ registerReqFFI(LargeStringRequest, lib: ptr GcTestLib):
       s[i] = char(ord('a') + (i mod 26))
     return ok(s)
 
-# Error path: the error string must be alive when the callback fires.
 registerReqFFI(GcErrRequest, lib: ptr GcTestLib):
   proc(input: cstring): Future[Result[string, string]] {.async.} =
     return err("gc-err:" & $input)
@@ -149,14 +138,9 @@ suite "GC safety - string lifetime across thread boundary":
       .isOk()
     waitCallback(d)
     check d.retCode == RET_ERR
-    # Error payloads are raw UTF-8, not CBOR.
     check callbackMsg(d) == "gc-err:test"
 
   test "large string result is delivered without corruption":
-    # Round-trip check: build the same 512-char string the FFI handler is
-    # specified to produce, run the request through the FFI thread (which
-    # CBOR-encodes the result), decode the callback payload, and assert
-    # the decoded string is byte-for-byte identical to the original.
     var expected = newString(512)
     for i in 0 ..< 512:
       expected[i] = char(ord('a') + (i mod 26))

@@ -1,11 +1,6 @@
-## Exercises the CBOR-free scalar fast path (`{.ffi: "abi = c".}` on an
-## all-scalar signature). A scalar proc's C export takes its scalar args
-## directly (no `reqCbor`/`reqCborLen`), packs them inline into the request,
-## and the response rides back as raw bytes — no CBOR envelope either way.
-##
-## Two angles are covered: the C-export shape (ctx, callback, userData, args…)
-## driven through a real FFI thread, and the Nim-native shape (the user proc
-## name still resolves to its declared `Future[Result[T, string]]`).
+## Exercises the CBOR-free scalar fast path (`{.ffi: "abi = c".}` all-scalar):
+## scalar args packed inline, response rides back as raw bytes. Covers both the
+## C-export shape (through a real FFI thread) and the Nim-native shape.
 
 import std/[locks, strutils, sequtils]
 import unittest2
@@ -17,7 +12,7 @@ import ffi/internal/ffi_scalar
 type ScalarLib = object
   base: int
 
-# Stub the dylib NimMain importc that declareLibrary emits (this links as an exe).
+# Stub the dylib NimMain importc that declareLibrary emits (links as an exe).
 {.emit: "void libscalarfastNimMain(void) {}".}
 
 declareLibrary("scalarfast", ScalarLib)
@@ -33,13 +28,12 @@ proc scalarfast_create*(
 proc scalarfast_add*(
     lib: ScalarLib, a: int, b: int
 ): Future[Result[int, string]] {.ffi: "abi = c".} =
-  ## Two scalar params, scalar return — the flagship fast-path shape.
   return ok(lib.base + a + b)
 
 proc scalarfast_version*(
     lib: ScalarLib
 ): Future[Result[string, string]] {.ffi: "abi = c".} =
-  ## No params, string return (rides back as raw UTF-8, no CBOR).
+  ## No params; string return rides back as raw UTF-8.
   return ok("scalarfast v1")
 
 proc scalarfast_scale*(
@@ -64,8 +58,7 @@ proc scalarfast_checked*(
 proc scalarfast_blank*(
     lib: ScalarLib
 ): Future[Result[string, string]] {.ffi: "abi = c".} =
-  ## Empty-string return — must ride back as a genuine 0-length RET_OK payload,
-  ## not the CBOR-null sentinel.
+  ## Empty-string return rides back as a 0-length RET_OK payload, not the sentinel.
   return ok("")
 
 ## C-shape callback harness (mirrors test_ffi_context.nim).
@@ -274,9 +267,7 @@ suite "scalar fast path — Nim-native shape":
     check blank.isOk()
     check blank.value == ""
 
-# `ffiProcRegistry` is a compile-time var, so its assertions run in a static
-# block (mirrors test_abi_format.nim). A scalar-only `abi = c` proc must be
-# flagged, recognised by `isScalarOnly`, and dropped from `bindableProcs`.
+# Compile-time checks: a scalar-only `abi = c` proc is flagged, isScalarOnly, and dropped from bindableProcs.
 static:
   const scalarNames = [
     "scalarfast_add", "scalarfast_version", "scalarfast_scale", "scalarfast_positive",

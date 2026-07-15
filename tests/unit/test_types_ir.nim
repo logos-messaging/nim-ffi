@@ -1,7 +1,4 @@
-## Unit tests for the shared type intermediate representation that the C / C++ /
-## Rust binding generators parse Nim type strings through. `parseFFIType` is the
-## single source of truth the three backends consume, so its shape mappings are
-## pinned here directly.
+## Unit tests for `parseFFIType`, the shared type IR the C / C++ / Rust backends consume.
 
 import unittest2
 import ffi/codegen/types_ir

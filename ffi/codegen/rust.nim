@@ -1,12 +1,10 @@
-## Rust binding generator for the nim-ffi framework.
-## Generates a complete Rust crate that uses CBOR (ciborium) on the wire.
+## Rust binding generator: emits a complete Rust crate using CBOR (ciborium).
 
 import std/[os, strutils]
 import ./meta, ./string_helpers, ./types_ir
 
-## Wire-format Rust type used for any Nim `ptr T` / `pointer`. Fixed 64-bit so
-## the CBOR payload size is stable regardless of host architecture (mirrors
-## CppPtrType in cpp.nim).
+## Wire-format Rust type for any Nim `ptr T`/`pointer`; fixed 64-bit for a
+## host-independent CBOR payload size (mirrors CppPtrType).
 const RustPtrType* = "u64"
 
 func rustScalar(s: ScalarKind): string =
@@ -44,8 +42,7 @@ proc nimTypeToRust*(typeName: string): string =
   renderNative(rustMap, parseFFIType(typeName))
 
 proc deriveLibName*(procs: seq[FFIProcMeta]): string =
-  ## Extracts the common prefix before the first `_` from proc names.
-  ## e.g. ["timer_create", "timer_echo"] → "timer"
+  ## Common prefix before the first `_` in proc names, e.g. "timer_create" → "timer".
   if currentLibName.len > 0:
     return currentLibName
   if procs.len == 0:
@@ -57,8 +54,7 @@ proc deriveLibName*(procs: seq[FFIProcMeta]): string =
   return "unknown"
 
 proc stripLibPrefix*(procName: string, libName: string): string =
-  ## Strips the library prefix from a proc name.
-  ## e.g. "timer_echo", "timer" → "echo"
+  ## Strips the library prefix, e.g. ("timer_echo", "timer") → "echo".
   let prefix = libName & "_"
   if procName.startsWith(prefix):
     return procName[prefix.len .. ^1]
@@ -73,14 +69,7 @@ proc reqStructName(p: FFIProcMeta): string =
     camel & "Req"
 
 proc generateCargoToml*(libName: string): string =
-  # `flume` is the unified callback channel (PR #23 Rust review, item 8): one
-  # primitive that supports both `recv_timeout` (blocking trampoline) and
-  # `recv_async` (async trampoline). Default-features disabled to avoid
-  # pulling its async-std/futures shims.
-  # `tokio` is needed only for `tokio::time::timeout` around the async
-  # `recv_async`. Feature-gating tokio (item 11) is a follow-up commit.
-  # `[dev-dependencies]` lets the bundled `examples/` use `#[tokio::main]`
-  # without pulling those features into the library's runtime profile.
+  # flume: callback channel (recv_timeout + recv_async), default-features off. tokio: only the async timeout.
   return
     """[package]
 name = "$1"
@@ -99,8 +88,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
     [libName]
 
 proc generateBuildRs*(libName: string, nimSrcRelPath: string): string =
-  ## Generates build.rs that compiles the Nim library.
-  ## nimSrcRelPath is relative to the output (crate) directory.
+  ## Generates build.rs that compiles the Nim library; nimSrcRelPath is relative
+  ## to the crate directory.
   let escapedSrc = nimSrcRelPath.replace("\\", "\\\\")
   return
     """use std::path::PathBuf;
@@ -162,8 +151,8 @@ pub use api::*;
 """
 
 proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
-  ## Generates ffi.rs with extern "C" declarations. Each Nim FFI proc takes a
-  ## single CBOR buffer (ptr+len) for its request payload.
+  ## Generates ffi.rs with extern "C" declarations; each proc takes one CBOR
+  ## buffer (ptr+len) as its request payload.
   var lines: seq[string] = @[]
   lines.add("use std::os::raw::{c_char, c_int, c_void};")
   lines.add("")
@@ -175,18 +164,15 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
   lines.add(");")
   lines.add("")
 
-  # Collect unique lib names for #[link(...)]
   var libNames: seq[string] = @[]
   for p in procs:
     if p.libName notin libNames:
       libNames.add(p.libName)
 
-  # Derive lib name from proc names if not set
   var linkLibName = ""
   if libNames.len > 0 and libNames[0].len > 0:
     linkLibName = libNames[0]
   else:
-    # derive from first proc name
     if procs.len > 0:
       let parts = procs[0].procName.split('_')
       if parts.len > 0:
@@ -199,7 +185,7 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
     var params: seq[string] = @[]
     case p.kind
     of FFIKind.FFI:
-      # Method/destructor-style: ctx comes first
+      # Method-style: ctx first.
       params.add("ctx: *mut c_void")
       params.add("callback: FFICallback")
       params.add("user_data: *mut c_void")
@@ -207,7 +193,7 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
       params.add("req_cbor_len: usize")
       lines.add("    pub fn $1($2) -> c_int;" % [p.procName, params.join(", ")])
     of FFIKind.CTOR:
-      # Constructor: no ctx; returns the freshly-allocated handle
+      # Ctor: no ctx; returns the freshly-allocated handle.
       params.add("req_cbor: *const u8")
       params.add("req_cbor_len: usize")
       params.add("callback: FFICallback")
@@ -217,8 +203,7 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
       params.add("ctx: *mut c_void")
       lines.add("    pub fn $1($2) -> c_int;" % [p.procName, params.join(", ")])
 
-  # Listener-registration ABI — emitted on the Nim side by `declareLibrary`,
-  # always present in the dylib.
+  # Listener-registration ABI, always present in the dylib.
   lines.add(
     "    pub fn $1_add_event_listener(ctx: *mut c_void, event_name: *const c_char, callback: FFICallback, user_data: *mut c_void) -> u64;" %
       [linkLibName]
@@ -232,8 +217,7 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
   return lines.join("\n") & "\n"
 
 proc generateTypesRs*(types: seq[FFITypeMeta], procs: seq[FFIProcMeta]): string =
-  ## Generates types.rs with Rust structs for all user-declared FFI types and
-  ## for each per-proc Req struct (matching the Nim macro's generated types).
+  ## Generates types.rs: Rust structs for user FFI types and each per-proc Req.
   var lines: seq[string] = @[]
   lines.add("use serde::{Deserialize, Serialize};")
   lines.add("")
@@ -244,15 +228,14 @@ proc generateTypesRs*(types: seq[FFITypeMeta], procs: seq[FFIProcMeta]): string 
     for f in t.fields:
       let snakeName = camelToSnakeCase(f.name)
       let rustType = nimTypeToRust(f.typeName)
-      # Add serde rename if camelCase name differs from snake_case
+      # serde rename when camelCase differs from snake_case.
       if snakeName != f.name:
         lines.add("    #[serde(rename = \"$1\")]" % [f.name])
       lines.add("    pub $1: $2," % [snakeName, rustType])
     lines.add("}")
     lines.add("")
 
-  # Per-proc Req structs — these wrap the typed parameters and are the unit of
-  # CBOR encoding sent across the FFI boundary.
+  # Per-proc Req structs: the unit of CBOR encoding sent across the boundary.
   for p in procs:
     if p.kind == FFIKind.DTOR:
       continue
@@ -280,13 +263,7 @@ proc generateTypesRs*(types: seq[FFITypeMeta], procs: seq[FFIProcMeta]): string 
 proc generateApiRs*(
     procs: seq[FFIProcMeta], libName: string, events: seq[FFIEventMeta] = @[]
 ): string =
-  ## Generates api.rs with both a blocking and a tokio-async high-level API.
-  ##
-  ## Blocking: ctx.echo(req)             — thread-blocks via Condvar
-  ## Async:    ctx.echo_async(req).await — non-blocking via oneshot channel;
-  ##           the FFI callback fires from the Nim/chronos thread and wakes
-  ##           the awaiting task without ever blocking a thread.
-  ##
+  ## Generates api.rs with a blocking and a tokio-async high-level API.
   ## Requests/responses are CBOR (ciborium); errors are raw UTF-8 strings.
   var lines: seq[string] = @[]
 
@@ -311,7 +288,6 @@ proc generateApiRs*(
 
   let ctxTypeName = libTypeName & "Ctx"
 
-  # ── Imports ────────────────────────────────────────────────────────────────
   lines.add("use std::os::raw::{c_char, c_int, c_void};")
   lines.add("use std::slice;")
   lines.add("use std::time::Duration;")
@@ -321,7 +297,6 @@ proc generateApiRs*(
   lines.add("use super::types::*;")
   lines.add("")
 
-  # ── CBOR helpers ───────────────────────────────────────────────────────────
   lines.add("fn encode_cbor<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {")
   lines.add("    let mut buf = Vec::new();")
   lines.add(
@@ -335,16 +310,7 @@ proc generateApiRs*(
   lines.add("}")
   lines.add("")
 
-  # ── Unified FFI trampoline (PR #23 Rust review, items 1, 2, 4, 8, 9) ───────
-  # One callback shape used by both the blocking and async wrappers. The
-  # `user_data` pointer owns a single `Box<flume::Sender<Result<Vec<u8>,
-  # String>>>`; the callback reconstructs it, sends the payload, and drops
-  # the box (releasing the sender). The receiver side then either
-  # `recv_timeout` (sync) or `recv_async` under `tokio::time::timeout`
-  # (async). A late callback that fires after the caller has already timed
-  # out sends into a closed receiver, which is harmless: the Err is
-  # discarded and the box drops cleanly. No Arc/Condvar; no Box leak; no
-  # late-fire UAF; no double trampoline.
+  # FFI trampoline: user_data owns a Box<flume::Sender>; a late callback sends into a closed receiver, which is harmless.
   lines.add("type FFIResult = Result<Vec<u8>, String>;")
   lines.add("type FFISender = flume::Sender<FFIResult>;")
   lines.add("")
@@ -472,11 +438,7 @@ proc generateApiRs*(
   lines.add("}")
   lines.add("")
 
-  # ── Per-listener handler boxes + extern "C" trampolines ─────────────────
-  # Each registered listener owns a `Box<…Handler>` that is kept alive in
-  # `$1::listeners` (keyed by listener id). The raw pointer to the inner
-  # handler is handed to the dylib as `user_data` for the per-event
-  # trampoline below.
+  # Per-listener handler boxes + extern "C" trampolines: the Box is kept alive in `listeners`, its raw pointer is the per-event `user_data`.
   if events.len > 0:
     for ev in events:
       let handlerStruct = capitalizeFirstLetter(ev.nimProcName) & "Handler"
@@ -508,23 +470,18 @@ proc generateApiRs*(
     lines.add("pub struct ListenerHandle { pub id: u64 }")
     lines.add("")
 
-  # ── Context struct ─────────────────────────────────────────────────────────
   lines.add("/// High-level context for `$1`." % [libTypeName])
   lines.add("pub struct $1 {" % [ctxTypeName])
   lines.add("    ptr: *mut c_void,")
   lines.add("    timeout: Duration,")
   if events.len > 0:
-    # Keeps each registered handler box alive while its listener id is
-    # live on the Nim side. Removing an entry from the map drops the
-    # Box and frees the user's closure; the Nim-side registry has
-    # already guaranteed no callback for that id is in flight by the
-    # time `_remove_event_listener` returns.
+    # Keeps each handler box alive while its listener id is live on the Nim side.
     lines.add(
       "    listeners: std::sync::Mutex<std::collections::HashMap<u64, Box<dyn std::any::Any + Send>>>,"
     )
   lines.add("}")
   lines.add("")
-  # SAFETY block applies to both impls below (PR #23 Rust review, item 7).
+  # SAFETY block applies to both impls below.
   lines.add(
     "// SAFETY: The `ptr` field points to an FFIContext owned by the Nim runtime."
   )
@@ -546,10 +503,7 @@ proc generateApiRs*(
   lines.add("unsafe impl Sync for $1 {}" % [ctxTypeName])
   lines.add("")
 
-  # ── Drop: tears down the Nim runtime when the ctx goes out of scope ──────
-  # Without this, forgetting the ctx leaks the entire Nim runtime (FFI thread,
-  # watchdog, chronos, lib state). Mirrors the C++ binding's `~$1()` dtor.
-  # PR #23 review (Rust), Critical item 3.
+  # Drop tears down the Nim runtime when the ctx goes out of scope; without it, forgetting the ctx leaks the entire runtime (FFI thread, watchdog, chronos).
   if dtorProcName.len > 0:
     lines.add("impl Drop for $1 {" % [ctxTypeName])
     lines.add("    fn drop(&mut self) {")
@@ -557,16 +511,13 @@ proc generateApiRs*(
     lines.add("            unsafe { ffi::$1(self.ptr); }" % [dtorProcName])
     lines.add("            self.ptr = std::ptr::null_mut();")
     lines.add("        }")
-    # `listeners` is dropped automatically after this body returns. By
-    # that point the dylib has joined its threads, so no callback is mid-
-    # flight against any of the raw pointers we handed it.
+    # `listeners` drops after this body; the dylib has joined its threads by then, so no callback is mid-flight against the raw pointers we handed it.
     lines.add("    }")
     lines.add("}")
     lines.add("")
 
   lines.add("impl $1 {" % [ctxTypeName])
 
-  # ── Constructors ───────────────────────────────────────────────────────────
   for ctor in ctors:
     let reqName = reqStructName(ctor)
     var paramsList: seq[string] = @[]
@@ -580,9 +531,7 @@ proc generateApiRs*(
           nimTypeToRust(ep.typeName)
       paramsList.add("$1: $2" % [snake, rustType])
       fieldInits.add(snake)
-    # Both `create` and `new_async` accept an explicit `timeout: Duration`; the
-    # value flows into `self.timeout` so subsequent method calls inherit it.
-    # (PR #23 Rust review, item 5: don't hardcode 30s for the async ctor.)
+    # `create` and `new_async` take an explicit `timeout: Duration` that flows into `self.timeout` so subsequent method calls inherit it.
     let ctorParamsStr =
       if paramsList.len > 0:
         paramsList.join(", ") & ", timeout: Duration"
@@ -595,14 +544,10 @@ proc generateApiRs*(
       else:
         reqName & " {}"
 
-    # -- blocking create --
     lines.add("    pub fn create($1) -> Result<Self, String> {" % [ctorParamsStr])
     lines.add("        let req = $1;" % [reqLit])
     lines.add("        let req_bytes = encode_cbor(&req)?;")
-    # Ctor C ABI returns *mut c_void synchronously AND fires the callback;
-    # the callback carries the success/error payload, so discard the
-    # synchronous return value and yield RET_OK to make the trampoline wait
-    # on the callback.
+    # Ctor also fires the callback carrying the payload, so discard the synchronous *mut c_void and yield RET_OK to wait on the callback.
     lines.add("        let raw_bytes = ffi_call_sync(timeout, |cb, ud| unsafe {")
     lines.add(
       "            let _ = ffi::$1(req_bytes.as_ptr(), req_bytes.len(), cb, ud);" %
@@ -610,7 +555,7 @@ proc generateApiRs*(
     )
     lines.add("            0")
     lines.add("        })?;")
-    # The ctor success payload is a CBOR text string holding the ctx address.
+    # Ctor success payload is a CBOR text string holding the ctx address.
     lines.add("        let addr_str: String = decode_cbor(&raw_bytes)?;")
     lines.add(
       "        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;"
@@ -624,14 +569,12 @@ proc generateApiRs*(
     lines.add("    }")
     lines.add("")
 
-    # -- async new_async --
     lines.add(
       "    pub async fn new_async($1) -> Result<Self, String> {" % [ctorParamsStr]
     )
     lines.add("        let req = $1;" % [reqLit])
     lines.add("        let req_bytes = encode_cbor(&req)?;")
-    # See `create` above: discard the ctor's *mut c_void synchronous return
-    # and rely on the callback to deliver the ctx address.
+    # See `create`: discard the ctor's synchronous return; the callback delivers the ctx address.
     lines.add("        let raw_bytes = ffi_call_async(timeout, move |cb, ud| unsafe {")
     lines.add(
       "            let _ = ffi::$1(req_bytes.as_ptr(), req_bytes.len(), cb, ud);" %
@@ -652,14 +595,8 @@ proc generateApiRs*(
     lines.add("    }")
     lines.add("")
 
-  # ── Listener-registration API ─────────────────────────────────────────
   if events.len > 0:
-    # Private helper shared by every public `add_*_listener`: the
-    # FFI call + map insertion is identical across the typed event
-    # variants, so it lives in one place. The caller owns the box
-    # (typed as the concrete handler struct so the raw pointer matches
-    # the trampoline's expected type) and only erases it to
-    # `dyn Any + Send` when handing ownership over.
+    # Shared by every public `add_*_listener`: caller owns the concrete-typed box, erased to `dyn Any + Send` only on hand-off.
     lines.add("    fn add_listener_inner(")
     lines.add("        &self,")
     lines.add("        event_name: *const c_char,")
@@ -706,8 +643,7 @@ proc generateApiRs*(
       lines.add("    }")
       lines.add("")
 
-    # Remove by handle. Drops the Box (and the user's closure) after the
-    # C ABI confirms the listener has been unregistered.
+    # Remove by handle; drops the Box after the C ABI confirms unregistration.
     lines.add("    /// Remove a previously-registered listener by handle. Returns true")
     lines.add("    /// if the listener existed and was removed; false otherwise.")
     lines.add(
@@ -724,7 +660,6 @@ proc generateApiRs*(
     lines.add("    }")
     lines.add("")
 
-  # ── Methods ────────────────────────────────────────────────────────────────
   for m in methods:
     let methodName = stripLibPrefix(m.procName, libName)
     let retRustType = nimTypeToRust(m.returnTypeName)
@@ -755,7 +690,6 @@ proc generateApiRs*(
 
     let retTypeForApi = if m.returnRidesAsPtr(): RustPtrType else: retRustType
 
-    # -- blocking method --
     lines.add(
       "    pub fn $1(&self$2) -> Result<$3, String> {" %
         [methodName, paramsStr, retTypeForApi]
@@ -772,9 +706,7 @@ proc generateApiRs*(
     lines.add("    }")
     lines.add("")
 
-    # -- async method --
-    # ptr is cast to usize (Copy + Send) so the move closure is Send,
-    # keeping the returned future Send for multi-threaded tokio runtimes.
+    # async method: ptr cast to usize (Copy + Send) keeps the move closure and returned future Send for multi-threaded tokio runtimes.
     lines.add(
       "    pub async fn $1_async(&self$2) -> Result<$3, String> {" %
         [methodName, paramsStr, retTypeForApi]

@@ -1,21 +1,16 @@
-## Identifier-casing helpers shared by the codegen modules and the FFI macro.
-## All three operate on `Rune` via `std/unicode` so non-ASCII identifiers
-## (rare in FFI symbols but possible in field names) round-trip correctly.
+## Unicode-aware identifier-casing helpers shared by codegen and the FFI macro.
 
 import std/[strutils, unicode]
 
 proc toLower*(s: string): string =
-  ## Unicode-aware lowercase for an entire string. Wraps `std/unicode`'s
-  ## per-Rune `toLower` so callers don't have to iterate manually.
+  ## Unicode-aware lowercase for an entire string.
   var buf = ""
   for r in runes(s):
     buf.add($r.toLower())
   return buf
 
 proc camelToSnakeCase*(s: string): string =
-  ## Converts camelCase to snake_case. Inserts `_` before each uppercase rune
-  ## that's not the first character and lowercases everything.
-  ## e.g. "delayMs" → "delay_ms", "timerName" → "timer_name"
+  ## camelCase → snake_case, e.g. "delayMs" → "delay_ms".
   var snake = ""
   var first = true
   for r in runes(s):
@@ -26,8 +21,7 @@ proc camelToSnakeCase*(s: string): string =
   return snake
 
 func capitalizeFirstLetter*(s: string): string =
-  ## Returns `s` with its first rune uppercased; the rest is left unchanged.
-  ## e.g. "abc" → "Abc", "" → "", "Abc" → "Abc"
+  ## Returns `s` with its first rune uppercased, rest unchanged.
   if s.len == 0:
     return s
   var runesSeq = toRunes(s)
@@ -35,9 +29,7 @@ func capitalizeFirstLetter*(s: string): string =
   return $runesSeq
 
 proc snakeToPascalCase*(s: string): string =
-  ## Converts snake_case identifiers to PascalCase: split on `_`, uppercase
-  ## the first rune of each part, concatenate.
-  ## e.g. "testlib_create" → "TestlibCreate", "hello_world" → "HelloWorld"
+  ## snake_case → PascalCase, e.g. "hello_world" → "HelloWorld".
   let parts = s.split('_')
   var pascal = ""
   for p in parts:

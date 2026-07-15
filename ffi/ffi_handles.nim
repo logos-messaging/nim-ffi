@@ -1,16 +1,12 @@
-## Per-context registry of live `{.ffiHandle.}` objects. The object stays here,
-## in `FFIContext.handles`; only its `uint64` id crosses the boundary. Ids are
-## monotonic and never recycled (0 = null), so a stale/forged id misses cleanly.
-## FFI-thread-only access, so no locking.
+## Per-context registry of live `{.ffiHandle.}` objects; only the `uint64` id crosses the
+## boundary. Ids are monotonic, never recycled (0 = null). FFI-thread-only, so no locking.
 
 import std/tables
 import results
 import ./cbor_serial
 
 type
-  FFIHandleRoot* = ref object of RootObj
-    ## Base every `{.ffiHandle.}` type inherits from, so handle refs are storable
-    ## under one static type.
+  FFIHandleRoot* = ref object of RootObj ## Base of every `{.ffiHandle.}` type.
 
   FFIHandleEntry = object
     obj: FFIHandleRoot
@@ -31,7 +27,6 @@ proc deinitHandleRegistry*(reg: var FFIHandleRegistry) =
 proc register*(
     reg: var FFIHandleRegistry, obj: FFIHandleRoot, typeName: string
 ): uint64 =
-  ## Stores `obj`, returns its fresh handle id (>0).
   reg.nextId.inc()
   reg.byHandle[reg.nextId] = FFIHandleEntry(obj: obj, typeName: typeName)
   reg.nextId
@@ -51,16 +46,15 @@ proc lookup*(
   ok(entry.obj)
 
 proc release*(reg: var FFIHandleRegistry, handle: uint64): bool {.discardable.} =
-  ## Drops the entry; true iff it existed.
   if not reg.byHandle.hasKey(handle):
     return false
   reg.byHandle.del(handle)
   return true
 
 proc releaseAll*(reg: var FFIHandleRegistry) =
-  ## Drops every entry. Must run on the FFI thread that allocated the refs.
+  ## Must run on the FFI thread that allocated the refs.
   reg.byHandle.clear()
 
 proc encodeHandle*(id: uint64): seq[byte] =
-  ## Wire-form bytes for a handle id. Single ABI seam for future format changes.
+  ## Single ABI seam for the handle-id wire format.
   cborEncode(id)

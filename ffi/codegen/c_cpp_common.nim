@@ -1,22 +1,17 @@
-## Helpers shared by the language-specific binding generators (cpp.nim, c.nim).
-## Kept here so the per-proc envelope naming, lib-prefix stripping and
-## proc-classification logic live in one place rather than being copy-pasted
-## into each backend.
+## Helpers shared by the C/C++ binding generators (cpp.nim, c.nim).
 
 import std/strutils
 import ./meta, ./string_helpers
 
 proc stripLibPrefix*(procName, libName: string): string =
-  ## Drops the `<lib>_` prefix from an exported C symbol, e.g.
-  ## `stripLibPrefix("timer_echo", "timer")` → `"echo"`.
+  ## Drops the `<lib>_` prefix from an exported C symbol.
   let prefix = libName & "_"
   if procName.startsWith(prefix):
     return procName[prefix.len .. ^1]
   return procName
 
 proc reqStructName*(p: FFIProcMeta): string =
-  ## Mirrors the Nim macro: `<PascalCase(procName)>Req`, or `...CtorReq` for a
-  ## constructor. The per-proc envelope every backend encodes onto the wire.
+  ## Per-proc wire envelope name: `<PascalCase(procName)>Req` (`...CtorReq` for ctors).
   let camel = snakeToPascalCase(p.procName)
   if p.kind == FFIKind.CTOR:
     camel & "CtorReq"
@@ -29,9 +24,7 @@ type ClassifiedProcs* = object
   dtorProcName*: string
 
 proc classifyProcs*(procs: seq[FFIProcMeta]): ClassifiedProcs =
-  ## Splits the registry into constructors, instance methods and (the first)
-  ## destructor symbol — the split every backend needs before emitting a
-  ## high-level context wrapper.
+  ## Splits the registry into constructors, methods and the first destructor.
   var c: ClassifiedProcs
   for p in procs:
     case p.kind
@@ -45,8 +38,7 @@ proc classifyProcs*(procs: seq[FFIProcMeta]): ClassifiedProcs =
   c
 
 proc libTypeName*(ctors: seq[FFIProcMeta], libName: string): string =
-  ## The user's library type name (e.g. `MyTimer`), taken from the first ctor
-  ## or derived from `libName` when the library declares none.
+  ## The library type name, from the first ctor or derived from `libName`.
   if ctors.len > 0:
     return ctors[0].libTypeName
   capitalizeFirstLetter(libName)

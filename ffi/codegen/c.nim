@@ -1,15 +1,11 @@
-## C99 binding generator. The library's ABI format picks the shape: `cbor`
-## (default) emits three headers (prelude + cbor codecs + `<lib>.h`) exchanging
-## CBOR via vendored TinyCBOR; `c` (`abi = c`) emits one `<lib>.h` whose structs
-## are the C ABI directly. C lacks generics, so each distinct `seq[T]`/`Option[T]`
-## is monomorphised into its own struct + codec triple (e.g. `seq[uint32]` yields
-## an `EchoSeq_U32` struct plus `echo_enc_`/`echo_dec_`/`echo_free_EchoSeq_U32`).
+## C99 binding generator. `abi = cbor` (default) emits three CBOR headers;
+## `abi = c` emits one header whose structs are the C ABI directly. Lacking
+## generics, each distinct `seq[T]`/`Option[T]` is monomorphised per type.
 
 import std/[os, strutils, tables, sets]
 import ./meta, ./string_helpers, ./c_cpp_common, ./types_ir
 
-## Fixed 64-bit wire type for any Nim `ptr T`/`pointer`, so payload size is
-## host-arch independent (mirrors CppPtrType).
+## Fixed 64-bit wire type for any Nim `ptr T`/`pointer` (mirrors CppPtrType).
 const CPtrType* = "uint64_t"
 
 const
@@ -47,8 +43,7 @@ func leafSuffix(cType: string): string =
     else: ""
 
 func cToken(cType: string): string =
-  ## PascalCase token for monomorphised names: leaf suffix capitalised, else the
-  ## (already unique) composite C name verbatim.
+  ## PascalCase token for monomorphised names.
   let suffix = leafSuffix(cType)
   if suffix.len > 0:
     return capitalizeFirstLetter(suffix)
@@ -244,10 +239,8 @@ proc emitStructType(reg: var CTypeReg, t: FFITypeMeta) =
   reg.owns[t.name] = owns
 
 proc ensureCType(reg: var CTypeReg, t: FFIType): tuple[cType: string, owns: bool] =
-  ## Lowers the type intermediate representation (see types_ir.nim) to a C type,
-  ## monomorphising each distinct `seq[T]`/`Option[T]` on first sight. `owns`
-  ## marks a type carrying heap payload the caller must release via its generated
-  ## free function.
+  ## Lowers an `FFIType` to a C type, monomorphising each `seq[T]`/`Option[T]`
+  ## on first sight. `owns` marks a type the caller must free.
   case t.kind
   of ftPtr:
     return (CPtrType, false)
@@ -285,8 +278,7 @@ proc ensureCType(reg: var CTypeReg, nimType: string): tuple[cType: string, owns:
   return ensureCType(reg, parseFFIType(nimType))
 
 proc reqTypeMeta(p: FFIProcMeta): FFITypeMeta =
-  ## Synthesises the per-proc Req struct so it flows through the same
-  ## monomorphisation path as user types; pointer/handle params ride as uint64.
+  ## Synthesises the per-proc Req struct; pointer/handle params ride as uint64.
   var fields: seq[FFIFieldMeta] = @[]
   for ep in p.extraParams:
     let typeName = if ep.ridesAsPtr(): "pointer" else: ep.typeName
@@ -641,8 +633,7 @@ proc emitMethod(
   lines.add("    if (dec != 0) {")
   lines.add("        box->fn(-1, NULL, err ? err : \"decode failed\", box->user_data);")
   lines.add("        free(err);")
-  # Reclaim any fields a partial decode allocated (out is zeroed, so free skips
-  # what was never written).
+  # Reclaim fields a partial decode allocated (out is zeroed).
   if retFree.len > 0:
     lines.add("        " & retFree & "(&out);")
   lines.add("        free(box);")
@@ -722,9 +713,8 @@ proc monomorphiseAll(
     procs, methods: seq[FFIProcMeta],
     events: seq[FFIEventMeta],
 ): tuple[reqTypes, respTypes: seq[string]] =
-  ## Runs every user type, Req envelope, return type and event payload through
-  ## ensureCType, emitting structs/codecs into `reg` in dependency order.
-  ## Returns the Req and response C type names the buffer adapters need.
+  ## Runs every type, Req, return type and event payload through ensureCType,
+  ## returning the Req and response C type names the buffer adapters need.
   for t in types:
     discard ensureCType(reg, t.name)
   var reqTypes: seq[string] = @[]
@@ -741,13 +731,11 @@ proc monomorphiseAll(
   return (reqTypes, respTypes)
 
 func generateCPreludeHeader*(): string =
-  ## The library-agnostic `nim_ffi_prelude.h`: owned string/byte types + libc/
-  ## TinyCBOR includes, emitted verbatim.
+  ## The library-agnostic `nim_ffi_prelude.h`, emitted verbatim.
   return HeaderPreludeTpl & "\n"
 
 func generateCCborHeader*(): string =
-  ## The library-agnostic `nim_ffi_cbor.h`: leaf CBOR codecs and buffer drivers,
-  ## emitted verbatim.
+  ## The library-agnostic `nim_ffi_cbor.h`, emitted verbatim.
   return CborHelpersTpl & "\n"
 
 proc generateCLibHeader*(
@@ -857,10 +845,7 @@ proc generateCCMakeLists*(libName, nimSrcRelPath: string): string =
   let src = nimSrcRelPath.replace("\\", "/")
   return CMakeListsTpl.multiReplace(("{{LIB}}", libName), ("{{SRC}}", src))
 
-# `abi = c` binding: the `_CWire` structs are the C ABI (no CBOR). Layout
-# mirrors `wireValueType`/`wireFieldsFor` byte-for-byte: `string`→`const char*`,
-# `seq[T]`→`<wireT>* <f>_items` + `ptrdiff_t <f>_len`, `Option[T]`→`<wireT>*`
-# (NULL = none), nested type→its `_CWire` struct, `ptr`/`pointer`→`void*`.
+# `abi = c` binding: structs are the C ABI directly (no CBOR), matching the Nim-side wire layout byte-for-byte.
 
 const AbiCPtrType = "void*"
 const AbiCMakeListsTpl = staticRead("templates/c/CMakeLists_abi.txt.tpl")
@@ -1261,8 +1246,7 @@ proc generateCAbiCMakeLists*(libName, nimSrcRelPath: string): string =
   return AbiCMakeListsTpl.multiReplace(("{{LIB}}", libName), ("{{SRC}}", src))
 
 func libWireFormat(procs: seq[FFIProcMeta], types: seq[FFITypeMeta]): ABIFormat =
-  ## The single wire format the C header targets; a library can't mix `abi = c`
-  ## and `abi = cbor` in one header.
+  ## The single wire format the C header targets (no mixing in one header).
   var seen: set[ABIFormat] = {}
   for p in procs:
     if p.kind != FFIKind.DTOR:
@@ -1286,8 +1270,7 @@ proc generateCBindings*(
     nimSrcRelPath: string,
     events: seq[FFIEventMeta] = @[],
 ) =
-  ## Emits the C binding for `libName`, picking the `abi = c` or CBOR shape from
-  ## the library's ABI format.
+  ## Emits the C binding for `libName`, picking the `abi = c` or CBOR shape.
   createDir(outputDir)
   case libWireFormat(procs, types)
   of ABIFormat.C:

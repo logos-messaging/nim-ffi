@@ -1,6 +1,4 @@
-## ABI-format annotation mechanism (issue #78): inherited default + per-spec
-## override, recorded on the registry. `static:` blocks assert the registry at
-## compile time; the parsing helpers run at runtime with unittest2.
+## ABI-format annotation: inherited default + per-spec override, recorded on the registry.
 
 import std/strutils
 import unittest2
@@ -10,12 +8,11 @@ import ffi/codegen/meta
 
 type AbiLib = object
 
-# Stub the dylib NimMain importc that declareLibrary emits (links as a plain exe).
+# Stub the importc NimMain declareLibrary emits (plain-exe link).
 {.emit: "void libabitestNimMain(void) {}".}
 
 declareLibrary("abitest", AbiLib, defaultABIFormat = "cbor")
 
-# declareLibrary must wire its parameter into the library-wide default.
 static:
   doAssert currentDefaultABIFormat == ABIFormat.Cbor
 
@@ -25,31 +22,27 @@ type AbiConfig {.ffi.} = object
 type Pinged {.ffi.} = object
   n: int
 
-# Plain annotations inherit the library default (cbor).
+# Plain annotations inherit the library default.
 proc abitest_create*(c: AbiConfig): Future[Result[AbiLib, string]] {.ffiCtor.} =
   return ok(AbiLib())
 
 proc abitest_ping*(lib: AbiLib): Future[Result[string, string]] {.ffi.} =
   return ok("pong")
 
-# Explicit override — same value, but exercises the spec parser end-to-end.
+# Explicit override exercises the spec parser.
 proc abitest_echo*(
     lib: AbiLib, n: int
 ): Future[Result[int, string]] {.ffi: "abi = cbor".} =
   return ok(n)
 
-# Event with an explicit ABI override passed after the wire name.
 proc abitest_pinged*(p: Pinged) {.ffiEvent("on_pinged", "abi = cbor").}
 
-# Handles accept the spec for surface parity; the wire form stays uint64.
 type PlainHandle {.ffiHandle.} = ref object
   v: int
 
 type AbiHandle {.ffiHandle: "abi = cbor".} = ref object
   v: int
 
-# Both the inherited-default and the explicit-override annotations must record
-# the resolved format on their registry entries.
 static:
   for name in ["abitest_create", "abitest_ping", "abitest_echo"]:
     var found = false
@@ -99,9 +92,5 @@ suite "pragma override key parsing":
 
 suite "ABI proc-dispatch readiness":
   test "both cbor and c proc-dispatch are wired":
-    # This predicate is what the proc-form macros consult. Both ABIs now have a
-    # working dispatch path: `cbor` rides the generic overloads, `c` rides the
-    # `_CWire` companions (a CBOR-free foreign surface, CBOR transport
-    # internally). Events are the one `c` gap, gated separately in the macro.
     check abiCodegenImplemented(ABIFormat.Cbor)
     check abiCodegenImplemented(ABIFormat.C)

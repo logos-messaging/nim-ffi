@@ -17,8 +17,7 @@ var gSendErrors: Atomic[int]
 
 let settleTimeout = 30.seconds
 
-## Forcing gate: min submit-throughput scaling (max-threads / 1-thread); red
-## until the per-request submit lock is replaced. See README "Scaling gate".
+## Min submit-throughput scaling gate (max-threads / 1-thread). See README.
 const RequiredScaling = 1.5
 
 proc benchCallback(
@@ -119,10 +118,7 @@ proc main() =
   let gateOn = getEnv("FFI_SCALING_GATE", "1") != "0"
   if perThread < 1 or iters < 1:
     quit("FFI_SUBMIT_PER_THREAD and FFI_SUBMIT_ITERS must be >= 1")
-  # Default sweep is light so CI (and the slower asan/tsan jobs) stays fast. Set
-  # FFI_SUBMIT_THREADS for the high-contention curve locally — under a sanitizer
-  # it can outrun `settleTimeout` and fail on timing, not a real bug.
-  #   FFI_SUBMIT_THREADS="1,8,16,32,64,100" nimble bench_ffi_submit
+  # Default sweep is light so CI stays fast; set FFI_SUBMIT_THREADS locally for the high-contention curve.
   let threadCounts = block:
     var cs: seq[int]
     for part in getEnv("FFI_SUBMIT_THREADS", "1,2,4,8").split(','):
