@@ -101,7 +101,7 @@ suite "ABI proc-dispatch readiness":
   test "both cbor and c proc-dispatch are wired":
     # This predicate is what the proc-form macros consult. Both ABIs now have a
     # working dispatch path: `cbor` rides the generic overloads, `c` rides the
-    # flat `_CWire` companions (a CBOR-free foreign surface, CBOR transport
+    # `_CWire` companions (a CBOR-free foreign surface, CBOR transport
     # internally). Events are the one `c` gap, gated separately in the macro.
     check abiCodegenImplemented(ABIFormat.Cbor)
     check abiCodegenImplemented(ABIFormat.C)

@@ -60,25 +60,25 @@ All notable changes to this project are documented in this file.
   `"abi = cbor"` spec (e.g. `{.ffi: "abi = cbor".}`). `declareLibrary` is now
   required before any FFI annotation
   ([#78](https://github.com/logos-messaging/nim-ffi/issues/78)).
-- `c` (flat C-struct) ABI **codec**: every `{.ffi: "abi = c".}` type gets a
+- `c` (`abi = c` C-struct) ABI **codec**: every `{.ffi: "abi = c".}` type gets a
   `<T>_CWire` companion plus `cwirePack` / `cwireUnpack` / `cwireFree`. This
-  first slice covers the flat path — POD scalars and `string` (as `cstring`);
-  composite fields follow. (The `c` proc-dispatch path and its CBOR-free C
-  generator landed later in this release — see the `-d:targetLang=c_abi` entry
-  below; `c` events remain CBOR-only.)
-- **CBOR-free `abi = c` C binding generator** (`-d:targetLang=c_abi`): emits a
-  single self-contained `<lib>.h` whose flat `_CWire` structs *are* the C ABI,
-  so the C consumer passes native structs and links no CBOR at all (contrast
-  the CBOR `-d:targetLang=c` backend). The `c` proc-dispatch path is now wired
-  end-to-end: the generated exported wrappers `cwireUnpack` the request into a
-  Nim object, reuse the existing CBOR thread transport internally, and a Nim
-  reply trampoline `cwirePack`s the response back into a flat struct for the
-  caller's typed callback. `abiCodegenImplemented` now accepts `c` for
-  proc/ctor/dtor annotations (events remain CBOR-only). New
-  `examples/echo/c_abi_bindings/` (checked in beside the CBOR `c_bindings/` for
-  comparison), `nimble genbindings_c_abi_echo` / `check_bindings_c_abi` /
-  `test_c_abi_e2e` / `test_c_abi_e2e_sanitized` tasks, and a `tests/e2e/c_abi`
-  ctest harness ([#105](https://github.com/logos-messaging/nim-ffi/issues/105)).
+  first slice covers the `abi = c` path — POD scalars and `string` (as `cstring`);
+  composite fields follow. (`c` events remain CBOR-only.)
+- **CBOR-free (`abi = c`) C bindings, emitted by the single `c` target**
+  (`-d:targetLang=c`): the one `c` generator now picks its output from the
+  library's ABI format — the `abi = c` header or the CBOR header. The `abi = c`
+  header is a single self-contained `<lib>.h` whose `_CWire` structs *are* the C
+  ABI, so the C consumer passes native structs and links no CBOR at all. The `c`
+  proc-dispatch path is wired end-to-end: the generated exported wrappers
+  `cwireUnpack` the request into a Nim object, reuse the existing CBOR thread
+  transport internally, and a Nim reply trampoline `cwirePack`s the response
+  back into a `_CWire` struct for the caller's typed callback.
+  `abiCodegenImplemented` accepts `c` for proc/ctor/dtor annotations (events
+  remain CBOR-only). New `examples/echo/c_abi_bindings/` (checked in beside the
+  CBOR `c_bindings/` for comparison), `nimble genbindings_c_abi_echo` /
+  `check_bindings_c_abi` / `test_c_abi_e2e` / `test_c_abi_e2e_sanitized`
+  tasks, and a `tests/e2e/c_abi` ctest harness
+  ([#105](https://github.com/logos-messaging/nim-ffi/issues/105)).
 - `tests/bench/bench_codec.nim` (+ `nimble bench_codec`): a single-process
   microbenchmark comparing the `cbor` and `c` codecs across payload shapes,
   isolating codec cost from the (identical) thread/callback round-trip.

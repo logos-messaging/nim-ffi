@@ -11,7 +11,6 @@ when defined(ffiGenBindings):
   import ../codegen/rust
   import ../codegen/cpp
   import ../codegen/c
-  import ../codegen/c_abi
   import ../codegen/cddl
 
 proc requireLibraryDeclared(where: string) {.compileTime.} =
@@ -92,7 +91,7 @@ proc gateABIFormat(fmt: ABIFormat, where: string) {.compileTime.} =
 
 proc gateFFITypeABIFormat(fmt: ABIFormat, where: string) {.compileTime.} =
   ## Type annotations only register metadata. `cbor` uses the generic CBOR
-  ## overloads, while `c` emits its flat `_CWire` companion from `genBindings()`.
+  ## overloads, while `c` emits its `_CWire` companion from `genBindings()`.
   case fmt
   of ABIFormat.Cbor, ABIFormat.C: discard
 
@@ -931,7 +930,7 @@ macro ffi*(args: varargs[untyped]): untyped =
   # Does this proc qualify for the CBOR-free scalar fast path? Only `abi = c`
   # opts in, and only when every wire param + the return is a plain scalar
   # (see `isScalarOnly`) and the args fit the inline slots. A non-scalar
-  # `abi = c` proc rides the flat `_CWire` C-dispatch emitted by `asyncPath`.
+  # `abi = c` proc rides the `_CWire` C-dispatch emitted by `asyncPath`.
   let scalarEligible =
     abiFormat == ABIFormat.C and isScalarOnly(procMeta) and
     extraParamNames.len <= MaxScalarArgs
@@ -1061,7 +1060,7 @@ macro ffi*(args: varargs[untyped]): untyped =
     ffiProcRegistry.add(procMeta)
 
     if abiFormat == ABIFormat.C:
-      # The flat-struct exported wrapper + reply trampoline are emitted at
+      # The `abi = c` exported wrapper + reply trampoline are emitted at
       # genBindings() time (see flushCAbiDispatch); the CBOR `ffiProc` is not.
       registerCAbiMethod(
         cExportName, libTypeName, reqTypeName, extraParamNames, extraParamTypes,
@@ -1515,7 +1514,7 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
 
   let stmts =
     if abiFormat == ABIFormat.C:
-      # The flat-struct exported wrapper is emitted at genBindings() time (see
+      # The `abi = c` exported wrapper is emitted at genBindings() time (see
       # flushCAbiDispatch); the CBOR `ffiProc` is not.
       registerCAbiCtor(cExportName, libTypeName, reqTypeName, paramNames, paramTypes)
       newStmtList(typeDef, ffiNewReqProc, helperProc, processProc, addToReg, poolDecl)
@@ -1858,16 +1857,12 @@ when defined(ffiGenBindings):
       generateCBindings(
         genProcs, ffiTypeRegistry, libName, outDir, srcRel, ffiEventRegistry
       )
-    of "c_abi":
-      generateCAbiBindings(
-        genProcs, ffiTypeRegistry, libName, outDir, srcRel, ffiEventRegistry
-      )
     of "cddl":
       generateCddlBindings(genProcs, ffiTypeRegistry, libName, outDir, srcRel)
     else:
       error(
         "genBindings: unknown targetLang '" & lang &
-          "'. Use 'rust', 'cpp', 'c', 'c_abi', or 'cddl'."
+          "'. Use 'rust', 'cpp', 'c', or 'cddl'."
       )
 
 macro genBindings*(
@@ -1886,9 +1881,10 @@ macro genBindings*(
   ## In a multi-file library, import all sub-modules first and call
   ## genBindings() once at the bottom of the top-level compilation-root file.
   ##
-  ## Supported languages (-d:targetLang): "rust" (default), "cpp", "c",
-  ## "c_abi", "cddl". Pass a comma-separated list to emit several at once from
-  ## a single compile — the backend dispatch loops over each language.
+  ## Supported languages (-d:targetLang): "rust" (default), "cpp", "c", "cddl".
+  ## Pass a comma-separated list to emit several at once from a single compile —
+  ## the backend dispatch loops over each language. The `c` target emits the
+  ## `abi = c` or CBOR C shape based on the library's ABI format (`defaultABIFormat`).
   ##
   ## Output dir defaults to `<lang>_bindings/` next to the compiled source; the
   ## embedded nim source path is derived by making that source relative to the

@@ -86,7 +86,8 @@ func scalarKind(t: string): Option[ScalarKind] =
     none(ScalarKind)
 
 func parseFFIType*(typeName: string): FFIType =
-  ## Single source of truth for turning a Nim type string into the shared IR:
+  ## Single source of truth for turning a Nim type string into the shared
+  ## intermediate representation:
   ## ptr/pointer, seq[byte]→bytes, seq/Option/Maybe, scalars, string, else struct.
   let t = typeName.strip()
   if t.startsWith("ptr ") or t == "pointer":

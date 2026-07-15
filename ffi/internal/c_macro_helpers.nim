@@ -1,4 +1,4 @@
-## Compile-time helpers used by `ffi_macro.nim` for the `c` (flat C-struct) ABI.
+## Compile-time helpers used by `ffi_macro.nim` for the `c` (`abi = c` C-struct) ABI.
 ## For each `{.ffi: "abi = c".}` object T, emits a `T_CWire` companion plus
 ## `cwirePack` / `cwireUnpack` / `cwireFree`. Field mapping: `string`→`cstring`,
 ## `seq[T]`→`<name>_items`+`<name>_len`, `Option[T]`/`Maybe[T]`→`ptr T_w`
@@ -554,7 +554,7 @@ proc flushCWireCompanions*(): NimNode {.compileTime.} =
       ensureCWireFor(typeMeta.name, sink)
   sink
 
-## abi = c proc dispatch. The foreign surface is CBOR-free — the flat `_CWire`
+## abi = c proc dispatch. The foreign surface is CBOR-free — the `_CWire`
 ## structs are the C ABI — but transport reuses the proven CBOR request path
 ## internally: the generated exported wrapper `cwireUnpack`s the request into a
 ## Nim object, `cborEncodeShared`s it onto the FFI thread, and a Nim reply
@@ -679,7 +679,7 @@ proc replyTrampProc(trampName, body: NimNode): NimNode =
 proc objectTrampBody(boxName, respType, respWire: NimNode): NimNode =
   ## Reply trampoline for an object return: recover the box, deliver a transport
   ## error as a copied NUL-terminated string, else CBOR-decode the reply,
-  ## `cwirePack` it into the flat wire struct, hand a pointer to the caller, and
+  ## `cwirePack` it into the `_CWire` struct, hand a pointer to the caller, and
   ## release the wire. `err_msg` is always a non-nil string; the `reply` struct
   ## pointer is nil only on error, gated by a non-`RET_OK` `err_code`.
   quote:

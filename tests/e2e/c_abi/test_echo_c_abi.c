@@ -1,13 +1,8 @@
-/* End-to-end test for the CBOR-free `abi = c` echo bindings. Unlike the CBOR C
- * backend, this header links no TinyCBOR: the flat structs in echo.h are the C
- * ABI, strings are plain borrowed `const char*`. The test drives the same
- * async, callback-per-call surface — constructor, an object-returning method
- * and teardown — copying out what each callback delivers (owned by the binding,
- * valid only for the call) and polling a `done` flag to sequence the async
- * calls. A string-returning method (echoVersion) rides the CBOR-free scalar
- * fast path instead of a flat `_CWire` wrapper, so it has no c_abi binding yet
- * (foreign codegen for the scalar shape is a follow-up) and isn't exercised
- * here. */
+/* End-to-end test for the CBOR-free `abi = c` echo bindings: the `_CWire`
+ * structs in echo.h are the C ABI, strings are borrowed `const char*`, no
+ * TinyCBOR. Drives the async callback-per-call surface (ctor, object-returning
+ * method, teardown). echoVersion rides the scalar fast path (no foreign binding
+ * yet) and isn't exercised. */
 #include "echo.h"
 #include <assert.h>
 #include <stdatomic.h>

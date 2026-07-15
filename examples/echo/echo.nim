@@ -6,9 +6,9 @@ import ffi, chronos, strutils
 type Echo = object
   prefix: string
 
-# `-d:ffiEchoAbiC` builds the CBOR-free `abi = c` variant (flat `_CWire` structs
-# on the wire); the default is the CBOR ABI. The same source drives both the
-# `c_bindings/` (CBOR) and `c_abi_bindings/` (flat) example outputs.
+# `-d:ffiEchoAbiC` builds the `abi = c` variant (`_CWire` structs on the wire);
+# the default is the CBOR ABI. The same source drives both the `c_bindings/`
+# (CBOR) and `c_abi_bindings/` example outputs.
 when defined(ffiEchoAbiC):
   declareLibrary("echo", Echo, defaultABIFormat = "c")
 else:

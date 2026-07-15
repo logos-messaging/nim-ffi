@@ -1,4 +1,4 @@
-## Round-trip correctness for the `c` (flat C-struct) ABI codec.
+## Round-trip correctness for the `c` (`abi = c` C-struct) ABI codec.
 ##
 ## Each `{.ffi: "abi = c".}` type gets a `<T>_CWire` companion plus
 ## `cwirePack` / `cwireUnpack` / `cwireFree`. This asserts

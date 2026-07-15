@@ -1,22 +1,15 @@
-## C99 binding generator for the nim-ffi framework.
-## Emits a header-only C binding plus a CMakeLists.txt. The binding is split
-## into three headers so the example reads cleanly: `nim_ffi_prelude.h` (owned
-## string/byte types + libc includes), `nim_ffi_cbor.h` (leaf CBOR codecs and
-## buffer drivers, includes the prelude), and `<lib>.h` (the library-specific
-## structs, codecs and async API, includes the cbor header). Requests/responses
-## travel as CBOR (encoded with the same vendored TinyCBOR the C++ backend
-## uses, matching the Nim-side cbor_serial codec — both ends speak RFC 8949).
-##
-## C has neither generics nor overloading, so the codecs the C++ backend gets
-## from templates are monomorphised here: every distinct `seq[T]` / `Option[T]`
-## becomes its own struct + encode/decode/free triple, and each leaf type has a
-## distinctly-named codec emitted by the cbor_helpers template.
+## C99 binding generator. The library's ABI format picks the shape: `cbor`
+## (default) emits three headers (prelude + cbor codecs + `<lib>.h`) exchanging
+## CBOR via vendored TinyCBOR; `c` (`abi = c`) emits one `<lib>.h` whose structs
+## are the C ABI directly. C lacks generics, so each distinct `seq[T]`/`Option[T]`
+## is monomorphised into its own struct + codec triple (e.g. `seq[uint32]` yields
+## an `EchoSeq_U32` struct plus `echo_enc_`/`echo_dec_`/`echo_free_EchoSeq_U32`).
 
 import std/[os, strutils, tables, sets]
 import ./meta, ./string_helpers, ./c_cpp_common, ./types_ir
 
-## Wire-format C type for any Nim `ptr T` / `pointer`. Fixed 64-bit so the CBOR
-## payload size is stable regardless of host architecture (mirrors CppPtrType).
+## Fixed 64-bit wire type for any Nim `ptr T`/`pointer`, so payload size is
+## host-arch independent (mirrors CppPtrType).
 const CPtrType* = "uint64_t"
 
 const
@@ -24,9 +17,7 @@ const
   CborHelpersTpl = staticRead("templates/c/cbor_helpers.h.tpl")
   CMakeListsTpl = staticRead("templates/c/CMakeLists.txt.tpl")
 
-  # Shared headers written alongside the library header. Their names match the
-  # include guards baked into the templates and the `#include` the cbor header
-  # emits for the prelude.
+  # Shared header names; must match the include guards baked into the templates.
   PreludeHeaderName* = "nim_ffi_prelude.h"
   CborHeaderName* = "nim_ffi_cbor.h"
 
@@ -45,63 +36,60 @@ const scalarCInfoTable: array[ScalarKind, tuple[cType, suffix: string]] = [
 ]
 
 func leafSuffix(cType: string): string =
-  ## C type name → leaf codec suffix for the leaf codecs the template provides;
-  ## empty string for composite types. Driven off the shared scalar table so it
-  ## can't drift from the IR's scalar set.
+  ## Leaf codec suffix for `cType`; "" for composites.
   for s in ScalarKind:
     if scalarCInfoTable[s].cType == cType:
       return scalarCInfoTable[s].suffix
-  case cType
-  of "NimFfiStr": "str"
-  of "NimFfiBytes": "bytes"
-  else: ""
+  return
+    case cType
+    of "NimFfiStr": "str"
+    of "NimFfiBytes": "bytes"
+    else: ""
 
 func cToken(cType: string): string =
-  ## Short PascalCase token used to build monomorphised container names and
-  ## codec-adapter symbols. Leaf types reuse their codec suffix (e.g.
-  ## `int64_t`→`I64`); composite C type names are already unique C identifiers,
-  ## so they pass through verbatim.
+  ## PascalCase token for monomorphised names: leaf suffix capitalised, else the
+  ## (already unique) composite C name verbatim.
   let suffix = leafSuffix(cType)
   if suffix.len > 0:
-    capitalizeFirstLetter(suffix)
-  else:
-    cType
+    return capitalizeFirstLetter(suffix)
+  return cType
 
 type CTypeReg = object
-  libName: string ## snake_case symbol prefix, e.g. "my_timer"
-  libType: string ## PascalCase container-name prefix, e.g. "MyTimer"
-  typeTable: Table[string, FFITypeMeta] ## user structs + synthetic Req structs
-  emitted: HashSet[string] ## composite C type names already emitted
+  libName: string ## snake_case symbol prefix
+  libType: string ## PascalCase container-name prefix
+  typeTable: Table[string, FFITypeMeta]
+  emitted: HashSet[string]
   owns: Table[string, bool] ## C type name → owns-heap-memory
-  decls: seq[string] ## struct typedefs, dependency order
-  codecs: seq[string] ## enc/dec/free defs, dependency order
+  decls: seq[string]
+  codecs: seq[string]
 
 func encFn(reg: CTypeReg, cType: string): string =
   let suffix = leafSuffix(cType)
   if suffix.len > 0:
     return "nimffi_enc_" & suffix
-  reg.libName & "_enc_" & cType
+  return reg.libName & "_enc_" & cType
 
 func decFn(reg: CTypeReg, cType: string): string =
   let suffix = leafSuffix(cType)
   if suffix.len > 0:
     return "nimffi_dec_" & suffix
-  reg.libName & "_dec_" & cType
+  return reg.libName & "_dec_" & cType
 
 func freeFn(reg: CTypeReg, cType: string): string =
-  ## Free-function name for `cType`, or "" when the type owns no heap memory.
-  case cType
-  of "NimFfiStr":
-    "nimffi_free_str"
-  of "NimFfiBytes":
-    "nimffi_free_bytes"
-  else:
-    if leafSuffix(cType).len > 0:
-      ""
-    elif reg.owns.getOrDefault(cType, false):
-      reg.libName & "_free_" & cType
+  ## Free-function name for `cType`, or "" when it owns no heap memory.
+  return
+    case cType
+    of "NimFfiStr":
+      "nimffi_free_str"
+    of "NimFfiBytes":
+      "nimffi_free_bytes"
     else:
-      ""
+      if leafSuffix(cType).len > 0:
+        ""
+      elif reg.owns.getOrDefault(cType, false):
+        reg.libName & "_free_" & cType
+      else:
+        ""
 
 proc emitSeqType(reg: var CTypeReg, name, elemC: string) =
   let eEnc = encFn(reg, elemC)
@@ -256,12 +244,10 @@ proc emitStructType(reg: var CTypeReg, t: FFITypeMeta) =
   reg.owns[t.name] = owns
 
 proc ensureCType(reg: var CTypeReg, t: FFIType): tuple[cType: string, owns: bool] =
-  ## Walks the shared type IR into a C type, monomorphising each distinct
-  ## `seq[T]` / `Option[T]` into its own struct + codec triple on first sight.
-  ## `owns` marks a C type that carries heap-allocated payload the caller must
-  ## release with its generated free function (strings, byte buffers, and any
-  ## seq/opt/struct transitively containing one); plain scalars and pointers own
-  ## nothing and need no cleanup.
+  ## Lowers the type intermediate representation (see types_ir.nim) to a C type,
+  ## monomorphising each distinct `seq[T]`/`Option[T]` on first sight. `owns`
+  ## marks a type carrying heap payload the caller must release via its generated
+  ## free function.
   case t.kind
   of ftPtr:
     return (CPtrType, false)
@@ -296,31 +282,27 @@ proc ensureCType(reg: var CTypeReg, t: FFIType): tuple[cType: string, owns: bool
     return (name, reg.owns.getOrDefault(name, false))
 
 proc ensureCType(reg: var CTypeReg, nimType: string): tuple[cType: string, owns: bool] =
-  ensureCType(reg, parseFFIType(nimType))
+  return ensureCType(reg, parseFFIType(nimType))
 
 proc reqTypeMeta(p: FFIProcMeta): FFITypeMeta =
-  ## Synthesises the per-proc Req struct as an FFITypeMeta so it flows through
-  ## the same monomorphisation path as user-declared types. Pointer/handle
-  ## params ride the wire as the opaque uint64 pointer type.
+  ## Synthesises the per-proc Req struct so it flows through the same
+  ## monomorphisation path as user types; pointer/handle params ride as uint64.
   var fields: seq[FFIFieldMeta] = @[]
   for ep in p.extraParams:
     let typeName = if ep.ridesAsPtr(): "pointer" else: ep.typeName
     fields.add(FFIFieldMeta(name: ep.name, typeName: typeName))
-  FFITypeMeta(name: reqStructName(p), fields: fields)
+  return FFITypeMeta(name: reqStructName(p), fields: fields)
 
 func paramByValue(nimType: string, ridesAsPtr: bool): bool =
-  ## Scalars / opaque pointers / string views pass by value; composite
-  ## aggregates (seq, Option, user structs) pass by const pointer. Note `ptr T`
-  ## rides by value as the 64-bit wire int (like `pointer`); production params
-  ## reach here as `pointer` since handles are pre-converted upstream.
+  ## Scalars/pointers/string views pass by value; aggregates by const pointer.
   if ridesAsPtr:
     return true
-  parseFFIType(nimType).kind in {ftScalar, ftStr, ftPtr}
+  return parseFFIType(nimType).kind in {ftScalar, ftStr, ftPtr}
 
 proc cReturnType(reg: var CTypeReg, p: FFIProcMeta): string =
   if p.returnRidesAsPtr():
     return CPtrType
-  ensureCType(reg, p.returnTypeName).cType
+  return ensureCType(reg, p.returnTypeName).cType
 
 proc buildReqParams(
     reg: var CTypeReg, eps: seq[FFIParamMeta]
@@ -340,14 +322,14 @@ proc buildReqParams(
     else:
       params.add("const " & cType & "* " & ep.name)
       assigns.add("    ffi_req." & ep.name & " = *" & ep.name & ";")
-  (params, assigns)
+  return (params, assigns)
 
 proc evNames(
     libType, libName: string, ev: FFIEventMeta
 ): tuple[fnType, boxType, tramp, regName: string] =
   let pascal = capitalizeFirstLetter(ev.nimProcName)
   let snake = camelToSnakeCase(ev.nimProcName)
-  (
+  return (
     libType & pascal & "Fn",
     libType & pascal & "Box",
     libName & "_" & snake & "_trampoline",
@@ -425,10 +407,8 @@ proc emitCallBox(lines: var seq[string], fnType, boxType: string) =
   lines.add("typedef struct { " & fnType & " fn; void* user_data; } " & boxType & ";")
 
 proc emitReplyTrampolineHead(lines: var seq[string], tramp, boxType, fallback: string) =
-  ## Opens a reply trampoline: cast the user-data back to the call box, bail if
-  ## the caller passed no callback (nothing to deliver to, and leaving early
-  ## avoids allocating a result nobody receives), then deliver a non-zero `ret`
-  ## as an error. The error text in msg/len is not NUL-terminated, so copy it.
+  ## Opens a reply trampoline: recover the box, fail if no callback, deliver a
+  ## non-zero `ret` as an error (msg/len isn't NUL-terminated, so copy it).
   lines.add(
     "static void " & tramp & "(int ret, const char* msg, size_t len, void* ud) {"
   )
@@ -661,8 +641,8 @@ proc emitMethod(
   lines.add("    if (dec != 0) {")
   lines.add("        box->fn(-1, NULL, err ? err : \"decode failed\", box->user_data);")
   lines.add("        free(err);")
-  # A partial decode may have allocated some fields; reclaim them (out is
-  # zeroed, so the typed free skips what was never written).
+  # Reclaim any fields a partial decode allocated (out is zeroed, so free skips
+  # what was never written).
   if retFree.len > 0:
     lines.add("        " & retFree & "(&out);")
   lines.add("        free(box);")
@@ -734,7 +714,7 @@ proc newCTypeReg(
     if p.kind != FFIKind.DTOR:
       let rt = reqTypeMeta(p)
       reg.typeTable[rt.name] = rt
-  reg
+  return reg
 
 proc monomorphiseAll(
     reg: var CTypeReg,
@@ -742,10 +722,9 @@ proc monomorphiseAll(
     procs, methods: seq[FFIProcMeta],
     events: seq[FFIEventMeta],
 ): tuple[reqTypes, respTypes: seq[string]] =
-  ## Walks every user type, per-proc Req envelope, return type and event
-  ## payload through ensureCType, emitting their structs/codecs into `reg` in
-  ## dependency order. Returns the Req and response C type names the buffer
-  ## adapters need.
+  ## Runs every user type, Req envelope, return type and event payload through
+  ## ensureCType, emitting structs/codecs into `reg` in dependency order.
+  ## Returns the Req and response C type names the buffer adapters need.
   for t in types:
     discard ensureCType(reg, t.name)
   var reqTypes: seq[string] = @[]
@@ -759,19 +738,17 @@ proc monomorphiseAll(
     respTypes.add(cReturnType(reg, m))
   for ev in events:
     discard ensureCType(reg, ev.payloadTypeName)
-  (reqTypes, respTypes)
+  return (reqTypes, respTypes)
 
 func generateCPreludeHeader*(): string =
-  ## The `nim_ffi_prelude.h` shared header: owned string/byte types plus the
-  ## libc/TinyCBOR includes every nim-ffi C binding needs. Identical across
-  ## libraries, so it is emitted verbatim from the template.
-  HeaderPreludeTpl & "\n"
+  ## The library-agnostic `nim_ffi_prelude.h`: owned string/byte types + libc/
+  ## TinyCBOR includes, emitted verbatim.
+  return HeaderPreludeTpl & "\n"
 
 func generateCCborHeader*(): string =
-  ## The `nim_ffi_cbor.h` shared header: leaf CBOR codecs and buffer drivers.
-  ## Includes the prelude (its guard is inside the template) and is library-
-  ## agnostic, so it too is emitted verbatim.
-  CborHelpersTpl & "\n"
+  ## The library-agnostic `nim_ffi_cbor.h`: leaf CBOR codecs and buffer drivers,
+  ## emitted verbatim.
+  return CborHelpersTpl & "\n"
 
 proc generateCLibHeader*(
     procs: seq[FFIProcMeta],
@@ -779,8 +756,7 @@ proc generateCLibHeader*(
     libName: string,
     events: seq[FFIEventMeta] = @[],
 ): string =
-  ## The `<lib>.h` header: library-specific structs, monomorphised codecs and
-  ## the async API. Pulls the two shared headers in via the cbor header.
+  ## The `<lib>.h` header: library structs, monomorphised codecs and async API.
   let classified = classifyProcs(procs)
   let ctors = classified.ctors
   let methods = classified.methods
@@ -875,11 +851,432 @@ proc generateCLibHeader*(
     emitMethod(lines, reg, ctxType, libType, libName, m)
 
   lines.add("#endif /* " & guard & " */")
-  lines.join("\n") & "\n"
+  return lines.join("\n") & "\n"
 
 proc generateCCMakeLists*(libName, nimSrcRelPath: string): string =
   let src = nimSrcRelPath.replace("\\", "/")
-  CMakeListsTpl.multiReplace(("{{LIB}}", libName), ("{{SRC}}", src))
+  return CMakeListsTpl.multiReplace(("{{LIB}}", libName), ("{{SRC}}", src))
+
+# `abi = c` binding: the `_CWire` structs are the C ABI (no CBOR). Layout
+# mirrors `wireValueType`/`wireFieldsFor` byte-for-byte: `string`→`const char*`,
+# `seq[T]`→`<wireT>* <f>_items` + `ptrdiff_t <f>_len`, `Option[T]`→`<wireT>*`
+# (NULL = none), nested type→its `_CWire` struct, `ptr`/`pointer`→`void*`.
+
+const AbiCPtrType = "void*"
+const AbiCMakeListsTpl = staticRead("templates/c/CMakeLists_abi.txt.tpl")
+
+func abiLeafCType(t: string): tuple[ok: bool, cType: string] =
+  ## Nim leaf type → `abi = c` wire C type; `ok` is false for composites.
+  return
+    case t
+    of "int", "int64":
+      (true, "int64_t")
+    of "int32":
+      (true, "int32_t")
+    of "int16":
+      (true, "int16_t")
+    of "int8":
+      (true, "int8_t")
+    of "uint", "uint64":
+      (true, "uint64_t")
+    of "uint32":
+      (true, "uint32_t")
+    of "uint16":
+      (true, "uint16_t")
+    of "uint8", "byte":
+      (true, "uint8_t")
+    of "bool":
+      (true, "bool")
+    of "float", "float64":
+      (true, "double")
+    of "float32":
+      (true, "float")
+    of "pointer":
+      (true, AbiCPtrType)
+    of "string", "cstring":
+      (true, "const char*")
+    else:
+      (false, "")
+
+type AbiReg = object
+  typeTable: Table[string, FFITypeMeta]
+  emitted: HashSet[string]
+  decls: seq[string]
+
+proc ensureAbiStruct(reg: var AbiReg, typeName: string)
+
+proc abiWireValueCType(reg: var AbiReg, nimType: string): string =
+  ## `abi = c` C type for a value-position field (a top-level `seq` splits in two).
+  let t = nimType.strip()
+  if t.startsWith("ptr ") or t == "pointer":
+    return AbiCPtrType
+  let leaf = abiLeafCType(t)
+  if leaf.ok:
+    return leaf.cType
+  var optInner = genericInnerType(t, "Option[")
+  if optInner.len == 0:
+    optInner = genericInnerType(t, "Maybe[")
+  if optInner.len > 0:
+    return abiWireValueCType(reg, optInner.strip()) & "*"
+  if genericInnerType(t, "seq[").len > 0:
+    raise newException(
+      ValueError, "abi = c: `seq` has no single-field wire form, so it can't nest: " & t
+    )
+  if genericInnerType(t, "array[").len > 0:
+    raise newException(
+      ValueError, "abi = c: array fields are not yet supported by the C backend: " & t
+    )
+  if t in reg.typeTable:
+    ensureAbiStruct(reg, t)
+    return t
+  raise newException(ValueError, "abi = c: unknown field type: " & t)
+
+proc abiFieldDecls(reg: var AbiReg, name, nimType: string): seq[string] =
+  let seqInner = genericInnerType(nimType.strip(), "seq[")
+  if seqInner.len > 0:
+    let elemC = abiWireValueCType(reg, seqInner.strip())
+    return @[elemC & "* " & name & "_items;", "ptrdiff_t " & name & "_len;"]
+  return @[abiWireValueCType(reg, nimType) & " " & name & ";"]
+
+proc emitAbiStruct(reg: var AbiReg, t: FFITypeMeta) =
+  var members: seq[string] = @[]
+  for f in t.fields:
+    for line in abiFieldDecls(reg, f.name, f.typeName):
+      members.add("    " & line)
+  if members.len == 0:
+    members.add("    uint8_t _placeholder; /* C forbids empty structs */")
+  reg.decls.add("typedef struct {\n" & members.join("\n") & "\n} " & t.name & ";")
+
+proc ensureAbiStruct(reg: var AbiReg, typeName: string) =
+  if typeName in reg.emitted:
+    return
+  reg.emitted.incl(typeName)
+  if typeName in reg.typeTable:
+    emitAbiStruct(reg, reg.typeTable[typeName])
+  else:
+    reg.decls.add("/* unknown type referenced: " & typeName & " */")
+
+proc newAbiReg(types: seq[FFITypeMeta], procs: seq[FFIProcMeta]): AbiReg =
+  var reg = AbiReg()
+  for t in types:
+    reg.typeTable[t.name] = t
+  for p in procs:
+    if p.kind != FFIKind.DTOR:
+      let rt = reqTypeMeta(p)
+      reg.typeTable[rt.name] = rt
+  return reg
+
+func abiParamByValue(nimType: string, ridesAsPtr: bool): bool =
+  ## Scalars/pointers/string views pass by value; aggregates by const pointer.
+  if ridesAsPtr:
+    return true
+  return abiLeafCType(nimType.strip()).ok
+
+proc abiReqParamsAndAssigns(
+    reg: var AbiReg, extraParams: seq[FFIParamMeta]
+): tuple[params, assigns: seq[string]] =
+  var params, assigns: seq[string] = @[]
+  for ep in extraParams:
+    let rides = ep.ridesAsPtr()
+    let cType =
+      if rides:
+        AbiCPtrType
+      else:
+        abiWireValueCType(reg, ep.typeName)
+    if abiParamByValue(ep.typeName, rides):
+      params.add(cType & " " & ep.name)
+      assigns.add("    ffi_req." & ep.name & " = " & ep.name & ";")
+    else:
+      params.add("const " & cType & "* " & ep.name)
+      assigns.add("    ffi_req." & ep.name & " = *" & ep.name & ";")
+  return (params, assigns)
+
+proc abiMethodReplyInfo(
+    reg: var AbiReg, libType: string, m: FFIProcMeta
+): tuple[fnType, replyParam: string] =
+  ## Reply-callback typedef name plus the C type of its `reply` argument.
+  let pascal = snakeToPascalCase(stripLibPrefix(m.procName, m.libName))
+  let fnType = libType & pascal & "ReplyFn"
+  if m.returnRidesAsPtr():
+    raise newException(
+      ValueError,
+      "abi = c: handle/pointer returns are not yet supported by the C backend: " &
+        m.procName,
+    )
+  let rt = m.returnTypeName.strip()
+  let leaf = abiLeafCType(rt)
+  let replyParam =
+    if rt == "string" or rt == "cstring":
+      "const char*"
+    elif leaf.ok:
+      "const " & leaf.cType & "*"
+    else:
+      ensureAbiStruct(reg, rt)
+      "const " & rt & "*"
+  return (fnType, replyParam)
+
+proc emitAbiReplyTypedefs(
+    lines: var seq[string], reg: var AbiReg, libType: string, methods: seq[FFIProcMeta]
+) =
+  for m in methods:
+    let info = abiMethodReplyInfo(reg, libType, m)
+    lines.add(
+      "typedef void (*" & info.fnType & ")(int err_code, " & info.replyParam &
+        " reply, const char* err_msg, void* user_data);"
+    )
+
+proc emitAbiExternDecls(
+    lines: var seq[string],
+    reg: var AbiReg,
+    libName, libType: string,
+    procs: seq[FFIProcMeta],
+) =
+  let createRawFn = libType & "CreateRawFn"
+  var haveCtor = false
+  for p in procs:
+    if p.kind == FFIKind.CTOR:
+      haveCtor = true
+  if haveCtor:
+    lines.add(
+      "typedef void (*" & createRawFn &
+        ")(int err_code, const char* ctx_addr, const char* err_msg, void* user_data);"
+    )
+  lines.add("#ifdef __cplusplus")
+  lines.add("extern \"C\" {")
+  lines.add("#endif")
+  lines.add("")
+  for p in procs:
+    let reqStruct = reqStructName(p)
+    case p.kind
+    of FFIKind.FFI:
+      let info = abiMethodReplyInfo(reg, libType, p)
+      lines.add(
+        "int " & p.procName & "(void* ctx, " & info.fnType &
+          " on_reply, void* user_data, const " & reqStruct & "* req);"
+      )
+    of FFIKind.CTOR:
+      lines.add(
+        "void* " & p.procName & "(const " & reqStruct & "* req, " & createRawFn &
+          " on_created, void* user_data);"
+      )
+    of FFIKind.DTOR:
+      lines.add("int " & p.procName & "(void* ctx);")
+  lines.add("")
+  lines.add("#ifdef __cplusplus")
+  lines.add("} /* extern \"C\" */")
+  lines.add("#endif")
+  lines.add("")
+
+proc emitAbiCtxAndCtor(
+    lines: var seq[string],
+    reg: var AbiReg,
+    libName, libType, ctxType: string,
+    ctors: seq[FFIProcMeta],
+) =
+  lines.add("typedef struct {")
+  lines.add("    void* ptr;")
+  lines.add("} " & ctxType & ";")
+  lines.add("")
+  if ctors.len == 0:
+    return
+  let createFn = libType & "CreateFn"
+  let createBox = libType & "CreateBox"
+  let createRawFn = libType & "CreateRawFn"
+  let tramp = libName & "_create_trampoline"
+  lines.add(
+    "typedef void (*" & createFn & ")(int err_code, " & ctxType &
+      "* ctx, const char* err_msg, void* user_data);"
+  )
+  lines.add(
+    "typedef struct { " & createFn & " fn; void* user_data; } " & createBox & ";"
+  )
+  lines.add(
+    "static void " & tramp &
+      "(int ret, const char* ctx_addr, const char* err_msg, void* ud) {"
+  )
+  lines.add("    " & createBox & "* box = (" & createBox & "*)ud;")
+  lines.add("    if (!box) return;")
+  lines.add("    if (ret == NIMFFI_RET_STALE_WARN) return;")
+  lines.add("    if (!box->fn) { free(box); return; }")
+  lines.add("    if (ret != 0) {")
+  lines.add(
+    "        box->fn(ret, NULL, err_msg ? err_msg : \"FFI create failed\", box->user_data);"
+  )
+  lines.add("        free(box);")
+  lines.add("        return;")
+  lines.add("    }")
+  lines.add("    char* endp = NULL;")
+  lines.add("    unsigned long long a = ctx_addr ? strtoull(ctx_addr, &endp, 10) : 0;")
+  lines.add("    bool ok = ctx_addr && *ctx_addr && endp && *endp == '\\0';")
+  lines.add("    if (!ok) {")
+  lines.add(
+    "        box->fn(-1, NULL, \"FFI create returned non-numeric address\", box->user_data);"
+  )
+  lines.add("        free(box);")
+  lines.add("        return;")
+  lines.add("    }")
+  lines.add(
+    "    " & ctxType & "* ctx = (" & ctxType & "*)calloc(1, sizeof(" & ctxType & "));"
+  )
+  lines.add("    if (!ctx) {")
+  lines.add("        box->fn(-1, NULL, \"out of memory\", box->user_data);")
+  lines.add("        free(box);")
+  lines.add("        return;")
+  lines.add("    }")
+  lines.add("    ctx->ptr = (void*)(uintptr_t)a;")
+  lines.add("    box->fn(NIMFFI_RET_OK, ctx, NULL, box->user_data);")
+  lines.add("    free(box);")
+  lines.add("}")
+  lines.add("")
+  for ctor in ctors:
+    let reqStruct = reqStructName(ctor)
+    let (params, assigns) = abiReqParamsAndAssigns(reg, ctor.extraParams)
+    let head = "static inline int " & libName & "_ctx_create("
+    let sig =
+      if params.len > 0:
+        head & params.join(", ") & ", " & createFn & " on_created, void* user_data) {"
+      else:
+        head & createFn & " on_created, void* user_data) {"
+    lines.add(sig)
+    lines.add("    " & reqStruct & " ffi_req;")
+    lines.add("    memset(&ffi_req, 0, sizeof(ffi_req));")
+    for a in assigns:
+      lines.add(a)
+    lines.add(
+      "    " & createBox & "* box = (" & createBox & "*)malloc(sizeof(" & createBox &
+        "));"
+    )
+    lines.add("    if (!box) {")
+    lines.add(
+      "        if (on_created) on_created(-1, NULL, \"out of memory\", user_data);"
+    )
+    lines.add("        return -1;")
+    lines.add("    }")
+    lines.add("    box->fn = on_created;")
+    lines.add("    box->user_data = user_data;")
+    lines.add("    (void)" & ctor.procName & "(&ffi_req, " & tramp & ", box);")
+    lines.add("    return 0;")
+    lines.add("}")
+    lines.add("")
+
+proc emitAbiDestructor(lines: var seq[string], ctxType, libName, dtorProcName: string) =
+  lines.add("static inline void " & libName & "_ctx_destroy(" & ctxType & "* ctx) {")
+  lines.add("    if (!ctx) return;")
+  if dtorProcName.len > 0:
+    lines.add("    if (ctx->ptr) { " & dtorProcName & "(ctx->ptr); ctx->ptr = NULL; }")
+  lines.add("    free(ctx);")
+  lines.add("}")
+  lines.add("")
+
+proc emitAbiMethod(
+    lines: var seq[string],
+    reg: var AbiReg,
+    ctxType, libName, libType: string,
+    m: FFIProcMeta,
+) =
+  let stripped = stripLibPrefix(m.procName, m.libName)
+  let reqStruct = reqStructName(m)
+  let info = abiMethodReplyInfo(reg, libType, m)
+  let (params, assigns) = abiReqParamsAndAssigns(reg, m.extraParams)
+  let head =
+    "static inline int " & libName & "_ctx_" & stripped & "(const " & ctxType & "* ctx, "
+  let sig =
+    if params.len > 0:
+      head & params.join(", ") & ", " & info.fnType & " on_reply, void* user_data) {"
+    else:
+      head & info.fnType & " on_reply, void* user_data) {"
+  lines.add(sig)
+  lines.add("    " & reqStruct & " ffi_req;")
+  lines.add("    memset(&ffi_req, 0, sizeof(ffi_req));")
+  for a in assigns:
+    lines.add(a)
+  lines.add("    return " & m.procName & "(ctx->ptr, on_reply, user_data, &ffi_req);")
+  lines.add("}")
+  lines.add("")
+
+proc generateCAbiLibHeader*(
+    procs: seq[FFIProcMeta],
+    types: seq[FFITypeMeta],
+    libName: string,
+    events: seq[FFIEventMeta] = @[],
+): string =
+  if events.len > 0:
+    raise newException(
+      ValueError, "abi = c: the C backend does not yet support {.ffiEvent.} listeners"
+    )
+  let classified = classifyProcs(procs)
+  let libType = libTypeName(classified.ctors, libName)
+  let ctxType = libType & "Ctx"
+
+  var reg = newAbiReg(types, procs)
+  for t in types:
+    ensureAbiStruct(reg, t.name)
+  for p in procs:
+    if p.kind != FFIKind.DTOR:
+      ensureAbiStruct(reg, reqStructName(p))
+
+  let guard = "NIM_FFI_LIB_" & libName.toUpperAscii() & "_C_ABI_H_INCLUDED"
+  var lines: seq[string] = @[]
+  lines.add("#ifndef " & guard)
+  lines.add("#define " & guard)
+  lines.add("#include <stdint.h>")
+  lines.add("#include <stddef.h>")
+  lines.add("#include <stdbool.h>")
+  lines.add("#include <stdlib.h>")
+  lines.add("#include <string.h>")
+  lines.add("")
+  lines.add("#define NIMFFI_RET_OK 0")
+  lines.add("#define NIMFFI_RET_ERR 1")
+  lines.add("#define NIMFFI_RET_MISSING_CALLBACK 2")
+  lines.add("/* Non-terminal: the request is still running. Fires every ~5s with `msg`")
+  lines.add(
+    "   carrying the elapsed milliseconds as decimal text; always followed by a"
+  )
+  lines.add("   terminal RET_OK/RET_ERR. Ignore it unless you want progress. */")
+  lines.add("#define NIMFFI_RET_STALE_WARN 3")
+  lines.add("")
+  lines.add(
+    "/* `abi = c` wire structs — the C ABI. Strings are borrowed, NUL-terminated"
+  )
+  lines.add("   `const char*` valid only for the duration of the call they cross. */")
+  for decl in reg.decls:
+    lines.add(decl)
+  lines.add("")
+
+  emitAbiReplyTypedefs(lines, reg, libType, classified.methods)
+  lines.add("")
+  emitAbiExternDecls(lines, reg, libName, libType, procs)
+
+  lines.add("/* High-level context wrapper */")
+  emitAbiCtxAndCtor(lines, reg, libName, libType, ctxType, classified.ctors)
+  emitAbiDestructor(lines, ctxType, libName, classified.dtorProcName)
+  for m in classified.methods:
+    emitAbiMethod(lines, reg, ctxType, libName, libType, m)
+
+  lines.add("#endif /* " & guard & " */")
+  return lines.join("\n") & "\n"
+
+proc generateCAbiCMakeLists*(libName, nimSrcRelPath: string): string =
+  let src = nimSrcRelPath.replace("\\", "/")
+  return AbiCMakeListsTpl.multiReplace(("{{LIB}}", libName), ("{{SRC}}", src))
+
+func libWireFormat(procs: seq[FFIProcMeta], types: seq[FFITypeMeta]): ABIFormat =
+  ## The single wire format the C header targets; a library can't mix `abi = c`
+  ## and `abi = cbor` in one header.
+  var seen: set[ABIFormat] = {}
+  for p in procs:
+    if p.kind != FFIKind.DTOR:
+      seen.incl(p.abiFormat)
+  if seen.len == 0:
+    for t in types:
+      seen.incl(t.abiFormat)
+  if seen.len > 1:
+    raise newException(
+      ValueError,
+      "abi = c/cbor mismatch: a C library must use one ABI format for all its " &
+        "procs and types; a mixed header is not supported",
+    )
+  return (if ABIFormat.C in seen: ABIFormat.C else: ABIFormat.Cbor)
 
 proc generateCBindings*(
     procs: seq[FFIProcMeta],
@@ -889,10 +1286,21 @@ proc generateCBindings*(
     nimSrcRelPath: string,
     events: seq[FFIEventMeta] = @[],
 ) =
+  ## Emits the C binding for `libName`, picking the `abi = c` or CBOR shape from
+  ## the library's ABI format.
   createDir(outputDir)
-  writeFile(outputDir / PreludeHeaderName, generateCPreludeHeader())
-  writeFile(outputDir / CborHeaderName, generateCCborHeader())
-  writeFile(
-    outputDir / (libName & ".h"), generateCLibHeader(procs, types, libName, events)
-  )
-  writeFile(outputDir / "CMakeLists.txt", generateCCMakeLists(libName, nimSrcRelPath))
+  case libWireFormat(procs, types)
+  of ABIFormat.C:
+    writeFile(
+      outputDir / (libName & ".h"), generateCAbiLibHeader(procs, types, libName, events)
+    )
+    writeFile(
+      outputDir / "CMakeLists.txt", generateCAbiCMakeLists(libName, nimSrcRelPath)
+    )
+  of ABIFormat.Cbor:
+    writeFile(outputDir / PreludeHeaderName, generateCPreludeHeader())
+    writeFile(outputDir / CborHeaderName, generateCCborHeader())
+    writeFile(
+      outputDir / (libName & ".h"), generateCLibHeader(procs, types, libName, events)
+    )
+    writeFile(outputDir / "CMakeLists.txt", generateCCMakeLists(libName, nimSrcRelPath))
