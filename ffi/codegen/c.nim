@@ -1018,7 +1018,7 @@ func abiScalarRawFnName(libType: string): string =
   ## per-method trampoline converts into the typed reply.
   return libType & "ScalarRawFn"
 
-proc abiScalarArgParams(m: FFIProcMeta): seq[string] =
+func abiScalarArgParams(m: FFIProcMeta): seq[string] =
   ## C parameters for a scalar method's args — passed inline by value, in both
   ## the raw export and the high-level wrapper (no Req struct).
   var params: seq[string] = @[]

@@ -35,7 +35,7 @@ func bindableProcs*(procs: seq[FFIProcMeta]): seq[FFIProcMeta] =
   ## The procs the CBOR-speaking foreign-binding generators emit for.
   ## Scalar-fast-path procs are dropped: their C export takes inline scalar
   ## args, not the CBOR `(reqCbor, reqCborLen)` shape those backends assume, so
-  ## emitting a CBOR caller for them would be wrong. Only the `c_abi` generator
+  ## emitting a CBOR caller for them would be wrong. Only the `abi = c` C header
   ## has scalar codegen and binds the full registry (see genBindings()).
   var kept: seq[FFIProcMeta] = @[]
   for p in procs:
