@@ -160,13 +160,15 @@ suite "generateCAbiLibHeader":
       header
     check "return timer_add(ctx->ptr, timer_add_scalar_reply, box, a, b);" in header
 
-  test "scalar returns unpack the 8-byte image; strings copy and NUL-terminate":
+  test "scalar returns unpack the 8-byte image; strings copy through the dup helper":
     # int return: the slot is the sign-extended int64 image.
     check "memcpy(&reply, &slot, sizeof(reply));" in header
     # float32 return: packed as a widened double, narrowed back here.
     check "float reply = (float)wide;" in header
-    # string return: raw UTF-8 bytes, not NUL-terminated on the wire.
-    check "reply[len] = '\\0';" in header
+    # string return: copied via the overflow-guarded, NUL-terminating dup helper.
+    check "char* reply = nimffi_abi_dup_cstr_n(msg ? msg : \"\", msg ? len : 0);" in
+      header
+    check "if (n == SIZE_MAX) return NULL;" in header
 
   test "events are rejected (CBOR-only for now)":
     expect ValueError:

@@ -1018,6 +1018,31 @@ func abiScalarRawFnName(libType: string): string =
   ## per-method trampoline converts into the typed reply.
   return libType & "ScalarRawFn"
 
+const abiScalarDupCStr = "nimffi_abi_dup_cstr_n"
+
+func abiScalarDupHelper(): seq[string] =
+  ## CBOR-free twin of `nimffi_dup_cstr_n` for the scalar trampolines: a
+  ## NUL-terminated copy of a length-delimited (not NUL-terminated) byte run,
+  ## returning NULL on allocation failure or a length that would overflow the
+  ## `n + 1` size passed to `malloc`.
+  # Guarded so co-including two `abi = c` headers in one TU doesn't redefine it.
+  return @[
+    "#ifndef NIMFFI_ABI_DUP_CSTR_N",
+    "#define NIMFFI_ABI_DUP_CSTR_N",
+    "/* NUL-terminated copy of a length-delimited (not NUL-terminated) byte run;",
+    "   NULL on allocation failure or a length that would overflow `n + 1`. */",
+    "static inline char* " & abiScalarDupCStr & "(const char* s, size_t n) {",
+    "    if (n == SIZE_MAX) return NULL;",
+    "    char* p = (char*)malloc(n + 1);",
+    "    if (p) {",
+    "        if (n > 0) memcpy(p, s, n);",
+    "        p[n] = '\\0';",
+    "    }",
+    "    return p;",
+    "}",
+    "#endif",
+  ]
+
 func abiScalarArgParams(m: FFIProcMeta): seq[string] =
   ## C parameters for a scalar method's args — passed inline by value, in both
   ## the raw export and the high-level wrapper (no Req struct).
@@ -1054,6 +1079,8 @@ proc emitAbiExternDecls(
       "typedef void (*" & abiScalarRawFnName(libType) &
         ")(int caller_ret, char* msg, size_t len, void* user_data);"
     )
+    for l in abiScalarDupHelper():
+      lines.add(l)
   lines.add("#ifdef __cplusplus")
   lines.add("extern \"C\" {")
   lines.add("#endif")
@@ -1221,10 +1248,10 @@ func abiScalarOkLines(m: FFIProcMeta, fnType: string): seq[string] =
   let rt = m.returnTypeName.strip()
   if rt == "string" or rt == "cstring":
     return @[
-      "    char* reply = (char*)malloc(len + 1);", "    if (!reply) {",
+      "    char* reply = " & abiScalarDupCStr & "(msg ? msg : \"\", msg ? len : 0);",
+      "    if (!reply) {",
       "        fn(NIMFFI_RET_ERR, \"\", \"out of memory\", user_data);",
-      "        return;", "    }", "    if (len > 0) memcpy(reply, msg, len);",
-      "    reply[len] = '\\0';", "    fn(NIMFFI_RET_OK, reply, \"\", user_data);",
+      "        return;", "    }", "    fn(NIMFFI_RET_OK, reply, \"\", user_data);",
       "    free(reply);",
     ]
   var lines = @[
@@ -1294,11 +1321,9 @@ proc emitAbiScalarMethod(
   lines.add("    free(box);")
   lines.add("    if (!fn) return;")
   lines.add("    if (caller_ret != NIMFFI_RET_OK) {")
-  lines.add("        char* em = (char*)malloc(len + 1);")
-  lines.add("        if (em) {")
-  lines.add("            if (len > 0) memcpy(em, msg, len);")
-  lines.add("            em[len] = '\\0';")
-  lines.add("        }")
+  lines.add(
+    "        char* em = " & abiScalarDupCStr & "(msg ? msg : \"\", msg ? len : 0);"
+  )
   lines.add(
     "        fn(caller_ret, " & errReply & ", em ? em : \"FFI call failed\", user_data);"
   )

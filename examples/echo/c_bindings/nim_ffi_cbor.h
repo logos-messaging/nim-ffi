@@ -271,8 +271,12 @@ static inline char* nimffi_dup_cstr(const char* s) {
 }
 
 /* NUL-terminated copy of a length-delimited (not NUL-terminated) byte run,
- * for turning the FFICallback's raw error `msg`/`len` into a C string. */
+ * for turning the FFICallback's raw error `msg`/`len` into a C string. Returns
+ * NULL on allocation failure or a length that would overflow `n + 1`. */
 static inline char* nimffi_dup_cstr_n(const char* s, size_t n) {
+    if (n == SIZE_MAX) {
+        return NULL;
+    }
     char* p = (char*)malloc(n + 1);
     if (p) {
         if (n > 0) {

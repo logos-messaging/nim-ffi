@@ -41,6 +41,20 @@ typedef void (*EchoCreateRawFn)(int err_code, const char* ctx_addr, const char* 
    string return's UTF-8, or the 8-byte native-endian scalar image), not
    NUL-terminated and valid only for the duration of the call. */
 typedef void (*EchoScalarRawFn)(int caller_ret, char* msg, size_t len, void* user_data);
+#ifndef NIMFFI_ABI_DUP_CSTR_N
+#define NIMFFI_ABI_DUP_CSTR_N
+/* NUL-terminated copy of a length-delimited (not NUL-terminated) byte run;
+   NULL on allocation failure or a length that would overflow `n + 1`. */
+static inline char* nimffi_abi_dup_cstr_n(const char* s, size_t n) {
+    if (n == SIZE_MAX) return NULL;
+    char* p = (char*)malloc(n + 1);
+    if (p) {
+        if (n > 0) memcpy(p, s, n);
+        p[n] = '\0';
+    }
+    return p;
+}
+#endif
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -127,22 +141,16 @@ static void echo_version_scalar_reply(int caller_ret, char* msg, size_t len, voi
     free(box);
     if (!fn) return;
     if (caller_ret != NIMFFI_RET_OK) {
-        char* em = (char*)malloc(len + 1);
-        if (em) {
-            if (len > 0) memcpy(em, msg, len);
-            em[len] = '\0';
-        }
+        char* em = nimffi_abi_dup_cstr_n(msg ? msg : "", msg ? len : 0);
         fn(caller_ret, "", em ? em : "FFI call failed", user_data);
         free(em);
         return;
     }
-    char* reply = (char*)malloc(len + 1);
+    char* reply = nimffi_abi_dup_cstr_n(msg ? msg : "", msg ? len : 0);
     if (!reply) {
         fn(NIMFFI_RET_ERR, "", "out of memory", user_data);
         return;
     }
-    if (len > 0) memcpy(reply, msg, len);
-    reply[len] = '\0';
     fn(NIMFFI_RET_OK, reply, "", user_data);
     free(reply);
 }
