@@ -160,29 +160,17 @@ header shape from the library's ABI format. It carries two honest limits today:
 - **Events are CBOR-only.** Applying `abi = c` to an `{.ffiEvent.}` proc is a
   hard compile error; declare events with `abi = cbor` (they ride CBOR
   internally regardless of the library default).
-- **All-scalar `abi = c` procs are dropped from the foreign bindings.** A
-  `{.ffi: "abi = c".}` method whose every param and return is a plain scalar
-  takes the CBOR-free scalar fast path at runtime, but the foreign codegen for
-  that inline-args shape is a follow-up (tracked in #120) — such procs are
-  omitted from the generated `.h`. Give a proc at least one non-scalar
-  (struct / `seq` / `Option`) param or return, or use `abi = cbor`, if you need
-  it in the bindings.
-
-An `abi = c` proc whose whole signature is scalar — fixed-width integer, float,
-or bool params (a `string` return is fine, a `string` param is not) and no
-structs, handles, or pointers — dispatches through a CBOR-free scalar fast path.
-The `abi = c` C header (an `abi = c` library generated with `-d:targetLang=c`)
-emits real bindings for that shape: the wrapper passes the scalar args inline
-(no request struct) and adapts the raw-bytes reply into the same typed callback
-surface the flat-struct methods use. The CBOR-speaking outputs — the CBOR C
-header and the `cpp`, `rust`, `cddl` targets — have no scalar codegen, so under
-`-d:ffiGenBindings` they would omit such a proc from the generated bindings —
-and `genBindings()` fails with an error naming the affected procs. Resolve it by
-making the whole library `abi = c` and generating C bindings, switching the proc
-to `abi = cbor`, adding a non-scalar param so it takes the CBOR wire shape, or
-passing `-d:ffiAllowScalarSkip` to accept the omission (the proc still works
-over the scalar fast path; it's just absent from the generated foreign
-bindings).
+- **All-scalar `abi = c` procs bind only in the `abi = c` C header.** A
+  `{.ffi: "abi = c".}` method whose params and return are all scalars — ints,
+  floats, bools; a `string` return is fine, a `string` param is not — takes a
+  CBOR-free fast path, and its C wrapper passes the args inline instead of
+  packing a request struct. Only the `abi = c` C header emits that shape. The
+  CBOR C header and the `cpp`, `rust` and `cddl` targets have no scalar codegen
+  and would silently omit the proc, so `genBindings()` fails and names it. Fix
+  it by generating C bindings from an `abi = c` library, switching the proc to
+  `abi = cbor`, giving it a non-scalar param, or passing
+  `-d:ffiAllowScalarSkip` to accept the omission — the proc still works over the
+  fast path, it's just absent from the bindings.
 
 ## Placement of `genBindings()`
 

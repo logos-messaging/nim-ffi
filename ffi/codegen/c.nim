@@ -946,8 +946,6 @@ proc newAbiReg(types: seq[FFITypeMeta], procs: seq[FFIProcMeta]): AbiReg =
   for t in types:
     reg.typeTable[t.name] = t
   for p in procs:
-    # A scalar-fast-path proc has no Req envelope: its export takes the scalar
-    # args inline (see emitAbiScalarMethod).
     if p.kind != FFIKind.DTOR and not p.scalarFastPath:
       let rt = reqTypeMeta(p)
       reg.typeTable[rt.name] = rt
@@ -1013,24 +1011,18 @@ proc emitAbiReplyTypedefs(
     )
 
 func abiScalarRawFnName(libType: string): string =
-  ## The `FFICallBack`-shaped raw callback typedef a scalar-fast-path export
-  ## takes: the dylib replies with raw bytes (no CBOR, no flat struct) that the
-  ## per-method trampoline converts into the typed reply.
+  ## Raw-bytes callback typedef a scalar-fast-path export takes.
   return libType & "ScalarRawFn"
 
 const abiScalarDupCStr = "nimffi_abi_dup_cstr_n"
 
 func abiScalarDupHelper(): seq[string] =
-  ## CBOR-free twin of `nimffi_dup_cstr_n` for the scalar trampolines: a
-  ## NUL-terminated copy of a length-delimited (not NUL-terminated) byte run,
-  ## returning NULL on allocation failure or a length that would overflow the
-  ## `n + 1` size passed to `malloc`.
-  # Guarded so co-including two `abi = c` headers in one TU doesn't redefine it.
+  ## CBOR-free twin of `nimffi_dup_cstr_n`, include-guarded so two `abi = c`
+  ## headers can co-exist in one TU.
   return @[
     "#ifndef NIMFFI_ABI_DUP_CSTR_N",
     "#define NIMFFI_ABI_DUP_CSTR_N",
-    "/* NUL-terminated copy of a length-delimited (not NUL-terminated) byte run;",
-    "   NULL on allocation failure or a length that would overflow `n + 1`. */",
+    "/* NUL-terminated copy of a length-delimited byte run; NULL if it can't. */",
     "static inline char* " & abiScalarDupCStr & "(const char* s, size_t n) {",
     "    if (n == SIZE_MAX) return NULL;",
     "    char* p = (char*)malloc(n + 1);",
@@ -1044,8 +1036,6 @@ func abiScalarDupHelper(): seq[string] =
   ]
 
 func abiScalarArgParams(m: FFIProcMeta): seq[string] =
-  ## C parameters for a scalar method's args — passed inline by value, in both
-  ## the raw export and the high-level wrapper (no Req struct).
   var params: seq[string] = @[]
   for ep in m.extraParams:
     params.add(abiLeafCType(ep.typeName.strip()).cType & " " & ep.name)
@@ -1070,10 +1060,10 @@ proc emitAbiExternDecls(
         ")(int err_code, const char* ctx_addr, const char* err_msg, void* user_data);"
     )
   if haveScalar:
-    lines.add("/* Raw reply of a scalar-fast-path export: `msg`/`len` are raw bytes (a")
     lines.add(
-      "   string return's UTF-8, or the 8-byte native-endian scalar image), not"
+      "/* Raw reply of a scalar-fast-path export: `msg`/`len` are bytes (a string"
     )
+    lines.add("   return's UTF-8, or the 8-byte native-endian scalar image), not")
     lines.add("   NUL-terminated and valid only for the duration of the call. */")
     lines.add(
       "typedef void (*" & abiScalarRawFnName(libType) &
@@ -1240,11 +1230,9 @@ proc emitAbiMethod(
   lines.add("")
 
 func abiScalarOkLines(m: FFIProcMeta, fnType: string): seq[string] =
-  ## Trampoline RET_OK branch: convert the raw reply bytes into the typed
-  ## reply. A string return rides as its own UTF-8 bytes (copied and
-  ## NUL-terminated here); every other scalar is the 8-byte native-endian image
-  ## of the Nim-side pack (signed ints sign-extended to 64 bits, floats widened
-  ## to double, bool as 0/1 — see `ffiScalarRetBytes`).
+  ## Trampoline RET_OK branch. A string return rides as its own UTF-8; every
+  ## other scalar is the 8-byte image `ffiScalarRetBytes` packs (ints
+  ## sign-extended, floats widened to double, bool as 0/1).
   let rt = m.returnTypeName.strip()
   if rt == "string" or rt == "cstring":
     return @[
@@ -1294,13 +1282,9 @@ proc emitAbiScalarMethod(
     ctxType, libName, libType: string,
     m: FFIProcMeta,
 ) =
-  ## A scalar-fast-path method: no Req struct crosses — the wrapper hands the
-  ## scalar args straight to the raw export and a per-method trampoline adapts
-  ## the raw-bytes reply into the same typed `ReplyFn` surface the flat-struct
-  ## methods use. The heap box carrying the caller's callback is freed by the
-  ## trampoline, which the dylib invokes exactly once on every path (the ctx
-  ## guard and enqueue failures reply synchronously; success replies from the
-  ## FFI thread).
+  ## Args go inline to the raw export and a trampoline adapts the raw-bytes
+  ## reply into the typed `ReplyFn` surface. The trampoline frees the callback
+  ## box, relying on the dylib invoking it exactly once on every path.
   let stripped = stripLibPrefix(m.procName, m.libName)
   let pascal = snakeToPascalCase(stripped)
   let info = abiMethodReplyInfo(reg, libType, m)

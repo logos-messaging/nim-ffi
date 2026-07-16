@@ -37,14 +37,13 @@ typedef void (*EchoShoutReplyFn)(int err_code, const ShoutResponse* reply, const
 typedef void (*EchoVersionReplyFn)(int err_code, const char* reply, const char* err_msg, void* user_data);
 
 typedef void (*EchoCreateRawFn)(int err_code, const char* ctx_addr, const char* err_msg, void* user_data);
-/* Raw reply of a scalar-fast-path export: `msg`/`len` are raw bytes (a
-   string return's UTF-8, or the 8-byte native-endian scalar image), not
+/* Raw reply of a scalar-fast-path export: `msg`/`len` are bytes (a string
+   return's UTF-8, or the 8-byte native-endian scalar image), not
    NUL-terminated and valid only for the duration of the call. */
 typedef void (*EchoScalarRawFn)(int caller_ret, char* msg, size_t len, void* user_data);
 #ifndef NIMFFI_ABI_DUP_CSTR_N
 #define NIMFFI_ABI_DUP_CSTR_N
-/* NUL-terminated copy of a length-delimited (not NUL-terminated) byte run;
-   NULL on allocation failure or a length that would overflow `n + 1`. */
+/* NUL-terminated copy of a length-delimited byte run; NULL if it can't. */
 static inline char* nimffi_abi_dup_cstr_n(const char* s, size_t n) {
     if (n == SIZE_MAX) return NULL;
     char* p = (char*)malloc(n + 1);

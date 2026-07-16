@@ -1,12 +1,7 @@
-## Drives the scalar-fast-path drop error end to end: compiles
-## `fixtures/scalar_skip_fixture.nim` (a CBOR-default library with a stray
-## all-scalar `abi = c` proc) with `-d:ffiGenBindings` and asserts genBindings()
-## fails loudly, and that `-d:ffiAllowScalarSkip` downgrades the drop to a clean
-## build. The positive path — the `abi = c` C header emitting a real scalar
-## binding — is covered by test_c_abi_codegen and the echo c_abi e2e.
+## Asserts genBindings() fails loudly on a scalar `abi = c` proc no target can
+## bind, and that -d:ffiAllowScalarSkip downgrades it to a clean build.
 ##
-## The fixture is compiled in a child `nim check` (search paths and compiler
-## captured at compile time) so its expected failure is observed as a test
+## The fixture compiles in a child `nim check` so its expected failure is a test
 ## assertion, not this file's own compile error.
 
 import std/[os, osproc, strutils, compilesettings]
