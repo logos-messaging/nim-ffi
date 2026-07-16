@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Changed
+- The generated C `<lib>_ctx_destroy()` now returns `int` instead of `void`,
+  propagating the exported `<lib>_destroy()` status code (`NIMFFI_RET_OK` on
+  success, `RET_ERR` on a null/invalid context or a failed context teardown)
+  instead of discarding it, so a host can observe a failed teardown. Existing
+  callers that invoke it as a statement are unaffected
+  ([#133](https://github.com/logos-messaging/nim-ffi/issues/133)).
+- A failed `<lib>_ctx_destroy()` no longer frees the event-listener boxes. A
+  non-`NIMFFI_RET_OK` teardown leaves the worker threads live, and they still
+  hold each box as callback `user_data`; the boxes are now leaked rather than
+  freed out from under a running event thread. The context struct and the
+  listener array are still freed unconditionally.
 - User event callbacks now run on a dedicated event thread fed by a
   bounded SPSC queue (default capacity 1024), so a slow listener can no
   longer block the FFI thread or concurrent `add_event_listener` /

@@ -896,12 +896,16 @@ static inline int my_timer_ctx_create(const TimerConfig* config, MyTimerCreateFn
     return 0;
 }
 
-static inline void my_timer_ctx_destroy(MyTimerCtx* ctx) {
-    if (!ctx) return;
-    if (ctx->ptr) { my_timer_destroy(ctx->ptr); ctx->ptr = NULL; }
-    for (size_t i = 0; i < ctx->listeners_len; i++) free(ctx->listeners[i].box);
+static inline int my_timer_ctx_destroy(MyTimerCtx* ctx) {
+    if (!ctx) return NIMFFI_RET_OK;
+    int rc = NIMFFI_RET_OK;
+    if (ctx->ptr) { rc = my_timer_destroy(ctx->ptr); ctx->ptr = NULL; }
+    if (rc == NIMFFI_RET_OK) {
+        for (size_t i = 0; i < ctx->listeners_len; i++) free(ctx->listeners[i].box);
+    }
     free(ctx->listeners);
     free(ctx);
+    return rc;
 }
 
 static inline uint64_t my_timer_ctx_add_on_echo_fired_listener(MyTimerCtx* ctx, MyTimerOnEchoFiredFn fn, void* user_data) {

@@ -133,6 +133,19 @@ suite "generateCAbiLibHeader":
     check "timer_ctx_version(" in header
     check "timer_ctx_destroy(" in header
 
+  test "the context destructor propagates the destructor's status code":
+    check(
+      """
+static inline int timer_ctx_destroy(TimerCtx* ctx) {
+    if (!ctx) return NIMFFI_RET_OK;
+    int rc = NIMFFI_RET_OK;
+    if (ctx->ptr) { rc = timer_destroy(ctx->ptr); ctx->ptr = NULL; }
+    free(ctx);
+    return rc;
+}""" in
+        header
+    )
+
   test "scalar-fast-path methods take inline args, not a Req struct":
     check "TimerAddReq" notin header
     check "TimerNameReq" notin header

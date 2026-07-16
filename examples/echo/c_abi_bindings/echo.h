@@ -118,10 +118,12 @@ static inline int echo_ctx_create(const EchoConfig* config, EchoCreateFn on_crea
     return 0;
 }
 
-static inline void echo_ctx_destroy(EchoCtx* ctx) {
-    if (!ctx) return;
-    if (ctx->ptr) { echo_destroy(ctx->ptr); ctx->ptr = NULL; }
+static inline int echo_ctx_destroy(EchoCtx* ctx) {
+    if (!ctx) return NIMFFI_RET_OK;
+    int rc = NIMFFI_RET_OK;
+    if (ctx->ptr) { rc = echo_destroy(ctx->ptr); ctx->ptr = NULL; }
     free(ctx);
+    return rc;
 }
 
 static inline int echo_ctx_shout(const EchoCtx* ctx, const ShoutRequest* req, EchoShoutReplyFn on_reply, void* user_data) {

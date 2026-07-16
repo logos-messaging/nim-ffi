@@ -107,7 +107,7 @@ int main(void) {
     EchoCtx* ctx = make_ctx();
     test_shout(ctx);
     test_version(ctx);
-    echo_ctx_destroy(ctx);
+    assert(echo_ctx_destroy(ctx) == NIMFFI_RET_OK);
     printf("all abi=c echo e2e checks passed\n");
     return 0;
 }

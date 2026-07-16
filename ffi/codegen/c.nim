@@ -528,16 +528,25 @@ proc emitDestructor(
     ctxType, libName, dtorProcName: string,
     events: seq[FFIEventMeta],
 ) =
-  lines.add("static inline void " & libName & "_ctx_destroy(" & ctxType & "* ctx) {")
-  lines.add("    if (!ctx) return;")
+  lines.add("static inline int " & libName & "_ctx_destroy(" & ctxType & "* ctx) {")
+  lines.add("    if (!ctx) return NIMFFI_RET_OK;")
+  lines.add("    int rc = NIMFFI_RET_OK;")
   if dtorProcName.len > 0:
-    lines.add("    if (ctx->ptr) { " & dtorProcName & "(ctx->ptr); ctx->ptr = NULL; }")
-  if events.len > 0:
     lines.add(
-      "    for (size_t i = 0; i < ctx->listeners_len; i++) free(ctx->listeners[i].box);"
+      "    if (ctx->ptr) { rc = " & dtorProcName & "(ctx->ptr); ctx->ptr = NULL; }"
     )
+  if events.len > 0:
+    # A failed teardown leaves the worker threads live (ffi_context.nim:
+    # stopAndJoinThreads), and they still hold each box as callback user_data.
+    # Leaking a box beats handing a running event thread a dangling pointer.
+    lines.add("    if (rc == NIMFFI_RET_OK) {")
+    lines.add(
+      "        for (size_t i = 0; i < ctx->listeners_len; i++) free(ctx->listeners[i].box);"
+    )
+    lines.add("    }")
     lines.add("    free(ctx->listeners);")
   lines.add("    free(ctx);")
+  lines.add("    return rc;")
   lines.add("}")
   lines.add("")
 
@@ -1194,15 +1203,6 @@ proc emitAbiCtxAndCtor(
     lines.add("}")
     lines.add("")
 
-proc emitAbiDestructor(lines: var seq[string], ctxType, libName, dtorProcName: string) =
-  lines.add("static inline void " & libName & "_ctx_destroy(" & ctxType & "* ctx) {")
-  lines.add("    if (!ctx) return;")
-  if dtorProcName.len > 0:
-    lines.add("    if (ctx->ptr) { " & dtorProcName & "(ctx->ptr); ctx->ptr = NULL; }")
-  lines.add("    free(ctx);")
-  lines.add("}")
-  lines.add("")
-
 proc emitAbiMethod(
     lines: var seq[string],
     reg: var AbiReg,
@@ -1400,7 +1400,8 @@ proc generateCAbiLibHeader*(
 
   lines.add("/* High-level context wrapper */")
   emitAbiCtxAndCtor(lines, reg, libName, libType, ctxType, classified.ctors)
-  emitAbiDestructor(lines, ctxType, libName, classified.dtorProcName)
+  # abi = c has no events, so the destructor is the CBOR one minus the listener sweep.
+  emitDestructor(lines, ctxType, libName, classified.dtorProcName, @[])
   for m in classified.methods:
     if m.scalarFastPath:
       emitAbiScalarMethod(lines, reg, ctxType, libName, libType, m)

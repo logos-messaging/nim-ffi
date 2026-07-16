@@ -257,7 +257,7 @@ int main(void) {
     test_schedule_ok(ctx);
     test_schedule_error(ctx);
     test_event(ctx);
-    my_timer_ctx_destroy(ctx);
+    assert(my_timer_ctx_destroy(ctx) == NIMFFI_RET_OK);
     printf("all C e2e checks passed\n");
     return 0;
 }
