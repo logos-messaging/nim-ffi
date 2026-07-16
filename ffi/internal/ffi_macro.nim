@@ -329,8 +329,37 @@ proc buildFFINewReqProc(reqTypeName, body: NimNode): NimNode =
     echo newReqProc.repr
   return newReqProc
 
-proc buildProcessFFIRequestProc(reqTypeName, reqHandler, body: NimNode): NimNode =
-  ## FFI-thread processor: decodes the CBOR Req, unpacks fields, runs user body.
+proc reqDecodePreamble(
+    reqTypeName, reqIdent, decodedIdent: NimNode, abi: ABIFormat
+): NimNode =
+  ## Materialise the typed Req from the request payload. `abi = c` unpacks the
+  ## packed `_CWire` struct the caller thread handed over and frees it here (the
+  ## unpack deep-copies into Nim memory); the envelope buffer itself goes with
+  ## `deleteRequest`. Otherwise the payload is CBOR.
+  if abi != ABIFormat.C:
+    return quote:
+      let `reqIdent`: ptr FFIThreadRequest = cast[ptr FFIThreadRequest](request)
+      let `decodedIdent` = cborDecodePtr(
+        cast[ptr UncheckedArray[byte]](`reqIdent`[].data),
+        `reqIdent`[].dataLen,
+        `reqTypeName`,
+      ).valueOr:
+        return err("CBOR decode failed for " & $T & ": " & $error)
+
+  let wireType = ident(cwireTypeName($reqTypeName))
+  let wirePtr = genSym(nskLet, "wireReq")
+  return quote:
+    let `reqIdent`: ptr FFIThreadRequest = cast[ptr FFIThreadRequest](request)
+    if `reqIdent`[].data.isNil() or `reqIdent`[].dataLen != sizeof(`wireType`):
+      return err("abi = c: unexpected request payload size for " & $T)
+    let `wirePtr` = cast[ptr `wireType`](`reqIdent`[].data)
+    let `decodedIdent` = cwireUnpack(`wirePtr`[])
+    cwireFree(`wirePtr`[])
+
+proc buildProcessFFIRequestProc(
+    reqTypeName, reqHandler, body: NimNode, abi: ABIFormat
+): NimNode =
+  ## FFI-thread processor: materialises the Req, unpacks fields, runs user body.
   if reqHandler.kind != nnkExprColonExpr:
     error(
       "Second argument must be a typed parameter, e.g., waku: ptr Waku. Found: " &
@@ -367,14 +396,7 @@ proc buildProcessFFIRequestProc(reqTypeName, reqHandler, body: NimNode): NimNode
   let reqIdent = genSym(nskLet, "ffiReq")
   let decodedIdent = genSym(nskLet, "decoded")
 
-  newBody.add quote do:
-    let `reqIdent`: ptr FFIThreadRequest = cast[ptr FFIThreadRequest](request)
-    let `decodedIdent` = cborDecodePtr(
-      cast[ptr UncheckedArray[byte]](`reqIdent`[].data),
-      `reqIdent`[].dataLen,
-      `reqTypeName`,
-    ).valueOr:
-      return err("CBOR decode failed for " & $T & ": " & $error)
+  newBody.add reqDecodePreamble(reqTypeName, reqIdent, decodedIdent, abi)
 
   for p in procParams[1 ..^ 1]:
     if isHandleType(p[1]):
@@ -400,9 +422,44 @@ proc buildProcessFFIRequestProc(reqTypeName, reqHandler, body: NimNode): NimNode
     echo processProc.repr
   return processProc
 
-proc addNewRequestToRegistry(reqTypeName, reqHandler: NimNode): NimNode =
-  ## Dispatcher the FFI thread calls: runs processFFIRequest and cborEncodes the
-  ## typed T value into the seq[byte] payload.
+proc replyEncode(
+    typedResIdent, handlerCtxIdent, respType: NimNode, abi: ABIFormat
+): NimNode =
+  ## Lower the handler's typed value into the `seq[byte]` reply payload. `abi = c`
+  ## rides raw — a `string` as its own UTF-8, an object as the native image of its
+  ## packed `_CWire`, whose buffers the reply trampoline frees.
+  if abi == ABIFormat.C:
+    if isStringType(respType):
+      return quote:
+        return ok(ffiRawRetBytes(`typedResIdent`.value))
+    let wireType = ident(cwireTypeName($respType))
+    let wireIdent = genSym(nskVar, "replyWire")
+    return quote:
+      var `wireIdent`: `wireType`
+      cwirePack(`wireIdent`, `typedResIdent`.value)
+      return ok(cwireStructBytes(`wireIdent`))
+
+  return quote:
+    when typeof(`typedResIdent`.value) is seq[byte]:
+      return ok(`typedResIdent`.value)
+    elif typeof(`typedResIdent`.value) is void:
+      return ok(newSeq[byte]())
+    elif typeof(`typedResIdent`.value) is FFIHandleRoot:
+      return ok(
+        encodeHandle(
+          `handlerCtxIdent`[].handles.register(
+            `typedResIdent`.value, $typeof(`typedResIdent`.value)
+          )
+        )
+      )
+    else:
+      return ok(cborEncode(`typedResIdent`.value))
+
+proc addNewRequestToRegistry(
+    reqTypeName, reqHandler, respType: NimNode, abi: ABIFormat
+): NimNode =
+  ## Dispatcher the FFI thread calls: runs processFFIRequest and lowers the typed
+  ## T value into the seq[byte] payload.
   let returnType = nnkBracketExpr.newTree(
     ident("Future"),
     nnkBracketExpr.newTree(
@@ -434,20 +491,8 @@ proc addNewRequestToRegistry(reqTypeName, reqHandler: NimNode): NimNode =
     let `typedResIdent` = await `callExpr`
     if `typedResIdent`.isErr:
       return err(`typedResIdent`.error)
-    when typeof(`typedResIdent`.value) is seq[byte]:
-      return ok(`typedResIdent`.value)
-    elif typeof(`typedResIdent`.value) is void:
-      return ok(newSeq[byte]())
-    elif typeof(`typedResIdent`.value) is FFIHandleRoot:
-      return ok(
-        encodeHandle(
-          `handlerCtxIdent`[].handles.register(
-            `typedResIdent`.value, $typeof(`typedResIdent`.value)
-          )
-        )
-      )
-    else:
-      return ok(cborEncode(`typedResIdent`.value))
+
+  newBody.add replyEncode(typedResIdent, handlerCtxIdent, respType, abi)
 
   let asyncProc = newProc(
     name = newEmptyNode(),
@@ -474,8 +519,10 @@ macro registerReqFFI*(reqTypeName, reqHandler, body: untyped): untyped =
   ## Future[Result[string, string]] {.async.}.
   let typeDef = buildRequestType(reqTypeName, body)
   let ffiNewReqProc = buildFFINewReqProc(reqTypeName, body)
-  let processProc = buildProcessFFIRequestProc(reqTypeName, reqHandler, body)
-  let addNewReqToReg = addNewRequestToRegistry(reqTypeName, reqHandler)
+  let processProc =
+    buildProcessFFIRequestProc(reqTypeName, reqHandler, body, ABIFormat.Cbor)
+  let addNewReqToReg =
+    addNewRequestToRegistry(reqTypeName, reqHandler, newEmptyNode(), ABIFormat.Cbor)
   let stmts = newStmtList(typeDef, ffiNewReqProc, processProc, addNewReqToReg)
 
   when defined(ffiDumpMacros):
@@ -883,12 +930,17 @@ macro ffi*(args: varargs[untyped]): untyped =
     ffiProcRegistry.add(procMeta)
 
     if abiFormat == ABIFormat.C:
-      # The `abi = c` wrapper + reply trampoline are emitted at genBindings() time (flushCAbiDispatch); the CBOR `ffiProc` is not.
+      # The handler unpacks through the `_CWire` companions, which only exist once every `{.ffi.}` type has been seen, so it (with the wrapper + reply trampoline) is emitted at genBindings() time (flushCAbiDispatch). The Req type stays here for the companion to name. The CBOR `ffiProc`/`ffiNewReq` aren't emitted at all.
+      let handlerParam = nnkExprColonExpr.newTree(ctxHandlerName, ptrFFICtx)
+      let handler = newStmtList(
+        buildProcessFFIRequestProc(reqTypeName, handlerParam, lambdaNode, ABIFormat.C),
+        addNewRequestToRegistry(reqTypeName, handlerParam, resultRetType, ABIFormat.C),
+      )
       registerCAbiMethod(
         cExportName, libTypeName, reqTypeName, extraParamNames, extraParamTypes,
-        resultRetType,
+        resultRetType, handler,
       )
-      return newStmtList(helperProc, registerReq)
+      return newStmtList(helperProc, buildRequestType(reqTypeName, lambdaNode))
 
     return newStmtList(helperProc, registerReq, ffiProc)
 
@@ -1016,8 +1068,9 @@ proc buildCtorProcessFFIRequestProc(
     paramNames: seq[string],
     paramTypes: seq[NimNode],
     libTypeName: NimNode,
+    abi: ABIFormat,
 ): NimNode =
-  ## Decodes the Req, runs the user body, stores the library value in ctx.myLib.
+  ## Materialises the Req, runs the user body, stores the library value in ctx.myLib.
   let returnType = nnkBracketExpr.newTree(
     ident("Future"),
     nnkBracketExpr.newTree(ident("Result"), ident("string"), ident("string")),
@@ -1040,14 +1093,7 @@ proc buildCtorProcessFFIRequestProc(
   let ctxIdent = ident("ctx")
   let decodedIdent = ident("decoded")
 
-  newBody.add quote do:
-    let `reqIdent` = cast[ptr FFIThreadRequest](request)
-    let `decodedIdent` = cborDecodePtr(
-      cast[ptr UncheckedArray[byte]](`reqIdent`[].data),
-      `reqIdent`[].dataLen,
-      `reqTypeName`,
-    ).valueOr:
-      return err("CBOR decode failed for " & $T & ": " & $error)
+  newBody.add reqDecodePreamble(reqTypeName, reqIdent, decodedIdent, abi)
 
   for i in 0 ..< paramNames.len:
     newBody.add unpackReqField(ident(paramNames[i]), paramTypes[i], decodedIdent)
@@ -1081,9 +1127,12 @@ proc buildCtorProcessFFIRequestProc(
     echo processProc.repr
   return processProc
 
-proc addCtorRequestToRegistry(reqTypeName, libTypeName: NimNode): NimNode =
+proc addCtorRequestToRegistry(
+    reqTypeName, libTypeName: NimNode, abi: ABIFormat
+): NimNode =
   ## Wraps the ctor processFFIRequest result in a seq[byte] dispatcher; the ctor
-  ## returns the ctx address as a decimal string, CBOR-encoded for the foreign side.
+  ## returns the ctx address as a decimal string — raw UTF-8 under `abi = c`,
+  ## CBOR-encoded otherwise.
   let ctxType =
     nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), libTypeName))
 
@@ -1103,12 +1152,21 @@ proc addCtorRequestToRegistry(reqTypeName, libTypeName: NimNode): NimNode =
   )
 
   let resIdent = genSym(nskLet, "ctorRes")
+  let encodeRet =
+    if abi == ABIFormat.C:
+      quote:
+        return ok(ffiRawRetBytes(`resIdent`.value))
+    else:
+      quote:
+        return ok(cborEncode(`resIdent`.value))
+
   var newBody = newStmtList()
   newBody.add quote do:
     let `resIdent` = await `callExpr`
     if `resIdent`.isErr:
       return err(`resIdent`.error)
-    return ok(cborEncode(`resIdent`.value))
+
+  newBody.add encodeRet
 
   let asyncProc = newProc(
     name = newEmptyNode(),
@@ -1190,9 +1248,9 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
   let helperProc =
     buildCtorBodyProc(userProcName, paramNames, paramTypes, libTypeName, bodyNode)
   let processProc = buildCtorProcessFFIRequestProc(
-    reqTypeName, userProcName, paramNames, paramTypes, libTypeName
+    reqTypeName, userProcName, paramNames, paramTypes, libTypeName, abiFormat
   )
-  let addToReg = addCtorRequestToRegistry(reqTypeName, libTypeName)
+  let addToReg = addCtorRequestToRegistry(reqTypeName, libTypeName, abiFormat)
 
   # C-exported proc: (reqCbor, reqCborLen, callback, userData) -> pointer
   var exportedParams = newSeq[NimNode]()
@@ -1303,9 +1361,16 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
 
   let stmts =
     if abiFormat == ABIFormat.C:
-      # The `abi = c` wrapper is emitted at genBindings() time; CBOR `ffiProc` isn't.
-      registerCAbiCtor(cExportName, libTypeName, reqTypeName, paramNames, paramTypes)
-      newStmtList(typeDef, ffiNewReqProc, helperProc, processProc, addToReg, poolDecl)
+      # The `abi = c` handler + wrapper are emitted at genBindings() time (the handler unpacks through the `_CWire` companions); the CBOR `ffiProc`/`ffiNewReq` aren't emitted at all.
+      registerCAbiCtor(
+        cExportName,
+        libTypeName,
+        reqTypeName,
+        paramNames,
+        paramTypes,
+        newStmtList(processProc, addToReg),
+      )
+      newStmtList(typeDef, helperProc, poolDecl)
     else:
       newStmtList(
         typeDef, ffiNewReqProc, helperProc, processProc, addToReg, poolDecl, ffiProc
