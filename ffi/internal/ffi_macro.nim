@@ -271,11 +271,13 @@ proc unpackHandleField*(
         return err(`errPrefix` & error)
       cast[`userType`](ffiH)
 
-proc cExportedParams(ctxType: NimNode): seq[NimNode] =
-  ## C-exported wrapper param list (cint; ctx, callback, userData, reqCbor, reqCborLen).
+proc cExportedParams(ctxType: NimNode, withCtx = true): seq[NimNode] =
+  ## C-exported wrapper param list (cint; ctx, callback, userData, reqCbor,
+  ## reqCborLen). A `{.ffiStatic.}` wrapper drops the leading `ctx`.
   var params: seq[NimNode] = @[]
   params.add(ident("cint"))
-  params.add(newIdentDefs(ident("ctx"), ctxType))
+  if withCtx:
+    params.add(newIdentDefs(ident("ctx"), ctxType))
   params.add(newIdentDefs(ident("callback"), ident("FFICallBack")))
   params.add(newIdentDefs(ident("userData"), ident("pointer")))
   params.add(newIdentDefs(ident("reqCbor"), nnkPtrTy.newTree(ident("byte"))))
@@ -807,44 +809,35 @@ macro ffiConst*(args: varargs[untyped]): untyped =
     echo stmts.repr
   return stmts
 
-macro ffi*(args: varargs[untyped]): untyped =
-  ## Simplified FFI macro for procs or types: a type registers for binding gen; a
-  ## proc takes a library-type param plus optional Nim params, returns
-  ## Future[Result[RetType, string]], and gets a C wrapper taking one CBOR buffer.
-  requireBeforeGenBindings("`.ffi.`")
-  # Annotated node is the last vararg; leading args are `"abi = ..."` specs.
-  let prc = args[^1]
-  let abiFormat = resolveFFISpecs(args[0 ..^ 2])
-
-  # A value type stands alone (no library required); its `c` companion is emitted later by `genBindings()`, since a type-pragma macro can only return a TypeDef.
-  if prc.kind == nnkTypeDef:
-    gateFFITypeABIFormat(abiFormat, "`.ffi.` type")
-    var cleanTypeDef = prc.copyNimTree()
-    if cleanTypeDef[0].kind == nnkPragmaExpr:
-      cleanTypeDef[0] = cleanTypeDef[0][0]
-    return registerFFITypeInfo(cleanTypeDef, abiFormat)
-
-  requireLibraryDeclared("`.ffi.`")
+proc buildFFIProc(
+    prc: NimNode, abiFormat: ABIFormat, isStatic: bool
+): NimNode {.compileTime.} =
+  ## Shared body of `{.ffi.}` and `{.ffiStatic.}`. A static has no library receiver:
+  ## its wire params start at param 1 and its C wrapper binds the static context.
+  let where = if isStatic: "`.ffiStatic.`" else: "`.ffi.`"
 
   let procName = prc[0]
   let formalParams = prc[3]
   let bodyNode = prc[^1]
 
-  if formalParams.len < 2:
+  if not isStatic and formalParams.len < 2:
     error("`.ffi.` procs require at least 1 parameter (the library type)")
 
-  let firstParam = formalParams[1]
-  let recvName = firstParam[0]
-  let recvType = firstParam[1]
-  let firstIsHandle = isHandleType(recvType)
-  if firstIsHandle and currentLibType.len == 0:
+  var recvName, recvType: NimNode = newEmptyNode()
+  var firstIsHandle = false
+  if not isStatic:
+    let firstParam = formalParams[1]
+    recvName = firstParam[0]
+    recvType = firstParam[1]
+    firstIsHandle = isHandleType(recvType)
+  if (firstIsHandle or isStatic) and currentLibType.len == 0:
     error(
-      "`.ffi.` proc " & $procName & " has an {.ffiHandle.} receiver but no " &
-        "library is declared; call declareLibrary(name, LibType) first"
+      where & " proc " & $procName & " carries no library type but no library is " &
+        "declared; call declareLibrary(name, LibType) first"
     )
-  # A handle receiver carries no library type, so fall back to the declared one.
+  # A static proc and a handle receiver both carry no library type, so fall back to the declared one.
   let libTypeName =
-    if firstIsHandle:
+    if firstIsHandle or isStatic:
       ident(currentLibType)
     else:
       recvType
@@ -852,31 +845,43 @@ macro ffi*(args: varargs[untyped]): untyped =
   let retTypeNode = formalParams[0]
   if retTypeNode.kind == nnkEmpty:
     error(
-      "`.ffi.` proc must have an explicit return type Future[Result[RetType, string]]"
+      where & " proc must have an explicit return type Future[Result[RetType, string]]"
     )
   if retTypeNode.kind != nnkBracketExpr or $retTypeNode[0] != "Future":
     error(
-      "`.ffi.` return type must be Future[Result[RetType, string]], got: " &
+      where & " return type must be Future[Result[RetType, string]], got: " &
         retTypeNode.repr
     )
   let resultInner = retTypeNode[1]
   if resultInner.kind != nnkBracketExpr or $resultInner[0] != "Result":
     error(
-      "`.ffi.` return type must be Future[Result[RetType, string]], got: " &
+      where & " return type must be Future[Result[RetType, string]], got: " &
         retTypeNode.repr
     )
 
   let resultRetType = resultInner[1]
-  rejectRawPtrType(resultRetType, "`.ffi.` proc " & $procName & " return type")
+  rejectRawPtrType(resultRetType, where & " proc " & $procName & " return type")
+  # An {.ffiHandle.} lives in one ctx's registry, which a static proc cannot reach.
+  if isStatic and isHandleType(resultRetType):
+    error(
+      where & " proc " & $procName & " returns the {.ffiHandle.} type " & $resultRetType &
+        "; a handle belongs to a context. Make it an `{.ffi.}` method instead."
+    )
 
   # A handle receiver rides the wire; a value-type lib receiver binds to ctx.myLib.
   var extraParamNames: seq[string] = @[]
   var extraParamTypes: seq[NimNode] = @[]
-  let wireStart = if firstIsHandle: 1 else: 2
+  let wireStart = if isStatic or firstIsHandle: 1 else: 2
   for i in wireStart ..< formalParams.len:
     let p = formalParams[i]
     for j in 0 ..< p.len - 2:
-      rejectRawPtrType(p[^2], "`.ffi.` proc " & $procName & " parameter " & $p[j])
+      rejectRawPtrType(p[^2], where & " proc " & $procName & " parameter " & $p[j])
+      if isStatic and isHandleType(p[^2]):
+        error(
+          where & " proc " & $procName & " takes the {.ffiHandle.} parameter " & $p[j] &
+            ": " & $p[^2] & "; a handle belongs to a context. " &
+            "Make it an `{.ffi.}` method instead."
+        )
       extraParamNames.add($p[j])
       extraParamTypes.add(p[^2])
 
@@ -927,7 +932,7 @@ macro ffi*(args: varargs[untyped]): untyped =
   let procMeta = FFIProcMeta(
     procName: cExportName,
     libName: currentLibName,
-    kind: FFIKind.FFI,
+    kind: if isStatic: FFIKind.STATIC else: FFIKind.FFI,
     libTypeName: $libTypeName,
     extraParams: wireParamMetas,
     returnTypeName: retTn,
@@ -951,6 +956,20 @@ macro ffi*(args: varargs[untyped]): untyped =
         return RET_MISSING_CALLBACK
       if not `poolIdent`.isValidCtx(cast[pointer](ctx)):
         let errStr = "ctx is not a valid FFI context"
+        callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
+        return RET_ERR
+
+  proc buildStaticCtxGuard(): NimNode =
+    ## Binds the library's static context: a static wrapper takes no `ctx`, and a
+    ## static call may be the host's first entry (hence `initializeLibrary`).
+    ## `ctxIdent` is substituted so the send below sees it (`quote` gensyms).
+    let ctxIdent = ident("ctx")
+    quote:
+      initializeLibrary()
+      if callback.isNil():
+        return RET_MISSING_CALLBACK
+      let `ctxIdent` = `poolIdent`.staticFFIContext().valueOr:
+        let errStr = "ffiStatic: " & error
         callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
         return RET_ERR
 
@@ -988,8 +1007,10 @@ macro ffi*(args: varargs[untyped]): untyped =
     ## Reproduces the user's exact signature so it stays callable from Nim.
     var helperParams = newSeq[NimNode]()
     helperParams.add(retTypeNode)
-    helperParams.add(newIdentDefs(recvName, recvType))
-    for i in 2 ..< formalParams.len:
+    let helperStart = if isStatic: 1 else: 2
+    if not isStatic:
+      helperParams.add(newIdentDefs(recvName, recvType))
+    for i in helperStart ..< formalParams.len:
       let p = formalParams[i]
       for j in 0 ..< p.len - 2:
         helperParams.add(newIdentDefs(p[j], p[^2]))
@@ -1015,7 +1036,7 @@ macro ffi*(args: varargs[untyped]): untyped =
       lambdaParams.add(newIdentDefs(ident(extraParamNames[i]), extraParamTypes[i]))
 
     let helperCall = newTree(nnkCall, userProcName)
-    if not firstIsHandle:
+    if not firstIsHandle and not isStatic:
       let ctxMyLib = newDotExpr(newTree(nnkDerefExpr, ctxHandlerName), ident("myLib"))
       helperCall.add(newTree(nnkDerefExpr, ctxMyLib))
     for name in extraParamNames:
@@ -1040,10 +1061,18 @@ macro ffi*(args: varargs[untyped]): untyped =
         `lambdaNode`
 
     # C-exported wrapper: (ctx, callback, userData, reqCbor, reqCborLen).
-    let exportedParams = cExportedParams(ctxType)
+    let exportedParams = cExportedParams(ctxType, withCtx = not isStatic)
 
     let ffiBody = newStmtList()
-    ffiBody.add buildCtxGuard()
+    # Flattened, not nested: the static guard's `let ctx` has to be a sibling of
+    # the send below for it to be in scope.
+    let guard =
+      if isStatic:
+        buildStaticCtxGuard()
+      else:
+        buildCtxGuard()
+    for stmt in guard:
+      ffiBody.add(stmt)
 
     let reqPtrIdent = genSym(nskLet, "reqPtr")
     ffiBody.add quote do:
@@ -1064,9 +1093,9 @@ macro ffi*(args: varargs[untyped]): untyped =
         buildProcessFFIRequestProc(reqTypeName, handlerParam, lambdaNode, ABIFormat.C),
         addNewRequestToRegistry(reqTypeName, handlerParam, resultRetType, ABIFormat.C),
       )
-      registerCAbiMethod(
-        cExportName, libTypeName, reqTypeName, extraParamNames, extraParamTypes,
-        resultRetType, handler,
+      registerCAbiProc(
+        isStatic, cExportName, libTypeName, reqTypeName, extraParamNames,
+        extraParamTypes, resultRetType, handler,
       )
       return newStmtList(helperProc, buildRequestType(reqTypeName, lambdaNode))
 
@@ -1100,6 +1129,40 @@ macro ffi*(args: varargs[untyped]): untyped =
   when defined(ffiDumpMacros):
     echo stmts.repr
   return stmts
+
+macro ffi*(args: varargs[untyped]): untyped =
+  ## Simplified FFI macro for procs or types: a type registers for binding gen; a
+  ## proc takes a library-type param plus optional Nim params, returns
+  ## Future[Result[RetType, string]], and gets a C wrapper taking one CBOR buffer.
+  requireBeforeGenBindings("`.ffi.`")
+  # Annotated node is the last vararg; leading args are `"abi = ..."` specs.
+  let prc = args[^1]
+  let abiFormat = resolveFFISpecs(args[0 ..^ 2])
+
+  # A value type stands alone (no library required); its `c` companion is emitted later by `genBindings()`, since a type-pragma macro can only return a TypeDef.
+  if prc.kind == nnkTypeDef:
+    gateFFITypeABIFormat(abiFormat, "`.ffi.` type")
+    var cleanTypeDef = prc.copyNimTree()
+    if cleanTypeDef[0].kind == nnkPragmaExpr:
+      cleanTypeDef[0] = cleanTypeDef[0][0]
+    return registerFFITypeInfo(cleanTypeDef, abiFormat)
+
+  requireLibraryDeclared("`.ffi.`")
+  return buildFFIProc(prc, abiFormat, isStatic = false)
+
+macro ffiStatic*(args: varargs[untyped]): untyped =
+  ## Context-independent twin of `{.ffi.}`: the proc takes no library receiver and
+  ## its C wrapper takes no `ctx`, so a host can call it without constructing the
+  ## library. Handlers still run on an FFI thread — the library's static context,
+  ## created on the first such call and alive for the rest of the process.
+  requireBeforeGenBindings("`.ffiStatic.`")
+  requireLibraryDeclared("`.ffiStatic.`")
+  let prc = args[^1]
+  let abiFormat = resolveFFISpecs(args[0 ..^ 2])
+  gateABIFormat(abiFormat, "`.ffiStatic.` proc")
+  if prc.kind notin {nnkProcDef, nnkFuncDef}:
+    error("`.ffiStatic.` must be applied to a proc definition")
+  return buildFFIProc(prc, abiFormat, isStatic = true)
 
 proc buildCtorRequestType(
     reqTypeName: NimNode, paramNames: seq[string], paramTypes: seq[NimNode]

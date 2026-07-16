@@ -1,7 +1,7 @@
 ## Compile-time metadata types for FFI binding generation, populated by the
 ## {.ffiCtor.}/{.ffi.} macros and consumed by codegen.
 
-import std/strutils
+import std/[strutils, options]
 
 type
   ABIFormat* {.pure.} = enum
@@ -20,6 +20,7 @@ type
     FFI
     CTOR
     DTOR
+    STATIC ## `{.ffiStatic.}`: context-independent, its wrapper takes no `ctx`
 
   FFIProcMeta* = object
     procName*: string
@@ -145,6 +146,40 @@ var ffiEnumTypeNames* {.compileTime.}: seq[string]
 
 proc isFFIEnumTypeName*(name: string): bool {.compileTime.} =
   name in ffiEnumTypeNames
+
+func isStatic*(p: FFIProcMeta): bool =
+  ## True for a `{.ffiStatic.}` proc: no library receiver, no ctx in its wrapper.
+  p.kind == FFIKind.STATIC
+
+type ClassifiedProcs* = object
+  ctors*: seq[FFIProcMeta]
+  methods*: seq[FFIProcMeta]
+  statics*: seq[FFIProcMeta]
+  dtor*: Option[FFIProcMeta]
+
+func classifyProcs*(procs: seq[FFIProcMeta]): ClassifiedProcs =
+  ## Splits the registry into constructors, methods, statics and the first destructor.
+  var c: ClassifiedProcs
+  for p in procs:
+    case p.kind
+    of FFIKind.CTOR:
+      c.ctors.add(p)
+    of FFIKind.FFI:
+      c.methods.add(p)
+    of FFIKind.STATIC:
+      c.statics.add(p)
+    of FFIKind.DTOR:
+      if c.dtor.isNone():
+        c.dtor = some(p)
+  c
+
+func dtorProcName*(c: ClassifiedProcs): string =
+  ## The destructor's proc name, or "" when the library has no destructor.
+  if c.dtor.isSome(): c.dtor.get().procName else: ""
+
+func replyProcs*(c: ClassifiedProcs): seq[FFIProcMeta] =
+  ## Procs that reply with a decoded value: methods and statics.
+  c.methods & c.statics
 
 proc ridesAsPtr*(ep: FFIParamMeta): bool =
   ## True if the param crosses the wire as an opaque uint64 (raw ptr or handle).

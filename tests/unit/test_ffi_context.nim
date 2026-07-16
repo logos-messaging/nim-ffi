@@ -109,6 +109,11 @@ registerReqFFI(HeavyRefAllocRequest, lib: ptr TestLib):
     await sleepAsync(10.milliseconds)
     return ok("heavy-done")
 
+# Globals, as declareLibrary emits them: a static ctx is never destroyed, so its
+# threads outlive any scope and the pool must outlive them.
+var sharedPool: FFIContextPool[TestLib]
+var retryPool: FFIContextPool[TestLib]
+
 suite "FFIContextPool":
   test "create and destroy via pool succeeds":
     var pool: FFIContextPool[TestLib]
@@ -141,6 +146,35 @@ suite "FFIContextPool":
     check pool.createFFIContext().isErr()
     for i in 0 ..< MaxFFIContexts:
       discard pool.destroyFFIContext(ctxs[i])
+
+  test "staticFFIContext returns one shared context and holds its slot":
+    let first = sharedPool.staticFFIContext().valueOr:
+      assert false, "staticFFIContext failed: " & $error
+      return
+    check sharedPool.staticFFIContext().tryGet() == first
+    # The static ctx owns a slot for good: only MaxFFIContexts-1 are left.
+    var ctxs: seq[ptr FFIContext[TestLib]] = @[]
+    for _ in 0 ..< MaxFFIContexts - 1:
+      let c = sharedPool.createFFIContext().valueOr:
+        assert false, "createFFIContext(pool) failed: " & $error
+        return
+      ctxs.add(c)
+    check sharedPool.createFFIContext().isErr()
+    for c in ctxs:
+      discard sharedPool.destroyFFIContext(c)
+
+  test "a failed create leaves staticFFIContext retryable":
+    var ctxs: array[MaxFFIContexts, ptr FFIContext[TestLib]]
+    for i in 0 ..< MaxFFIContexts:
+      ctxs[i] = retryPool.createFFIContext().valueOr:
+        assert false, "createFFIContext(pool) failed at slot " & $i & ": " & $error
+        return
+    # No slot free: the create fails and must reset the state, not latch it.
+    check retryPool.staticFFIContext().isErr()
+    discard retryPool.destroyFFIContext(ctxs[0])
+    check retryPool.staticFFIContext().isOk()
+    for i in 1 ..< MaxFFIContexts:
+      discard retryPool.destroyFFIContext(ctxs[i])
 
   test "requests are processed via pool context":
     var pool: FFIContextPool[TestLib]

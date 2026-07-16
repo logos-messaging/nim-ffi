@@ -185,9 +185,10 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
     var params: seq[string] = @[]
     lines.add(renderMemberDocComment(p.doc))
     case p.kind
-    of FFIKind.FFI:
-      # Method-style: ctx first.
-      params.add("ctx: *mut c_void")
+    of FFIKind.FFI, FFIKind.STATIC:
+      # Method-style: ctx first. A static is the same shape, minus the ctx.
+      if not p.isStatic():
+        params.add("ctx: *mut c_void")
       params.add("callback: FFICallback")
       params.add("user_data: *mut c_void")
       params.add("req_cbor: *const u8")
@@ -304,18 +305,9 @@ proc generateApiRs*(
   ## Requests/responses are CBOR (ciborium); errors are raw UTF-8 strings.
   var lines: seq[string] = @[]
 
-  var ctors: seq[FFIProcMeta] = @[]
-  var methods: seq[FFIProcMeta] = @[]
-  var dtorProcName = ""
-  for p in procs:
-    case p.kind
-    of FFIKind.CTOR:
-      ctors.add(p)
-    of FFIKind.FFI:
-      methods.add(p)
-    of FFIKind.DTOR:
-      if dtorProcName.len == 0:
-        dtorProcName = p.procName
+  let classified = classifyProcs(procs)
+  let ctors = classified.ctors
+  let dtorProcName = classified.dtorProcName
 
   var libTypeName = ""
   if ctors.len > 0:
@@ -700,7 +692,9 @@ proc generateApiRs*(
     lines.add("    }")
     lines.add("")
 
-  for m in methods:
+  # A static is an associated fn: no `&self` to read `timeout` from, so it takes one.
+  for m in classified.replyProcs():
+    let isStatic = m.isStatic()
     let methodName = stripLibPrefix(m.procName, libName)
     let retRustType = nimTypeToRust(m.returnTypeName)
     let reqName = reqStructName(m)
@@ -716,11 +710,15 @@ proc generateApiRs*(
           nimTypeToRust(ep.typeName)
       paramsList.add("$1: $2" % [snake, rustType])
       fieldInits.add(snake)
+    if isStatic:
+      paramsList.add("timeout: Duration")
     let paramsStr =
-      if paramsList.len > 0:
-        ", " & paramsList.join(", ")
+      if isStatic:
+        paramsList.join(", ")
+      elif paramsList.len > 0:
+        "&self, " & paramsList.join(", ")
       else:
-        ""
+        "&self"
 
     let reqLit =
       if fieldInits.len > 0:
@@ -729,18 +727,22 @@ proc generateApiRs*(
         reqName & " {}"
 
     let retTypeForApi = if m.returnRidesAsPtr(): RustPtrType else: retRustType
+    let timeoutExpr = if isStatic: "timeout" else: "self.timeout"
+    let ctxArg = if isStatic: "" else: "self.ptr, "
 
     lines.add(renderMemberDocComment(m.doc))
     lines.add(
-      "    pub fn $1(&self$2) -> Result<$3, String> {" %
+      "    pub fn $1($2) -> Result<$3, String> {" %
         [methodName, paramsStr, retTypeForApi]
     )
     lines.add("        let req = $1;" % [reqLit])
     lines.add("        let req_bytes = encode_cbor(&req)?;")
-    lines.add("        let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {")
     lines.add(
-      "            ffi::$1(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())" %
-        [m.procName]
+      "        let raw_bytes = ffi_call_sync($1, |cb, ud| unsafe {" % [timeoutExpr]
+    )
+    lines.add(
+      "            ffi::$1($2cb, ud, req_bytes.as_ptr(), req_bytes.len())" %
+        [m.procName, ctxArg]
     )
     lines.add("        })?;")
     lines.add("        decode_cbor::<$1>(&raw_bytes)" % [retTypeForApi])
@@ -750,18 +752,21 @@ proc generateApiRs*(
     # async method: ptr cast to usize (Copy + Send) keeps the move closure and returned future Send for multi-threaded tokio runtimes.
     lines.add(renderMemberDocComment(m.doc))
     lines.add(
-      "    pub async fn $1_async(&self$2) -> Result<$3, String> {" %
+      "    pub async fn $1_async($2) -> Result<$3, String> {" %
         [methodName, paramsStr, retTypeForApi]
     )
     lines.add("        let req = $1;" % [reqLit])
     lines.add("        let req_bytes = encode_cbor(&req)?;")
-    lines.add("        let ptr = self.ptr as usize;")
+    if not isStatic:
+      lines.add("        let ptr = self.ptr as usize;")
     lines.add(
-      "        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {"
+      "        let raw_bytes = ffi_call_async($1, move |cb, ud| unsafe {" % [
+        timeoutExpr
+      ]
     )
     lines.add(
-      "            ffi::$1(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())" %
-        [m.procName]
+      "            ffi::$1($2cb, ud, req_bytes.as_ptr(), req_bytes.len())" %
+        [m.procName, if isStatic: "" else: "ptr as *mut c_void, "]
     )
     lines.add("        }).await?;")
     lines.add("        decode_cbor::<$1>(&raw_bytes)" % [retTypeForApi])

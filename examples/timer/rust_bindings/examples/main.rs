@@ -7,6 +7,9 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 fn main() -> Result<(), String> {
+    // `myTimerLibVersion` is {.ffiStatic.}: an associated fn, no ctx needed.
+    println!("lib version: {}", MyTimerCtx::lib_version(Duration::from_secs(5))?);
+
     let ctx = MyTimerCtx::create(
         TimerConfig { name: "rust-sync-demo".into() },
         Duration::from_secs(5),

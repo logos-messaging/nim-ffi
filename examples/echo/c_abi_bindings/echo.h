@@ -38,9 +38,17 @@ typedef struct {
 typedef struct {
     ShoutRequest req;
 } EchoShoutReq;
+typedef struct {
+    uint8_t _placeholder; /* C forbids empty structs */
+} EchoLibVersionReq;
+typedef struct {
+    ShoutRequest req;
+} EchoShoutAnonReq;
 
 typedef void (*EchoShoutReplyFn)(int err_code, const ShoutResponse* reply, const char* err_msg, void* user_data);
 typedef void (*EchoVersionReplyFn)(int err_code, const char* reply, const char* err_msg, void* user_data);
+typedef void (*EchoLibVersionReplyFn)(int err_code, const char* reply, const char* err_msg, void* user_data);
+typedef void (*EchoShoutAnonReplyFn)(int err_code, const ShoutResponse* reply, const char* err_msg, void* user_data);
 
 typedef void (*EchoCreateRawFn)(int err_code, const char* ctx_addr, const char* err_msg, void* user_data);
 /* Raw reply of a scalar-fast-path export: `msg`/`len` are bytes (a string
@@ -70,6 +78,8 @@ void* echo_create(const EchoCreateCtorReq* req, EchoCreateRawFn on_created, void
 int echo_shout(void* ctx, EchoShoutReplyFn on_reply, void* user_data, const EchoShoutReq* req);
 /** Returns the library's version string. */
 int echo_version(void* ctx, EchoScalarRawFn callback, void* user_data);
+int echo_lib_version(EchoLibVersionReplyFn on_reply, void* user_data, const EchoLibVersionReq* req);
+int echo_shout_anon(EchoShoutAnonReplyFn on_reply, void* user_data, const EchoShoutAnonReq* req);
 /** Releases the echo context. */
 int echo_destroy(void* ctx);
 
@@ -179,6 +189,19 @@ static inline int echo_ctx_version(const EchoCtx* ctx, EchoVersionReplyFn on_rep
     box->fn = on_reply;
     box->user_data = user_data;
     return echo_version(ctx->ptr, echo_version_scalar_reply, box);
+}
+
+static inline int echo_static_lib_version(EchoLibVersionReplyFn on_reply, void* user_data) {
+    EchoLibVersionReq ffi_req;
+    memset(&ffi_req, 0, sizeof(ffi_req));
+    return echo_lib_version(on_reply, user_data, &ffi_req);
+}
+
+static inline int echo_static_shout_anon(const ShoutRequest* req, EchoShoutAnonReplyFn on_reply, void* user_data) {
+    EchoShoutAnonReq ffi_req;
+    memset(&ffi_req, 0, sizeof(ffi_req));
+    ffi_req.req = *req;
+    return echo_shout_anon(on_reply, user_data, &ffi_req);
 }
 
 #endif /* NIM_FFI_LIB_ECHO_C_ABI_H_INCLUDED */

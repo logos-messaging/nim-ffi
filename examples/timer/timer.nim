@@ -65,6 +65,10 @@ proc myTimerVersion*(timer: MyTimer): Future[Result[string, string]] {.ffi.} =
   ## Returns the library's version string.
   return ok(TimerVersion)
 
+# No `timer` param, so its wrapper takes no ctx.
+proc myTimerLibVersion*(): Future[Result[string, string]] {.ffiStatic.} =
+  return ok("nim-timer v0.1.0")
+
 proc myTimerComplex*(
     timer: MyTimer, req: ComplexRequest
 ): Future[Result[ComplexResponse, string]] {.ffi.} =

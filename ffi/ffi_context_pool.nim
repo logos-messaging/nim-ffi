@@ -1,13 +1,22 @@
-import std/atomics
+import std/[atomics, sysatomics]
 import results
 import ./ffi_context
 
 const MaxFFIContexts* = 32
 
-type FFIContextPool*[T] = object
-  ## Fixed pool. Bounds ThreadSignalPtr fds at MaxFFIContexts * 2.
-  slots: array[MaxFFIContexts, FFIContext[T]]
-  inUse: array[MaxFFIContexts, Atomic[bool]]
+type
+  StaticCtxState = enum
+    ## Lifecycle of the pool's `{.ffiStatic.}` context; see `staticFFIContext`.
+    StaticCtxNone
+    StaticCtxCreating
+    StaticCtxReady
+
+  FFIContextPool*[T] = object
+    ## Fixed pool. Bounds ThreadSignalPtr fds at MaxFFIContexts * 2.
+    slots: array[MaxFFIContexts, FFIContext[T]]
+    inUse: array[MaxFFIContexts, Atomic[bool]]
+    staticCtx: Atomic[pointer]
+    staticState: Atomic[StaticCtxState]
 
 proc acquireSlot[T](pool: var FFIContextPool[T]): Result[ptr FFIContext[T], string] =
   for i in 0 ..< MaxFFIContexts:
@@ -44,6 +53,32 @@ proc destroyFFIContext*[T](
   deinitRes.isOkOr:
     return err("destroyFFIContext(pool): " & $error)
   ok()
+
+proc staticFFIContext*[T](
+    pool: var FFIContextPool[T]
+): Result[ptr FFIContext[T], string] =
+  ## The pool's `{.ffiStatic.}` context: a static proc has no ctx of its own, but
+  ## its handler still needs an FFI thread. Created on first use and never
+  ## destroyed, so it holds a slot for good and `pool` must outlive its threads —
+  ## only ever call this on the global `declareLibrary` emits. `myLib` stays the
+  ## zero value; a static handler must not touch it. A failed create resets to
+  ## `StaticCtxNone` so the spinning losers retry instead of hanging.
+  while true:
+    case pool.staticState.load()
+    of StaticCtxReady:
+      return ok(cast[ptr FFIContext[T]](pool.staticCtx.load()))
+    of StaticCtxCreating:
+      cpuRelax()
+    of StaticCtxNone:
+      var expected = StaticCtxNone
+      if not pool.staticState.compareExchange(expected, StaticCtxCreating):
+        continue
+      let ctx = pool.createFFIContext().valueOr:
+        pool.staticState.store(StaticCtxNone)
+        return err("staticFFIContext: " & error)
+      pool.staticCtx.store(cast[pointer](ctx))
+      pool.staticState.store(StaticCtxReady)
+      return ok(ctx)
 
 proc isValidCtx*[T](pool: var FFIContextPool[T], ctx: pointer): bool =
   ## Rejects nil / dangling pointers at the API boundary.

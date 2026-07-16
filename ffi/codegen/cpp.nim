@@ -6,6 +6,9 @@ import ./meta, ./string_helpers, ./c_cpp_common, ./types_ir, ./consts
 ## Fixed 64-bit wire type for any Nim `ptr T` / `pointer`.
 const CppPtrType* = "uint64_t"
 
+## Trailing param of every call that can't inherit a ctx's `timeout_`.
+const CppTimeoutParam = "std::chrono::milliseconds timeout = std::chrono::seconds{30}"
+
 const
   HeaderPreludeTpl = staticRead("templates/cpp/header_prelude.hpp.tpl")
   ResultTpl = staticRead("templates/cpp/result.hpp.tpl")
@@ -319,6 +322,11 @@ proc generateCppHeader*(
         "int $1(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);" %
           [p.procName]
       )
+    of FFIKind.STATIC:
+      lines.add(
+        "int $1(FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);" %
+          [p.procName]
+      )
     of FFIKind.CTOR:
       lines.add(
         "void* $1(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback callback, void* user_data);" %
@@ -341,7 +349,6 @@ proc generateCppHeader*(
 
   let classified = classifyProcs(procs)
   let ctors = classified.ctors
-  let methods = classified.methods
   let ctxTypeName = libTypeName(ctors, libName) & "Ctx"
 
   lines.add("// ============================================================")
@@ -363,12 +370,11 @@ proc generateCppHeader*(
           nimTypeToCpp(ep.typeName)
       ctorParams.add("const $1& $2" % [cppType, ep.name])
       epNames.add(ep.name)
-    let timeoutParam = "std::chrono::milliseconds timeout = std::chrono::seconds{30}"
     let ctorParamsWithTimeout =
       if ctorParams.len > 0:
-        ctorParams.join(", ") & ", " & timeoutParam
+        ctorParams.join(", ") & ", " & CppTimeoutParam
       else:
-        timeoutParam
+        CppTimeoutParam
 
     let reqInit = cppBracedInit(reqName, epNames)
 
@@ -444,7 +450,9 @@ proc generateCppHeader*(
 
   emitEventDispatcher(lines, ctxTypeName, libName, events)
 
-  for m in methods:
+  # A static has no ctx to inherit `timeout_` from, so it takes its own `timeout`.
+  for m in classified.replyProcs():
+    let isStatic = m.isStatic()
     let methodName = stripLibPrefix(m.procName, libName)
     let retCppType =
       if m.returnRidesAsPtr():
@@ -463,14 +471,21 @@ proc generateCppHeader*(
           nimTypeToCpp(ep.typeName)
       methParams.add("const $1& $2" % [cppType, ep.name])
       methParamNames.add(ep.name)
-    let methParamsStr = methParams.join(", ")
     let methParamNamesStr = methParamNames.join(", ")
+    let methParamsStr =
+      if not isStatic:
+        methParams.join(", ")
+      elif methParams.len > 0:
+        methParams.join(", ") & ", " & CppTimeoutParam
+      else:
+        CppTimeoutParam
 
     let reqInit = cppBracedInit(reqName, methParamNames)
 
     let methRet = "Result<$1>" % [retCppType]
     lines.add(renderMemberDocComment(m.doc))
-    lines.add("    $1 $2($3) const {" % [methRet, methodName, methParamsStr])
+    let decl = if isStatic: "    static $1 $2($3) {" else: "    $1 $2($3) const {"
+    lines.add(decl % [methRet, methodName, methParamsStr])
     lines.add("        const auto ffi_req_ = $1;" % [reqInit])
     lines.add("        auto ffi_enc_ = encodeCborFFI(ffi_req_);")
     lines.add(
@@ -478,35 +493,46 @@ proc generateCppHeader*(
     )
     lines.add("        const auto& ffi_req_bytes_ = ffi_enc_.value();")
     lines.add("        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {")
+    let ctxArg = if isStatic: "" else: "ptr_, "
     lines.add(
-      "            return $1(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());" %
-        [m.procName]
+      "            return $1($2cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());" %
+        [m.procName, ctxArg]
     )
-    lines.add("        }, timeout_);")
+    lines.add("        }, $1);" % [if isStatic: "timeout" else: "timeout_"])
     lines.add(
       "        if (ffi_raw_.isErr()) return $1::err(ffi_raw_.error());" % [methRet]
     )
     lines.add("        return decodeCborFFI<$1>(ffi_raw_.value());" % [retCppType])
     lines.add("    }")
     lines.add("")
+
+    # A static forwards its own `timeout`; a method captures `this` and calls
     # `this->methodName(...)` so a same-named param can't shadow the call target.
+    let staticArgs =
+      if methParamNames.len > 0:
+        methParamNamesStr & ", timeout"
+      else:
+        "timeout"
+    let asyncArgs = if isStatic: staticArgs else: methParamNamesStr
+    let asyncCapture =
+      if isStatic:
+        staticArgs
+      elif methParamNamesStr.len > 0:
+        "this, " & methParamNamesStr
+      else:
+        "this"
+    let asyncDecl =
+      if isStatic:
+        "    static std::future<$1> $2Async($3) {"
+      else:
+        "    std::future<$1> $2Async($3) const {"
     lines.add(renderMemberDocComment(m.doc))
-    if methParamsStr.len > 0:
-      lines.add(
-        "    std::future<$1> $2Async($3) const {" % [methRet, methodName, methParamsStr]
-      )
-      lines.add(
-        "        return std::async(std::launch::async, [this, $1]() { return this->$2($3); });" %
-          [methParamNamesStr, methodName, methParamNamesStr]
-      )
-      lines.add("    }")
-    else:
-      lines.add("    std::future<$1> $2Async() const {" % [methRet, methodName])
-      lines.add(
-        "        return std::async(std::launch::async, [this]() { return this->$1(); });" %
-          [methodName]
-      )
-      lines.add("    }")
+    lines.add(asyncDecl % [methRet, methodName, methParamsStr])
+    lines.add(
+      "        return std::async(std::launch::async, [$1]() { return $2$3($4); });" %
+        [asyncCapture, (if isStatic: "" else: "this->"), methodName, asyncArgs]
+    )
+    lines.add("    }")
     lines.add("")
 
   lines.add("private:")

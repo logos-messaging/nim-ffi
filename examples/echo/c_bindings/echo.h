@@ -31,6 +31,12 @@ typedef struct {
 typedef struct {
     char _nimffi_empty; /* C forbids empty structs */
 } EchoVersionReq;
+typedef struct {
+    char _nimffi_empty; /* C forbids empty structs */
+} EchoLibVersionReq;
+typedef struct {
+    ShoutRequest req;
+} EchoShoutAnonReq;
 
 static inline CborError echo_enc_EchoConfig(
         CborEncoder* e, const EchoConfig* v) {
@@ -191,6 +197,47 @@ static inline CborError echo_dec_EchoVersionReq(
     (void)out;
     return cbor_value_advance(it);
 }
+static inline CborError echo_enc_EchoLibVersionReq(
+        CborEncoder* e, const EchoLibVersionReq* v) {
+    (void)v;
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(e, &m, 0);
+    if (err) return err;
+    return cbor_encoder_close_container(e, &m);
+}
+static inline CborError echo_dec_EchoLibVersionReq(
+        CborValue* it, EchoLibVersionReq* out) {
+    if (!cbor_value_is_map(it)) return CborErrorImproperValue;
+    (void)out;
+    return cbor_value_advance(it);
+}
+static inline CborError echo_enc_EchoShoutAnonReq(
+        CborEncoder* e, const EchoShoutAnonReq* v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(e, &m, 1);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "req");
+    if (err) return err;
+    err = echo_enc_ShoutRequest(&m, &v->req);
+    if (err) return err;
+    return cbor_encoder_close_container(e, &m);
+}
+static inline CborError echo_dec_EchoShoutAnonReq(
+        CborValue* it, EchoShoutAnonReq* out) {
+    if (!cbor_value_is_map(it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(it, "req", &field);
+    if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = echo_dec_ShoutRequest(&field, &out->req);
+    if (err) return err;
+    return cbor_value_advance(it);
+}
+static inline void echo_free_EchoShoutAnonReq(EchoShoutAnonReq* v) {
+    if (!v) return;
+    echo_free_ShoutRequest(&v->req);
+}
 
 /* ============================================================ */
 /* C ABI declarations (symbols exported by the Nim dylib)       */
@@ -205,6 +252,8 @@ void* echo_create(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback call
 int echo_shout(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 /** Returns the library's version string. */
 int echo_version(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int echo_lib_version(FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int echo_shout_anon(FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 /** Releases the echo context. */
 int echo_destroy(void* ctx);
 uint64_t echo_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
@@ -218,6 +267,8 @@ int echo_remove_event_listener(void* ctx, uint64_t listener_id);
 static inline CborError echo_encv_EchoCreateCtorReq(CborEncoder* e, const void* v) { return echo_enc_EchoCreateCtorReq(e, (const EchoCreateCtorReq*)v); }
 static inline CborError echo_encv_EchoShoutReq(CborEncoder* e, const void* v) { return echo_enc_EchoShoutReq(e, (const EchoShoutReq*)v); }
 static inline CborError echo_encv_EchoVersionReq(CborEncoder* e, const void* v) { return echo_enc_EchoVersionReq(e, (const EchoVersionReq*)v); }
+static inline CborError echo_encv_EchoLibVersionReq(CborEncoder* e, const void* v) { return echo_enc_EchoLibVersionReq(e, (const EchoLibVersionReq*)v); }
+static inline CborError echo_encv_EchoShoutAnonReq(CborEncoder* e, const void* v) { return echo_enc_EchoShoutAnonReq(e, (const EchoShoutAnonReq*)v); }
 static inline CborError echo_decv_ShoutResponse(CborValue* it, void* v) { return echo_dec_ShoutResponse(it, (ShoutResponse*)v); }
 static inline CborError echo_decv_Str(CborValue* it, void* v) { return nimffi_dec_str(it, (NimFfiStr*)v); }
 
@@ -425,6 +476,129 @@ static inline int echo_ctx_version(const EchoCtx* ctx, EchoVersionReplyFn on_rep
     box->fn = on_reply;
     box->user_data = user_data;
     int ret = echo_version(ctx->ptr, echo_version_reply_trampoline, box, req_buf, req_len);
+    free(req_buf);
+    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
+        if (on_reply) on_reply(-1, NULL, "RET_MISSING_CALLBACK (internal error)", user_data);
+        free(box);
+        return -1;
+    }
+    return 0;
+}
+
+typedef void (*EchoLibVersionReplyFn)(int err_code, const NimFfiStr* reply, const char* err_msg, void* user_data);
+typedef struct { EchoLibVersionReplyFn fn; void* user_data; } EchoLibVersionCallBox;
+static void echo_lib_version_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
+    EchoLibVersionCallBox* box = (EchoLibVersionCallBox*)ud;
+    /* Non-terminal progress ping: keep the box for the terminal reply. */
+    if (ret == NIMFFI_RET_STALE_WARN) return;
+    if (!box->fn) {
+        free(box);
+        return;
+    }
+    if (ret != 0) {
+        char* em = nimffi_dup_cstr_n(msg ? msg : "", msg ? len : 0);
+        box->fn(ret, NULL, em ? em : "FFI call failed", box->user_data);
+        free(em);
+        free(box);
+        return;
+    }
+    char* err = NULL;
+    NimFfiStr out;
+    memset(&out, 0, sizeof(out));
+    int dec = nimffi_decode_from_buf(echo_decv_Str, (const uint8_t*)msg, len, &out, &err);
+    if (dec != 0) {
+        box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
+        free(err);
+        nimffi_free_str(&out);
+        free(box);
+        return;
+    }
+    box->fn(NIMFFI_RET_OK, &out, NULL, box->user_data);
+    nimffi_free_str(&out);
+    free(box);
+}
+static inline int echo_static_lib_version(EchoLibVersionReplyFn on_reply, void* user_data) {
+    EchoLibVersionReq ffi_req;
+    memset(&ffi_req, 0, sizeof(ffi_req));
+    uint8_t* req_buf = NULL;
+    size_t req_len = 0;
+    char* err = NULL;
+    if (nimffi_encode_to_buf(echo_encv_EchoLibVersionReq, &ffi_req, &req_buf, &req_len, &err) != 0) {
+        if (on_reply) on_reply(-1, NULL, err ? err : "encode failed", user_data);
+        free(err);
+        return -1;
+    }
+    EchoLibVersionCallBox* box = (EchoLibVersionCallBox*)malloc(sizeof(EchoLibVersionCallBox));
+    if (!box) {
+        free(req_buf);
+        if (on_reply) on_reply(-1, NULL, "out of memory", user_data);
+        return -1;
+    }
+    box->fn = on_reply;
+    box->user_data = user_data;
+    int ret = echo_lib_version(echo_lib_version_reply_trampoline, box, req_buf, req_len);
+    free(req_buf);
+    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
+        if (on_reply) on_reply(-1, NULL, "RET_MISSING_CALLBACK (internal error)", user_data);
+        free(box);
+        return -1;
+    }
+    return 0;
+}
+
+typedef void (*EchoShoutAnonReplyFn)(int err_code, const ShoutResponse* reply, const char* err_msg, void* user_data);
+typedef struct { EchoShoutAnonReplyFn fn; void* user_data; } EchoShoutAnonCallBox;
+static void echo_shout_anon_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
+    EchoShoutAnonCallBox* box = (EchoShoutAnonCallBox*)ud;
+    /* Non-terminal progress ping: keep the box for the terminal reply. */
+    if (ret == NIMFFI_RET_STALE_WARN) return;
+    if (!box->fn) {
+        free(box);
+        return;
+    }
+    if (ret != 0) {
+        char* em = nimffi_dup_cstr_n(msg ? msg : "", msg ? len : 0);
+        box->fn(ret, NULL, em ? em : "FFI call failed", box->user_data);
+        free(em);
+        free(box);
+        return;
+    }
+    char* err = NULL;
+    ShoutResponse out;
+    memset(&out, 0, sizeof(out));
+    int dec = nimffi_decode_from_buf(echo_decv_ShoutResponse, (const uint8_t*)msg, len, &out, &err);
+    if (dec != 0) {
+        box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
+        free(err);
+        echo_free_ShoutResponse(&out);
+        free(box);
+        return;
+    }
+    box->fn(NIMFFI_RET_OK, &out, NULL, box->user_data);
+    echo_free_ShoutResponse(&out);
+    free(box);
+}
+static inline int echo_static_shout_anon(const ShoutRequest* req, EchoShoutAnonReplyFn on_reply, void* user_data) {
+    EchoShoutAnonReq ffi_req;
+    memset(&ffi_req, 0, sizeof(ffi_req));
+    ffi_req.req = *req;
+    uint8_t* req_buf = NULL;
+    size_t req_len = 0;
+    char* err = NULL;
+    if (nimffi_encode_to_buf(echo_encv_EchoShoutAnonReq, &ffi_req, &req_buf, &req_len, &err) != 0) {
+        if (on_reply) on_reply(-1, NULL, err ? err : "encode failed", user_data);
+        free(err);
+        return -1;
+    }
+    EchoShoutAnonCallBox* box = (EchoShoutAnonCallBox*)malloc(sizeof(EchoShoutAnonCallBox));
+    if (!box) {
+        free(req_buf);
+        if (on_reply) on_reply(-1, NULL, "out of memory", user_data);
+        return -1;
+    }
+    box->fn = on_reply;
+    box->user_data = user_data;
+    int ret = echo_shout_anon(echo_shout_anon_reply_trampoline, box, req_buf, req_len);
     free(req_buf);
     if (ret == NIMFFI_RET_MISSING_CALLBACK) {
         if (on_reply) on_reply(-1, NULL, "RET_MISSING_CALLBACK (internal error)", user_data);
