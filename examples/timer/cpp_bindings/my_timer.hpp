@@ -729,11 +729,16 @@ inline CborError decode_cbor(CborValue& it, MyTimerScheduleReq& v) {
 extern "C" {
 typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_data);
 
+/** Creates the FFIContext + MyTimer; async via chronos. */
 void* my_timer_create(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback callback, void* user_data);
+/** Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`. */
 int my_timer_echo(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+/** Returns the library's version string. */
 int my_timer_version(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int my_timer_complex(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+/** Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope. */
 int my_timer_schedule(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+/** Tears down the FFI context; blocks until FFI + watchdog threads join. */
 int my_timer_destroy(void* ctx);
 uint64_t my_timer_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
 int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
@@ -812,6 +817,7 @@ inline Result<std::vector<std::uint8_t>> ffi_call_(
 
 class MyTimerCtx {
 public:
+    /// Creates the FFIContext + MyTimer; async via chronos.
     static Result<std::unique_ptr<MyTimerCtx>> create(const TimerConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
         const auto ffi_req_ = MyTimerCreateCtorReq{config};
         auto ffi_enc_ = encodeCborFFI(ffi_req_);
@@ -835,6 +841,7 @@ public:
         return Result<std::unique_ptr<MyTimerCtx>>::ok(std::unique_ptr<MyTimerCtx>(new MyTimerCtx(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout)));
     }
 
+    /// Creates the FFIContext + MyTimer; async via chronos.
     static std::future<Result<std::unique_ptr<MyTimerCtx>>> createAsync(const TimerConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
         return std::async(std::launch::async, [config, timeout]() { return create(config, timeout); });
     }
@@ -863,6 +870,7 @@ public:
     // ── Event listener API ──────────────────────────────────
     struct ListenerHandle { std::uint64_t id = 0; };
 
+    /// Fired by `myTimerEcho` once the reply is ready.
     ListenerHandle addOnEchoFiredListener(std::function<void(const EchoEvent&)> handler) {
         auto owned = std::make_unique<TypedListener<EchoEvent>>(std::move(handler));
         auto* raw = owned.get();
@@ -880,6 +888,7 @@ public:
         return rc == 0;
     }
 
+    /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
     Result<EchoResponse> echo(const EchoRequest& req) const {
         const auto ffi_req_ = MyTimerEchoReq{req};
         auto ffi_enc_ = encodeCborFFI(ffi_req_);
@@ -892,10 +901,12 @@ public:
         return decodeCborFFI<EchoResponse>(ffi_raw_.value());
     }
 
+    /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
     std::future<Result<EchoResponse>> echoAsync(const EchoRequest& req) const {
         return std::async(std::launch::async, [this, req]() { return this->echo(req); });
     }
 
+    /// Returns the library's version string.
     Result<std::string> version() const {
         const auto ffi_req_ = MyTimerVersionReq{};
         auto ffi_enc_ = encodeCborFFI(ffi_req_);
@@ -908,6 +919,7 @@ public:
         return decodeCborFFI<std::string>(ffi_raw_.value());
     }
 
+    /// Returns the library's version string.
     std::future<Result<std::string>> versionAsync() const {
         return std::async(std::launch::async, [this]() { return this->version(); });
     }
@@ -928,6 +940,7 @@ public:
         return std::async(std::launch::async, [this, req]() { return this->complex(req); });
     }
 
+    /// Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
     Result<ScheduleResult> schedule(const JobSpec& job, const RetryPolicy& retry, const ScheduleConfig& schedule) const {
         const auto ffi_req_ = MyTimerScheduleReq{job, retry, schedule};
         auto ffi_enc_ = encodeCborFFI(ffi_req_);
@@ -940,6 +953,7 @@ public:
         return decodeCborFFI<ScheduleResult>(ffi_raw_.value());
     }
 
+    /// Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
     std::future<Result<ScheduleResult>> scheduleAsync(const JobSpec& job, const RetryPolicy& retry, const ScheduleConfig& schedule) const {
         return std::async(std::launch::async, [this, job, retry, schedule]() { return this->schedule(job, retry, schedule); });
     }

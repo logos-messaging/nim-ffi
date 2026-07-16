@@ -31,6 +31,14 @@ All notable changes to this project are documented in this file.
   where `-install_name` requires `-dynamiclib`.
 
 ### Added
+- Doc comments (`##`) on `{.ffi.}` / `{.ffiCtor.}` / `{.ffiDtor.}` procs are now
+  propagated to the generated bindings — `/** ... */` on the C declarations,
+  `///` on the C++ class methods and Rust `pub fn`s, and `;` comments in the
+  CDDL schema — so the exported API is documented once, in the Nim source
+  ([#127](https://github.com/logos-messaging/nim-ffi/issues/127)). Editing a
+  `##` comment now changes the generated bindings, so `nimble check_bindings`
+  flags them stale until regenerated; an undocumented proc still generates
+  byte-identical output.
 - `{.ffiEvent.}` no longer requires an explicit wire-name string: when omitted
   it is derived from the proc name via `camelToSnakeCase`
   (`onPeerConnected` → `on_peer_connected`), matching how `{.ffi.}` derives its

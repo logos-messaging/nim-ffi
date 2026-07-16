@@ -2,7 +2,7 @@
 ## ffi/cbor_serial.nim: types become rules, procs get request/response rules.
 
 import std/[os, strutils, unicode]
-import ./meta
+import ./meta, ./string_helpers
 
 proc innerOf(typeName, prefix: string): string =
   if typeName.startsWith(prefix) and typeName.endsWith("]"):
@@ -154,6 +154,7 @@ proc generateCddlSchema*(
       of FFIKind.DTOR: "dtor"
       of FFIKind.FFI: "ffi"
     L.add("; " & p.procName & " (" & kindTag & ")")
+    L.add(renderDocComment(p.doc, "", "; "))
     if p.kind != FFIKind.DTOR:
       L.add(p.procName & "-request = " & reqStructName(p))
     L.add(p.procName & "-response = " & responseRule(p))

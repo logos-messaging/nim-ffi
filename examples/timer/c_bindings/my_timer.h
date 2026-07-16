@@ -766,11 +766,16 @@ static inline void my_timer_free_MyTimerScheduleReq(MyTimerScheduleReq* v) {
 extern "C" {
 #endif
 
+/** Creates the FFIContext + MyTimer; async via chronos. */
 void* my_timer_create(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback callback, void* user_data);
+/** Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`. */
 int my_timer_echo(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+/** Returns the library's version string. */
 int my_timer_version(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int my_timer_complex(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+/** Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope. */
 int my_timer_schedule(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+/** Tears down the FFI context; blocks until FFI + watchdog threads join. */
 int my_timer_destroy(void* ctx);
 uint64_t my_timer_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
 int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
@@ -871,6 +876,7 @@ static void my_timer_create_trampoline(int ret, const char* msg, size_t len, voi
     free(box);
 }
 
+/** Creates the FFIContext + MyTimer; async via chronos. */
 static inline int my_timer_ctx_create(const TimerConfig* config, MyTimerCreateFn on_created, void* user_data) {
     MyTimerCreateCtorReq ffi_req;
     memset(&ffi_req, 0, sizeof(ffi_req));
@@ -896,6 +902,7 @@ static inline int my_timer_ctx_create(const TimerConfig* config, MyTimerCreateFn
     return 0;
 }
 
+/** Tears down the FFI context; blocks until FFI + watchdog threads join. */
 static inline int my_timer_ctx_destroy(MyTimerCtx* ctx) {
     if (!ctx) return NIMFFI_RET_OK;
     int rc = NIMFFI_RET_OK;
@@ -908,6 +915,7 @@ static inline int my_timer_ctx_destroy(MyTimerCtx* ctx) {
     return rc;
 }
 
+/** Fired by `myTimerEcho` once the reply is ready. */
 static inline uint64_t my_timer_ctx_add_on_echo_fired_listener(MyTimerCtx* ctx, MyTimerOnEchoFiredFn fn, void* user_data) {
     MyTimerOnEchoFiredBox* box = (MyTimerOnEchoFiredBox*)malloc(sizeof(MyTimerOnEchoFiredBox));
     if (!box) return 0;
@@ -974,6 +982,7 @@ static void my_timer_echo_reply_trampoline(int ret, const char* msg, size_t len,
     my_timer_free_EchoResponse(&out);
     free(box);
 }
+/** Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`. */
 static inline int my_timer_ctx_echo(const MyTimerCtx* ctx, const EchoRequest* req, MyTimerEchoReplyFn on_reply, void* user_data) {
     MyTimerEchoReq ffi_req;
     memset(&ffi_req, 0, sizeof(ffi_req));
@@ -1036,6 +1045,7 @@ static void my_timer_version_reply_trampoline(int ret, const char* msg, size_t l
     nimffi_free_str(&out);
     free(box);
 }
+/** Returns the library's version string. */
 static inline int my_timer_ctx_version(const MyTimerCtx* ctx, MyTimerVersionReplyFn on_reply, void* user_data) {
     MyTimerVersionReq ffi_req;
     memset(&ffi_req, 0, sizeof(ffi_req));
@@ -1159,6 +1169,7 @@ static void my_timer_schedule_reply_trampoline(int ret, const char* msg, size_t 
     my_timer_free_ScheduleResult(&out);
     free(box);
 }
+/** Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope. */
 static inline int my_timer_ctx_schedule(const MyTimerCtx* ctx, const JobSpec* job, const RetryPolicy* retry, const ScheduleConfig* schedule, MyTimerScheduleReplyFn on_reply, void* user_data) {
     MyTimerScheduleReq ffi_req;
     memset(&ffi_req, 0, sizeof(ffi_req));

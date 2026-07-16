@@ -183,6 +183,7 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
 
   for p in procs:
     var params: seq[string] = @[]
+    lines.add(renderMemberDocComment(p.doc))
     case p.kind
     of FFIKind.FFI:
       # Method-style: ctx first.
@@ -544,6 +545,7 @@ proc generateApiRs*(
       else:
         reqName & " {}"
 
+    lines.add(renderMemberDocComment(ctor.doc))
     lines.add("    pub fn create($1) -> Result<Self, String> {" % [ctorParamsStr])
     lines.add("        let req = $1;" % [reqLit])
     lines.add("        let req_bytes = encode_cbor(&req)?;")
@@ -569,6 +571,7 @@ proc generateApiRs*(
     lines.add("    }")
     lines.add("")
 
+    lines.add(renderMemberDocComment(ctor.doc))
     lines.add(
       "    pub async fn new_async($1) -> Result<Self, String> {" % [ctorParamsStr]
     )
@@ -621,6 +624,7 @@ proc generateApiRs*(
       let methodName = "add_" & camelToSnakeCase(ev.nimProcName) & "_listener"
       let handlerStruct = capitalizeFirstLetter(ev.nimProcName) & "Handler"
       let trampolineName = camelToSnakeCase(ev.nimProcName) & "_trampoline"
+      lines.add(renderMemberDocComment(ev.doc))
       lines.add(
         "    /// Register a typed listener for `$1`. The returned handle can be" %
           [ev.wireName]
@@ -690,6 +694,7 @@ proc generateApiRs*(
 
     let retTypeForApi = if m.returnRidesAsPtr(): RustPtrType else: retRustType
 
+    lines.add(renderMemberDocComment(m.doc))
     lines.add(
       "    pub fn $1(&self$2) -> Result<$3, String> {" %
         [methodName, paramsStr, retTypeForApi]
@@ -707,6 +712,7 @@ proc generateApiRs*(
     lines.add("")
 
     # async method: ptr cast to usize (Copy + Send) keeps the move closure and returned future Send for multi-threaded tokio runtimes.
+    lines.add(renderMemberDocComment(m.doc))
     lines.add(
       "    pub async fn $1_async(&self$2) -> Result<$3, String> {" %
         [methodName, paramsStr, retTypeForApi]

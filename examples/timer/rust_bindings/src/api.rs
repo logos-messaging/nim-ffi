@@ -159,6 +159,7 @@ impl Drop for MyTimerCtx {
 }
 
 impl MyTimerCtx {
+    /// Creates the FFIContext + MyTimer; async via chronos.
     pub fn create(config: TimerConfig, timeout: Duration) -> Result<Self, String> {
         let req = MyTimerCreateCtorReq { config };
         let req_bytes = encode_cbor(&req)?;
@@ -171,6 +172,7 @@ impl MyTimerCtx {
         Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })
     }
 
+    /// Creates the FFIContext + MyTimer; async via chronos.
     pub async fn new_async(config: TimerConfig, timeout: Duration) -> Result<Self, String> {
         let req = MyTimerCreateCtorReq { config };
         let req_bytes = encode_cbor(&req)?;
@@ -199,6 +201,7 @@ impl MyTimerCtx {
         ListenerHandle { id }
     }
 
+    /// Fired by `myTimerEcho` once the reply is ready.
     /// Register a typed listener for `on_echo_fired`. The returned handle can be
     /// passed to `remove_event_listener` to unregister.
     pub fn add_on_echo_fired_listener<F>(&self, handler: F) -> ListenerHandle
@@ -220,6 +223,7 @@ impl MyTimerCtx {
         rc == 0
     }
 
+    /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
     pub fn echo(&self, req: EchoRequest) -> Result<EchoResponse, String> {
         let req = MyTimerEchoReq { req };
         let req_bytes = encode_cbor(&req)?;
@@ -229,6 +233,7 @@ impl MyTimerCtx {
         decode_cbor::<EchoResponse>(&raw_bytes)
     }
 
+    /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
     pub async fn echo_async(&self, req: EchoRequest) -> Result<EchoResponse, String> {
         let req = MyTimerEchoReq { req };
         let req_bytes = encode_cbor(&req)?;
@@ -239,6 +244,7 @@ impl MyTimerCtx {
         decode_cbor::<EchoResponse>(&raw_bytes)
     }
 
+    /// Returns the library's version string.
     pub fn version(&self) -> Result<String, String> {
         let req = MyTimerVersionReq {};
         let req_bytes = encode_cbor(&req)?;
@@ -248,6 +254,7 @@ impl MyTimerCtx {
         decode_cbor::<String>(&raw_bytes)
     }
 
+    /// Returns the library's version string.
     pub async fn version_async(&self) -> Result<String, String> {
         let req = MyTimerVersionReq {};
         let req_bytes = encode_cbor(&req)?;
@@ -277,6 +284,7 @@ impl MyTimerCtx {
         decode_cbor::<ComplexResponse>(&raw_bytes)
     }
 
+    /// Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
     pub fn schedule(&self, job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig) -> Result<ScheduleResult, String> {
         let req = MyTimerScheduleReq { job, retry, schedule };
         let req_bytes = encode_cbor(&req)?;
@@ -286,6 +294,7 @@ impl MyTimerCtx {
         decode_cbor::<ScheduleResult>(&raw_bytes)
     }
 
+    /// Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
     pub async fn schedule_async(&self, job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig) -> Result<ScheduleResult, String> {
         let req = MyTimerScheduleReq { job, retry, schedule };
         let req_bytes = encode_cbor(&req)?;

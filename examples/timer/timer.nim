@@ -36,23 +36,25 @@ type EchoEvent {.ffi.} = object
   message: string
   echoCount: int
 
-proc onEchoFired*(evt: EchoEvent) {.ffiEvent: "on_echo_fired".}
+proc onEchoFired*(evt: EchoEvent) {.ffiEvent: "on_echo_fired".} =
+  ## Fired by `myTimerEcho` once the reply is ready.
 
-# Constructor: creates the FFIContext + MyTimer; async via chronos.
 proc myTimerCreate*(config: TimerConfig): Future[Result[MyTimer, string]] {.ffiCtor.} =
+  ## Creates the FFIContext + MyTimer; async via chronos.
   await sleepAsync(1.milliseconds) # proves chronos is live on the FFI thread
   return ok(MyTimer(name: config.name))
 
-# Async method: sleeps `delayMs` then echoes the message back.
 proc myTimerEcho*(
     timer: MyTimer, req: EchoRequest
 ): Future[Result[EchoResponse, string]] {.ffi.} =
+  ## Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
   await sleepAsync(req.delayMs.milliseconds)
   onEchoFired(EchoEvent(message: req.message, echoCount: 1))
   return ok(EchoResponse(echoed: req.message, timerName: timer.name))
 
 # Sync method: no await, so the macro fires the callback inline.
 proc myTimerVersion*(timer: MyTimer): Future[Result[string, string]] {.ffi.} =
+  ## Returns the library's version string.
   return ok("nim-timer v0.1.0")
 
 proc myTimerComplex*(
