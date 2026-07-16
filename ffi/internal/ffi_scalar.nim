@@ -32,8 +32,9 @@ func isScalarOnly*(p: FFIProcMeta): bool =
   true
 
 func bindableProcs*(procs: seq[FFIProcMeta]): seq[FFIProcMeta] =
-  ## Procs the foreign-binding generators emit for; scalar-fast-path procs are
+  ## Procs the CBOR-speaking generators emit for; scalar-fast-path procs are
   ## dropped (their inline-scalar export doesn't match the CBOR codegen shape).
+  ## The `abi = c` C header binds the full registry instead.
   var kept: seq[FFIProcMeta] = @[]
   for p in procs:
     if not p.scalarFastPath:

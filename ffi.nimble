@@ -253,10 +253,9 @@ task genbindings_c_echo, "Generate C bindings for the echo example":
   exec genBindingsCmd(nimFlagsRefc, echoSrc, "c")
 
 task genbindings_c_abi_echo, "Generate CBOR-free abi=c C bindings for the echo example":
-  # ffiAllowScalarSkip omits echoVersion (all-scalar, no foreign codegen yet);
   # abiOut forces output beside the CBOR `c_bindings/` instead of overwriting it.
   const abiOut = "examples/echo/c_abi_bindings"
-  const abiFlags = " -d:ffiEchoAbiC -d:ffiAllowScalarSkip -d:ffiSrcPath=../echo.nim"
+  const abiFlags = " -d:ffiEchoAbiC -d:ffiSrcPath=../echo.nim"
   exec genBindingsCmd(nimFlagsOrc & abiFlags, echoSrc, "c", abiOut)
   exec genBindingsCmd(nimFlagsRefc & abiFlags, echoSrc, "c", abiOut)
 

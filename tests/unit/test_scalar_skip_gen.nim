@@ -1,6 +1,8 @@
-## Compiles fixtures/scalar_skip_fixture.nim (all-scalar `abi = c`) in a child
-## `nim check` under `-d:ffiGenBindings`, asserting genBindings() fails loudly
-## and that `-d:ffiAllowScalarSkip` downgrades the drop to a clean build.
+## Asserts genBindings() fails loudly on a scalar `abi = c` proc no target can
+## bind, and that -d:ffiAllowScalarSkip downgrades it to a clean build.
+##
+## The fixture compiles in a child `nim check` so its expected failure is a test
+## assertion, not this file's own compile error.
 
 import std/[os, osproc, strutils, compilesettings]
 import unittest2

@@ -1519,8 +1519,8 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
   return generated
 
 proc reportScalarFastPathDrops(procs: seq[FFIProcMeta]) {.compileTime.} =
-  ## Scalar-fast-path procs have no foreign-binding codegen yet; fail loudly
-  ## naming them unless `-d:ffiAllowScalarSkip` downgrades it to a hint.
+  ## Fail loudly on scalar-fast-path procs a target can't bind, unless
+  ## `-d:ffiAllowScalarSkip` downgrades it to a hint.
   var skipped: seq[string] = @[]
   for p in procs:
     if p.scalarFastPath:
@@ -1535,12 +1535,17 @@ proc reportScalarFastPathDrops(procs: seq[FFIProcMeta]) {.compileTime.} =
       )
     return
   error(
-    "genBindings: no foreign-binding codegen for scalar-fast-path `abi = c` " &
-      "procs yet, so these would be silently omitted from the generated " & "bindings: " &
-      skipped.join(", ") & ".\n" & "Fix by one of:\n" &
-      "  - switch the proc to `abi = cbor`, or\n" &
-      "  - add a non-scalar param (e.g. a struct or handle) so it takes the " &
-      "CBOR wire shape, or\n" & "  - pass -d:ffiAllowScalarSkip to accept the omission."
+    """genBindings: this target has no foreign-binding codegen for scalar-fast-path
+`abi = c` procs, so these would be silently omitted from the generated bindings:
+$1
+They are emitted only into the `abi = c` C header (an `abi = c` library generated
+with -d:targetLang=c).
+Fix by one of:
+  - make the library `abi = c` (declareLibrary(..., "c")) and generate C bindings, or
+  - switch the proc to `abi = cbor`, or
+  - add a non-scalar param (e.g. a struct or handle) so it takes the CBOR wire shape, or
+  - pass -d:ffiAllowScalarSkip to accept the omission.""" %
+      [skipped.join(", ")]
   )
 
 proc bindingsOutputDir(lang, explicit: string): string {.compileTime.} =
@@ -1595,12 +1600,19 @@ macro genBindings*(
 
   when defined(ffiGenBindings):
     let libName = deriveLibName(ffiProcRegistry)
-    let genProcs = bindableProcs(ffiProcRegistry)
-    reportScalarFastPathDrops(ffiProcRegistry)
     for rawLang in targetLang.split(','):
       let lang = string_helpers.toLower(rawLang.strip())
       if lang.len == 0:
         continue
+      # The `abi = c` C header is the only output with scalar-fast-path codegen.
+      let emitsScalars = lang == "c" and currentDefaultABIFormat == ABIFormat.C
+      let genProcs =
+        if emitsScalars:
+          ffiProcRegistry
+        else:
+          bindableProcs(ffiProcRegistry)
+      if not emitsScalars:
+        reportScalarFastPathDrops(ffiProcRegistry)
       let outDir = bindingsOutputDir(lang, outputDir)
       emitBindingsFor(
         lang, genProcs, libName, outDir, bindingsSrcPath(outDir, nimSrcRelPath)

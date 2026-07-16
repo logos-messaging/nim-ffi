@@ -51,6 +51,33 @@ suite "generateCAbiLibHeader":
         returnTypeName: "string",
       ),
       FFIProcMeta(
+        procName: "timer_add",
+        libName: "timer",
+        kind: FFIKind.FFI,
+        libTypeName: "Timer",
+        extraParams: @[param("a", "int"), param("b", "int32")],
+        returnTypeName: "int",
+        scalarFastPath: true,
+      ),
+      FFIProcMeta(
+        procName: "timer_name",
+        libName: "timer",
+        kind: FFIKind.FFI,
+        libTypeName: "Timer",
+        extraParams: @[],
+        returnTypeName: "string",
+        scalarFastPath: true,
+      ),
+      FFIProcMeta(
+        procName: "timer_ratio",
+        libName: "timer",
+        kind: FFIKind.FFI,
+        libTypeName: "Timer",
+        extraParams: @[param("enabled", "bool")],
+        returnTypeName: "float32",
+        scalarFastPath: true,
+      ),
+      FFIProcMeta(
         procName: "timer_destroy",
         libName: "timer",
         kind: FFIKind.DTOR,
@@ -105,6 +132,40 @@ suite "generateCAbiLibHeader":
     check "timer_ctx_echo(" in header
     check "timer_ctx_version(" in header
     check "timer_ctx_destroy(" in header
+
+  test "scalar-fast-path methods take inline args, not a Req struct":
+    check "TimerAddReq" notin header
+    check "TimerNameReq" notin header
+    check "TimerRatioReq" notin header
+    check "typedef void (*TimerScalarRawFn)(int caller_ret, char* msg, size_t len, void* user_data);" in
+      header
+    check "int timer_add(void* ctx, TimerScalarRawFn callback, void* user_data, int64_t a, int32_t b);" in
+      header
+    check "int timer_name(void* ctx, TimerScalarRawFn callback, void* user_data);" in
+      header
+
+  test "scalar-fast-path replies ride the same typed ReplyFn surface":
+    check "typedef void (*TimerAddReplyFn)(int err_code, const int64_t* reply," in header
+    check "typedef void (*TimerNameReplyFn)(int err_code, const char* reply," in header
+    check "typedef void (*TimerRatioReplyFn)(int err_code, const float* reply," in header
+
+  test "scalar-fast-path wrappers box the callback and adapt the raw reply":
+    check "typedef struct { TimerAddReplyFn fn; void* user_data; } TimerAddScalarBox;" in
+      header
+    check "static void timer_add_scalar_reply(int caller_ret, char* msg, size_t len, void* ud)" in
+      header
+    check "timer_ctx_add(const TimerCtx* ctx, int64_t a, int32_t b, TimerAddReplyFn on_reply, void* user_data)" in
+      header
+    check "timer_ctx_name(const TimerCtx* ctx, TimerNameReplyFn on_reply, void* user_data)" in
+      header
+    check "return timer_add(ctx->ptr, timer_add_scalar_reply, box, a, b);" in header
+
+  test "scalar returns unpack the 8-byte image; strings copy through the dup helper":
+    check "memcpy(&reply, &slot, sizeof(reply));" in header
+    check "float reply = (float)wide;" in header
+    check "char* reply = nimffi_abi_dup_cstr_n(msg ? msg : \"\", msg ? len : 0);" in
+      header
+    check "if (n == SIZE_MAX) return NULL;" in header
 
   test "events are rejected (CBOR-only for now)":
     expect ValueError:

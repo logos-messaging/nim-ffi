@@ -946,7 +946,7 @@ proc newAbiReg(types: seq[FFITypeMeta], procs: seq[FFIProcMeta]): AbiReg =
   for t in types:
     reg.typeTable[t.name] = t
   for p in procs:
-    if p.kind != FFIKind.DTOR:
+    if p.kind != FFIKind.DTOR and not p.scalarFastPath:
       let rt = reqTypeMeta(p)
       reg.typeTable[rt.name] = rt
   return reg
@@ -1010,6 +1010,37 @@ proc emitAbiReplyTypedefs(
         " reply, const char* err_msg, void* user_data);"
     )
 
+func abiScalarRawFnName(libType: string): string =
+  ## Raw-bytes callback typedef a scalar-fast-path export takes.
+  return libType & "ScalarRawFn"
+
+const abiScalarDupCStr = "nimffi_abi_dup_cstr_n"
+
+func abiScalarDupHelper(): seq[string] =
+  ## CBOR-free twin of `nimffi_dup_cstr_n`, include-guarded so two `abi = c`
+  ## headers can co-exist in one TU.
+  return @[
+    "#ifndef NIMFFI_ABI_DUP_CSTR_N",
+    "#define NIMFFI_ABI_DUP_CSTR_N",
+    "/* NUL-terminated copy of a length-delimited byte run; NULL if it can't. */",
+    "static inline char* " & abiScalarDupCStr & "(const char* s, size_t n) {",
+    "    if (n == SIZE_MAX) return NULL;",
+    "    char* p = (char*)malloc(n + 1);",
+    "    if (p) {",
+    "        if (n > 0) memcpy(p, s, n);",
+    "        p[n] = '\\0';",
+    "    }",
+    "    return p;",
+    "}",
+    "#endif",
+  ]
+
+func abiScalarArgParams(m: FFIProcMeta): seq[string] =
+  var params: seq[string] = @[]
+  for ep in m.extraParams:
+    params.add(abiLeafCType(ep.typeName.strip()).cType & " " & ep.name)
+  return params
+
 proc emitAbiExternDecls(
     lines: var seq[string],
     reg: var AbiReg,
@@ -1017,31 +1048,50 @@ proc emitAbiExternDecls(
     procs: seq[FFIProcMeta],
 ) =
   let createRawFn = libType & "CreateRawFn"
-  var haveCtor = false
+  var haveCtor, haveScalar = false
   for p in procs:
     if p.kind == FFIKind.CTOR:
       haveCtor = true
+    if p.scalarFastPath:
+      haveScalar = true
   if haveCtor:
     lines.add(
       "typedef void (*" & createRawFn &
         ")(int err_code, const char* ctx_addr, const char* err_msg, void* user_data);"
     )
+  if haveScalar:
+    lines.add(
+      "/* Raw reply of a scalar-fast-path export: `msg`/`len` are bytes (a string"
+    )
+    lines.add("   return's UTF-8, or the 8-byte native-endian scalar image), not")
+    lines.add("   NUL-terminated and valid only for the duration of the call. */")
+    lines.add(
+      "typedef void (*" & abiScalarRawFnName(libType) &
+        ")(int caller_ret, char* msg, size_t len, void* user_data);"
+    )
+    for l in abiScalarDupHelper():
+      lines.add(l)
   lines.add("#ifdef __cplusplus")
   lines.add("extern \"C\" {")
   lines.add("#endif")
   lines.add("")
   for p in procs:
-    let reqStruct = reqStructName(p)
     case p.kind
     of FFIKind.FFI:
-      let info = abiMethodReplyInfo(reg, libType, p)
-      lines.add(
-        "int " & p.procName & "(void* ctx, " & info.fnType &
-          " on_reply, void* user_data, const " & reqStruct & "* req);"
-      )
+      if p.scalarFastPath:
+        var params =
+          @["void* ctx", abiScalarRawFnName(libType) & " callback", "void* user_data"]
+        params.add(abiScalarArgParams(p))
+        lines.add("int " & p.procName & "(" & params.join(", ") & ");")
+      else:
+        let info = abiMethodReplyInfo(reg, libType, p)
+        lines.add(
+          "int " & p.procName & "(void* ctx, " & info.fnType &
+            " on_reply, void* user_data, const " & reqStructName(p) & "* req);"
+        )
     of FFIKind.CTOR:
       lines.add(
-        "void* " & p.procName & "(const " & reqStruct & "* req, " & createRawFn &
+        "void* " & p.procName & "(const " & reqStructName(p) & "* req, " & createRawFn &
           " on_created, void* user_data);"
       )
     of FFIKind.DTOR:
@@ -1179,6 +1229,122 @@ proc emitAbiMethod(
   lines.add("}")
   lines.add("")
 
+func abiScalarOkLines(m: FFIProcMeta, fnType: string): seq[string] =
+  ## Trampoline RET_OK branch. A string return rides as its own UTF-8; every
+  ## other scalar is the 8-byte image `ffiScalarRetBytes` packs (ints
+  ## sign-extended, floats widened to double, bool as 0/1).
+  let rt = m.returnTypeName.strip()
+  if rt == "string" or rt == "cstring":
+    return @[
+      "    char* reply = " & abiScalarDupCStr & "(msg ? msg : \"\", msg ? len : 0);",
+      "    if (!reply) {",
+      "        fn(NIMFFI_RET_ERR, \"\", \"out of memory\", user_data);",
+      "        return;", "    }", "    fn(NIMFFI_RET_OK, reply, \"\", user_data);",
+      "    free(reply);",
+    ]
+  var lines = @[
+    "    uint64_t slot = 0;", "    if (!msg || len != sizeof(slot)) {",
+    "        fn(NIMFFI_RET_ERR, NULL, \"scalar reply: unexpected payload size\", user_data);",
+    "        return;", "    }", "    memcpy(&slot, msg, sizeof(slot));",
+  ]
+  let cType = abiLeafCType(rt).cType
+  case rt
+  of "int", "int64":
+    lines.add("    int64_t reply;")
+    lines.add("    memcpy(&reply, &slot, sizeof(reply));")
+  of "int8", "int16", "int32":
+    lines.add("    int64_t wide;")
+    lines.add("    memcpy(&wide, &slot, sizeof(wide));")
+    lines.add("    " & cType & " reply = (" & cType & ")wide;")
+  of "uint", "uint64":
+    lines.add("    uint64_t reply = slot;")
+  of "uint8", "uint16", "uint32", "byte":
+    lines.add("    " & cType & " reply = (" & cType & ")slot;")
+  of "bool":
+    lines.add("    bool reply = slot != 0;")
+  of "float", "float64":
+    lines.add("    double reply;")
+    lines.add("    memcpy(&reply, &slot, sizeof(reply));")
+  of "float32":
+    lines.add("    double wide;")
+    lines.add("    memcpy(&wide, &slot, sizeof(wide));")
+    lines.add("    float reply = (float)wide;")
+  else:
+    raise newException(
+      ValueError, "abi = c: unexpected scalar-fast-path return type: " & rt
+    )
+  lines.add("    fn(NIMFFI_RET_OK, &reply, \"\", user_data);")
+  return lines
+
+proc emitAbiScalarMethod(
+    lines: var seq[string],
+    reg: var AbiReg,
+    ctxType, libName, libType: string,
+    m: FFIProcMeta,
+) =
+  ## Args go inline to the raw export and a trampoline adapts the raw-bytes
+  ## reply into the typed `ReplyFn` surface. The trampoline frees the callback
+  ## box, relying on the dylib invoking it exactly once on every path.
+  let stripped = stripLibPrefix(m.procName, m.libName)
+  let pascal = snakeToPascalCase(stripped)
+  let info = abiMethodReplyInfo(reg, libType, m)
+  let boxType = libType & pascal & "ScalarBox"
+  let tramp = m.procName & "_scalar_reply"
+  let isStr = m.returnTypeName.strip() in ["string", "cstring"]
+  let errReply = if isStr: "\"\"" else: "NULL"
+  lines.add(
+    "typedef struct { " & info.fnType & " fn; void* user_data; } " & boxType & ";"
+  )
+  lines.add(
+    "static void " & tramp & "(int caller_ret, char* msg, size_t len, void* ud) {"
+  )
+  lines.add("    " & boxType & "* box = (" & boxType & "*)ud;")
+  lines.add("    if (!box) return;")
+  lines.add("    " & info.fnType & " fn = box->fn;")
+  lines.add("    void* user_data = box->user_data;")
+  lines.add("    free(box);")
+  lines.add("    if (!fn) return;")
+  lines.add("    if (caller_ret != NIMFFI_RET_OK) {")
+  lines.add(
+    "        char* em = " & abiScalarDupCStr & "(msg ? msg : \"\", msg ? len : 0);"
+  )
+  lines.add(
+    "        fn(caller_ret, " & errReply & ", em ? em : \"FFI call failed\", user_data);"
+  )
+  lines.add("        free(em);")
+  lines.add("        return;")
+  lines.add("    }")
+  for l in abiScalarOkLines(m, info.fnType):
+    lines.add(l)
+  lines.add("}")
+  lines.add("")
+  let params = abiScalarArgParams(m)
+  let head =
+    "static inline int " & libName & "_ctx_" & stripped & "(const " & ctxType & "* ctx, "
+  let sig =
+    if params.len > 0:
+      head & params.join(", ") & ", " & info.fnType & " on_reply, void* user_data) {"
+    else:
+      head & info.fnType & " on_reply, void* user_data) {"
+  lines.add(sig)
+  lines.add(
+    "    " & boxType & "* box = (" & boxType & "*)malloc(sizeof(" & boxType & "));"
+  )
+  lines.add("    if (!box) {")
+  lines.add(
+    "        if (on_reply) on_reply(-1, " & errReply & ", \"out of memory\", user_data);"
+  )
+  lines.add("        return -1;")
+  lines.add("    }")
+  lines.add("    box->fn = on_reply;")
+  lines.add("    box->user_data = user_data;")
+  var callArgs = @["ctx->ptr", tramp, "box"]
+  for ep in m.extraParams:
+    callArgs.add(ep.name)
+  lines.add("    return " & m.procName & "(" & callArgs.join(", ") & ");")
+  lines.add("}")
+  lines.add("")
+
 proc generateCAbiLibHeader*(
     procs: seq[FFIProcMeta],
     types: seq[FFITypeMeta],
@@ -1197,7 +1363,7 @@ proc generateCAbiLibHeader*(
   for t in types:
     ensureAbiStruct(reg, t.name)
   for p in procs:
-    if p.kind != FFIKind.DTOR:
+    if p.kind != FFIKind.DTOR and not p.scalarFastPath:
       ensureAbiStruct(reg, reqStructName(p))
 
   let guard = "NIM_FFI_LIB_" & libName.toUpperAscii() & "_C_ABI_H_INCLUDED"
@@ -1236,7 +1402,10 @@ proc generateCAbiLibHeader*(
   emitAbiCtxAndCtor(lines, reg, libName, libType, ctxType, classified.ctors)
   emitAbiDestructor(lines, ctxType, libName, classified.dtorProcName)
   for m in classified.methods:
-    emitAbiMethod(lines, reg, ctxType, libName, libType, m)
+    if m.scalarFastPath:
+      emitAbiScalarMethod(lines, reg, ctxType, libName, libType, m)
+    else:
+      emitAbiMethod(lines, reg, ctxType, libName, libType, m)
 
   lines.add("#endif /* " & guard & " */")
   return lines.join("\n") & "\n"

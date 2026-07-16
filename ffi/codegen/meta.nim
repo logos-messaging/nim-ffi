@@ -33,7 +33,7 @@ type
     abiFormat*: ABIFormat
     scalarFastPath*: bool
       ## `abi = c` proc with an all-scalar signature: uses the CBOR-free fast
-      ## path and is skipped by the foreign-binding generators.
+      ## path, and binds only in the `abi = c` C header (see `bindableProcs`).
 
   FFIFieldMeta* = object
     name*: string
@@ -135,5 +135,5 @@ const ffiOutputDir* {.strdefine.} = ""
 # Nim src path override relative to outputDir (-d:ffiSrcPath); empty derives it.
 const ffiSrcPath* {.strdefine.} = ""
 
-# When true, scalar-only `abi = c` procs are silently omitted rather than failing the build. Off by default so the drop is loud; see genBindings().
+# When true, targets without scalar codegen silently omit scalar-only `abi = c` procs rather than failing the build. Off by default so the drop is loud; see genBindings().
 const ffiAllowScalarSkip* {.booldefine.} = false
