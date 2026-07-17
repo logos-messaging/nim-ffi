@@ -163,6 +163,18 @@ suite "FFIContextPool":
     for c in ctxs:
       discard sharedPool.destroyFFIContext(c)
 
+  test "destroyFFIContext refuses the static context but not a plain one":
+    let staticCtx = sharedPool.staticFFIContext().valueOr:
+      assert false, "staticFFIContext failed: " & $error
+      return
+    check sharedPool.destroyFFIContext(staticCtx).isErr()
+    # Still live and still the same context, not a released slot.
+    check sharedPool.staticFFIContext().tryGet() == staticCtx
+    let plain = sharedPool.createFFIContext().valueOr:
+      assert false, "createFFIContext(pool) failed: " & $error
+      return
+    check sharedPool.destroyFFIContext(plain).isOk()
+
   test "a failed create leaves staticFFIContext retryable":
     var ctxs: array[MaxFFIContexts, ptr FFIContext[TestLib]]
     for i in 0 ..< MaxFFIContexts:
@@ -175,6 +187,13 @@ suite "FFIContextPool":
     check retryPool.staticFFIContext().isOk()
     for i in 1 ..< MaxFFIContexts:
       discard retryPool.destroyFFIContext(ctxs[i])
+
+  # Static contexts hold FFI/event threads for the whole process. Left running
+  # under refc they race with later suites' allocation and GC (macOS SIGSEGV).
+  # No later case uses these pools, so stop their threads here.
+  test "static contexts tear down without outliving the suite":
+    check sharedPool.destroyStaticFFIContext().isOk()
+    check retryPool.destroyStaticFFIContext().isOk()
 
   test "requests are processed via pool context":
     var pool: FFIContextPool[TestLib]

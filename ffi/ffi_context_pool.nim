@@ -41,10 +41,18 @@ proc createFFIContext*[T](
     return err("createFFIContext: initContextResources failed: " & $error)
   ok(ctx)
 
+proc isStaticCtx[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]): bool =
+  ## `staticCtx` is published before the state flips, so `Ready` implies it is readable.
+  pool.staticState.load() == StaticCtxReady and
+    pool.staticCtx.load() == cast[pointer](ctx)
+
 proc destroyFFIContext*[T](
     pool: var FFIContextPool[T], ctx: ptr FFIContext[T]
 ): Result[void, string] =
   ## On thread-exit timeout the slot is leaked; closing live-thread resources is unsafe.
+  # Destroying it would release the slot while `staticState` still points at it.
+  if pool.isStaticCtx(ctx):
+    return err("destroyFFIContext(pool): the {.ffiStatic.} context outlives every ctx")
   ctx.stopAndJoinThreads().isOkOr:
     return err("destroyFFIContext(pool): " & $error)
   # Required: next acquisition would otherwise re-init a live lock (UB).
@@ -79,6 +87,25 @@ proc staticFFIContext*[T](
       pool.staticCtx.store(cast[pointer](ctx))
       pool.staticState.store(StaticCtxReady)
       return ok(ctx)
+
+proc destroyStaticFFIContext*[T](pool: var FFIContextPool[T]): Result[void, string] =
+  ## Teardown counterpart to `staticFFIContext`: stops the static context's
+  ## threads and frees its slot. The static context is meant to live for the
+  ## whole process, so only call this once nothing will call `staticFFIContext`
+  ## again (e.g. test teardown) — a lingering static context otherwise keeps its
+  ## FFI/event threads running for the process lifetime.
+  if pool.staticState.load() != StaticCtxReady:
+    return ok()
+  let ctx = cast[ptr FFIContext[T]](pool.staticCtx.load())
+  ctx.stopAndJoinThreads().isOkOr:
+    return err("destroyStaticFFIContext: " & $error)
+  let deinitRes = ctx.deinitContextResources()
+  pool.releaseSlot(ctx)
+  pool.staticCtx.store(nil)
+  pool.staticState.store(StaticCtxNone)
+  deinitRes.isOkOr:
+    return err("destroyStaticFFIContext: " & $error)
+  return ok()
 
 proc isValidCtx*[T](pool: var FFIContextPool[T], ctx: pointer): bool =
   ## Rejects nil / dangling pointers at the API boundary.

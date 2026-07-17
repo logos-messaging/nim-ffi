@@ -54,9 +54,11 @@ All notable changes to this project are documented in this file.
   `<lib>_static_<proc>(...)`, while C++ and Rust emit an associated function on
   the ctx type taking the `timeout` a method reads from its ctx. Handlers run on
   the library's *static context*, created on the first such call and alive for the
-  rest of the process, so that call starts a thread pair that is never torn down.
-  An `{.ffiHandle.}` parameter or return is rejected at macro time: a handle
-  belongs to the context that created it, which a static proc cannot reach.
+  rest of the process, so that call starts a thread pair that is never torn down —
+  `destroyFFIContext` refuses it rather than releasing its slot; `destroyStaticFFIContext`
+  is the explicit teardown counterpart (stops the thread pair and frees the slot) for
+  process shutdown and tests. An `{.ffiHandle.}` parameter or return is rejected at macro
+  time: a handle belongs to the context that created it, which a static proc cannot reach.
 - `{.ffi.}` now accepts an `enum` type, emitting a native enum in every target
   (C `enum`, C++ `enum class`, Rust enum, CDDL string choice). Values cross the
   wire as the text `$value` yields — the associated string if declared, else the
