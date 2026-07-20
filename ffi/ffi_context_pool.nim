@@ -12,7 +12,9 @@ type
     StaticCtxReady
 
   FFIContextPool*[T] = object
-    ## Fixed pool. Bounds ThreadSignalPtr fds at MaxFFIContexts * 2.
+    ## Fixed pool. Each live context holds 5 ThreadSignalPtrs — one fd each on
+    ## Linux, two (a socketpair) elsewhere. Under refc a destroyed context cannot
+    ## close them (see `deinitContextResources`), so churn leaks fds unbounded.
     slots: array[MaxFFIContexts, FFIContext[T]]
     inUse: array[MaxFFIContexts, Atomic[bool]]
     staticCtx: Atomic[pointer]
