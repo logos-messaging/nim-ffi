@@ -81,3 +81,53 @@ suite "snakeToPascalCase":
   test "already-mixed parts preserve their existing case after the first":
     # Existing caps after the first letter of each part are preserved.
     check snakeToPascalCase("already_HasCaps") == "AlreadyHasCaps"
+
+suite "renderDocComment":
+  test "empty doc renders nothing":
+    check renderDocComment("", "", "/// ").len == 0
+
+  test "blank doc renders nothing":
+    check renderDocComment("  \n  ", "", "/// ").len == 0
+
+  test "single line gets the prefix":
+    check renderDocComment("does a thing", "", "/// ") == @["/// does a thing"]
+
+  test "each line gets prefix and indent":
+    check renderDocComment("one\ntwo", "    ", "/// ") == @[
+      "    /// one", "    /// two"
+    ]
+
+  test "a blank interior line keeps no trailing whitespace":
+    check renderDocComment("one\n\ntwo", "", "/// ") == @["/// one", "///", "/// two"]
+
+  test "trailing blank lines are dropped":
+    check renderDocComment("one\n\n", "", "; ") == @["; one"]
+
+  test "a trailing backslash cannot splice the next line into the comment":
+    check renderDocComment("one \\\ntwo", "", "/// ") == @["/// one", "/// two"]
+
+suite "renderBlockDocComment":
+  test "empty doc renders nothing":
+    check renderBlockDocComment("", "").len == 0
+
+  test "single line collapses to a one-line block":
+    check renderBlockDocComment("does a thing", "") == @["/** does a thing */"]
+
+  test "multiple lines render a star block":
+    check renderBlockDocComment("one\ntwo", "") == @["/**", " * one", " * two", " */"]
+
+  test "indent applies to every line of the block":
+    check renderBlockDocComment("one\ntwo", "  ") ==
+      @["  /**", "   * one", "   * two", "   */"]
+
+  test "a blank interior line keeps no trailing whitespace":
+    check renderBlockDocComment("one\n\ntwo", "") ==
+      @["/**", " * one", " *", " * two", " */"]
+
+  test "a one-liner cannot close its own comment early":
+    check renderBlockDocComment("Frees it. */ #define OOPS 1 /* x", "") ==
+      @["/** Frees it. * / #define OOPS 1 /* x */"]
+
+  test "a star block cannot close its own comment early":
+    check renderBlockDocComment("one */ #define OOPS 1\ntwo", "") ==
+      @["/**", " * one * / #define OOPS 1", " * two", " */"]

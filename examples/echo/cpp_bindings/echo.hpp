@@ -431,9 +431,13 @@ inline CborError decode_cbor(CborValue& it, EchoVersionReq&) {
 extern "C" {
 typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_data);
 
+/** Creates an echo context that prefixes every reply with `config.prefix`. */
 void* echo_create(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback callback, void* user_data);
+/** Upper-cases `req.text` and returns it behind the context's prefix. */
 int echo_shout(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+/** Returns the library's version string. */
 int echo_version(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+/** Releases the echo context. */
 int echo_destroy(void* ctx);
 uint64_t echo_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
 int echo_remove_event_listener(void* ctx, uint64_t listener_id);
@@ -512,6 +516,7 @@ inline Result<std::vector<std::uint8_t>> ffi_call_(
 
 class EchoCtx {
 public:
+    /// Creates an echo context that prefixes every reply with `config.prefix`.
     static Result<std::unique_ptr<EchoCtx>> create(const EchoConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
         const auto ffi_req_ = EchoCreateCtorReq{config};
         auto ffi_enc_ = encodeCborFFI(ffi_req_);
@@ -535,6 +540,7 @@ public:
         return Result<std::unique_ptr<EchoCtx>>::ok(std::unique_ptr<EchoCtx>(new EchoCtx(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout)));
     }
 
+    /// Creates an echo context that prefixes every reply with `config.prefix`.
     static std::future<Result<std::unique_ptr<EchoCtx>>> createAsync(const EchoConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
         return std::async(std::launch::async, [config, timeout]() { return create(config, timeout); });
     }
@@ -560,6 +566,7 @@ public:
     EchoCtx(EchoCtx&&) = delete;
     EchoCtx& operator=(EchoCtx&&) = delete;
 
+    /// Upper-cases `req.text` and returns it behind the context's prefix.
     Result<ShoutResponse> shout(const ShoutRequest& req) const {
         const auto ffi_req_ = EchoShoutReq{req};
         auto ffi_enc_ = encodeCborFFI(ffi_req_);
@@ -572,10 +579,12 @@ public:
         return decodeCborFFI<ShoutResponse>(ffi_raw_.value());
     }
 
+    /// Upper-cases `req.text` and returns it behind the context's prefix.
     std::future<Result<ShoutResponse>> shoutAsync(const ShoutRequest& req) const {
         return std::async(std::launch::async, [this, req]() { return this->shout(req); });
     }
 
+    /// Returns the library's version string.
     Result<std::string> version() const {
         const auto ffi_req_ = EchoVersionReq{};
         auto ffi_enc_ = encodeCborFFI(ffi_req_);
@@ -588,6 +597,7 @@ public:
         return decodeCborFFI<std::string>(ffi_raw_.value());
     }
 
+    /// Returns the library's version string.
     std::future<Result<std::string>> versionAsync() const {
         return std::async(std::launch::async, [this]() { return this->version(); });
     }

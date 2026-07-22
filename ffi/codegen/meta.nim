@@ -26,6 +26,7 @@ type
     libName*: string
     kind*: FFIKind
     libTypeName*: string
+    doc*: string
     extraParams*: seq[FFIParamMeta] # all params except the lib param
     returnTypeName*: string
     returnIsPtr*: bool
@@ -52,6 +53,7 @@ type
     libName*: string
     payloadTypeName*: string
     abiFormat*: ABIFormat
+    doc*: string
 
 var ffiProcRegistry* {.compileTime.}: seq[FFIProcMeta]
 var ffiTypeRegistry* {.compileTime.}: seq[FFITypeMeta]

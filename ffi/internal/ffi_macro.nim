@@ -143,6 +143,16 @@ proc registerFFITypeInfo(
   )
   return typeDef
 
+func extractDocComment(prc: NimNode): string {.compileTime.} =
+  ## The proc's leading `##`, or "". Nim drops comments outside a proc body, so
+  ## types and fields are unreachable from here.
+  let body = prc[^1]
+  if body.kind != nnkStmtList or body.len == 0:
+    return ""
+  if body[0].kind != nnkCommentStmt:
+    return ""
+  return body[0].strVal
+
 proc nimTypeNameRepr(typ: NimNode): string =
   ## Stringifies a parameter or field type for the registry.
   case typ.kind
@@ -760,6 +770,7 @@ macro ffi*(args: varargs[untyped]): untyped =
     returnIsPtr: retIsPtr,
     returnIsHandle: retIsHandle,
     abiFormat: abiFormat,
+    doc: extractDocComment(prc),
   )
 
   # CBOR-free scalar fast path: only `abi = c` with all-scalar params/return that fit the inline slots; non-scalar `abi = c` rides the `_CWire` C-dispatch.
@@ -1294,6 +1305,7 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
         returnTypeName: $libTypeName,
         returnIsPtr: false,
         abiFormat: abiFormat,
+        doc: extractDocComment(prc),
       )
     )
 
@@ -1422,6 +1434,7 @@ macro ffiDtor*(args: varargs[untyped]): untyped =
       returnTypeName: "",
       returnIsPtr: false,
       abiFormat: abiFormat,
+      doc: extractDocComment(prc),
     )
   )
 
@@ -1511,6 +1524,7 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
       libName: currentLibName,
       payloadTypeName: payloadTypeNameStr,
       abiFormat: abiFormat,
+      doc: extractDocComment(prc),
     )
   )
 

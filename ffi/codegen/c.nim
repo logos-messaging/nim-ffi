@@ -2,7 +2,7 @@
 ## `abi = c` emits one header whose structs are the C ABI directly. Lacking
 ## generics, each distinct `seq[T]`/`Option[T]` is monomorphised per type.
 
-import std/[os, strutils, tables, sets]
+import std/[os, strutils, tables, sets, options]
 import ./meta, ./string_helpers, ./c_cpp_common, ./types_ir
 
 ## Fixed 64-bit wire type for any Nim `ptr T`/`pointer` (mirrors CppPtrType).
@@ -487,6 +487,7 @@ proc emitConstructors(
         head & params.join(", ") & ", " & fnType & " on_created, void* user_data) {"
       else:
         head & fnType & " on_created, void* user_data) {"
+    lines.add(renderBlockDocComment(ctor.doc))
     lines.add(sig)
     lines.add("    " & reqName & " ffi_req;")
     lines.add("    memset(&ffi_req, 0, sizeof(ffi_req));")
@@ -525,15 +526,19 @@ proc emitConstructors(
 
 proc emitDestructor(
     lines: var seq[string],
-    ctxType, libName, dtorProcName: string,
+    ctxType, libName: string,
+    dtor: Option[FFIProcMeta],
     events: seq[FFIEventMeta],
 ) =
+  if dtor.isSome():
+    lines.add(renderBlockDocComment(dtor.get().doc))
   lines.add("static inline int " & libName & "_ctx_destroy(" & ctxType & "* ctx) {")
   lines.add("    if (!ctx) return NIMFFI_RET_OK;")
   lines.add("    int rc = NIMFFI_RET_OK;")
-  if dtorProcName.len > 0:
+  if dtor.isSome():
     lines.add(
-      "    if (ctx->ptr) { rc = " & dtorProcName & "(ctx->ptr); ctx->ptr = NULL; }"
+      "    if (ctx->ptr) { rc = " & dtor.get().procName &
+        "(ctx->ptr); ctx->ptr = NULL; }"
     )
   if events.len > 0:
     # A failed teardown leaves the worker threads live (ffi_context.nim:
@@ -557,6 +562,7 @@ proc emitListenerApi(
     return
   for ev in events:
     let n = evNames(libType, libName, ev)
+    lines.add(renderBlockDocComment(ev.doc))
     lines.add(
       "static inline uint64_t " & n.regName & "(" & ctxType & "* ctx, " & n.fnType &
         " fn, void* user_data) {"
@@ -661,6 +667,7 @@ proc emitMethod(
       head & params.join(", ") & ", " & fnType & " on_reply, void* user_data) {"
     else:
       head & fnType & " on_reply, void* user_data) {"
+  lines.add(renderBlockDocComment(m.doc))
   lines.add(sig)
   lines.add("    " & reqName & " ffi_req;")
   lines.add("    memset(&ffi_req, 0, sizeof(ffi_req));")
@@ -789,6 +796,7 @@ proc generateCLibHeader*(
   lines.add("#endif")
   lines.add("")
   for p in procs:
+    lines.add(renderBlockDocComment(p.doc))
     case p.kind
     of FFIKind.FFI:
       lines.add(
@@ -842,7 +850,7 @@ proc generateCLibHeader*(
   emitEventMachinery(lines, reg, libType, libName, events)
   emitContextStruct(lines, ctxType, events)
   emitConstructors(lines, reg, ctxType, libType, libName, ctors)
-  emitDestructor(lines, ctxType, libName, classified.dtorProcName, events)
+  emitDestructor(lines, ctxType, libName, classified.dtor, events)
   emitListenerApi(lines, ctxType, libType, libName, events)
   for m in methods:
     emitMethod(lines, reg, ctxType, libType, libName, m)
@@ -1085,6 +1093,7 @@ proc emitAbiExternDecls(
   lines.add("#endif")
   lines.add("")
   for p in procs:
+    lines.add(renderBlockDocComment(p.doc))
     case p.kind
     of FFIKind.FFI:
       if p.scalarFastPath:
@@ -1181,6 +1190,7 @@ proc emitAbiCtxAndCtor(
         head & params.join(", ") & ", " & createFn & " on_created, void* user_data) {"
       else:
         head & createFn & " on_created, void* user_data) {"
+    lines.add(renderBlockDocComment(ctor.doc))
     lines.add(sig)
     lines.add("    " & reqStruct & " ffi_req;")
     lines.add("    memset(&ffi_req, 0, sizeof(ffi_req));")
@@ -1220,6 +1230,7 @@ proc emitAbiMethod(
       head & params.join(", ") & ", " & info.fnType & " on_reply, void* user_data) {"
     else:
       head & info.fnType & " on_reply, void* user_data) {"
+  lines.add(renderBlockDocComment(m.doc))
   lines.add(sig)
   lines.add("    " & reqStruct & " ffi_req;")
   lines.add("    memset(&ffi_req, 0, sizeof(ffi_req));")
@@ -1326,6 +1337,7 @@ proc emitAbiScalarMethod(
       head & params.join(", ") & ", " & info.fnType & " on_reply, void* user_data) {"
     else:
       head & info.fnType & " on_reply, void* user_data) {"
+  lines.add(renderBlockDocComment(m.doc))
   lines.add(sig)
   lines.add(
     "    " & boxType & "* box = (" & boxType & "*)malloc(sizeof(" & boxType & "));"
@@ -1401,7 +1413,7 @@ proc generateCAbiLibHeader*(
   lines.add("/* High-level context wrapper */")
   emitAbiCtxAndCtor(lines, reg, libName, libType, ctxType, classified.ctors)
   # abi = c has no events, so the destructor is the CBOR one minus the listener sweep.
-  emitDestructor(lines, ctxType, libName, classified.dtorProcName, @[])
+  emitDestructor(lines, ctxType, libName, classified.dtor, @[])
   for m in classified.methods:
     if m.scalarFastPath:
       emitAbiScalarMethod(lines, reg, ctxType, libName, libType, m)

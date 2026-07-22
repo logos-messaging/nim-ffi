@@ -112,6 +112,7 @@ proc emitEventDispatcher(
   for ev in events:
     let methodName =
       "addOn" & capitalizeFirstLetter(ev.nimProcName).substr(2) & "Listener"
+    lines.add(renderMemberDocComment(ev.doc))
     lines.add(
       "    ListenerHandle $1(std::function<void(const $2&)> handler) {" %
         [methodName, ev.payloadTypeName]
@@ -251,6 +252,7 @@ proc generateCppHeader*(
   )
   lines.add("")
   for p in procs:
+    lines.add(renderBlockDocComment(p.doc))
     case p.kind
     of FFIKind.FFI:
       lines.add(
@@ -312,6 +314,7 @@ proc generateCppHeader*(
 
     # `create` yields the ctx via the callback's CBOR address (sync void* return discarded), owned as a unique_ptr since the class forbids copy/move.
     let createRet = "Result<std::unique_ptr<$1>>" % [ctxTypeName]
+    lines.add(renderMemberDocComment(ctor.doc))
     lines.add("    static $1 create($2) {" % [createRet, ctorParamsWithTimeout])
     lines.add("        const auto ffi_req_ = $1;" % [reqInit])
     lines.add("        auto ffi_enc_ = encodeCborFFI(ffi_req_);")
@@ -363,6 +366,7 @@ proc generateCppHeader*(
         epNames.join(", ") & ", timeout"
       else:
         "timeout"
+    lines.add(renderMemberDocComment(ctor.doc))
     lines.add(
       "    static std::future<Result<std::unique_ptr<$1>>> createAsync($2) {" %
         [ctxTypeName, ctorParamsWithTimeout]
@@ -405,6 +409,7 @@ proc generateCppHeader*(
     let reqInit = cppBracedInit(reqName, methParamNames)
 
     let methRet = "Result<$1>" % [retCppType]
+    lines.add(renderMemberDocComment(m.doc))
     lines.add("    $1 $2($3) const {" % [methRet, methodName, methParamsStr])
     lines.add("        const auto ffi_req_ = $1;" % [reqInit])
     lines.add("        auto ffi_enc_ = encodeCborFFI(ffi_req_);")
@@ -425,6 +430,7 @@ proc generateCppHeader*(
     lines.add("    }")
     lines.add("")
     # `this->methodName(...)` so a same-named param can't shadow the call target.
+    lines.add(renderMemberDocComment(m.doc))
     if methParamsStr.len > 0:
       lines.add(
         "    std::future<$1> $2Async($3) const {" % [methRet, methodName, methParamsStr]

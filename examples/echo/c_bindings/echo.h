@@ -193,9 +193,13 @@ static inline CborError echo_dec_EchoVersionReq(
 extern "C" {
 #endif
 
+/** Creates an echo context that prefixes every reply with `config.prefix`. */
 void* echo_create(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback callback, void* user_data);
+/** Upper-cases `req.text` and returns it behind the context's prefix. */
 int echo_shout(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+/** Returns the library's version string. */
 int echo_version(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+/** Releases the echo context. */
 int echo_destroy(void* ctx);
 uint64_t echo_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
 int echo_remove_event_listener(void* ctx, uint64_t listener_id);
@@ -264,6 +268,7 @@ static void echo_create_trampoline(int ret, const char* msg, size_t len, void* u
     free(box);
 }
 
+/** Creates an echo context that prefixes every reply with `config.prefix`. */
 static inline int echo_ctx_create(const EchoConfig* config, EchoCreateFn on_created, void* user_data) {
     EchoCreateCtorReq ffi_req;
     memset(&ffi_req, 0, sizeof(ffi_req));
@@ -289,6 +294,7 @@ static inline int echo_ctx_create(const EchoConfig* config, EchoCreateFn on_crea
     return 0;
 }
 
+/** Releases the echo context. */
 static inline int echo_ctx_destroy(EchoCtx* ctx) {
     if (!ctx) return NIMFFI_RET_OK;
     int rc = NIMFFI_RET_OK;
@@ -329,6 +335,7 @@ static void echo_shout_reply_trampoline(int ret, const char* msg, size_t len, vo
     echo_free_ShoutResponse(&out);
     free(box);
 }
+/** Upper-cases `req.text` and returns it behind the context's prefix. */
 static inline int echo_ctx_shout(const EchoCtx* ctx, const ShoutRequest* req, EchoShoutReplyFn on_reply, void* user_data) {
     EchoShoutReq ffi_req;
     memset(&ffi_req, 0, sizeof(ffi_req));
@@ -391,6 +398,7 @@ static void echo_version_reply_trampoline(int ret, const char* msg, size_t len, 
     nimffi_free_str(&out);
     free(box);
 }
+/** Returns the library's version string. */
 static inline int echo_ctx_version(const EchoCtx* ctx, EchoVersionReplyFn on_reply, void* user_data) {
     EchoVersionReq ffi_req;
     memset(&ffi_req, 0, sizeof(ffi_req));

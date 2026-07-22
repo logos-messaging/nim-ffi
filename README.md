@@ -84,6 +84,28 @@ The generated C export names are the snake_case form of the proc names, e.g.
 | `{.ffiHandle.}` | `ref object` | Marks a type as an opaque handle: it stays server-side and crosses the wire as a `uint64` id. |
 | `genBindings()` | call | Emits the bindings. Must be the **last** FFI call in the compilation root. |
 
+### Doc comments
+
+A `##` doc comment on an annotated proc is carried through to every generated
+binding, so the exported API is documented once, at the source:
+
+```nim
+proc myTimerEcho*(
+    timer: MyTimer, req: EchoRequest
+): Future[Result[EchoResponse, string]] {.ffi.} =
+  ## Sleeps `delayMs` then echoes the message back.
+  ...
+```
+
+becomes ``/** Sleeps `delayMs` then echoes the message back. */`` above both the
+exported symbol and the `<lib>_ctx_echo` wrapper in the C header, `/// ...` on
+the C++ class method and the Rust `pub fn`, and a `;` comment in the CDDL
+schema. Multi-line doc comments are preserved as-is.
+
+Only `##` doc comments are propagated, and only on procs — a plain `#` comment
+above the proc, and any comment on a `{.ffi.}` type or its fields, is dropped by
+Nim's parser before the macro can see it.
+
 ### The return-type contract
 
 Every `{.ffi.}` / `{.ffiCtor.}` proc must have an explicit

@@ -1,6 +1,47 @@
-## Unicode-aware identifier-casing helpers shared by codegen and the FFI macro.
+## Unicode-aware identifier casing and doc-comment rendering, shared by codegen
+## and the FFI macro.
 
 import std/[strutils, unicode]
+
+func docLines(doc: string): seq[string] =
+  ## `doc` split into lines, trailing blank ones dropped.
+  if doc.strip().len == 0:
+    return @[]
+  var lines = doc.splitLines()
+  while lines.len > 0 and lines[^1].strip().len == 0:
+    lines.setLen(lines.len - 1)
+  return lines
+
+func renderDocComment*(doc, indent, prefix: string): seq[string] =
+  ## `doc` as one `prefix`-led line comment per source line, at `indent`.
+  var rendered: seq[string] = @[]
+  for line in docLines(doc):
+    # A trailing `\` would splice the next generated line into a `//` comment.
+    rendered.add(
+      indent & (prefix & line).strip(leading = false, chars = Whitespace + {'\\'})
+    )
+  return rendered
+
+func renderMemberDocComment*(doc: string): seq[string] =
+  ## `///` at the indent C++ class members and Rust `impl` items sit at.
+  return doc.renderDocComment("    ", "/// ")
+
+func escapeBlockComment(line: string): string =
+  ## `*/` would close the comment early and splice the rest in as code.
+  return line.replace("*/", "* /")
+
+func renderBlockDocComment*(doc: string, indent = ""): seq[string] =
+  ## `doc` as a `/** ... */` block at `indent`; one-liners stay on one line.
+  let lines = docLines(doc)
+  if lines.len == 0:
+    return @[]
+  if lines.len == 1:
+    return @[indent & "/** " & escapeBlockComment(lines[0].strip()) & " */"]
+  var rendered = @[indent & "/**"]
+  for line in lines:
+    rendered.add((indent & " * " & escapeBlockComment(line)).strip(leading = false))
+  rendered.add(indent & " */")
+  return rendered
 
 proc toLower*(s: string): string =
   ## Unicode-aware lowercase for an entire string.
