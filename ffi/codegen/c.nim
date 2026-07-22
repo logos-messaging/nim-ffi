@@ -3,7 +3,7 @@
 ## generics, each distinct `seq[T]`/`Option[T]` is monomorphised per type.
 
 import std/[os, strutils, tables, sets, options]
-import ./meta, ./string_helpers, ./c_cpp_common, ./types_ir
+import ./meta, ./string_helpers, ./c_cpp_common, ./types_ir, ./consts
 
 ## Fixed 64-bit wire type for any Nim `ptr T`/`pointer` (mirrors CppPtrType).
 const CPtrType* = "uint64_t"
@@ -174,6 +174,60 @@ proc emitOptType(reg: var CTypeReg, name, elemC: string, elemOwns: bool) =
 
 proc ensureCType(reg: var CTypeReg, nimType: string): tuple[cType: string, owns: bool]
 
+func enumConstName*(typeName, valueName: string): string =
+  ## C/CDDL-safe constant name for an enum value, e.g. ("Color", "cRed") → COLOR_C_RED.
+  return identToUpperSnake(typeName) & "_" & identToUpperSnake(valueName)
+
+proc emitEnumType(reg: var CTypeReg, t: FFITypeMeta) =
+  ## A `{.ffi.}` enum becomes a C enum whose codec maps to the CBOR text form
+  ## (the value's Nim symbol name, or its associated string) that
+  ## cbor_serialization writes.
+  var members: seq[string] = @[]
+  for v in t.enumValues:
+    members.add("    " & enumConstName(t.name, v.name) & " = " & $v.ord & ",")
+  members[^1].removeSuffix(',')
+  reg.decls.add("typedef enum {\n" & members.join("\n") & "\n} " & t.name & ";")
+
+  var longest = 0
+  for v in t.enumValues:
+    longest = max(longest, v.wire.len)
+
+  var body: seq[string] = @[]
+  body.add("static inline CborError " & reg.libName & "_enc_" & t.name & "(")
+  body.add("        CborEncoder* e, const " & t.name & "* v) {")
+  body.add("    switch (*v) {")
+  for v in t.enumValues:
+    body.add(
+      "    case " & enumConstName(t.name, v.name) &
+        ": return cbor_encode_text_stringz(e, \"" & v.wire & "\");"
+    )
+  body.add("    }")
+  body.add("    return CborErrorImproperValue;")
+  body.add("}")
+
+  body.add("static inline CborError " & reg.libName & "_dec_" & t.name & "(")
+  body.add("        CborValue* it, " & t.name & "* out) {")
+  body.add("    if (!cbor_value_is_text_string(it)) return CborErrorImproperValue;")
+  body.add("    size_t len = 0;")
+  body.add("    CborError err = cbor_value_get_string_length(it, &len);")
+  body.add("    if (err) return err;")
+  body.add("    char buf[" & $(longest + 1) & "];")
+  body.add("    if (len >= sizeof(buf)) return CborErrorImproperValue;")
+  body.add("    size_t copied = sizeof(buf);")
+  body.add("    err = cbor_value_copy_text_string(it, buf, &copied, NULL);")
+  body.add("    if (err) return err;")
+  body.add("    buf[len] = '\\0';")
+  for v in t.enumValues:
+    body.add(
+      "    if (strcmp(buf, \"" & v.wire & "\") == 0) { *out = " &
+        enumConstName(t.name, v.name) & "; return cbor_value_advance(it); }"
+    )
+  body.add("    return CborErrorImproperValue;")
+  body.add("}")
+
+  reg.codecs.add(body.join("\n"))
+  reg.owns[t.name] = false
+
 proc emitStructType(reg: var CTypeReg, t: FFITypeMeta) =
   var fieldDecls: seq[string] = @[]
   var members: seq[tuple[name, cType: string, owns: bool]] = @[]
@@ -269,7 +323,11 @@ proc ensureCType(reg: var CTypeReg, t: FFIType): tuple[cType: string, owns: bool
     if name notin reg.emitted:
       reg.emitted.incl(name)
       if name in reg.typeTable:
-        emitStructType(reg, reg.typeTable[name])
+        let meta = reg.typeTable[name]
+        if meta.isEnum():
+          emitEnumType(reg, meta)
+        else:
+          emitStructType(reg, meta)
       else:
         reg.decls.add("/* unknown type referenced: " & name & " */")
     return (name, reg.owns.getOrDefault(name, false))
@@ -285,11 +343,14 @@ proc reqTypeMeta(p: FFIProcMeta): FFITypeMeta =
     fields.add(FFIFieldMeta(name: ep.name, typeName: typeName))
   return FFITypeMeta(name: reqStructName(p), fields: fields)
 
-func paramByValue(nimType: string, ridesAsPtr: bool): bool =
-  ## Scalars/pointers/string views pass by value; aggregates by const pointer.
+func paramByValue(reg: CTypeReg, nimType: string, ridesAsPtr: bool): bool =
+  ## Scalars/pointers/string views and enums pass by value; aggregates by const pointer.
   if ridesAsPtr:
     return true
-  return parseFFIType(nimType).kind in {ftScalar, ftStr, ftPtr}
+  let t = parseFFIType(nimType)
+  if t.kind == ftStruct and reg.typeTable.getOrDefault(t.name).isEnum():
+    return true
+  return t.kind in {ftScalar, ftStr, ftPtr}
 
 proc cReturnType(reg: var CTypeReg, p: FFIProcMeta): string =
   if p.returnRidesAsPtr():
@@ -308,7 +369,7 @@ proc buildReqParams(
         CPtrType
       else:
         ensureCType(reg, ep.typeName).cType
-    if paramByValue(ep.typeName, rides):
+    if paramByValue(reg, ep.typeName, rides):
       params.add(cType & " " & ep.name)
       assigns.add("    ffi_req." & ep.name & " = " & ep.name & ";")
     else:
@@ -746,6 +807,33 @@ proc monomorphiseAll(
     discard ensureCType(reg, ev.payloadTypeName)
   return (reqTypes, respTypes)
 
+func constDeclLines(consts: seq[FFIConstMeta]): seq[string] =
+  ## `{.ffiConst.}` values as typed `static const` definitions; shared by the
+  ## CBOR and `abi = c` headers.
+  if consts.len == 0:
+    return @[]
+  var lines = @[
+    "/* ============================================================ */",
+    "/* Generated constants                                          */",
+    "/* ============================================================ */", "",
+  ]
+  for c in consts:
+    let t = parseFFIType(c.typeName)
+    let name = identToUpperSnake(c.name)
+    let value = cConstValue(t, c.value)
+    case t.kind
+    of ftStr:
+      lines.add("static const char* const " & name & " = " & value & ";")
+    of ftScalar:
+      lines.add(
+        "static const " & scalarCInfoTable[t.scalar].cType & " " & name & " = " & value &
+          ";"
+      )
+    else:
+      discard
+  lines.add("")
+  return lines
+
 func generateCPreludeHeader*(): string =
   ## The library-agnostic `nim_ffi_prelude.h`, emitted verbatim.
   return HeaderPreludeTpl & "\n"
@@ -759,6 +847,7 @@ proc generateCLibHeader*(
     types: seq[FFITypeMeta],
     libName: string,
     events: seq[FFIEventMeta] = @[],
+    consts: seq[FFIConstMeta] = @[],
 ): string =
   ## The `<lib>.h` header: library structs, monomorphised codecs and async API.
   let classified = classifyProcs(procs)
@@ -776,6 +865,8 @@ proc generateCLibHeader*(
   lines.add("#define " & guard)
   lines.add("#include \"" & CborHeaderName & "\"")
   lines.add("")
+
+  lines.add(constDeclLines(consts))
 
   lines.add("/* ============================================================ */")
   lines.add("/* Generated types (user-declared + per-proc request envelopes) */")
@@ -1362,6 +1453,7 @@ proc generateCAbiLibHeader*(
     types: seq[FFITypeMeta],
     libName: string,
     events: seq[FFIEventMeta] = @[],
+    consts: seq[FFIConstMeta] = @[],
 ): string =
   if events.len > 0:
     raise newException(
@@ -1398,6 +1490,7 @@ proc generateCAbiLibHeader*(
   lines.add("   terminal RET_OK/RET_ERR. Ignore it unless you want progress. */")
   lines.add("#define NIMFFI_RET_STALE_WARN 3")
   lines.add("")
+  lines.add(constDeclLines(consts))
   lines.add(
     "/* `abi = c` wire structs — the C ABI. Strings are borrowed, NUL-terminated"
   )
@@ -1451,13 +1544,15 @@ proc generateCBindings*(
     outputDir: string,
     nimSrcRelPath: string,
     events: seq[FFIEventMeta] = @[],
+    consts: seq[FFIConstMeta] = @[],
 ) =
   ## Emits the C binding for `libName`, picking the `abi = c` or CBOR shape.
   createDir(outputDir)
   case libWireFormat(procs, types)
   of ABIFormat.C:
     writeFile(
-      outputDir / (libName & ".h"), generateCAbiLibHeader(procs, types, libName, events)
+      outputDir / (libName & ".h"),
+      generateCAbiLibHeader(procs, types, libName, events, consts),
     )
     writeFile(
       outputDir / "CMakeLists.txt", generateCAbiCMakeLists(libName, nimSrcRelPath)
@@ -1466,6 +1561,7 @@ proc generateCBindings*(
     writeFile(outputDir / PreludeHeaderName, generateCPreludeHeader())
     writeFile(outputDir / CborHeaderName, generateCCborHeader())
     writeFile(
-      outputDir / (libName & ".h"), generateCLibHeader(procs, types, libName, events)
+      outputDir / (libName & ".h"),
+      generateCLibHeader(procs, types, libName, events, consts),
     )
     writeFile(outputDir / "CMakeLists.txt", generateCCMakeLists(libName, nimSrcRelPath))

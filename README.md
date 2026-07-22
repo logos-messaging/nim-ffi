@@ -39,9 +39,9 @@ type Counter = object
 
 declareLibrary("counter", Counter)
 
-# 2. Request/response shapes. Any {.ffi.} object type becomes a first-class
-#    struct/class in the generated bindings and rides the wire in the library's
-#    ABI format (CBOR by default).
+# 2. Request/response shapes. Any {.ffi.} object or enum type becomes a
+#    first-class struct/class in the generated bindings and rides the wire in
+#    the library's ABI format (CBOR by default).
 type BumpRequest {.ffi.} = object
   by: int
 
@@ -76,13 +76,75 @@ The generated C export names are the snake_case form of the proc names, e.g.
 | Pragma | Applies to | Purpose |
 | --- | --- | --- |
 | `declareLibrary(name, LibType[, defaultABIFormat])` | call | Registers the library, its state type, and the default wire format. Must run before any annotation. |
-| `{.ffi.}` on a `type` | `object` | Registers the type for binding generation; it serializes via the library's ABI format (CBOR by default). |
+| `{.ffi.}` on a `type` | `object`, `enum` | Registers the type for binding generation; it serializes via the library's ABI format (CBOR by default). Enums are CBOR-only — see below. |
 | `{.ffi.}` on a `proc` | proc | Exposes a method. First param is the library value, then typed params; returns `Future[Result[T, string]]`. |
 | `{.ffiCtor.}` | proc | The constructor. Returns `Future[Result[LibType, string]]`; creates the FFI context. |
 | `{.ffiDtor.}` | proc | The destructor. Exactly one param `(x: LibType)`; tears the context down. |
 | `{.ffiEvent[: "wire_name"].}` | proc (empty body) | A library-initiated callback. Call the proc from any `{.ffi.}` handler to fire it. The wire name is optional — see below. |
 | `{.ffiHandle.}` | `ref object` | Marks a type as an opaque handle: it stays server-side and crosses the wire as a `uint64` id. |
+| `{.ffiConst.}` | `const` | Re-emits the value as a native constant in every generated binding — see below. |
 | `genBindings()` | call | Emits the bindings. Must be the **last** FFI call in the compilation root. |
+
+### Enums
+
+`{.ffi.}` on an `enum` gives each language its own native enum:
+
+```nim
+type Level {.ffi.} = enum
+  lLow = "low"
+  lHigh = "high"
+```
+
+```c
+typedef enum { LEVEL_L_LOW = 0, LEVEL_L_HIGH = 1 } Level;  /* C   */
+enum class Level { lLow = 0, lHigh = 1 };                  // C++
+pub enum Level { #[serde(rename = "low")] LLow, ... }      // Rust
+```
+
+An enum crosses the wire as **text**, not as its ordinal — whatever `$value`
+yields, so the associated string if the enum declares one (`"low"` above) and
+the symbol name otherwise (`lLow`). That is what `cbor_serialization` writes on
+the Nim side, and the generated codecs map name ↔ value on the far side, so
+reordering or renumbering values doesn't break an already-deployed peer.
+Explicit ordinals are carried into the foreign enum so the two sides agree if
+you ever cast.
+
+Enums are supported on the CBOR wire only. Reaching one from an `abi = c` type
+or proc is a compile error naming the type — the `abi = c` `_CWire` structs have
+no enum form yet.
+
+### Constants
+
+`{.ffiConst.}` copies a Nim `const` into the generated bindings, so callers
+don't hand-maintain a second copy of a limit, a default or a protocol string:
+
+```nim
+const
+  MaxPeers* {.ffiConst.} = 42
+  DefaultTimeoutMs* {.ffiConst.}: uint32 = 3 * 1000
+  Greeting* {.ffiConst.} = "hello"
+```
+
+```c
+static const int64_t MAX_PEERS = 42LL;            /* C   */
+static const uint32_t DEFAULT_TIMEOUT_MS = 3000;
+static const char* const GREETING = "hello";
+```
+
+```cpp
+constexpr int64_t MAX_PEERS = 42LL;               // C++
+```
+
+```rust
+pub const MAX_PEERS: i64 = 42;                    // Rust
+```
+
+Integer, float, `bool` and `string` consts are supported; anything else is a
+compile error. The value is whatever the const evaluates to, so computed
+expressions arrive folded. Names are re-cased to `UPPER_SNAKE`, preserving
+acronyms (`httpTTL` → `HTTP_TTL`). A constant is a compile-time value in each
+language, not a symbol exported by the shared library — it never crosses the
+wire, so `{.ffiConst.}` is ABI-agnostic.
 
 ### Doc comments
 
@@ -182,6 +244,8 @@ header shape from the library's ABI format. It carries two honest limits today:
 - **Events are CBOR-only.** Applying `abi = c` to an `{.ffiEvent.}` proc is a
   hard compile error; declare events with `abi = cbor` (they ride CBOR
   internally regardless of the library default).
+- **Enums are CBOR-only.** A `{.ffi.}` enum in an `abi = c` library, or reached
+  from an `abi = c` type or proc, is a hard compile error naming the type.
 - **All-scalar `abi = c` procs bind only in the `abi = c` C header.** A
   `{.ffi: "abi = c".}` method whose params and return are all scalars — ints,
   floats, bools; a `string` return is fine, a `string` param is not — takes a

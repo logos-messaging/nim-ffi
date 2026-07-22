@@ -62,12 +62,21 @@ proc tupleComponents(t: NimNode): seq[tuple[name: string, typ: NimNode]] =
 
 proc isKnownFFIType(name: string): bool {.compileTime.} =
   for typeMeta in ffiTypeRegistry:
-    if typeMeta.name == name:
+    if typeMeta.name == name and not typeMeta.isEnum():
       return true
   false
 
 proc isNestedFFIType(t: NimNode): bool =
+  ## Enums are excluded: they are registered types but have no `_CWire`
+  ## companion, and treating one as a nested struct would silently drop its value.
   t.kind == nnkIdent and isKnownFFIType($t)
+
+proc rejectEnumOnCWire(t: NimNode) {.compileTime.} =
+  if t.kind == nnkIdent and isFFIEnumTypeName($t):
+    error(
+      "cwire: `abi = c` does not support enum types yet, but " & $t &
+        " crosses the boundary here; use the CBOR ABI for this proc or type"
+    )
 
 proc cwireNeedsFree(t: NimNode): bool =
   ## Whether the wire form of `t` owns allocations `cwireFree` must release.
@@ -90,6 +99,7 @@ proc rejectNestedSeq(t: NimNode) =
 
 proc wireValueType(t: NimNode): NimNode =
   ## Single-field wire form of value type `t`; `seq` has none, so it errors here.
+  rejectEnumOnCWire(t)
   if isStringType(t):
     return ident("cstring")
   if isNestedFFIType(t):

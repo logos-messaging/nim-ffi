@@ -1,7 +1,7 @@
 ## Rust binding generator: emits a complete Rust crate using CBOR (ciborium).
 
 import std/[os, strutils]
-import ./meta, ./string_helpers, ./types_ir
+import ./meta, ./string_helpers, ./types_ir, ./consts
 
 ## Wire-format Rust type for any Nim `ptr T`/`pointer`; fixed 64-bit for a
 ## host-independent CBOR payload size (mirrors CppPtrType).
@@ -217,13 +217,49 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
   lines.add("}")
   return lines.join("\n") & "\n"
 
-proc generateTypesRs*(types: seq[FFITypeMeta], procs: seq[FFIProcMeta]): string =
+func rustConstType(typeName: string): string =
+  ## `&str` rather than `String`: a `pub const` can't own a heap value. The
+  ## 'static lifetime is implied, and spelling it out trips clippy.
+  let t = parseFFIType(typeName)
+  if t.kind == ftStr:
+    return "&str"
+  return renderNative(rustMap, t)
+
+proc generateTypesRs*(
+    types: seq[FFITypeMeta], procs: seq[FFIProcMeta], consts: seq[FFIConstMeta] = @[]
+): string =
   ## Generates types.rs: Rust structs for user FFI types and each per-proc Req.
   var lines: seq[string] = @[]
   lines.add("use serde::{Deserialize, Serialize};")
   lines.add("")
 
+  for c in consts:
+    let t = parseFFIType(c.typeName)
+    lines.add(
+      "pub const $1: $2 = $3;" % [
+        identToUpperSnake(c.name), rustConstType(c.typeName), rustConstValue(t, c.value)
+      ]
+    )
+  if consts.len > 0:
+    lines.add("")
+
   for t in types:
+    if not t.isEnum():
+      continue
+    lines.add("#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]")
+    lines.add("pub enum $1 {" % [t.name])
+    for v in t.enumValues:
+      let variant = capitalizeFirstLetter(v.name)
+      # serde carries the same text form Nim's cbor_serialization writes.
+      if variant != v.wire:
+        lines.add("    #[serde(rename = \"$1\")]" % [v.wire])
+      lines.add("    $1," % [variant])
+    lines.add("}")
+    lines.add("")
+
+  for t in types:
+    if t.isEnum():
+      continue
     lines.add("#[derive(Debug, Clone, Serialize, Deserialize)]")
     lines.add("pub struct $1 {" % [t.name])
     for f in t.fields:
@@ -742,6 +778,7 @@ proc generateRustCrate*(
     outputDir: string,
     nimSrcRelPath: string,
     events: seq[FFIEventMeta] = @[],
+    consts: seq[FFIConstMeta] = @[],
 ) =
   ## Generates a complete Rust crate in outputDir.
   createDir(outputDir)
@@ -751,5 +788,5 @@ proc generateRustCrate*(
   writeFile(outputDir / "build.rs", generateBuildRs(libName, nimSrcRelPath))
   writeFile(outputDir / "src" / "lib.rs", generateLibRs())
   writeFile(outputDir / "src" / "ffi.rs", generateFFIRs(procs))
-  writeFile(outputDir / "src" / "types.rs", generateTypesRs(types, procs))
+  writeFile(outputDir / "src" / "types.rs", generateTypesRs(types, procs, consts))
   writeFile(outputDir / "src" / "api.rs", generateApiRs(procs, libName, events))
