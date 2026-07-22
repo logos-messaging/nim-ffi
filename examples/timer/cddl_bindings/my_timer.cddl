@@ -9,10 +9,11 @@ EchoResponse = { echoed: tstr, timerName: tstr }
 ComplexRequest = { messages: [* EchoRequest], tags: [* tstr], note: tstr / nil, retries: int / nil }
 ComplexResponse = { summary: tstr, itemCount: int, hasNote: bool }
 EchoEvent = { message: tstr, echoCount: int }
-JobSpec = { name: tstr, payload: [* tstr], priority: int }
+JobPriority = "low" / "normal" / "high"
+JobSpec = { name: tstr, payload: [* tstr], priority: JobPriority }
 RetryPolicy = { maxAttempts: int, backoffMs: int, retryOn: [* tstr] }
 ScheduleConfig = { startAtMs: int, intervalMs: int, jitter: int / nil }
-ScheduleResult = { jobId: tstr, willRunCount: int, firstRunAtMs: int, effectiveBackoffMs: int }
+ScheduleResult = { jobId: tstr, willRunCount: int, firstRunAtMs: int, effectiveBackoffMs: int, priority: JobPriority }
 
 ; ─── Request envelopes (one CBOR blob per request) ────────────────
 MyTimerCreateCtorReq = { config: TimerConfig }

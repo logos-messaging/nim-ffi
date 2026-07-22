@@ -1,5 +1,19 @@
 use serde::{Deserialize, Serialize};
 
+pub const MAX_DELAY_MS: i64 = 5000;
+pub const DEFAULT_BACKOFF_MS: u32 = 250;
+pub const TIMER_VERSION: &str = "nim-timer v0.1.0";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum JobPriority {
+    #[serde(rename = "low")]
+    JpLow,
+    #[serde(rename = "normal")]
+    JpNormal,
+    #[serde(rename = "high")]
+    JpHigh,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimerConfig {
     pub name: String,
@@ -47,7 +61,7 @@ pub struct EchoEvent {
 pub struct JobSpec {
     pub name: String,
     pub payload: Vec<String>,
-    pub priority: i64,
+    pub priority: JobPriority,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +93,7 @@ pub struct ScheduleResult {
     pub first_run_at_ms: i64,
     #[serde(rename = "effectiveBackoffMs")]
     pub effective_backoff_ms: i64,
+    pub priority: JobPriority,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

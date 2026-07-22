@@ -7,7 +7,8 @@
 //   nimble genbindings_rust
 use std::time::Duration;
 use my_timer::{
-    EchoRequest, JobSpec, MyTimerCtx, RetryPolicy, ScheduleConfig, TimerConfig,
+    EchoRequest, JobPriority, JobSpec, MyTimerCtx, RetryPolicy, ScheduleConfig,
+    TimerConfig, MAX_DELAY_MS, TIMER_VERSION,
 };
 
 fn main() {
@@ -21,6 +22,8 @@ fn main() {
     // ── 2. Sync call: version ──────────────────────────────────────────────
     let version = ctx.version().expect("my_timer_version failed");
     println!("[2] Version (sync call, callback fired inline): {version}");
+    assert_eq!(version, TIMER_VERSION);
+    println!("[2b] Consts from the bindings: MAX_DELAY_MS={MAX_DELAY_MS}");
 
     // ── 3. Async call: echo (200 ms delay) ────────────────────────────────
     let echo = ctx
@@ -52,7 +55,7 @@ fn main() {
             JobSpec {
                 name: "nightly-rollup".into(),
                 payload: vec!["rollup".into(), "v2".into()],
-                priority: 10,
+                priority: JobPriority::JpHigh,
             },
             RetryPolicy {
                 max_attempts: 3,
@@ -67,11 +70,12 @@ fn main() {
         )
         .expect("my_timer_schedule failed");
     println!(
-        "[5] Schedule (3 complex params): jobId={}, willRunCount={}, firstRunAtMs={}, effectiveBackoffMs={}",
+        "[5] Schedule (3 complex params): jobId={}, willRunCount={}, firstRunAtMs={}, effectiveBackoffMs={}, priority={:?}",
         schedule.job_id,
         schedule.will_run_count,
         schedule.first_run_at_ms,
         schedule.effective_backoff_ms,
+        schedule.priority,
     );
 
     println!("\nDone. The Nim FFI thread and watchdog are still running.");

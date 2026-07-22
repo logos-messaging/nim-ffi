@@ -56,13 +56,13 @@ TEST(TimerE2E, CreateAndDestroy) {
 TEST(TimerE2E, VersionSync) {
     auto ctx = makeCtx("version-sync");
     const auto v = mustOk(ctx->version());
-    EXPECT_EQ(v, "nim-timer v0.1.0");
+    EXPECT_EQ(v, TIMER_VERSION);
 }
 
 TEST(TimerE2E, VersionAsync) {
     auto ctx = makeCtx("version-async");
     auto fut = ctx->versionAsync();
-    EXPECT_EQ(mustOk(fut.get()), "nim-timer v0.1.0");
+    EXPECT_EQ(mustOk(fut.get()), TIMER_VERSION);
 }
 
 TEST(TimerE2E, EchoRoundTripsMessageAndTimerName) {
@@ -152,6 +152,32 @@ TEST(TimerE2E, IndependentContextsKeepTheirOwnState) {
     EXPECT_EQ(rB.timerName, "beta");
 }
 
+// jpHigh halves the requested backoff, and the enum comes back as itself.
+TEST(TimerE2E, SchedulePriorityRoundTrips) {
+    auto ctx = makeCtx("prio");
+    const auto job = JobSpec{"rollup", {"p"}, JobPriority::jpHigh};
+    const auto res = mustOk(ctx->schedule(job, RetryPolicy{3, 100, {}},
+                                          ScheduleConfig{0, 0, std::nullopt}));
+    EXPECT_EQ(res.priority, JobPriority::jpHigh);
+    EXPECT_EQ(res.effectiveBackoffMs, 50);
+}
+
+// backoffMs 0 falls back to DEFAULT_BACKOFF_MS, doubled for jpLow.
+TEST(TimerE2E, ScheduleDefaultBackoffComesFromConst) {
+    auto ctx = makeCtx("prio-default");
+    const auto job = JobSpec{"rollup", {}, JobPriority::jpLow};
+    const auto res = mustOk(ctx->schedule(job, RetryPolicy{1, 0, {}},
+                                          ScheduleConfig{0, 0, std::nullopt}));
+    EXPECT_EQ(res.effectiveBackoffMs, DEFAULT_BACKOFF_MS * 2);
+}
+
+TEST(TimerE2E, EchoRejectsDelayAboveMaxDelayMs) {
+    auto ctx = makeCtx("max-delay");
+    const auto res = ctx->echo(EchoRequest{"too-slow", MAX_DELAY_MS + 1});
+    ASSERT_TRUE(res.isErr());
+    EXPECT_EQ(res.error(), "delayMs must not exceed " + std::to_string(MAX_DELAY_MS));
+}
+
 // N contexts keep independent state; an error on one must not poison siblings.
 // Empty JobSpec.name is the chosen error trigger: schedule() returns
 // err("job name must not be empty"), which the bindings surface as an
@@ -170,7 +196,7 @@ TEST(TimerE2E, MultiContextIsolation) {
         EXPECT_EQ(resp.timerName, "iso-" + std::to_string(i));
     }
 
-    const auto bad = JobSpec{/*name*/ "", /*payload*/ {}, /*priority*/ 0};
+    const auto bad = JobSpec{/*name*/ "", /*payload*/ {}, JobPriority::jpNormal};
     const auto retry = RetryPolicy{1, 10, {}};
     const auto sched = ScheduleConfig{0, 0, std::nullopt};
     const auto scheduleRes = ctxs[2]->schedule(bad, retry, sched);
@@ -194,7 +220,7 @@ TEST(TimerE2E, CrossLibrary) {
     auto timerCtx = mustOk(MyTimerCtx::create(TimerConfig{"x-timer"}));
     auto echoCtx  = mustOk(EchoCtx::create(EchoConfig{"X-ECHO"}));
 
-    EXPECT_EQ(mustOk(timerCtx->version()), "nim-timer v0.1.0");
+    EXPECT_EQ(mustOk(timerCtx->version()), TIMER_VERSION);
     EXPECT_EQ(mustOk(echoCtx->version()),  "nim-echo v0.1.0");
 
     const auto timerResp = mustOk(timerCtx->echo(EchoRequest{"hello", 0}));
