@@ -289,10 +289,12 @@ static inline int echo_ctx_create(const EchoConfig* config, EchoCreateFn on_crea
     return 0;
 }
 
-static inline void echo_ctx_destroy(EchoCtx* ctx) {
-    if (!ctx) return;
-    if (ctx->ptr) { echo_destroy(ctx->ptr); ctx->ptr = NULL; }
+static inline int echo_ctx_destroy(EchoCtx* ctx) {
+    if (!ctx) return NIMFFI_RET_OK;
+    int rc = NIMFFI_RET_OK;
+    if (ctx->ptr) { rc = echo_destroy(ctx->ptr); ctx->ptr = NULL; }
     free(ctx);
+    return rc;
 }
 
 typedef void (*EchoShoutReplyFn)(int err_code, const ShoutResponse* reply, const char* err_msg, void* user_data);

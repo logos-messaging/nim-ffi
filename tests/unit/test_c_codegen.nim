@@ -124,6 +124,19 @@ suite "generateCLibHeader: ABI declarations and context API":
     check "timer_ctx_version(" in header
     check "timer_ctx_destroy(" in header
 
+  test "the context destructor propagates the destructor's status code":
+    check(
+      """
+static inline int timer_ctx_destroy(TimerCtx* ctx) {
+    if (!ctx) return NIMFFI_RET_OK;
+    int rc = NIMFFI_RET_OK;
+    if (ctx->ptr) { rc = timer_destroy(ctx->ptr); ctx->ptr = NULL; }
+    free(ctx);
+    return rc;
+}""" in
+        header
+    )
+
   test "the async API is callback-driven, not blocking":
     # methods take a typed reply callback + user_data; no out-param, no char** err
     check "typedef void (*TimerVersionReplyFn)(int err_code, const NimFfiStr* reply, const char* err_msg, void* user_data);" in
@@ -192,6 +205,25 @@ suite "generateCLibHeader: events":
   test "the context tracks listeners only when events exist":
     check "TimerCtxListener* listeners;" in header
 
+  test "a failed teardown leaks the listener boxes instead of dangling them":
+    # A non-OK rc leaves the worker threads live, still holding each box as
+    # callback user_data, so the sweep must sit behind the rc guard.
+    check(
+      """
+static inline int timer_ctx_destroy(TimerCtx* ctx) {
+    if (!ctx) return NIMFFI_RET_OK;
+    int rc = NIMFFI_RET_OK;
+    if (ctx->ptr) { rc = timer_destroy(ctx->ptr); ctx->ptr = NULL; }
+    if (rc == NIMFFI_RET_OK) {
+        for (size_t i = 0; i < ctx->listeners_len; i++) free(ctx->listeners[i].box);
+    }
+    free(ctx->listeners);
+    free(ctx);
+    return rc;
+}""" in
+        header
+    )
+
 suite "generateCLibHeader: no-event libraries stay lean":
   test "a library without events has no listener bookkeeping":
     let procs = @[
@@ -207,6 +239,29 @@ suite "generateCLibHeader: no-event libraries stay lean":
     let header = generateCLibHeader(procs, @[], "timer")
     check "listeners_len" notin header
     check "_add_event_listener" in header # raw ABI symbol is always declared
+
+  test "a library without a dtor still reports success from ctx_destroy":
+    let procs = @[
+      FFIProcMeta(
+        procName: "timer_create",
+        libName: "timer",
+        kind: FFIKind.CTOR,
+        libTypeName: "Timer",
+        extraParams: @[],
+        returnTypeName: "Timer",
+      )
+    ]
+    let header = generateCLibHeader(procs, @[], "timer")
+    check(
+      """
+static inline int timer_ctx_destroy(TimerCtx* ctx) {
+    if (!ctx) return NIMFFI_RET_OK;
+    int rc = NIMFFI_RET_OK;
+    free(ctx);
+    return rc;
+}""" in
+        header
+    )
 
 suite "generateCLibHeader: scalar-fast-path procs are excluded":
   setup:
