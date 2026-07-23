@@ -79,7 +79,7 @@ proc buildScalarPath*(
   handlerBody.add quote do:
     let `retValIdent` = (await `helperCall`).valueOr:
       return err(error)
-    return ok(ffiScalarRetBytes(`retValIdent`))
+    return ok(ffiRawRetBytes(`retValIdent`))
 
   let seqByteResult = nnkBracketExpr.newTree(
     ident("Future"),

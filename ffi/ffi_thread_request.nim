@@ -17,11 +17,13 @@ type FFIThreadRequest* = object
   callback*: FFICallBack
   userData*: pointer
   reqId*: cstring ## Req type name used to look up the handler.
-  data*: ptr UncheckedArray[byte] ## Owned CBOR-encoded request payload.
+  data*: ptr UncheckedArray[byte]
+    ## Owned request payload: CBOR-encoded, or a packed `_CWire` struct on the
+    ## `abi = c` path. Nil on the scalar fast path.
   dataLen*: int
-  isScalar*: bool
-    ## Scalar fast path: args rode inline in `scalarArgs`, so a 0-length return
-    ## is a real empty string, not a CBOR "no value".
+  rawReply*: bool
+    ## CBOR-free request (scalar fast path or `abi = c`): the reply is raw bytes,
+    ## so a 0-length one is a real empty string, not a CBOR "no value".
   scalarArgs*: array[MaxScalarArgs, uint64]
     ## Inlined scalar args (no per-call c_malloc); a plain array keeps
     ## `deleteRequest` unaliased.
@@ -63,7 +65,7 @@ proc allocBaseRequest(
   ret[].reqId = reqId.alloc()
   ret[].data = nil
   ret[].dataLen = 0
-  ret[].isScalar = false
+  ret[].rawReply = false
   ret[].next = nil
   ret[].responded = false
   return ret
@@ -121,11 +123,14 @@ proc initFromOwnedShared*(
     reqId: cstring,
     data: ptr UncheckedArray[byte],
     dataLen: int,
+    rawReply: bool = false,
 ): ptr type T =
   ## Adopts an already-c_malloc'd buffer (no copy); `deleteRequest` c_frees it.
-  ## Pass `(nil, 0)` for an empty payload.
+  ## Pass `(nil, 0)` for an empty payload. Set `rawReply` when the handler answers
+  ## with raw (non-CBOR) bytes, so an empty reply reads as a real empty value.
   var ret = allocBaseRequest(callback, userData, reqId)
   adoptOwnedSharedPayload(ret, data, dataLen)
+  ret[].rawReply = rawReply
   return ret
 
 proc initScalar*(
@@ -140,14 +145,14 @@ proc initScalar*(
     "initScalar: " & $args.len & " scalar args exceed MaxScalarArgs (" & $MaxScalarArgs &
       ")"
   var ret = allocBaseRequest(callback, userData, reqId)
-  ret[].isScalar = true
+  ret[].rawReply = true
   for i in 0 ..< args.len:
     ret[].scalarArgs[i] = args[i]
   ret
 
-func ffiScalarRetBytes*[T](x: T): seq[byte] =
-  ## Scalar handler result as raw bytes, no CBOR: string/cstring ride as UTF-8,
-  ## other scalars as the 8-byte native image of `ffiPackScalar(x)`.
+func ffiRawRetBytes*[T](x: T): seq[byte] =
+  ## CBOR-free handler result as raw bytes: string/cstring ride as UTF-8, other
+  ## scalars as the 8-byte native image of `ffiPackScalar(x)`.
   when T is string:
     var b = newSeq[byte](x.len)
     if x.len > 0:
@@ -195,8 +200,8 @@ proc fireCallback*(res: Result[seq[byte], string], request: ptr FFIThreadRequest
         cast[csize_t](bytes.len),
         request[].userData,
       )
-    elif request[].isScalar:
-      # Scalar 0-byte return is a real empty string, not CBOR "no value".
+    elif request[].rawReply:
+      # A CBOR-free 0-byte return is a real empty string, not CBOR "no value".
       var empty: byte
       request[].callback(
         RET_OK, cast[ptr cchar](addr empty), 0.csize_t, request[].userData

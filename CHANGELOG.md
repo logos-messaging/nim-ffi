@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Changed
+- **`abi = c` non-scalar procs no longer marshal through CBOR.** The foreign
+  surface is unchanged — the generated headers and exported symbols are
+  byte-identical — but the hop between the caller and the FFI thread now carries
+  the packed `_CWire` struct itself instead of CBOR-encoding it and decoding it
+  back. A request is packed into a `malloc`'d owned copy on the calling thread
+  and unpacked (then freed) on the FFI thread; an object reply rides back as its
+  `_CWire` image and a `string` reply as raw UTF-8, so the round trip through
+  `cborEncodeShared`/`cborDecodePtr` is gone from both directions. Only the
+  scalar fast path was CBOR-free before
+  ([#131](https://github.com/logos-messaging/nim-ffi/issues/131)).
+- `_CWire` seq/Option payload buffers are allocated with libc `malloc`
+  (`cwireAllocBuf`) rather than `allocShared`, so a wire packed on the calling
+  thread can be freed on the FFI thread — the cross-thread ownership the
+  CBOR-free request path relies on, and consistent with the libc-backed request
+  envelope.
 - The generated C `<lib>_ctx_destroy()` now returns `int` instead of `void`,
   propagating the exported `<lib>_destroy()` status code (`NIMFFI_RET_OK` on
   success, `RET_ERR` on a null/invalid context or a failed context teardown)

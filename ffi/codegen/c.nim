@@ -1333,7 +1333,7 @@ proc emitAbiMethod(
 
 func abiScalarOkLines(m: FFIProcMeta, fnType: string): seq[string] =
   ## Trampoline RET_OK branch. A string return rides as its own UTF-8; every
-  ## other scalar is the 8-byte image `ffiScalarRetBytes` packs (ints
+  ## other scalar is the 8-byte image `ffiRawRetBytes` packs (ints
   ## sign-extended, floats widened to double, bool as 0/1).
   let rt = m.returnTypeName.strip()
   if rt == "string" or rt == "cstring":
