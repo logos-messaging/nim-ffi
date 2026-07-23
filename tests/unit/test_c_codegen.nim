@@ -161,6 +161,65 @@ static inline int timer_ctx_destroy(TimerCtx* ctx) {
   test "an empty request envelope still encodes a (zero-length) map":
     check "_nimffi_empty" in header
 
+suite "generateCLibHeader: context-independent procs":
+  setup:
+    let procs = @[
+      FFIProcMeta(
+        procName: "timer_create",
+        libName: "timer",
+        kind: FFIKind.CTOR,
+        libTypeName: "Timer",
+        extraParams: @[param("config", "EchoRequest")],
+        returnTypeName: "Timer",
+      ),
+      FFIProcMeta(
+        procName: "timer_version",
+        libName: "timer",
+        kind: FFIKind.FFI,
+        libTypeName: "Timer",
+        extraParams: @[],
+        returnTypeName: "string",
+      ),
+      FFIProcMeta(
+        procName: "timer_parse",
+        libName: "timer",
+        kind: FFIKind.STATIC,
+        libTypeName: "Timer",
+        extraParams: @[param("req", "EchoRequest")],
+        returnTypeName: "EchoResponse",
+      ),
+    ]
+    let types = @[
+      FFITypeMeta(name: "EchoRequest", fields: @[field("m", "string")]),
+      FFITypeMeta(name: "EchoResponse", fields: @[field("echoed", "string")]),
+    ]
+    let header = generateCLibHeader(procs, types, "timer")
+
+  test "the static's raw symbol takes no ctx":
+    check "int timer_parse(FFICallback callback, void* user_data, " &
+      "const uint8_t* req_cbor, size_t req_cbor_len);" in header
+
+  test "its wrapper is _static_-namespaced and takes neither ctx nor timeout":
+    check "timer_static_parse(const EchoRequest* req, TimerParseReplyFn on_reply, void* user_data)" in
+      header
+    check "timer_ctx_parse(" notin header
+
+  test "the wrapper calls the raw symbol without a ctx argument":
+    check "timer_parse(timer_parse_reply_trampoline, box, req_buf, req_len);" in header
+
+  test "a static gets the same reply machinery as a method":
+    check "typedef void (*TimerParseReplyFn)(int err_code, const EchoResponse* reply, " &
+      "const char* err_msg, void* user_data);" in header
+    check "TimerParseCallBox" in header
+    check "timer_parse_reply_trampoline(" in header
+
+  test "its return type is monomorphised into the codecs":
+    check "timer_decv_EchoResponse" in header
+
+  test "methods keep their ctx":
+    check "int timer_version(void* ctx, FFICallback callback" in header
+    check "timer_ctx_version(const TimerCtx* ctx," in header
+
 suite "generateCLibHeader: events":
   setup:
     let procs = @[

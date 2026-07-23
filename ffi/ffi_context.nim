@@ -83,11 +83,6 @@ proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     closeAndNil(ctx.eventThreadExitSignal)
   ok()
 
-proc cleanUpResources[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  defer:
-    freeShared(ctx)
-  ctx.deinitContextResources()
-
 template newSignalOrErr(field: untyped, name: string) =
   field = ThreadSignalPtr.new().valueOr:
     return err("couldn't create ThreadSignalPtr: " & name & ": " & $error)
@@ -112,7 +107,8 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   var success = false
   defer:
     if not success:
-      ctx.cleanUpResources().isOkOr:
+      # `ctx` is a pool slot the caller owns; close what was opened, never free it.
+      ctx.deinitContextResources().isOkOr:
         error "failed to clean up resources after createFFIContext failure",
           error = error
 
@@ -185,11 +181,4 @@ proc stopAndJoinThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   joinThread(ctx.ffiThread)
   ?ctx.eventThreadExitSignal.waitExitOrErr("event thread", ThreadExitTimeout)
   joinThread(ctx.eventThread)
-  ok()
-
-proc clearContext[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ctx.stopAndJoinThreads().isOkOr:
-    return err("clearContext: " & $error)
-  ctx.cleanUpResources().isOkOr:
-    return err("cleanUpResources failed: " & $error)
   ok()

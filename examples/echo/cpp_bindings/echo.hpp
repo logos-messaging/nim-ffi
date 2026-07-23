@@ -430,6 +430,40 @@ inline CborError decode_cbor(CborValue& it, EchoVersionReq&) {
     return cbor_value_advance(&it);
 }
 
+struct EchoLibVersionReq {
+};
+inline CborError encode_cbor(CborEncoder& e, const EchoLibVersionReq&) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(&e, &m, 0);
+    if (err) return err;
+    return cbor_encoder_close_container(&e, &m);
+}
+inline CborError decode_cbor(CborValue& it, EchoLibVersionReq&) {
+    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
+    return cbor_value_advance(&it);
+}
+
+struct EchoShoutAnonReq {
+    ShoutRequest req;
+};
+inline CborError encode_cbor(CborEncoder& e, const EchoShoutAnonReq& v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(&e, &m, 1);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "req"); if (err) return err;
+    err = encode_cbor(m, v.req);              if (err) return err;
+    return cbor_encoder_close_container(&e, &m);
+}
+inline CborError decode_cbor(CborValue& it, EchoShoutAnonReq& v) {
+    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(&it, "req", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.req); if (err) return err;
+    return cbor_value_advance(&it);
+}
+
 // ============================================================
 // C FFI declarations
 // ============================================================
@@ -443,6 +477,8 @@ void* echo_create(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback call
 int echo_shout(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 /** Returns the library's version string. */
 int echo_version(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int echo_lib_version(FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int echo_shout_anon(FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 /** Releases the echo context. */
 int echo_destroy(void* ctx);
 uint64_t echo_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
@@ -606,6 +642,38 @@ public:
     /// Returns the library's version string.
     std::future<Result<std::string>> versionAsync() const {
         return std::async(std::launch::async, [this]() { return this->version(); });
+    }
+
+    static Result<std::string> lib_version(std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
+        const auto ffi_req_ = EchoLibVersionReq{};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) return Result<std::string>::err(ffi_enc_.error());
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
+            return echo_lib_version(cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        }, timeout);
+        if (ffi_raw_.isErr()) return Result<std::string>::err(ffi_raw_.error());
+        return decodeCborFFI<std::string>(ffi_raw_.value());
+    }
+
+    static std::future<Result<std::string>> lib_versionAsync(std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
+        return std::async(std::launch::async, [timeout]() { return lib_version(timeout); });
+    }
+
+    static Result<ShoutResponse> shout_anon(const ShoutRequest& req, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
+        const auto ffi_req_ = EchoShoutAnonReq{req};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) return Result<ShoutResponse>::err(ffi_enc_.error());
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
+            return echo_shout_anon(cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        }, timeout);
+        if (ffi_raw_.isErr()) return Result<ShoutResponse>::err(ffi_raw_.error());
+        return decodeCborFFI<ShoutResponse>(ffi_raw_.value());
+    }
+
+    static std::future<Result<ShoutResponse>> shout_anonAsync(const ShoutRequest& req, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
+        return std::async(std::launch::async, [req, timeout]() { return shout_anon(req, timeout); });
     }
 
 private:

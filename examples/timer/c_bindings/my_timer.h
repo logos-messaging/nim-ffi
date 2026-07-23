@@ -93,6 +93,9 @@ typedef struct {
     char _nimffi_empty; /* C forbids empty structs */
 } MyTimerVersionReq;
 typedef struct {
+    char _nimffi_empty; /* C forbids empty structs */
+} MyTimerLibVersionReq;
+typedef struct {
     ComplexRequest req;
 } MyTimerComplexReq;
 typedef struct {
@@ -734,6 +737,20 @@ static inline CborError my_timer_dec_MyTimerVersionReq(
     (void)out;
     return cbor_value_advance(it);
 }
+static inline CborError my_timer_enc_MyTimerLibVersionReq(
+        CborEncoder* e, const MyTimerLibVersionReq* v) {
+    (void)v;
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(e, &m, 0);
+    if (err) return err;
+    return cbor_encoder_close_container(e, &m);
+}
+static inline CborError my_timer_dec_MyTimerLibVersionReq(
+        CborValue* it, MyTimerLibVersionReq* out) {
+    if (!cbor_value_is_map(it)) return CborErrorImproperValue;
+    (void)out;
+    return cbor_value_advance(it);
+}
 static inline CborError my_timer_enc_MyTimerComplexReq(
         CborEncoder* e, const MyTimerComplexReq* v) {
     CborEncoder m;
@@ -821,6 +838,7 @@ void* my_timer_create(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback 
 int my_timer_echo(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 /** Returns the library's version string. */
 int my_timer_version(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int my_timer_lib_version(FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int my_timer_complex(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 /** Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope. */
 int my_timer_schedule(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
@@ -837,6 +855,7 @@ int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
 static inline CborError my_timer_encv_MyTimerCreateCtorReq(CborEncoder* e, const void* v) { return my_timer_enc_MyTimerCreateCtorReq(e, (const MyTimerCreateCtorReq*)v); }
 static inline CborError my_timer_encv_MyTimerEchoReq(CborEncoder* e, const void* v) { return my_timer_enc_MyTimerEchoReq(e, (const MyTimerEchoReq*)v); }
 static inline CborError my_timer_encv_MyTimerVersionReq(CborEncoder* e, const void* v) { return my_timer_enc_MyTimerVersionReq(e, (const MyTimerVersionReq*)v); }
+static inline CborError my_timer_encv_MyTimerLibVersionReq(CborEncoder* e, const void* v) { return my_timer_enc_MyTimerLibVersionReq(e, (const MyTimerLibVersionReq*)v); }
 static inline CborError my_timer_encv_MyTimerComplexReq(CborEncoder* e, const void* v) { return my_timer_enc_MyTimerComplexReq(e, (const MyTimerComplexReq*)v); }
 static inline CborError my_timer_encv_MyTimerScheduleReq(CborEncoder* e, const void* v) { return my_timer_enc_MyTimerScheduleReq(e, (const MyTimerScheduleReq*)v); }
 static inline CborError my_timer_decv_EchoResponse(CborValue* it, void* v) { return my_timer_dec_EchoResponse(it, (EchoResponse*)v); }
@@ -1242,6 +1261,67 @@ static inline int my_timer_ctx_schedule(const MyTimerCtx* ctx, const JobSpec* jo
     box->fn = on_reply;
     box->user_data = user_data;
     int ret = my_timer_schedule(ctx->ptr, my_timer_schedule_reply_trampoline, box, req_buf, req_len);
+    free(req_buf);
+    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
+        if (on_reply) on_reply(-1, NULL, "RET_MISSING_CALLBACK (internal error)", user_data);
+        free(box);
+        return -1;
+    }
+    return 0;
+}
+
+typedef void (*MyTimerLibVersionReplyFn)(int err_code, const NimFfiStr* reply, const char* err_msg, void* user_data);
+typedef struct { MyTimerLibVersionReplyFn fn; void* user_data; } MyTimerLibVersionCallBox;
+static void my_timer_lib_version_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
+    MyTimerLibVersionCallBox* box = (MyTimerLibVersionCallBox*)ud;
+    /* Non-terminal progress ping: keep the box for the terminal reply. */
+    if (ret == NIMFFI_RET_STALE_WARN) return;
+    if (!box->fn) {
+        free(box);
+        return;
+    }
+    if (ret != 0) {
+        char* em = nimffi_dup_cstr_n(msg ? msg : "", msg ? len : 0);
+        box->fn(ret, NULL, em ? em : "FFI call failed", box->user_data);
+        free(em);
+        free(box);
+        return;
+    }
+    char* err = NULL;
+    NimFfiStr out;
+    memset(&out, 0, sizeof(out));
+    int dec = nimffi_decode_from_buf(my_timer_decv_Str, (const uint8_t*)msg, len, &out, &err);
+    if (dec != 0) {
+        box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
+        free(err);
+        nimffi_free_str(&out);
+        free(box);
+        return;
+    }
+    box->fn(NIMFFI_RET_OK, &out, NULL, box->user_data);
+    nimffi_free_str(&out);
+    free(box);
+}
+static inline int my_timer_static_lib_version(MyTimerLibVersionReplyFn on_reply, void* user_data) {
+    MyTimerLibVersionReq ffi_req;
+    memset(&ffi_req, 0, sizeof(ffi_req));
+    uint8_t* req_buf = NULL;
+    size_t req_len = 0;
+    char* err = NULL;
+    if (nimffi_encode_to_buf(my_timer_encv_MyTimerLibVersionReq, &ffi_req, &req_buf, &req_len, &err) != 0) {
+        if (on_reply) on_reply(-1, NULL, err ? err : "encode failed", user_data);
+        free(err);
+        return -1;
+    }
+    MyTimerLibVersionCallBox* box = (MyTimerLibVersionCallBox*)malloc(sizeof(MyTimerLibVersionCallBox));
+    if (!box) {
+        free(req_buf);
+        if (on_reply) on_reply(-1, NULL, "out of memory", user_data);
+        return -1;
+    }
+    box->fn = on_reply;
+    box->user_data = user_data;
+    int ret = my_timer_lib_version(my_timer_lib_version_reply_trampoline, box, req_buf, req_len);
     free(req_buf);
     if (ret == NIMFFI_RET_MISSING_CALLBACK) {
         if (on_reply) on_reply(-1, NULL, "RET_MISSING_CALLBACK (internal error)", user_data);

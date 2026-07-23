@@ -305,4 +305,22 @@ impl MyTimerCtx {
         decode_cbor::<ScheduleResult>(&raw_bytes)
     }
 
+    pub fn lib_version(timeout: Duration) -> Result<String, String> {
+        let req = MyTimerLibVersionReq {};
+        let req_bytes = encode_cbor(&req)?;
+        let raw_bytes = ffi_call_sync(timeout, |cb, ud| unsafe {
+            ffi::my_timer_lib_version(cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        })?;
+        decode_cbor::<String>(&raw_bytes)
+    }
+
+    pub async fn lib_version_async(timeout: Duration) -> Result<String, String> {
+        let req = MyTimerLibVersionReq {};
+        let req_bytes = encode_cbor(&req)?;
+        let raw_bytes = ffi_call_async(timeout, move |cb, ud| unsafe {
+            ffi::my_timer_lib_version(cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        }).await?;
+        decode_cbor::<String>(&raw_bytes)
+    }
+
 }

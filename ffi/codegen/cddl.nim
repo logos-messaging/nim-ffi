@@ -110,7 +110,7 @@ proc responseRule(p: FFIProcMeta): string =
   of FFIKind.DTOR:
     # Dtor payload is a CBOR null sentinel.
     "nil"
-  of FFIKind.FFI:
+  of FFIKind.FFI, FFIKind.STATIC:
     if p.returnRidesAsPtr():
       "uint"
     else:
@@ -166,6 +166,7 @@ proc generateCddlSchema*(
       of FFIKind.CTOR: "ctor"
       of FFIKind.DTOR: "dtor"
       of FFIKind.FFI: "ffi"
+      of FFIKind.STATIC: "ffiStatic"
     L.add("; " & p.procName & " (" & kindTag & ")")
     L.add(renderDocComment(p.doc, "", "; "))
     if p.kind != FFIKind.DTOR:

@@ -247,6 +247,38 @@ TEST(TimerE2E, CrossLibrary) {
     EXPECT_EQ(e.shouted, "X-ECHO: ASYNC-E");
 }
 
+// No EchoCtx is constructed anywhere in this test.
+TEST(TimerE2E, StaticProcNeedsNoContext) {
+    EXPECT_EQ(mustOk(EchoCtx::lib_version()), "nim-echo v0.1.0");
+
+    const auto resp = mustOk(EchoCtx::shout_anon(ShoutRequest{"hello"}));
+    EXPECT_EQ(resp.shouted, "HELLO");
+    EXPECT_EQ(resp.prefix, "");
+}
+
+// The static context is created once, on demand, and shared by every caller.
+TEST(TimerE2E, StaticProcConcurrentFirstCall) {
+    constexpr int kThreads = 8;
+
+    std::vector<std::future<Result<ShoutResponse>>> futs;
+    futs.reserve(kThreads);
+    for (int i = 0; i < kThreads; ++i) {
+        futs.push_back(EchoCtx::shout_anonAsync(ShoutRequest{"race" + std::to_string(i)}));
+    }
+    for (int i = 0; i < kThreads; ++i) {
+        EXPECT_EQ(mustOk(futs[i].get()).shouted, "RACE" + std::to_string(i));
+    }
+}
+
+// A static call and a ctx call must not disturb each other's state.
+TEST(TimerE2E, StaticProcCoexistsWithContext) {
+    auto ctx = mustOk(EchoCtx::create(EchoConfig{"WITH-CTX"}));
+
+    EXPECT_EQ(mustOk(ctx->shout(ShoutRequest{"a"})).prefix, "WITH-CTX");
+    EXPECT_EQ(mustOk(EchoCtx::shout_anon(ShoutRequest{"b"})).prefix, "");
+    EXPECT_EQ(mustOk(ctx->shout(ShoutRequest{"c"})).prefix, "WITH-CTX");
+}
+
 // Chained async calls A->B->C must preserve ordering and payload across hops.
 TEST(TimerE2E, TriplePipeline) {
     auto ctx = makeCtx("pipeline");
