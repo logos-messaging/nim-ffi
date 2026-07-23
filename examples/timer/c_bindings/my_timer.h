@@ -3,6 +3,14 @@
 #include "nim_ffi_cbor.h"
 
 /* ============================================================ */
+/* Generated constants                                          */
+/* ============================================================ */
+
+static const int64_t MAX_DELAY_MS = 5000;
+static const uint32_t DEFAULT_BACKOFF_MS = 250;
+static const char* const TIMER_VERSION = "nim-timer v0.1.0";
+
+/* ============================================================ */
 /* Generated types (user-declared + per-proc request envelopes) */
 /* ============================================================ */
 
@@ -48,10 +56,15 @@ typedef struct {
     NimFfiStr message;
     int64_t echoCount;
 } EchoEvent;
+typedef enum {
+    JOB_PRIORITY_JP_LOW = 0,
+    JOB_PRIORITY_JP_NORMAL = 1,
+    JOB_PRIORITY_JP_HIGH = 2
+} JobPriority;
 typedef struct {
     NimFfiStr name;
     MyTimerSeq_Str payload;
-    int64_t priority;
+    JobPriority priority;
 } JobSpec;
 typedef struct {
     int64_t maxAttempts;
@@ -68,6 +81,7 @@ typedef struct {
     int64_t willRunCount;
     int64_t firstRunAtMs;
     int64_t effectiveBackoffMs;
+    JobPriority priority;
 } ScheduleResult;
 typedef struct {
     TimerConfig config;
@@ -431,6 +445,32 @@ static inline void my_timer_free_EchoEvent(EchoEvent* v) {
     if (!v) return;
     nimffi_free_str(&v->message);
 }
+static inline CborError my_timer_enc_JobPriority(
+        CborEncoder* e, const JobPriority* v) {
+    switch (*v) {
+    case JOB_PRIORITY_JP_LOW: return cbor_encode_text_stringz(e, "low");
+    case JOB_PRIORITY_JP_NORMAL: return cbor_encode_text_stringz(e, "normal");
+    case JOB_PRIORITY_JP_HIGH: return cbor_encode_text_stringz(e, "high");
+    }
+    return CborErrorImproperValue;
+}
+static inline CborError my_timer_dec_JobPriority(
+        CborValue* it, JobPriority* out) {
+    if (!cbor_value_is_text_string(it)) return CborErrorImproperValue;
+    size_t len = 0;
+    CborError err = cbor_value_get_string_length(it, &len);
+    if (err) return err;
+    char buf[7];
+    if (len >= sizeof(buf)) return CborErrorImproperValue;
+    size_t copied = sizeof(buf);
+    err = cbor_value_copy_text_string(it, buf, &copied, NULL);
+    if (err) return err;
+    buf[len] = '\0';
+    if (strcmp(buf, "low") == 0) { *out = JOB_PRIORITY_JP_LOW; return cbor_value_advance(it); }
+    if (strcmp(buf, "normal") == 0) { *out = JOB_PRIORITY_JP_NORMAL; return cbor_value_advance(it); }
+    if (strcmp(buf, "high") == 0) { *out = JOB_PRIORITY_JP_HIGH; return cbor_value_advance(it); }
+    return CborErrorImproperValue;
+}
 static inline CborError my_timer_enc_JobSpec(
         CborEncoder* e, const JobSpec* v) {
     CborEncoder m;
@@ -446,7 +486,7 @@ static inline CborError my_timer_enc_JobSpec(
     if (err) return err;
     err = cbor_encode_text_stringz(&m, "priority");
     if (err) return err;
-    err = nimffi_enc_i64(&m, &v->priority);
+    err = my_timer_enc_JobPriority(&m, &v->priority);
     if (err) return err;
     return cbor_encoder_close_container(e, &m);
 }
@@ -468,7 +508,7 @@ static inline CborError my_timer_dec_JobSpec(
     err = cbor_value_map_find_value(it, "priority", &field);
     if (err) return err;
     if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
-    err = nimffi_dec_i64(&field, &out->priority);
+    err = my_timer_dec_JobPriority(&field, &out->priority);
     if (err) return err;
     return cbor_value_advance(it);
 }
@@ -566,7 +606,7 @@ static inline CborError my_timer_dec_ScheduleConfig(
 static inline CborError my_timer_enc_ScheduleResult(
         CborEncoder* e, const ScheduleResult* v) {
     CborEncoder m;
-    CborError err = cbor_encoder_create_map(e, &m, 4);
+    CborError err = cbor_encoder_create_map(e, &m, 5);
     if (err) return err;
     err = cbor_encode_text_stringz(&m, "jobId");
     if (err) return err;
@@ -583,6 +623,10 @@ static inline CborError my_timer_enc_ScheduleResult(
     err = cbor_encode_text_stringz(&m, "effectiveBackoffMs");
     if (err) return err;
     err = nimffi_enc_i64(&m, &v->effectiveBackoffMs);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "priority");
+    if (err) return err;
+    err = my_timer_enc_JobPriority(&m, &v->priority);
     if (err) return err;
     return cbor_encoder_close_container(e, &m);
 }
@@ -610,6 +654,11 @@ static inline CborError my_timer_dec_ScheduleResult(
     if (err) return err;
     if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
     err = nimffi_dec_i64(&field, &out->effectiveBackoffMs);
+    if (err) return err;
+    err = cbor_value_map_find_value(it, "priority", &field);
+    if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = my_timer_dec_JobPriority(&field, &out->priority);
     if (err) return err;
     return cbor_value_advance(it);
 }

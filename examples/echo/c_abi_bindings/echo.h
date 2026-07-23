@@ -14,6 +14,12 @@
    terminal RET_OK/RET_ERR. Ignore it unless you want progress. */
 #define NIMFFI_RET_STALE_WARN 3
 
+/* ============================================================ */
+/* Generated constants                                          */
+/* ============================================================ */
+
+static const int64_t MAX_SHOUT_LEN = 512;
+
 /* `abi = c` wire structs — the C ABI. Strings are borrowed, NUL-terminated
    `const char*` valid only for the duration of the call they cross. */
 typedef struct {

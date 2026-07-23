@@ -9,6 +9,12 @@ type MyTimer = object
 # `defaultABIFormat` is the wire format every annotation inherits (override per-annotation with "abi = ...").
 declareLibrary("my_timer", MyTimer, defaultABIFormat = "cbor")
 
+# {.ffiConst.}: re-emitted as a native constant in every binding.
+const
+  MaxDelayMs* {.ffiConst.} = 5_000
+  DefaultBackoffMs* {.ffiConst.}: uint32 = 250
+  TimerVersion* {.ffiConst.} = "nim-timer v0.1.0"
+
 type TimerConfig {.ffi.} = object
   name: string
 
@@ -48,6 +54,8 @@ proc myTimerEcho*(
     timer: MyTimer, req: EchoRequest
 ): Future[Result[EchoResponse, string]] {.ffi.} =
   ## Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
+  if req.delayMs > MaxDelayMs:
+    return err("delayMs must not exceed " & $MaxDelayMs)
   await sleepAsync(req.delayMs.milliseconds)
   onEchoFired(EchoEvent(message: req.message, echoCount: 1))
   return ok(EchoResponse(echoed: req.message, timerName: timer.name))
@@ -55,7 +63,7 @@ proc myTimerEcho*(
 # Sync method: no await, so the macro fires the callback inline.
 proc myTimerVersion*(timer: MyTimer): Future[Result[string, string]] {.ffi.} =
   ## Returns the library's version string.
-  return ok("nim-timer v0.1.0")
+  return ok(TimerVersion)
 
 proc myTimerComplex*(
     timer: MyTimer, req: ComplexRequest
@@ -68,11 +76,17 @@ proc myTimerComplex*(
   return
     ok(ComplexResponse(summary: summary, itemCount: count, hasNote: req.note.isSome))
 
+# {.ffi.} on an enum: a native enum in every binding, crossing the wire as text.
+type JobPriority {.ffi.} = enum
+  jpLow = "low"
+  jpNormal = "normal"
+  jpHigh = "high"
+
 # Multiple object-typed params: each is its own {.ffi.} type, all carried in one per-proc Req envelope.
 type JobSpec {.ffi.} = object
   name: string
   payload: seq[string]
-  priority: int # higher = runs sooner
+  priority: JobPriority
 
 type RetryPolicy {.ffi.} = object
   maxAttempts: int
@@ -89,6 +103,17 @@ type ScheduleResult {.ffi.} = object
   willRunCount: int
   firstRunAtMs: int
   effectiveBackoffMs: int
+  priority: JobPriority
+
+func effectiveBackoff(priority: JobPriority, backoffMs: int): int =
+  let base = if backoffMs > 0: backoffMs else: DefaultBackoffMs.int
+  case priority
+  of jpHigh:
+    return base div 2
+  of jpNormal:
+    return base
+  of jpLow:
+    return base * 2
 
 proc myTimerSchedule*(
     timer: MyTimer, job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig
@@ -110,7 +135,8 @@ proc myTimerSchedule*(
       jobId: timer.name & ":" & job.name,
       willRunCount: willRunCount,
       firstRunAtMs: schedule.startAtMs + jitter,
-      effectiveBackoffMs: retry.backoffMs,
+      effectiveBackoffMs: effectiveBackoff(job.priority, retry.backoffMs),
+      priority: job.priority,
     )
   )
 

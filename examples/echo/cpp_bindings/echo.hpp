@@ -293,6 +293,12 @@ inline Result<T> decodeCborFFI(const std::vector<std::uint8_t>& bytes) {
 #endif // NIM_FFI_CBOR_HELPERS_HPP_INCLUDED
 
 // ============================================================
+// Generated constants
+// ============================================================
+
+constexpr int64_t MAX_SHOUT_LEN = 512;
+
+// ============================================================
 // User-declared FFI types
 // ============================================================
 

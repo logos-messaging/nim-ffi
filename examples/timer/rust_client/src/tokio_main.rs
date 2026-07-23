@@ -1,6 +1,7 @@
 use std::time::Duration;
 use my_timer::{
-    EchoRequest, JobSpec, MyTimerCtx, RetryPolicy, ScheduleConfig, TimerConfig,
+    EchoRequest, JobPriority, JobSpec, MyTimerCtx, RetryPolicy, ScheduleConfig,
+    TimerConfig,
 };
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -40,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             JobSpec {
                 name: "hourly-sync".into(),
                 payload: vec!["sync".into(), "users".into()],
-                priority: 5,
+                priority: JobPriority::JpNormal,
             },
             RetryPolicy {
                 max_attempts: 5,
@@ -55,8 +56,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     println!(
-        "[5] Schedule (3 complex params, awaited): jobId={}, willRunCount={}, firstRunAtMs={}",
-        schedule.job_id, schedule.will_run_count, schedule.first_run_at_ms,
+        "[5] Schedule (3 complex params, awaited): jobId={}, willRunCount={}, firstRunAtMs={}, priority={:?}",
+        schedule.job_id, schedule.will_run_count, schedule.first_run_at_ms, schedule.priority,
     );
 
     println!("\nDone. Tokio runtime shut down.");

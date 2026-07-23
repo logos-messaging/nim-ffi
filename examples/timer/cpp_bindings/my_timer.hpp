@@ -294,6 +294,37 @@ inline Result<T> decodeCborFFI(const std::vector<std::uint8_t>& bytes) {
 #endif // NIM_FFI_CBOR_HELPERS_HPP_INCLUDED
 
 // ============================================================
+// Generated constants
+// ============================================================
+
+constexpr int64_t MAX_DELAY_MS = 5000;
+constexpr uint32_t DEFAULT_BACKOFF_MS = 250;
+constexpr const char* TIMER_VERSION = "nim-timer v0.1.0";
+
+enum class JobPriority {
+    jpLow = 0,
+    jpNormal = 1,
+    jpHigh = 2,
+};
+inline CborError encode_cbor(CborEncoder& e, const JobPriority& v) {
+    switch (v) {
+    case JobPriority::jpLow: return cbor_encode_text_stringz(&e, "low");
+    case JobPriority::jpNormal: return cbor_encode_text_stringz(&e, "normal");
+    case JobPriority::jpHigh: return cbor_encode_text_stringz(&e, "high");
+    }
+    return CborErrorImproperValue;
+}
+inline CborError decode_cbor(CborValue& it, JobPriority& v) {
+    std::string name;
+    CborError err = decode_cbor(it, name);
+    if (err) return err;
+    if (name == "low") { v = JobPriority::jpLow; return CborNoError; }
+    if (name == "normal") { v = JobPriority::jpNormal; return CborNoError; }
+    if (name == "high") { v = JobPriority::jpHigh; return CborNoError; }
+    return CborErrorImproperValue;
+}
+
+// ============================================================
 // User-declared FFI types
 // ============================================================
 
@@ -474,7 +505,7 @@ inline CborError decode_cbor(CborValue& it, EchoEvent& v) {
 struct JobSpec {
     std::string name;
     std::vector<std::string> payload;
-    int64_t priority;
+    JobPriority priority;
 };
 inline CborError encode_cbor(CborEncoder& e, const JobSpec& v) {
     CborEncoder m;
@@ -575,10 +606,11 @@ struct ScheduleResult {
     int64_t willRunCount;
     int64_t firstRunAtMs;
     int64_t effectiveBackoffMs;
+    JobPriority priority;
 };
 inline CborError encode_cbor(CborEncoder& e, const ScheduleResult& v) {
     CborEncoder m;
-    CborError err = cbor_encoder_create_map(&e, &m, 4);
+    CborError err = cbor_encoder_create_map(&e, &m, 5);
     if (err) return err;
     err = cbor_encode_text_stringz(&m, "jobId"); if (err) return err;
     err = encode_cbor(m, v.jobId);              if (err) return err;
@@ -588,6 +620,8 @@ inline CborError encode_cbor(CborEncoder& e, const ScheduleResult& v) {
     err = encode_cbor(m, v.firstRunAtMs);              if (err) return err;
     err = cbor_encode_text_stringz(&m, "effectiveBackoffMs"); if (err) return err;
     err = encode_cbor(m, v.effectiveBackoffMs);              if (err) return err;
+    err = cbor_encode_text_stringz(&m, "priority"); if (err) return err;
+    err = encode_cbor(m, v.priority);              if (err) return err;
     return cbor_encoder_close_container(&e, &m);
 }
 inline CborError decode_cbor(CborValue& it, ScheduleResult& v) {
@@ -606,6 +640,9 @@ inline CborError decode_cbor(CborValue& it, ScheduleResult& v) {
     err = cbor_value_map_find_value(&it, "effectiveBackoffMs", &field); if (err) return err;
     if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
     err = decode_cbor(field, v.effectiveBackoffMs); if (err) return err;
+    err = cbor_value_map_find_value(&it, "priority", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.priority); if (err) return err;
     return cbor_value_advance(&it);
 }
 

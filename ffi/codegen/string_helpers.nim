@@ -69,6 +69,24 @@ func capitalizeFirstLetter*(s: string): string =
   runesSeq[0] = runesSeq[0].toUpper()
   return $runesSeq
 
+func identToUpperSnake*(s: string): string =
+  ## Nim identifier → UPPER_SNAKE, keeping acronym runs intact: "maxPeers" and
+  ## "MAX_PEERS" both give "MAX_PEERS", "httpTTL" gives "HTTP_TTL".
+  var upper = ""
+  let rs = toRunes(s)
+  for i, r in rs:
+    if r == Rune('_'):
+      if upper.len > 0 and upper[^1] != '_':
+        upper.add('_')
+      continue
+    let startsWord =
+      i > 0 and r.isUpper() and
+      (not rs[i - 1].isUpper() or (i + 1 < rs.len and rs[i + 1].isLower()))
+    if startsWord and upper.len > 0 and upper[^1] != '_':
+      upper.add('_')
+    upper.add($r.toUpper())
+  return upper
+
 proc snakeToPascalCase*(s: string): string =
   ## snake_case → PascalCase, e.g. "hello_world" → "HelloWorld".
   let parts = s.split('_')

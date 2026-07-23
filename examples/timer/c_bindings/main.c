@@ -116,7 +116,8 @@ static void on_schedule(int ec, const ScheduleResult* reply, const char* em, voi
     w->err_code = ec;
     if (reply) {
         w->num_a = (long long)reply->willRunCount;
-        w->num_b = (long long)reply->firstRunAtMs;
+        w->num_b = (long long)reply->effectiveBackoffMs;
+        w->flag = (int)reply->priority;
         if (reply->jobId.data)
             snprintf(w->text_a, sizeof(w->text_a), "%s", reply->jobId.data);
     }
@@ -160,6 +161,9 @@ int main(void) {
     RUN(my_timer_ctx_version(ctx, on_version, &w), w);
     printf("[2] Version: %s\n", w.text_a);
 
+    printf("[2b] Header consts: TIMER_VERSION=%s, MAX_DELAY_MS=%lld\n", TIMER_VERSION,
+           (long long)MAX_DELAY_MS);
+
     EchoRequest echo_req = {nimffi_str("hello from C"), 50};
     RUN(my_timer_ctx_echo(ctx, &echo_req, on_echo, &w), w);
     printf("[3] Echo: echoed=%s, timerName=%s\n", w.text_a, w.text_b);
@@ -188,7 +192,7 @@ int main(void) {
     job.name = nimffi_str("nightly-rollup");
     job.payload.data = job_payload;
     job.payload.len = 2;
-    job.priority = 10;
+    job.priority = JOB_PRIORITY_JP_HIGH;
 
     NimFfiStr retry_on[2] = {nimffi_str("timeout"), nimffi_str("5xx")};
     RetryPolicy retry;
@@ -204,8 +208,9 @@ int main(void) {
     schedule.jitter.value = 250;
 
     RUN(my_timer_ctx_schedule(ctx, &job, &retry, &schedule, on_schedule, &w), w);
-    printf("[5] Schedule: jobId=%s, willRunCount=%lld, firstRunAtMs=%lld\n",
-           w.text_a, w.num_a, w.num_b);
+    printf("[5] Schedule: jobId=%s, willRunCount=%lld, effectiveBackoffMs=%lld, "
+           "priority=%d\n",
+           w.text_a, w.num_a, w.num_b, w.flag);
 
     uint64_t handle =
         my_timer_ctx_add_on_echo_fired_listener(ctx, on_echo_fired, NULL);

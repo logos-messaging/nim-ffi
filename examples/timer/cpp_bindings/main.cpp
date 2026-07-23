@@ -25,7 +25,8 @@ int main() {
         std::cerr << "Error: " << version.error() << "\n";
         return 1;
     }
-    std::cout << "[2] Version: " << version.value() << "\n";
+    std::cout << "[2] Version: " << version.value() << " (const TIMER_VERSION="
+              << TIMER_VERSION << ", MAX_DELAY_MS=" << MAX_DELAY_MS << ")\n";
 
     auto echo = echo1Future.get();
     if (echo.isErr()) {
@@ -66,7 +67,7 @@ int main() {
     auto job = JobSpec{
         /*name*/ "nightly-rollup",
         /*payload*/ std::vector<std::string>{"rollup", "v2"},
-        /*priority*/ 10,
+        JobPriority::jpHigh,
     };
     auto retry = RetryPolicy{
         /*maxAttempts*/ 3,
@@ -88,7 +89,7 @@ int main() {
               << ", willRunCount=" << scheduleRes->willRunCount
               << ", firstRunAtMs=" << scheduleRes->firstRunAtMs
               << ", effectiveBackoffMs=" << scheduleRes->effectiveBackoffMs
-              << "\n";
+              << ", priority=" << static_cast<int>(scheduleRes->priority) << "\n";
 
     // Each `{.ffiEvent.}` declared on the Nim side gets a typed
     // registration method — `addOnEchoFiredListener(handler)` here.

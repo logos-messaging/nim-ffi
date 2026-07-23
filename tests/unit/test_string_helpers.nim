@@ -34,6 +34,34 @@ suite "camelToSnakeCase":
   test "already snake_case passes through":
     check camelToSnakeCase("already_snake") == "already_snake"
 
+suite "identToUpperSnake":
+  test "empty string":
+    check identToUpperSnake("") == ""
+
+  test "camelCase":
+    check identToUpperSnake("maxPeers") == "MAX_PEERS"
+
+  test "PascalCase":
+    check identToUpperSnake("MaxPeers") == "MAX_PEERS"
+
+  test "already UPPER_SNAKE passes through":
+    check identToUpperSnake("MAX_PEERS") == "MAX_PEERS"
+
+  test "acronym run stays one word":
+    check identToUpperSnake("HTTPPort") == "HTTP_PORT"
+
+  test "acronym after a word":
+    check identToUpperSnake("httpTTL") == "HTTP_TTL"
+
+  test "digits don't split a word":
+    check identToUpperSnake("v2Enabled") == "V2_ENABLED"
+
+  test "single word":
+    check identToUpperSnake("timeout") == "TIMEOUT"
+
+  test "runs of underscores collapse":
+    check identToUpperSnake("a__b") == "A_B"
+
 suite "capitalizeFirstLetter":
   test "empty string":
     check capitalizeFirstLetter("") == ""
