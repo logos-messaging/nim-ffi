@@ -247,7 +247,7 @@ TEST(TimerE2E, CrossLibrary) {
     EXPECT_EQ(e.shouted, "X-ECHO: ASYNC-E");
 }
 
-// The whole point of {.ffiStatic.}: no EchoCtx is ever constructed here.
+// No EchoCtx is constructed anywhere in this test.
 TEST(TimerE2E, StaticProcNeedsNoContext) {
     EXPECT_EQ(mustOk(EchoCtx::lib_version()), "nim-echo v0.1.0");
 

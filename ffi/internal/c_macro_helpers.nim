@@ -706,13 +706,48 @@ proc stringTrampBody(boxName: NimNode): NimNode =
     except CatchableError as e:
       box.fn(RET_ERR, "".cstring, e.msg.cstring, box.ud)
 
-proc exportedMethodProc(
-    spec: CAbiSpec, boxName, envWire, trampName, poolIdent, cbType: NimNode
+proc ctxBindingGuard(
+    poolIdent, emptyReply, ctxIdent: NimNode, isStatic: bool
+): NimNode {.compileTime.} =
+  ## Prologue that binds `ctxIdent`: a method validates the ctx it was handed, a
+  ## static resolves the library's shared one.
+  if not isStatic:
+    return quote:
+      if onReply.isNil():
+        return RET_MISSING_CALLBACK
+      if not `poolIdent`.isValidCtx(cast[pointer](`ctxIdent`)):
+        onReply(
+          RET_ERR, `emptyReply`, "ctx is not a valid FFI context".cstring, userData
+        )
+        return RET_ERR
+  let guard = quote:
+    if onReply.isNil():
+      return RET_MISSING_CALLBACK
+    let `ctxIdent` = `poolIdent`.staticFFIContext().valueOr:
+      let errStr = "ffiStatic: " & error
+      onReply(RET_ERR, `emptyReply`, errStr.cstring, userData)
+      return RET_ERR
+  # A static call may be the host's first entry into the library. Raw AST, not
+  # `quote`: `when declared` over an undeclared symbol inside `quote` ICEs.
+  guard.insert(
+    0,
+    nnkWhenStmt.newTree(
+      nnkElifBranch.newTree(
+        newCall(ident("declared"), ident("initializeLibrary")),
+        newStmtList(newCall(ident("initializeLibrary"))),
+      )
+    ),
+  )
+  guard
+
+proc exportedProc(
+    spec: CAbiSpec,
+    boxName, envWire, trampName, poolIdent, cbType: NimNode,
+    isStatic: bool,
 ): NimNode =
   # No `foreignThreadGc`: `cwireUnpack`/`cwirePack` alloc on the calling thread (already GC-registered); wrapping would free its live ORC heap.
   let envName = spec.envelope
-  let libFFICtx =
-    nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), spec.libType))
+  let ctxIdent = ident("ctx")
   # String reply: empty non-nil cstring on error; object reply: nil ptr gated by err_code.
   let emptyReply =
     if isStringType(spec.respType):
@@ -720,11 +755,6 @@ proc exportedMethodProc(
     else:
       newNilLit()
   let body = quote:
-    if onReply.isNil():
-      return RET_MISSING_CALLBACK
-    if not `poolIdent`.isValidCtx(cast[pointer](ctx)):
-      onReply(RET_ERR, `emptyReply`, "ctx is not a valid FFI context".cstring, userData)
-      return RET_ERR
     var ownedWire: `envWire`
     cwirePack(ownedWire, cwireUnpack(req[]))
     let ownedCopy = cwireOwnedCopy(ownedWire)
@@ -742,7 +772,7 @@ proc exportedMethodProc(
     )
     let sendRes =
       try:
-        ffi_context.sendRequestToFFIThread(ctx, reqPtr)
+        ffi_context.sendRequestToFFIThread(`ctxIdent`, reqPtr)
       except Exception as e:
         Result[void, string].err("sendRequestToFFIThread exception: " & e.msg)
     if sendRes.isErr():
@@ -754,86 +784,25 @@ proc exportedMethodProc(
       return RET_ERR
     return RET_OK
 
-  newProc(
-    name = ident($envName & "CAbiExport"),
-    params = @[
-      ident("cint"),
-      newIdentDefs(ident("ctx"), libFFICtx),
-      newIdentDefs(ident("onReply"), cbType),
-      newIdentDefs(ident("userData"), ident("pointer")),
-      newIdentDefs(ident("req"), nnkPtrTy.newTree(envWire)),
-    ],
-    body = body,
-    pragmas = nnkPragma.newTree(
-      ident("dynlib"),
-      nnkExprColonExpr.newTree(ident("exportc"), newStrLitNode(spec.exportName)),
-      ident("cdecl"),
-      nnkExprColonExpr.newTree(ident("raises"), nnkBracket.newTree()),
-    ),
-  )
+  let fullBody = ctxBindingGuard(poolIdent, emptyReply, ctxIdent, isStatic)
+  for stmt in body:
+    fullBody.add(stmt)
 
-proc exportedStaticProc(
-    spec: CAbiSpec, boxName, envWire, trampName, poolIdent, cbType: NimNode
-): NimNode =
-  ## Ctx-less twin of `exportedMethodProc`: binds the library's static context
-  ## instead of taking one. `initGuard` is raw AST because a `when declared` over
-  ## an undeclared symbol inside `quote` ICEs (see `exportedCtorProc`).
-  let envName = spec.envelope
-  let emptyReply =
-    if isStringType(spec.respType):
-      newDotExpr(newLit(""), ident("cstring"))
-    else:
-      newNilLit()
-  let initGuard = nnkWhenStmt.newTree(
-    nnkElifBranch.newTree(
-      newCall(ident("declared"), ident("initializeLibrary")),
-      newStmtList(newCall(ident("initializeLibrary"))),
-    )
-  )
-  let body = quote:
-    if onReply.isNil():
-      return RET_MISSING_CALLBACK
-    let ctx = `poolIdent`.staticFFIContext().valueOr:
-      let errStr = "ffiStatic: " & error
-      onReply(RET_ERR, `emptyReply`, errStr.cstring, userData)
-      return RET_ERR
-    var ownedWire: `envWire`
-    cwirePack(ownedWire, cwireUnpack(req[]))
-    let ownedCopy = cwireOwnedCopy(ownedWire)
-    if ownedCopy.isNil():
-      cwireFree(ownedWire)
-      onReply(RET_ERR, `emptyReply`, "out of memory".cstring, userData)
-      return RET_ERR
-    let reqBuf = cast[ptr UncheckedArray[byte]](ownedCopy)
-    let box = cast[ptr `boxName`](allocBox(sizeof(`boxName`)))
-    box.fn = onReply
-    box.ud = userData
-    let typeStr = $`envName`
-    let reqPtr = FFIThreadRequest.initFromOwnedShared(
-      `trampName`, box, typeStr.cstring, reqBuf, sizeof(`envWire`), rawReply = true
-    )
-    let sendRes =
-      try:
-        ffi_context.sendRequestToFFIThread(ctx, reqPtr)
-      except Exception as e:
-        Result[void, string].err("sendRequestToFFIThread exception: " & e.msg)
-    if sendRes.isErr():
-      # See exportedMethodProc: the rejected send freed the struct copy, not the
-      # field buffers `ownedWire` still aliases.
-      cwireFree(ownedWire)
-      onReply(RET_ERR, `emptyReply`, sendRes.error.cstring, userData)
-      return RET_ERR
-    return RET_OK
-  body.insert(0, initGuard)
+  var params = @[
+    ident("cint"),
+    newIdentDefs(ident("onReply"), cbType),
+    newIdentDefs(ident("userData"), ident("pointer")),
+    newIdentDefs(ident("req"), nnkPtrTy.newTree(envWire)),
+  ]
+  if not isStatic:
+    let libFFICtx =
+      nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), spec.libType))
+    params.insert(newIdentDefs(ctxIdent, libFFICtx), 1)
+
   newProc(
     name = ident($envName & "CAbiExport"),
-    params = @[
-      ident("cint"),
-      newIdentDefs(ident("onReply"), cbType),
-      newIdentDefs(ident("userData"), ident("pointer")),
-      newIdentDefs(ident("req"), nnkPtrTy.newTree(envWire)),
-    ],
-    body = body,
+    params = params,
+    body = fullBody,
     pragmas = nnkPragma.newTree(
       ident("dynlib"),
       nnkExprColonExpr.newTree(ident("exportc"), newStrLitNode(spec.exportName)),
@@ -949,14 +918,15 @@ proc flushCAbiDispatch*(): NimNode {.compileTime.} =
       sink.add(replyTrampProc(trampName, stringTrampBody(boxName)))
       sink.add(exportedCtorProc(spec, boxName, envWire, trampName, poolIdent, cbType))
     of cakMethod, cakStatic:
-      let emitExport =
-        if spec.kind == cakStatic: exportedStaticProc else: exportedMethodProc
+      let isStatic = spec.kind == cakStatic
       let rt = spec.respType
       if isStringType(rt):
         let cbType = cAbiCbType(ident("cstring"))
         sink.add(boxTypeDef(boxName, cbType))
         sink.add(replyTrampProc(trampName, stringTrampBody(boxName)))
-        sink.add(emitExport(spec, boxName, envWire, trampName, poolIdent, cbType))
+        sink.add(
+          exportedProc(spec, boxName, envWire, trampName, poolIdent, cbType, isStatic)
+        )
       # `isKnownFFIType`, not just `nnkIdent`: a bare `int` is an ident too, and
       # would otherwise reach for a `int_CWire` companion that is never emitted.
       elif rt.kind == nnkIdent and isKnownFFIType($rt):
@@ -964,7 +934,9 @@ proc flushCAbiDispatch*(): NimNode {.compileTime.} =
         let cbType = cAbiCbType(nnkPtrTy.newTree(respWire))
         sink.add(boxTypeDef(boxName, cbType))
         sink.add(replyTrampProc(trampName, objectTrampBody(boxName, respWire)))
-        sink.add(emitExport(spec, boxName, envWire, trampName, poolIdent, cbType))
+        sink.add(
+          exportedProc(spec, boxName, envWire, trampName, poolIdent, cbType, isStatic)
+        )
       else:
         error(
           "abi = c: unsupported response type for proc '" & spec.exportName & "': " &

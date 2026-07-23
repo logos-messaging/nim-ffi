@@ -109,15 +109,11 @@ registerReqFFI(HeavyRefAllocRequest, lib: ptr TestLib):
     await sleepAsync(10.milliseconds)
     return ok("heavy-done")
 
-# Globals, as declareLibrary emits them: a static ctx is never destroyed, so its
-# threads outlive any scope and the pool must outlive them.
-#
-# One pool, filled once, for every slot-accounting case below. Under refc
-# `deinitContextResources` cannot close a context's five ThreadSignalPtrs (see
-# there), so every context ever created leaks its fds — and macOS spends two per
-# signal. A second 32-slot fill puts the suite over the 1024-fd limit.
+# Global, as declareLibrary emits it: a static ctx's threads may outlive any scope.
+# One pool for every slot-accounting case below — under refc a destroyed context
+# can't close its five ThreadSignalPtrs, so a second 32-slot fill would put the
+# suite over the 1024-fd limit.
 var staticPool: FFIContextPool[TestLib]
-var filler: seq[ptr FFIContext[TestLib]]
 
 suite "FFIContextPool":
   test "create and destroy via pool succeeds":
@@ -139,28 +135,39 @@ suite "FFIContextPool":
     check pool.destroyFFIContext(ctx2).isOk()
     check ctx1 == ctx2
 
+  # Each static case tears its pool back down on every exit path: left running
+  # under refc the threads race later suites' allocation and GC (macOS SIGSEGV).
   test "staticFFIContext returns one shared context and refuses destruction":
+    defer:
+      check staticPool.destroyStaticFFIContext().isOk()
     let first = staticPool.staticFFIContext().valueOr:
       assert false, "staticFFIContext failed: " & $error
       return
     check staticPool.staticFFIContext().tryGet() == first
-    # Owns a real slot, not a context handed out on the side.
+    # Occupies a pool slot like any other context.
     check staticPool.isValidCtx(first)
     check staticPool.destroyFFIContext(first).isErr()
-    # Still live and still the same context, not a released slot.
+    # Still live, and still the same context.
     check staticPool.staticFFIContext().tryGet() == first
 
   test "pool exhaustion errors and leaves staticFFIContext retryable":
+    var filler: seq[ptr FFIContext[TestLib]]
+    defer:
+      check staticPool.destroyStaticFFIContext().isOk()
+      for c in filler:
+        check staticPool.destroyFFIContext(c).isOk()
+
+    check staticPool.staticFFIContext().isOk()
     var c = staticPool.createFFIContext()
     while c.isOk():
       filler.add(c.tryGet())
       c = staticPool.createFFIContext()
-    # The static ctx holds a slot for good, so only MaxFFIContexts-1 were left.
+    # The static ctx holds a slot, so only MaxFFIContexts-1 were left.
     check filler.len == MaxFFIContexts - 1
     check staticPool.createFFIContext().isErr()
 
-    # Drop the static ctx and hand its slot straight to a plain one, so the
-    # retry below has to fail on a genuinely full pool.
+    # Hand the static ctx's slot straight to a plain one, so the retry below has
+    # to fail on a genuinely full pool.
     check staticPool.destroyStaticFFIContext().isOk()
     let reclaimed = staticPool.createFFIContext().valueOr:
       assert false, "createFFIContext(pool) failed on the freed static slot: " & $error
@@ -170,15 +177,6 @@ suite "FFIContextPool":
     check staticPool.staticFFIContext().isErr()
     check staticPool.destroyFFIContext(filler.pop()).isOk()
     check staticPool.staticFFIContext().isOk()
-
-  # Static contexts hold FFI/event threads for the whole process. Left running
-  # under refc they race with later suites' allocation and GC (macOS SIGSEGV).
-  # No later case uses this pool, so stop its threads here.
-  test "static contexts tear down without outliving the suite":
-    check staticPool.destroyStaticFFIContext().isOk()
-    for c in filler:
-      check staticPool.destroyFFIContext(c).isOk()
-    filler.setLen(0)
 
   test "requests are processed via pool context":
     var pool: FFIContextPool[TestLib]

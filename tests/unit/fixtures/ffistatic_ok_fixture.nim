@@ -1,4 +1,4 @@
-## Must compile: proves the rejections are about handles, not the static shape.
+## Must compile: the same shapes, with no handle crossing a static's boundary.
 
 import ffi, chronos
 

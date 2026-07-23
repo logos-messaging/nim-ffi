@@ -1,10 +1,6 @@
-## Asserts `{.ffiStatic.}` rejects what cannot cross a context-independent proc:
-## an {.ffiHandle.} parameter or return (both are resolved against the context
-## that owns them), and an `abi = c` scalar return (no reply shape without the
-## ctx-bound fast path).
-##
-## Each fixture compiles in a child `nim check` so its expected failure is a test
-## assertion, not this file's own compile error.
+## Asserts `{.ffiStatic.}` rejects an {.ffiHandle.} param/return and an `abi = c`
+## scalar return. Each fixture compiles in a child `nim check` so its expected
+## failure is an assertion rather than this file's own compile error.
 
 import std/[os, osproc, strutils, compilesettings]
 import unittest2

@@ -1,6 +1,6 @@
 ## Helpers shared by the C/C++ binding generators (cpp.nim, c.nim).
 
-import std/[strutils, options]
+import std/strutils
 import ./meta, ./string_helpers
 
 proc stripLibPrefix*(procName, libName: string): string =

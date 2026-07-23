@@ -200,8 +200,13 @@ exports. In C++ and Rust a static is an associated function on the ctx type
 
 The handler still needs an FFI thread, so it runs on the library's **static
 context**: created on the first `{.ffiStatic.}` call, then alive for the rest of
-the process — no ctx owns it, so nothing tears its thread pair down. It has no
-`myLib`, which is why a static proc cannot take the library value.
+the process — no ctx owns it, so nothing tears its thread pair down, and it holds
+one of the pool's slots. It has no `myLib`, which is why a static proc cannot
+take the library value.
+
+There is no foreign teardown for it. From Nim, `destroyStaticFFIContext(pool)`
+stops the thread pair and frees the slot; it is only sound once nothing will call
+a `{.ffiStatic.}` proc again, so it is meant for process shutdown and tests.
 
 The macro rejects an `{.ffiHandle.}` parameter or return: a handle is registered
 in the context that created it, which a static proc cannot reach. Under

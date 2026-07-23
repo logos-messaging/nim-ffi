@@ -506,8 +506,8 @@ proc generateCppHeader*(
     lines.add("    }")
     lines.add("")
 
-    # A static forwards its own `timeout`; a method captures `this` and calls
-    # `this->methodName(...)` so a same-named param can't shadow the call target.
+    # A method calls `this->methodName(...)` so a same-named param can't shadow
+    # the call target; a static has no `this` and forwards its own `timeout`.
     let staticArgs =
       if methParamNames.len > 0:
         methParamNamesStr & ", timeout"

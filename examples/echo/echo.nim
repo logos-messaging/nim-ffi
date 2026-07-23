@@ -44,7 +44,7 @@ proc echoVersion*(e: Echo): Future[Result[string, string]] {.ffi.} =
   ## Returns the library's version string.
   return ok("nim-echo v0.1.0")
 
-# The two below need no `Echo`, so their wrappers take no ctx.
+# No `Echo` param, so the wrappers take no ctx.
 proc echoLibVersion*(): Future[Result[string, string]] {.ffiStatic.} =
   return ok("nim-echo v0.1.0")
 

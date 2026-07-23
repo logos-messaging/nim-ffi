@@ -1,6 +1,5 @@
-## Must fail: `{.ffiStatic.}` never rides the ctx-bound all-scalar fast path, so a
-## scalar return has no `abi = c` reply shape. The error must say so, not die on an
-## undeclared `int_CWire` (see tests/unit/test_ffistatic_reject.nim).
+## Must fail: no `abi = c` reply shape for a static's scalar return, and the error
+## must say so rather than die on an undeclared `int_CWire`.
 
 import ffi, chronos
 

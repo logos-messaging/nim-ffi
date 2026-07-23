@@ -683,8 +683,8 @@ proc emitProcWrapper(
     ctxType, libType, libName: string,
     m: FFIProcMeta,
 ) =
-  ## Reply trampoline + CBOR-encoding wrapper: `<lib>_ctx_<name>` for a method,
-  ## `<lib>_static_<name>` for a static. `<lib>_<name>` is the raw dylib symbol.
+  ## Reply trampoline + wrapper: `<lib>_ctx_<name>`, or `<lib>_static_<name>` for a
+  ## static; `<lib>_<name>` itself is the raw symbol the dylib exports.
   let isStatic = m.isStatic()
   let stripped = stripLibPrefix(m.procName, libName)
   let reqName = reqStructName(m)
@@ -809,8 +809,8 @@ proc monomorphiseAll(
       discard ensureCType(reg, n)
       reqTypes.add(n)
   var respTypes: seq[string] = @[]
-  for m in replyProcs:
-    respTypes.add(cReturnType(reg, m))
+  for p in replyProcs:
+    respTypes.add(cReturnType(reg, p))
   for ev in events:
     discard ensureCType(reg, ev.payloadTypeName)
   return (reqTypes, respTypes)
@@ -1329,7 +1329,6 @@ proc emitAbiProcWrapper(
     ctxType, libName, libType: string,
     m: FFIProcMeta,
 ) =
-  ## See `emitProcWrapper` for why a static's wrapper is `<lib>_static_<name>`.
   let isStatic = m.isStatic()
   let stripped = stripLibPrefix(m.procName, m.libName)
   let reqStruct = reqStructName(m)

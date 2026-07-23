@@ -118,9 +118,8 @@ static void test_version(EchoCtx* ctx) {
     assert(strcmp(w.text_a, "nim-echo v0.1.0") == 0);
 }
 
-/* {.ffiStatic.}: no EchoCtx, and the library's static context is created by
- * this very call. Runs before make_ctx() so nothing else has initialised the
- * Nim runtime first. */
+/* No EchoCtx: this call creates the library's static context. Runs before
+ * make_ctx() so nothing else has initialised the Nim runtime first. */
 static void test_static_no_ctx(void) {
     ReplyWaiter v;
     memset(&v, 0, sizeof(v));

@@ -148,7 +148,6 @@ proc isFFIEnumTypeName*(name: string): bool {.compileTime.} =
   name in ffiEnumTypeNames
 
 func isStatic*(p: FFIProcMeta): bool =
-  ## True for a `{.ffiStatic.}` proc: no library receiver, no ctx in its wrapper.
   p.kind == FFIKind.STATIC
 
 type ClassifiedProcs* = object
@@ -175,7 +174,10 @@ func classifyProcs*(procs: seq[FFIProcMeta]): ClassifiedProcs =
 
 func dtorProcName*(c: ClassifiedProcs): string =
   ## The destructor's proc name, or "" when the library has no destructor.
-  if c.dtor.isSome(): c.dtor.get().procName else: ""
+  if c.dtor.isSome():
+    c.dtor.get().procName
+  else:
+    ""
 
 func replyProcs*(c: ClassifiedProcs): seq[FFIProcMeta] =
   ## Procs that reply with a decoded value: methods and statics.

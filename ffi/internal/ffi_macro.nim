@@ -831,11 +831,13 @@ proc buildFFIProc(
     recvType = firstParam[1]
     firstIsHandle = isHandleType(recvType)
   if (firstIsHandle or isStatic) and currentLibType.len == 0:
+    let why =
+      if isStatic: " takes no library param" else: " has an {.ffiHandle.} receiver"
     error(
-      where & " proc " & $procName & " carries no library type but no library is " &
-        "declared; call declareLibrary(name, LibType) first"
+      where & " proc " & $procName & why & " but no library is declared; " &
+        "call declareLibrary(name, LibType) first"
     )
-  # A static proc and a handle receiver both carry no library type, so fall back to the declared one.
+  # Neither carries a library type, so fall back to the declared one.
   let libTypeName =
     if firstIsHandle or isStatic:
       ident(currentLibType)
@@ -960,9 +962,9 @@ proc buildFFIProc(
         return RET_ERR
 
   proc buildStaticCtxGuard(): NimNode =
-    ## Binds the library's static context: a static wrapper takes no `ctx`, and a
-    ## static call may be the host's first entry (hence `initializeLibrary`).
-    ## `ctxIdent` is substituted so the send below sees it (`quote` gensyms).
+    ## Binds the library's static context; a static call may be the host's first
+    ## entry, hence `initializeLibrary`.
+    # `ctxIdent` is substituted so the send below sees it (`quote` gensyms).
     let ctxIdent = ident("ctx")
     quote:
       initializeLibrary()
@@ -1064,8 +1066,7 @@ proc buildFFIProc(
     let exportedParams = cExportedParams(ctxType, withCtx = not isStatic)
 
     let ffiBody = newStmtList()
-    # Flattened, not nested: the static guard's `let ctx` has to be a sibling of
-    # the send below for it to be in scope.
+    # Flattened: the guard's `let ctx` must be a sibling of the send to be in scope.
     let guard =
       if isStatic:
         buildStaticCtxGuard()
@@ -1151,10 +1152,8 @@ macro ffi*(args: varargs[untyped]): untyped =
   return buildFFIProc(prc, abiFormat, isStatic = false)
 
 macro ffiStatic*(args: varargs[untyped]): untyped =
-  ## Context-independent twin of `{.ffi.}`: the proc takes no library receiver and
-  ## its C wrapper takes no `ctx`, so a host can call it without constructing the
-  ## library. Handlers still run on an FFI thread — the library's static context,
-  ## created on the first such call and alive for the rest of the process.
+  ## Context-independent `{.ffi.}`: no library receiver, and no `ctx` in the C
+  ## wrapper, so a host calls it without constructing the library.
   requireBeforeGenBindings("`.ffiStatic.`")
   requireLibraryDeclared("`.ffiStatic.`")
   let prc = args[^1]

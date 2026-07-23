@@ -46,19 +46,19 @@ All notable changes to this project are documented in this file.
   where `-install_name` requires `-dynamiclib`.
 
 ### Added
-- **`{.ffiStatic.}`**: exports a context-independent proc. It takes no library
-  param and its wrapper takes no `ctx`, so a host can call a stateless utility
-  (key generation, parsing, a version string) without constructing the library
+- **`{.ffiStatic.}`**: exports a context-independent proc — no library param, and
+  no `ctx` in its wrapper, so a host can call a stateless utility (key generation,
+  parsing, a version string) without constructing the library
   ([#134](https://github.com/logos-messaging/nim-ffi/issues/134)). Wired for both
   the `cbor` and `c` ABIs across all four backends: the C header emits
-  `<lib>_static_<proc>(...)`, while C++ and Rust emit an associated function on
-  the ctx type taking the `timeout` a method reads from its ctx. Handlers run on
-  the library's *static context*, created on the first such call and alive for the
-  rest of the process, so that call starts a thread pair that is never torn down —
-  `destroyFFIContext` refuses it rather than releasing its slot; `destroyStaticFFIContext`
-  is the explicit teardown counterpart (stops the thread pair and frees the slot) for
-  process shutdown and tests. An `{.ffiHandle.}` parameter or return is rejected at macro
-  time: a handle belongs to the context that created it, which a static proc cannot reach.
+  `<lib>_static_<proc>(...)`, C++ and Rust an associated function on the ctx type
+  taking the `timeout` a method reads from its ctx. Handlers run on the library's
+  *static context*, created on the first such call and held for the rest of the
+  process, so that call starts a thread pair nothing tears down —
+  `destroyFFIContext` refuses it; `destroyStaticFFIContext` is the Nim-side
+  teardown for process shutdown and tests, with no foreign equivalent. An
+  `{.ffiHandle.}` parameter or return is rejected at macro time: a handle belongs
+  to the context that created it, which a static proc cannot reach.
 - `{.ffi.}` now accepts an `enum` type, emitting a native enum in every target
   (C `enum`, C++ `enum class`, Rust enum, CDDL string choice). Values cross the
   wire as the text `$value` yields — the associated string if declared, else the

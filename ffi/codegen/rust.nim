@@ -186,7 +186,6 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
     lines.add(renderMemberDocComment(p.doc))
     case p.kind
     of FFIKind.FFI, FFIKind.STATIC:
-      # Method-style: ctx first. A static is the same shape, minus the ctx.
       if not p.isStatic():
         params.add("ctx: *mut c_void")
       params.add("callback: FFICallback")

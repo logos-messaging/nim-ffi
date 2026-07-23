@@ -9,12 +9,14 @@ type
     ## Lifecycle of the pool's `{.ffiStatic.}` context; see `staticFFIContext`.
     StaticCtxNone
     StaticCtxCreating
+    StaticCtxDestroying
     StaticCtxReady
 
   FFIContextPool*[T] = object
-    ## Fixed pool. Each live context holds 5 ThreadSignalPtrs — one fd each on
-    ## Linux, two (a socketpair) elsewhere. Under refc a destroyed context cannot
-    ## close them (see `deinitContextResources`), so churn leaks fds unbounded.
+    ## Fixed pool of FFI contexts, plus the one `{.ffiStatic.}` context.
+    # Each live context holds 5 ThreadSignalPtrs — one fd each on Linux, two (a
+    # socketpair) elsewhere. Under refc a destroyed context cannot close them
+    # (see `deinitContextResources`), so churn leaks fds unbounded.
     slots: array[MaxFFIContexts, FFIContext[T]]
     inUse: array[MaxFFIContexts, Atomic[bool]]
     staticCtx: Atomic[pointer]
@@ -44,9 +46,10 @@ proc createFFIContext*[T](
   ok(ctx)
 
 proc isStaticCtx[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]): bool =
-  ## `staticCtx` is published before the state flips, so `Ready` implies it is readable.
-  pool.staticState.load() == StaticCtxReady and
-    pool.staticCtx.load() == cast[pointer](ctx)
+  ## True while `ctx` is the pool's static context, including mid-teardown.
+  # `staticCtx` is cleared only once the slot is released, so matching on the
+  # pointer covers `Destroying` too.
+  pool.staticCtx.load() == cast[pointer](ctx)
 
 proc destroyFFIContext*[T](
     pool: var FFIContextPool[T], ctx: ptr FFIContext[T]
@@ -67,17 +70,16 @@ proc destroyFFIContext*[T](
 proc staticFFIContext*[T](
     pool: var FFIContextPool[T]
 ): Result[ptr FFIContext[T], string] =
-  ## The pool's `{.ffiStatic.}` context: a static proc has no ctx of its own, but
-  ## its handler still needs an FFI thread. Created on first use and never
-  ## destroyed, so it holds a slot for good and `pool` must outlive its threads —
-  ## only ever call this on the global `declareLibrary` emits. `myLib` stays the
-  ## zero value; a static handler must not touch it. A failed create resets to
-  ## `StaticCtxNone` so the spinning losers retry instead of hanging.
+  ## The pool's `{.ffiStatic.}` context, created on first use: a static proc has
+  ## no ctx of its own, but its handler still needs an FFI thread.
+  # Holds its slot until `destroyStaticFFIContext`, so `pool` must outlive its
+  # threads: only call this on the global `declareLibrary` emits. `myLib` stays
+  # the zero value. A failed create resets to `StaticCtxNone` so waiters retry.
   while true:
     case pool.staticState.load()
     of StaticCtxReady:
       return ok(cast[ptr FFIContext[T]](pool.staticCtx.load()))
-    of StaticCtxCreating:
+    of StaticCtxCreating, StaticCtxDestroying:
       cpuRelax()
     of StaticCtxNone:
       var expected = StaticCtxNone
@@ -92,14 +94,16 @@ proc staticFFIContext*[T](
 
 proc destroyStaticFFIContext*[T](pool: var FFIContextPool[T]): Result[void, string] =
   ## Teardown counterpart to `staticFFIContext`: stops the static context's
-  ## threads and frees its slot. The static context is meant to live for the
-  ## whole process, so only call this once nothing will call `staticFFIContext`
-  ## again (e.g. test teardown) — a lingering static context otherwise keeps its
-  ## FFI/event threads running for the process lifetime.
-  if pool.staticState.load() != StaticCtxReady:
+  ## threads and frees its slot. A no-op when there is no static context.
+  # Claiming `Ready -> Destroying` serialises concurrent teardowns; it does not
+  # make teardown safe against a static call already in flight.
+  var expected = StaticCtxReady
+  if not pool.staticState.compareExchange(expected, StaticCtxDestroying):
     return ok()
   let ctx = cast[ptr FFIContext[T]](pool.staticCtx.load())
   ctx.stopAndJoinThreads().isOkOr:
+    # Threads are still live: leak the slot rather than free resources under them.
+    pool.staticState.store(StaticCtxReady)
     return err("destroyStaticFFIContext: " & $error)
   let deinitRes = ctx.deinitContextResources()
   pool.releaseSlot(ctx)
@@ -107,7 +111,7 @@ proc destroyStaticFFIContext*[T](pool: var FFIContextPool[T]): Result[void, stri
   pool.staticState.store(StaticCtxNone)
   deinitRes.isOkOr:
     return err("destroyStaticFFIContext: " & $error)
-  return ok()
+  ok()
 
 proc isValidCtx*[T](pool: var FFIContextPool[T], ctx: pointer): bool =
   ## Rejects nil / dangling pointers at the API boundary.
