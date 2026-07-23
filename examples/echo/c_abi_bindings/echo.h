@@ -14,6 +14,12 @@
    terminal RET_OK/RET_ERR. Ignore it unless you want progress. */
 #define NIMFFI_RET_STALE_WARN 3
 
+/* ============================================================ */
+/* Generated constants                                          */
+/* ============================================================ */
+
+static const int64_t MAX_SHOUT_LEN = 512;
+
 /* `abi = c` wire structs — the C ABI. Strings are borrowed, NUL-terminated
    `const char*` valid only for the duration of the call they cross. */
 typedef struct {
@@ -58,9 +64,13 @@ static inline char* nimffi_abi_dup_cstr_n(const char* s, size_t n) {
 extern "C" {
 #endif
 
+/** Creates an echo context that prefixes every reply with `config.prefix`. */
 void* echo_create(const EchoCreateCtorReq* req, EchoCreateRawFn on_created, void* user_data);
+/** Upper-cases `req.text` and returns it behind the context's prefix. */
 int echo_shout(void* ctx, EchoShoutReplyFn on_reply, void* user_data, const EchoShoutReq* req);
+/** Returns the library's version string. */
 int echo_version(void* ctx, EchoScalarRawFn callback, void* user_data);
+/** Releases the echo context. */
 int echo_destroy(void* ctx);
 
 #ifdef __cplusplus
@@ -103,6 +113,7 @@ static void echo_create_trampoline(int ret, const char* ctx_addr, const char* er
     free(box);
 }
 
+/** Creates an echo context that prefixes every reply with `config.prefix`. */
 static inline int echo_ctx_create(const EchoConfig* config, EchoCreateFn on_created, void* user_data) {
     EchoCreateCtorReq ffi_req;
     memset(&ffi_req, 0, sizeof(ffi_req));
@@ -118,12 +129,16 @@ static inline int echo_ctx_create(const EchoConfig* config, EchoCreateFn on_crea
     return 0;
 }
 
-static inline void echo_ctx_destroy(EchoCtx* ctx) {
-    if (!ctx) return;
-    if (ctx->ptr) { echo_destroy(ctx->ptr); ctx->ptr = NULL; }
+/** Releases the echo context. */
+static inline int echo_ctx_destroy(EchoCtx* ctx) {
+    if (!ctx) return NIMFFI_RET_OK;
+    int rc = NIMFFI_RET_OK;
+    if (ctx->ptr) { rc = echo_destroy(ctx->ptr); ctx->ptr = NULL; }
     free(ctx);
+    return rc;
 }
 
+/** Upper-cases `req.text` and returns it behind the context's prefix. */
 static inline int echo_ctx_shout(const EchoCtx* ctx, const ShoutRequest* req, EchoShoutReplyFn on_reply, void* user_data) {
     EchoShoutReq ffi_req;
     memset(&ffi_req, 0, sizeof(ffi_req));
@@ -154,6 +169,7 @@ static void echo_version_scalar_reply(int caller_ret, char* msg, size_t len, voi
     free(reply);
 }
 
+/** Returns the library's version string. */
 static inline int echo_ctx_version(const EchoCtx* ctx, EchoVersionReplyFn on_reply, void* user_data) {
     EchoVersionScalarBox* box = (EchoVersionScalarBox*)malloc(sizeof(EchoVersionScalarBox));
     if (!box) {

@@ -20,6 +20,17 @@ All notable changes to this project are documented in this file.
   thread can be freed on the FFI thread — the cross-thread ownership the
   CBOR-free request path relies on, and consistent with the libc-backed request
   envelope.
+- The generated C `<lib>_ctx_destroy()` now returns `int` instead of `void`,
+  propagating the exported `<lib>_destroy()` status code (`NIMFFI_RET_OK` on
+  success, `RET_ERR` on a null/invalid context or a failed context teardown)
+  instead of discarding it, so a host can observe a failed teardown. Existing
+  callers that invoke it as a statement are unaffected
+  ([#133](https://github.com/logos-messaging/nim-ffi/issues/133)).
+- A failed `<lib>_ctx_destroy()` no longer frees the event-listener boxes. A
+  non-`NIMFFI_RET_OK` teardown leaves the worker threads live, and they still
+  hold each box as callback `user_data`; the boxes are now leaked rather than
+  freed out from under a running event thread. The context struct and the
+  listener array are still freed unconditionally.
 - User event callbacks now run on a dedicated event thread fed by a
   bounded SPSC queue (default capacity 1024), so a slow listener can no
   longer block the FFI thread or concurrent `add_event_listener` /
@@ -35,10 +46,29 @@ All notable changes to this project are documented in this file.
   where `-install_name` requires `-dynamiclib`.
 
 ### Added
+- `{.ffi.}` now accepts an `enum` type, emitting a native enum in every target
+  (C `enum`, C++ `enum class`, Rust enum, CDDL string choice). Values cross the
+  wire as the text `$value` yields — the associated string if declared, else the
+  symbol name — matching what `cbor_serialization` writes. Enums are supported
+  on the CBOR wire only; reaching one from an `abi = c` type or proc is now a
+  compile error naming the type, where it previously registered as a
+  fieldless struct and silently dropped the value.
+- `{.ffiConst.}` exposes a Nim `const` to every generated binding as a native
+  constant (`static const` in C, `constexpr` in C++, `pub const` in Rust).
+  Integer, float, `bool` and `string` values are supported, computed
+  expressions arrive folded, and names are re-cased to `UPPER_SNAKE`.
 - `{.ffiEvent.}` no longer requires an explicit wire-name string: when omitted
   it is derived from the proc name via `camelToSnakeCase`
   (`onPeerConnected` → `on_peer_connected`), matching how `{.ffi.}` derives its
   C export symbol. Pass a string literal only to override it.
+- Doc comments (`##`) on `{.ffi.}` / `{.ffiCtor.}` / `{.ffiDtor.}` procs are now
+  propagated to the generated bindings — `/** ... */` on the C declarations,
+  `///` on the C++ class methods and Rust `pub fn`s, and `;` comments in the
+  CDDL schema — so the exported API is documented once, in the Nim source
+  ([#127](https://github.com/logos-messaging/nim-ffi/issues/127)). Editing a
+  `##` comment now changes the generated bindings, so `nimble check_bindings`
+  flags them stale until regenerated; an undocumented proc still generates
+  byte-identical output.
 - FFI annotations (`{.ffi.}`, `{.ffiCtor.}`, `{.ffiDtor.}`, `{.ffiEvent.}`,
   `{.ffiHandle.}`, `{.ffiRaw.}`) that expand after `genBindings()` now produce a
   loud compile error instead of being silently dropped from the generated

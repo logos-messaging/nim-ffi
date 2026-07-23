@@ -74,6 +74,7 @@ typedef struct {
     char text_a[256];
     char text_b[256];
     long long num_a;
+    long long num_b;
     int flag;
 } ReplyWaiter;
 
@@ -91,7 +92,7 @@ static void test_version(MyTimerCtx* ctx) {
     my_timer_ctx_version(ctx, on_version, &w);
     wait_done(&w.done);
     assert(w.err_code == 0);
-    assert(strcmp(w.text_a, "nim-timer v0.1.0") == 0);
+    assert(strcmp(w.text_a, TIMER_VERSION) == 0);
 }
 
 static void on_echo(int ec, const EchoResponse* reply, const char* em, void* ud) {
@@ -158,6 +159,8 @@ static void on_schedule(int ec, const ScheduleResult* reply, const char* em, voi
     w->err_code = ec;
     if (reply) {
         w->num_a = (long long)reply->willRunCount;
+        w->num_b = (long long)reply->effectiveBackoffMs;
+        w->flag = (int)reply->priority;
         if (reply->jobId.data) snprintf(w->text_a, sizeof(w->text_a), "%s", reply->jobId.data);
     }
     if (em) snprintf(w->err, sizeof(w->err), "%s", em);
@@ -170,7 +173,7 @@ static void test_schedule_ok(MyTimerCtx* ctx) {
     job.name = nimffi_str("rollup");
     job.payload.data = payload;
     job.payload.len = 1;
-    job.priority = 1;
+    job.priority = JOB_PRIORITY_JP_HIGH;
 
     NimFfiStr retry_on[1] = {nimffi_str("timeout")};
     RetryPolicy retry;
@@ -192,6 +195,9 @@ static void test_schedule_ok(MyTimerCtx* ctx) {
     assert(w.err_code == 0);
     assert(strcmp(w.text_a, "c-e2e:rollup") == 0);
     assert(w.num_a == 1);
+    /* jpHigh halves the requested 100ms backoff. */
+    assert(w.num_b == 50);
+    assert(w.flag == JOB_PRIORITY_JP_HIGH);
 }
 
 static void test_schedule_error(MyTimerCtx* ctx) {
@@ -200,7 +206,7 @@ static void test_schedule_error(MyTimerCtx* ctx) {
     job.name = nimffi_str(""); /* empty name → handler returns err */
     job.payload.data = payload;
     job.payload.len = 1;
-    job.priority = 1;
+    job.priority = JOB_PRIORITY_JP_LOW;
 
     NimFfiStr retry_on[1] = {nimffi_str("timeout")};
     RetryPolicy retry;
@@ -222,6 +228,16 @@ static void test_schedule_error(MyTimerCtx* ctx) {
     assert(w.err_code != 0);
     assert(w.err[0] != '\0');
     assert(strstr(w.err, "job name") != NULL);
+}
+
+static void test_delay_limit(MyTimerCtx* ctx) {
+    ReplyWaiter w;
+    memset(&w, 0, sizeof(w));
+    EchoRequest req = {nimffi_str("too-slow"), MAX_DELAY_MS + 1};
+    my_timer_ctx_echo(ctx, &req, on_echo, &w);
+    wait_done(&w.done);
+    assert(w.err_code != 0);
+    assert(strstr(w.err, "delayMs") != NULL);
 }
 
 static void test_event(MyTimerCtx* ctx) {
@@ -256,8 +272,9 @@ int main(void) {
     test_complex(ctx);
     test_schedule_ok(ctx);
     test_schedule_error(ctx);
+    test_delay_limit(ctx);
     test_event(ctx);
-    my_timer_ctx_destroy(ctx);
+    assert(my_timer_ctx_destroy(ctx) == NIMFFI_RET_OK);
     printf("all C e2e checks passed\n");
     return 0;
 }

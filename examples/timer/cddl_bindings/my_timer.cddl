@@ -9,10 +9,11 @@ EchoResponse = { echoed: tstr, timerName: tstr }
 ComplexRequest = { messages: [* EchoRequest], tags: [* tstr], note: tstr / nil, retries: int / nil }
 ComplexResponse = { summary: tstr, itemCount: int, hasNote: bool }
 EchoEvent = { message: tstr, echoCount: int }
-JobSpec = { name: tstr, payload: [* tstr], priority: int }
+JobPriority = "low" / "normal" / "high"
+JobSpec = { name: tstr, payload: [* tstr], priority: JobPriority }
 RetryPolicy = { maxAttempts: int, backoffMs: int, retryOn: [* tstr] }
 ScheduleConfig = { startAtMs: int, intervalMs: int, jitter: int / nil }
-ScheduleResult = { jobId: tstr, willRunCount: int, firstRunAtMs: int, effectiveBackoffMs: int }
+ScheduleResult = { jobId: tstr, willRunCount: int, firstRunAtMs: int, effectiveBackoffMs: int, priority: JobPriority }
 
 ; ─── Request envelopes (one CBOR blob per request) ────────────────
 MyTimerCreateCtorReq = { config: TimerConfig }
@@ -23,14 +24,17 @@ MyTimerScheduleReq = { job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfi
 
 ; ─── Procs ─────────────────────────────────────────────────────────
 ; my_timer_create (ctor)
+; Creates the FFIContext + MyTimer; async via chronos.
 my_timer_create-request = MyTimerCreateCtorReq
 my_timer_create-response = tstr
 
 ; my_timer_echo (ffi)
+; Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
 my_timer_echo-request = MyTimerEchoReq
 my_timer_echo-response = EchoResponse
 
 ; my_timer_version (ffi)
+; Returns the library's version string.
 my_timer_version-request = MyTimerVersionReq
 my_timer_version-response = tstr
 
@@ -39,8 +43,10 @@ my_timer_complex-request = MyTimerComplexReq
 my_timer_complex-response = ComplexResponse
 
 ; my_timer_schedule (ffi)
+; Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
 my_timer_schedule-request = MyTimerScheduleReq
 my_timer_schedule-response = ScheduleResult
 
 ; my_timer_destroy (dtor)
+; Tears down the FFI context; blocks until FFI + watchdog threads join.
 my_timer_destroy-response = nil

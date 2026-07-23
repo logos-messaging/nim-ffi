@@ -86,6 +86,21 @@ static void test_shout(EchoCtx* ctx) {
     assert(strcmp(w.text_b, "c-abi") == 0);
 }
 
+/* Constants are ABI-agnostic: the abi = c header carries the same limit. */
+static void test_shout_too_long(EchoCtx* ctx) {
+    char text[MAX_SHOUT_LEN + 2];
+    memset(text, 'a', sizeof(text) - 1);
+    text[sizeof(text) - 1] = '\0';
+
+    ReplyWaiter w;
+    memset(&w, 0, sizeof(w));
+    ShoutRequest req = {text};
+    echo_ctx_shout(ctx, &req, on_shout, &w);
+    wait_done(&w.done);
+    assert(w.err_code != 0);
+    assert(strstr(w.err, "must not exceed") != NULL);
+}
+
 static void on_version(int ec, const char* reply, const char* em, void* ud) {
     ReplyWaiter* w = (ReplyWaiter*)ud;
     w->err_code = ec;
@@ -106,8 +121,9 @@ static void test_version(EchoCtx* ctx) {
 int main(void) {
     EchoCtx* ctx = make_ctx();
     test_shout(ctx);
+    test_shout_too_long(ctx);
     test_version(ctx);
-    echo_ctx_destroy(ctx);
+    assert(echo_ctx_destroy(ctx) == NIMFFI_RET_OK);
     printf("all abi=c echo e2e checks passed\n");
     return 0;
 }

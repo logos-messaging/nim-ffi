@@ -1,6 +1,6 @@
 ## Helpers shared by the C/C++ binding generators (cpp.nim, c.nim).
 
-import std/strutils
+import std/[strutils, options]
 import ./meta, ./string_helpers
 
 proc stripLibPrefix*(procName, libName: string): string =
@@ -21,7 +21,7 @@ proc reqStructName*(p: FFIProcMeta): string =
 type ClassifiedProcs* = object
   ctors*: seq[FFIProcMeta]
   methods*: seq[FFIProcMeta]
-  dtorProcName*: string
+  dtor*: Option[FFIProcMeta]
 
 proc classifyProcs*(procs: seq[FFIProcMeta]): ClassifiedProcs =
   ## Splits the registry into constructors, methods and the first destructor.
@@ -33,8 +33,8 @@ proc classifyProcs*(procs: seq[FFIProcMeta]): ClassifiedProcs =
     of FFIKind.FFI:
       c.methods.add(p)
     of FFIKind.DTOR:
-      if c.dtorProcName.len == 0:
-        c.dtorProcName = p.procName
+      if c.dtor.isNone():
+        c.dtor = some(p)
   c
 
 proc libTypeName*(ctors: seq[FFIProcMeta], libName: string): string =

@@ -2,8 +2,8 @@
 ## `abi = c` emits one header whose structs are the C ABI directly. Lacking
 ## generics, each distinct `seq[T]`/`Option[T]` is monomorphised per type.
 
-import std/[os, strutils, tables, sets]
-import ./meta, ./string_helpers, ./c_cpp_common, ./types_ir
+import std/[os, strutils, tables, sets, options]
+import ./meta, ./string_helpers, ./c_cpp_common, ./types_ir, ./consts
 
 ## Fixed 64-bit wire type for any Nim `ptr T`/`pointer` (mirrors CppPtrType).
 const CPtrType* = "uint64_t"
@@ -174,6 +174,60 @@ proc emitOptType(reg: var CTypeReg, name, elemC: string, elemOwns: bool) =
 
 proc ensureCType(reg: var CTypeReg, nimType: string): tuple[cType: string, owns: bool]
 
+func enumConstName*(typeName, valueName: string): string =
+  ## C/CDDL-safe constant name for an enum value, e.g. ("Color", "cRed") → COLOR_C_RED.
+  return identToUpperSnake(typeName) & "_" & identToUpperSnake(valueName)
+
+proc emitEnumType(reg: var CTypeReg, t: FFITypeMeta) =
+  ## A `{.ffi.}` enum becomes a C enum whose codec maps to the CBOR text form
+  ## (the value's Nim symbol name, or its associated string) that
+  ## cbor_serialization writes.
+  var members: seq[string] = @[]
+  for v in t.enumValues:
+    members.add("    " & enumConstName(t.name, v.name) & " = " & $v.ord & ",")
+  members[^1].removeSuffix(',')
+  reg.decls.add("typedef enum {\n" & members.join("\n") & "\n} " & t.name & ";")
+
+  var longest = 0
+  for v in t.enumValues:
+    longest = max(longest, v.wire.len)
+
+  var body: seq[string] = @[]
+  body.add("static inline CborError " & reg.libName & "_enc_" & t.name & "(")
+  body.add("        CborEncoder* e, const " & t.name & "* v) {")
+  body.add("    switch (*v) {")
+  for v in t.enumValues:
+    body.add(
+      "    case " & enumConstName(t.name, v.name) &
+        ": return cbor_encode_text_stringz(e, \"" & v.wire & "\");"
+    )
+  body.add("    }")
+  body.add("    return CborErrorImproperValue;")
+  body.add("}")
+
+  body.add("static inline CborError " & reg.libName & "_dec_" & t.name & "(")
+  body.add("        CborValue* it, " & t.name & "* out) {")
+  body.add("    if (!cbor_value_is_text_string(it)) return CborErrorImproperValue;")
+  body.add("    size_t len = 0;")
+  body.add("    CborError err = cbor_value_get_string_length(it, &len);")
+  body.add("    if (err) return err;")
+  body.add("    char buf[" & $(longest + 1) & "];")
+  body.add("    if (len >= sizeof(buf)) return CborErrorImproperValue;")
+  body.add("    size_t copied = sizeof(buf);")
+  body.add("    err = cbor_value_copy_text_string(it, buf, &copied, NULL);")
+  body.add("    if (err) return err;")
+  body.add("    buf[len] = '\\0';")
+  for v in t.enumValues:
+    body.add(
+      "    if (strcmp(buf, \"" & v.wire & "\") == 0) { *out = " &
+        enumConstName(t.name, v.name) & "; return cbor_value_advance(it); }"
+    )
+  body.add("    return CborErrorImproperValue;")
+  body.add("}")
+
+  reg.codecs.add(body.join("\n"))
+  reg.owns[t.name] = false
+
 proc emitStructType(reg: var CTypeReg, t: FFITypeMeta) =
   var fieldDecls: seq[string] = @[]
   var members: seq[tuple[name, cType: string, owns: bool]] = @[]
@@ -269,7 +323,11 @@ proc ensureCType(reg: var CTypeReg, t: FFIType): tuple[cType: string, owns: bool
     if name notin reg.emitted:
       reg.emitted.incl(name)
       if name in reg.typeTable:
-        emitStructType(reg, reg.typeTable[name])
+        let meta = reg.typeTable[name]
+        if meta.isEnum():
+          emitEnumType(reg, meta)
+        else:
+          emitStructType(reg, meta)
       else:
         reg.decls.add("/* unknown type referenced: " & name & " */")
     return (name, reg.owns.getOrDefault(name, false))
@@ -285,11 +343,14 @@ proc reqTypeMeta(p: FFIProcMeta): FFITypeMeta =
     fields.add(FFIFieldMeta(name: ep.name, typeName: typeName))
   return FFITypeMeta(name: reqStructName(p), fields: fields)
 
-func paramByValue(nimType: string, ridesAsPtr: bool): bool =
-  ## Scalars/pointers/string views pass by value; aggregates by const pointer.
+func paramByValue(reg: CTypeReg, nimType: string, ridesAsPtr: bool): bool =
+  ## Scalars/pointers/string views and enums pass by value; aggregates by const pointer.
   if ridesAsPtr:
     return true
-  return parseFFIType(nimType).kind in {ftScalar, ftStr, ftPtr}
+  let t = parseFFIType(nimType)
+  if t.kind == ftStruct and reg.typeTable.getOrDefault(t.name).isEnum():
+    return true
+  return t.kind in {ftScalar, ftStr, ftPtr}
 
 proc cReturnType(reg: var CTypeReg, p: FFIProcMeta): string =
   if p.returnRidesAsPtr():
@@ -308,7 +369,7 @@ proc buildReqParams(
         CPtrType
       else:
         ensureCType(reg, ep.typeName).cType
-    if paramByValue(ep.typeName, rides):
+    if paramByValue(reg, ep.typeName, rides):
       params.add(cType & " " & ep.name)
       assigns.add("    ffi_req." & ep.name & " = " & ep.name & ";")
     else:
@@ -487,6 +548,7 @@ proc emitConstructors(
         head & params.join(", ") & ", " & fnType & " on_created, void* user_data) {"
       else:
         head & fnType & " on_created, void* user_data) {"
+    lines.add(renderBlockDocComment(ctor.doc))
     lines.add(sig)
     lines.add("    " & reqName & " ffi_req;")
     lines.add("    memset(&ffi_req, 0, sizeof(ffi_req));")
@@ -525,19 +587,32 @@ proc emitConstructors(
 
 proc emitDestructor(
     lines: var seq[string],
-    ctxType, libName, dtorProcName: string,
+    ctxType, libName: string,
+    dtor: Option[FFIProcMeta],
     events: seq[FFIEventMeta],
 ) =
-  lines.add("static inline void " & libName & "_ctx_destroy(" & ctxType & "* ctx) {")
-  lines.add("    if (!ctx) return;")
-  if dtorProcName.len > 0:
-    lines.add("    if (ctx->ptr) { " & dtorProcName & "(ctx->ptr); ctx->ptr = NULL; }")
-  if events.len > 0:
+  if dtor.isSome():
+    lines.add(renderBlockDocComment(dtor.get().doc))
+  lines.add("static inline int " & libName & "_ctx_destroy(" & ctxType & "* ctx) {")
+  lines.add("    if (!ctx) return NIMFFI_RET_OK;")
+  lines.add("    int rc = NIMFFI_RET_OK;")
+  if dtor.isSome():
     lines.add(
-      "    for (size_t i = 0; i < ctx->listeners_len; i++) free(ctx->listeners[i].box);"
+      "    if (ctx->ptr) { rc = " & dtor.get().procName &
+        "(ctx->ptr); ctx->ptr = NULL; }"
     )
+  if events.len > 0:
+    # A failed teardown leaves the worker threads live (ffi_context.nim:
+    # stopAndJoinThreads), and they still hold each box as callback user_data.
+    # Leaking a box beats handing a running event thread a dangling pointer.
+    lines.add("    if (rc == NIMFFI_RET_OK) {")
+    lines.add(
+      "        for (size_t i = 0; i < ctx->listeners_len; i++) free(ctx->listeners[i].box);"
+    )
+    lines.add("    }")
     lines.add("    free(ctx->listeners);")
   lines.add("    free(ctx);")
+  lines.add("    return rc;")
   lines.add("}")
   lines.add("")
 
@@ -548,6 +623,7 @@ proc emitListenerApi(
     return
   for ev in events:
     let n = evNames(libType, libName, ev)
+    lines.add(renderBlockDocComment(ev.doc))
     lines.add(
       "static inline uint64_t " & n.regName & "(" & ctxType & "* ctx, " & n.fnType &
         " fn, void* user_data) {"
@@ -652,6 +728,7 @@ proc emitMethod(
       head & params.join(", ") & ", " & fnType & " on_reply, void* user_data) {"
     else:
       head & fnType & " on_reply, void* user_data) {"
+  lines.add(renderBlockDocComment(m.doc))
   lines.add(sig)
   lines.add("    " & reqName & " ffi_req;")
   lines.add("    memset(&ffi_req, 0, sizeof(ffi_req));")
@@ -730,6 +807,33 @@ proc monomorphiseAll(
     discard ensureCType(reg, ev.payloadTypeName)
   return (reqTypes, respTypes)
 
+func constDeclLines(consts: seq[FFIConstMeta]): seq[string] =
+  ## `{.ffiConst.}` values as typed `static const` definitions; shared by the
+  ## CBOR and `abi = c` headers.
+  if consts.len == 0:
+    return @[]
+  var lines = @[
+    "/* ============================================================ */",
+    "/* Generated constants                                          */",
+    "/* ============================================================ */", "",
+  ]
+  for c in consts:
+    let t = parseFFIType(c.typeName)
+    let name = identToUpperSnake(c.name)
+    let value = cConstValue(t, c.value)
+    case t.kind
+    of ftStr:
+      lines.add("static const char* const " & name & " = " & value & ";")
+    of ftScalar:
+      lines.add(
+        "static const " & scalarCInfoTable[t.scalar].cType & " " & name & " = " & value &
+          ";"
+      )
+    else:
+      discard
+  lines.add("")
+  return lines
+
 func generateCPreludeHeader*(): string =
   ## The library-agnostic `nim_ffi_prelude.h`, emitted verbatim.
   return HeaderPreludeTpl & "\n"
@@ -743,6 +847,7 @@ proc generateCLibHeader*(
     types: seq[FFITypeMeta],
     libName: string,
     events: seq[FFIEventMeta] = @[],
+    consts: seq[FFIConstMeta] = @[],
 ): string =
   ## The `<lib>.h` header: library structs, monomorphised codecs and async API.
   let classified = classifyProcs(procs)
@@ -760,6 +865,8 @@ proc generateCLibHeader*(
   lines.add("#define " & guard)
   lines.add("#include \"" & CborHeaderName & "\"")
   lines.add("")
+
+  lines.add(constDeclLines(consts))
 
   lines.add("/* ============================================================ */")
   lines.add("/* Generated types (user-declared + per-proc request envelopes) */")
@@ -780,6 +887,7 @@ proc generateCLibHeader*(
   lines.add("#endif")
   lines.add("")
   for p in procs:
+    lines.add(renderBlockDocComment(p.doc))
     case p.kind
     of FFIKind.FFI:
       lines.add(
@@ -833,7 +941,7 @@ proc generateCLibHeader*(
   emitEventMachinery(lines, reg, libType, libName, events)
   emitContextStruct(lines, ctxType, events)
   emitConstructors(lines, reg, ctxType, libType, libName, ctors)
-  emitDestructor(lines, ctxType, libName, classified.dtorProcName, events)
+  emitDestructor(lines, ctxType, libName, classified.dtor, events)
   emitListenerApi(lines, ctxType, libType, libName, events)
   for m in methods:
     emitMethod(lines, reg, ctxType, libType, libName, m)
@@ -1076,6 +1184,7 @@ proc emitAbiExternDecls(
   lines.add("#endif")
   lines.add("")
   for p in procs:
+    lines.add(renderBlockDocComment(p.doc))
     case p.kind
     of FFIKind.FFI:
       if p.scalarFastPath:
@@ -1172,6 +1281,7 @@ proc emitAbiCtxAndCtor(
         head & params.join(", ") & ", " & createFn & " on_created, void* user_data) {"
       else:
         head & createFn & " on_created, void* user_data) {"
+    lines.add(renderBlockDocComment(ctor.doc))
     lines.add(sig)
     lines.add("    " & reqStruct & " ffi_req;")
     lines.add("    memset(&ffi_req, 0, sizeof(ffi_req));")
@@ -1194,15 +1304,6 @@ proc emitAbiCtxAndCtor(
     lines.add("}")
     lines.add("")
 
-proc emitAbiDestructor(lines: var seq[string], ctxType, libName, dtorProcName: string) =
-  lines.add("static inline void " & libName & "_ctx_destroy(" & ctxType & "* ctx) {")
-  lines.add("    if (!ctx) return;")
-  if dtorProcName.len > 0:
-    lines.add("    if (ctx->ptr) { " & dtorProcName & "(ctx->ptr); ctx->ptr = NULL; }")
-  lines.add("    free(ctx);")
-  lines.add("}")
-  lines.add("")
-
 proc emitAbiMethod(
     lines: var seq[string],
     reg: var AbiReg,
@@ -1220,6 +1321,7 @@ proc emitAbiMethod(
       head & params.join(", ") & ", " & info.fnType & " on_reply, void* user_data) {"
     else:
       head & info.fnType & " on_reply, void* user_data) {"
+  lines.add(renderBlockDocComment(m.doc))
   lines.add(sig)
   lines.add("    " & reqStruct & " ffi_req;")
   lines.add("    memset(&ffi_req, 0, sizeof(ffi_req));")
@@ -1326,6 +1428,7 @@ proc emitAbiScalarMethod(
       head & params.join(", ") & ", " & info.fnType & " on_reply, void* user_data) {"
     else:
       head & info.fnType & " on_reply, void* user_data) {"
+  lines.add(renderBlockDocComment(m.doc))
   lines.add(sig)
   lines.add(
     "    " & boxType & "* box = (" & boxType & "*)malloc(sizeof(" & boxType & "));"
@@ -1350,6 +1453,7 @@ proc generateCAbiLibHeader*(
     types: seq[FFITypeMeta],
     libName: string,
     events: seq[FFIEventMeta] = @[],
+    consts: seq[FFIConstMeta] = @[],
 ): string =
   if events.len > 0:
     raise newException(
@@ -1386,6 +1490,7 @@ proc generateCAbiLibHeader*(
   lines.add("   terminal RET_OK/RET_ERR. Ignore it unless you want progress. */")
   lines.add("#define NIMFFI_RET_STALE_WARN 3")
   lines.add("")
+  lines.add(constDeclLines(consts))
   lines.add(
     "/* `abi = c` wire structs — the C ABI. Strings are borrowed, NUL-terminated"
   )
@@ -1400,7 +1505,8 @@ proc generateCAbiLibHeader*(
 
   lines.add("/* High-level context wrapper */")
   emitAbiCtxAndCtor(lines, reg, libName, libType, ctxType, classified.ctors)
-  emitAbiDestructor(lines, ctxType, libName, classified.dtorProcName)
+  # abi = c has no events, so the destructor is the CBOR one minus the listener sweep.
+  emitDestructor(lines, ctxType, libName, classified.dtor, @[])
   for m in classified.methods:
     if m.scalarFastPath:
       emitAbiScalarMethod(lines, reg, ctxType, libName, libType, m)
@@ -1438,13 +1544,15 @@ proc generateCBindings*(
     outputDir: string,
     nimSrcRelPath: string,
     events: seq[FFIEventMeta] = @[],
+    consts: seq[FFIConstMeta] = @[],
 ) =
   ## Emits the C binding for `libName`, picking the `abi = c` or CBOR shape.
   createDir(outputDir)
   case libWireFormat(procs, types)
   of ABIFormat.C:
     writeFile(
-      outputDir / (libName & ".h"), generateCAbiLibHeader(procs, types, libName, events)
+      outputDir / (libName & ".h"),
+      generateCAbiLibHeader(procs, types, libName, events, consts),
     )
     writeFile(
       outputDir / "CMakeLists.txt", generateCAbiCMakeLists(libName, nimSrcRelPath)
@@ -1453,6 +1561,7 @@ proc generateCBindings*(
     writeFile(outputDir / PreludeHeaderName, generateCPreludeHeader())
     writeFile(outputDir / CborHeaderName, generateCCborHeader())
     writeFile(
-      outputDir / (libName & ".h"), generateCLibHeader(procs, types, libName, events)
+      outputDir / (libName & ".h"),
+      generateCLibHeader(procs, types, libName, events, consts),
     )
     writeFile(outputDir / "CMakeLists.txt", generateCCMakeLists(libName, nimSrcRelPath))

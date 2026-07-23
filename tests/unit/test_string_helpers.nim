@@ -34,6 +34,34 @@ suite "camelToSnakeCase":
   test "already snake_case passes through":
     check camelToSnakeCase("already_snake") == "already_snake"
 
+suite "identToUpperSnake":
+  test "empty string":
+    check identToUpperSnake("") == ""
+
+  test "camelCase":
+    check identToUpperSnake("maxPeers") == "MAX_PEERS"
+
+  test "PascalCase":
+    check identToUpperSnake("MaxPeers") == "MAX_PEERS"
+
+  test "already UPPER_SNAKE passes through":
+    check identToUpperSnake("MAX_PEERS") == "MAX_PEERS"
+
+  test "acronym run stays one word":
+    check identToUpperSnake("HTTPPort") == "HTTP_PORT"
+
+  test "acronym after a word":
+    check identToUpperSnake("httpTTL") == "HTTP_TTL"
+
+  test "digits don't split a word":
+    check identToUpperSnake("v2Enabled") == "V2_ENABLED"
+
+  test "single word":
+    check identToUpperSnake("timeout") == "TIMEOUT"
+
+  test "runs of underscores collapse":
+    check identToUpperSnake("a__b") == "A_B"
+
 suite "capitalizeFirstLetter":
   test "empty string":
     check capitalizeFirstLetter("") == ""
@@ -81,3 +109,53 @@ suite "snakeToPascalCase":
   test "already-mixed parts preserve their existing case after the first":
     # Existing caps after the first letter of each part are preserved.
     check snakeToPascalCase("already_HasCaps") == "AlreadyHasCaps"
+
+suite "renderDocComment":
+  test "empty doc renders nothing":
+    check renderDocComment("", "", "/// ").len == 0
+
+  test "blank doc renders nothing":
+    check renderDocComment("  \n  ", "", "/// ").len == 0
+
+  test "single line gets the prefix":
+    check renderDocComment("does a thing", "", "/// ") == @["/// does a thing"]
+
+  test "each line gets prefix and indent":
+    check renderDocComment("one\ntwo", "    ", "/// ") == @[
+      "    /// one", "    /// two"
+    ]
+
+  test "a blank interior line keeps no trailing whitespace":
+    check renderDocComment("one\n\ntwo", "", "/// ") == @["/// one", "///", "/// two"]
+
+  test "trailing blank lines are dropped":
+    check renderDocComment("one\n\n", "", "; ") == @["; one"]
+
+  test "a trailing backslash cannot splice the next line into the comment":
+    check renderDocComment("one \\\ntwo", "", "/// ") == @["/// one", "/// two"]
+
+suite "renderBlockDocComment":
+  test "empty doc renders nothing":
+    check renderBlockDocComment("", "").len == 0
+
+  test "single line collapses to a one-line block":
+    check renderBlockDocComment("does a thing", "") == @["/** does a thing */"]
+
+  test "multiple lines render a star block":
+    check renderBlockDocComment("one\ntwo", "") == @["/**", " * one", " * two", " */"]
+
+  test "indent applies to every line of the block":
+    check renderBlockDocComment("one\ntwo", "  ") ==
+      @["  /**", "   * one", "   * two", "   */"]
+
+  test "a blank interior line keeps no trailing whitespace":
+    check renderBlockDocComment("one\n\ntwo", "") ==
+      @["/**", " * one", " *", " * two", " */"]
+
+  test "a one-liner cannot close its own comment early":
+    check renderBlockDocComment("Frees it. */ #define OOPS 1 /* x", "") ==
+      @["/** Frees it. * / #define OOPS 1 /* x */"]
+
+  test "a star block cannot close its own comment early":
+    check renderBlockDocComment("one */ #define OOPS 1\ntwo", "") ==
+      @["/**", " * one * / #define OOPS 1", " * two", " */"]

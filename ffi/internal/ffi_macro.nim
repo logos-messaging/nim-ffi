@@ -1,4 +1,4 @@
-import std/[macros, tables, strutils]
+import std/[macros, options, tables, strutils]
 from std/os import `/`, relativePath
 from std/compilesettings import querySetting, SingleValueSetting
 import chronos
@@ -107,6 +107,74 @@ proc rejectRawPtrType(typ: NimNode, where: string) =
         "(only the ctx handle, managed by the framework, may be a pointer)"
     )
 
+proc enumWireName(rhs: NimNode, fieldName: string): string {.compileTime.} =
+  ## What `$value` yields: the associated string if the enum declares one
+  ## (`cRed = "red"` or `cRed = (3, "red")`), else the symbol name.
+  case rhs.kind
+  of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
+    $rhs
+  of nnkTupleConstr, nnkPar:
+    if rhs.len == 2 and rhs[1].kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+      $rhs[1]
+    else:
+      fieldName
+  else:
+    fieldName
+
+proc enumValueMetas(
+    enumTy: NimNode, typeName: string
+): seq[FFIEnumValueMeta] {.compileTime.} =
+  ## Walks an `nnkEnumTy`, resolving each value's wire name and ordinal.
+  var values: seq[FFIEnumValueMeta] = @[]
+  var nextOrd = 0
+  for child in enumTy:
+    if child.kind == nnkEmpty:
+      continue
+    var name: string
+    var wire: string
+    var ordinal = nextOrd
+    case child.kind
+    of nnkIdent, nnkSym:
+      name = $child
+      wire = name
+    of nnkEnumFieldDef:
+      name = $child[0]
+      wire = enumWireName(child[1], name)
+      let explicitOrd =
+        if child[1].kind == nnkIntLit:
+          some(int(child[1].intVal))
+        elif child[1].kind in {nnkTupleConstr, nnkPar} and child[1].len == 2 and
+          child[1][0].kind == nnkIntLit:
+          some(int(child[1][0].intVal))
+        else:
+          none(int)
+      if explicitOrd.isSome():
+        ordinal = explicitOrd.get()
+    else:
+      error("`.ffi.` enum " & typeName & ": unsupported enum value " & child.repr)
+    values.add(FFIEnumValueMeta(name: name, wire: wire, ord: ordinal))
+    nextOrd = ordinal + 1
+  values
+
+proc registerFFIEnumInfo(
+    typeDef: NimNode, typeNameStr: string, abiFormat: ABIFormat
+) {.compileTime.} =
+  ## Registers an `{.ffi.}` enum. Only the CBOR wire carries enums; `abi = c`
+  ## has no representation for them yet, so reject it at the annotation.
+  if abiFormat == ABIFormat.C:
+    error(
+      "`.ffi.` enum " & typeNameStr &
+        ": `abi = c` does not support enum types yet; use the CBOR ABI for this type"
+    )
+  ffiTypeRegistry.add(
+    FFITypeMeta(
+      name: typeNameStr,
+      abiFormat: abiFormat,
+      enumValues: enumValueMetas(typeDef[2], typeNameStr),
+    )
+  )
+  ffiEnumTypeNames.add(typeNameStr)
+
 proc registerFFITypeInfo(
     typeDef: NimNode, abiFormat: ABIFormat
 ): NimNode {.compileTime.} =
@@ -117,6 +185,10 @@ proc registerFFITypeInfo(
     else:
       typeDef[0]
   let typeNameStr = $typeName
+
+  if typeDef[2].kind == nnkEnumTy:
+    registerFFIEnumInfo(typeDef, typeNameStr, abiFormat)
+    return typeDef
 
   var fieldMetas: seq[FFIFieldMeta] = @[]
   let objTy = typeDef[2]
@@ -142,6 +214,16 @@ proc registerFFITypeInfo(
     FFITypeMeta(name: typeNameStr, fields: fieldMetas, abiFormat: abiFormat)
   )
   return typeDef
+
+func extractDocComment(prc: NimNode): string {.compileTime.} =
+  ## The proc's leading `##`, or "". Nim drops comments outside a proc body, so
+  ## types and fields are unreachable from here.
+  let body = prc[^1]
+  if body.kind != nnkStmtList or body.len == 0:
+    return ""
+  if body[0].kind != nnkCommentStmt:
+    return ""
+  return body[0].strVal
 
 proc nimTypeNameRepr(typ: NimNode): string =
   ## Stringifies a parameter or field type for the registry.
@@ -680,6 +762,51 @@ macro ffiHandle*(args: varargs[untyped]): untyped =
     echo clean.repr
   return clean
 
+proc registerFFIConst(nameNode: NimNode): NimNode {.compileTime.} =
+  ## Emits the type guard plus the `static:` block that records the const's
+  ## evaluated value; `$typeof` runs after the const is defined, so computed
+  ## expressions (`3 * 7`) land in the registry as their result.
+  let nameStr = newLit($nameNode)
+  let unsupported = newLit(
+    "`.ffiConst.` " & $nameNode &
+      ": only integer, float, bool and string consts can cross the FFI boundary"
+  )
+  # bindSym: the emitted code lands in the user's module, which doesn't import meta.
+  let registry = bindSym("ffiConstRegistry")
+  let metaType = bindSym("FFIConstMeta")
+  quote:
+    when not (`nameNode` is (SomeInteger | SomeFloat | bool | string)):
+      {.error: `unsupported`.}
+    static:
+      `registry`.add(
+        `metaType`(name: `nameStr`, typeName: $typeof(`nameNode`), value: $(`nameNode`))
+      )
+
+macro ffiConst*(args: varargs[untyped]): untyped =
+  ## Exposes a Nim `const` to the generated bindings as a native constant
+  ## (`static const` in C/C++, `pub const` in Rust). An `"abi = ..."` spec is
+  ## accepted but only validated — a constant never rides the wire.
+  requireBeforeGenBindings("`.ffiConst.`")
+  requireLibraryDeclared("`.ffiConst.`")
+  let section = args[^1]
+  discard resolveABIFormat(args[0 ..^ 2])
+  if section.kind != nnkConstSection:
+    error("`.ffiConst.` must be applied to a `const` definition")
+
+  # Nim splits the section so only the annotated defs reach this macro.
+  var stmts = newStmtList(section.copyNimTree())
+  for def in section:
+    let nameNode =
+      if def[0].kind == nnkPostfix:
+        def[0][1]
+      else:
+        def[0]
+    stmts.add(registerFFIConst(nameNode))
+
+  when defined(ffiDumpMacros):
+    echo stmts.repr
+  return stmts
+
 macro ffi*(args: varargs[untyped]): untyped =
   ## Simplified FFI macro for procs or types: a type registers for binding gen; a
   ## proc takes a library-type param plus optional Nim params, returns
@@ -807,6 +934,7 @@ macro ffi*(args: varargs[untyped]): untyped =
     returnIsPtr: retIsPtr,
     returnIsHandle: retIsHandle,
     abiFormat: abiFormat,
+    doc: extractDocComment(prc),
   )
 
   # CBOR-free scalar fast path: only `abi = c` with all-scalar params/return that fit the inline slots; non-scalar `abi = c` rides the `_CWire` C-dispatch.
@@ -1352,6 +1480,7 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
         returnTypeName: $libTypeName,
         returnIsPtr: false,
         abiFormat: abiFormat,
+        doc: extractDocComment(prc),
       )
     )
 
@@ -1487,6 +1616,7 @@ macro ffiDtor*(args: varargs[untyped]): untyped =
       returnTypeName: "",
       returnIsPtr: false,
       abiFormat: abiFormat,
+      doc: extractDocComment(prc),
     )
   )
 
@@ -1576,6 +1706,7 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
       libName: currentLibName,
       payloadTypeName: payloadTypeNameStr,
       abiFormat: abiFormat,
+      doc: extractDocComment(prc),
     )
   )
 
@@ -1637,15 +1768,18 @@ when defined(ffiGenBindings):
     case lang
     of "rust":
       generateRustCrate(
-        genProcs, ffiTypeRegistry, libName, outDir, srcRel, ffiEventRegistry
+        genProcs, ffiTypeRegistry, libName, outDir, srcRel, ffiEventRegistry,
+        ffiConstRegistry,
       )
     of "cpp", "c++":
       generateCppBindings(
-        genProcs, ffiTypeRegistry, libName, outDir, srcRel, ffiEventRegistry
+        genProcs, ffiTypeRegistry, libName, outDir, srcRel, ffiEventRegistry,
+        ffiConstRegistry,
       )
     of "c":
       generateCBindings(
-        genProcs, ffiTypeRegistry, libName, outDir, srcRel, ffiEventRegistry
+        genProcs, ffiTypeRegistry, libName, outDir, srcRel, ffiEventRegistry,
+        ffiConstRegistry,
       )
     of "cddl":
       generateCddlBindings(genProcs, ffiTypeRegistry, libName, outDir, srcRel)

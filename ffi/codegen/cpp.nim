@@ -1,7 +1,7 @@
 ## C++ binding generator: header-only binding + CMakeLists, CBOR over the wire.
 
 import std/[os, strutils]
-import ./meta, ./string_helpers, ./c_cpp_common, ./types_ir
+import ./meta, ./string_helpers, ./c_cpp_common, ./types_ir, ./consts
 
 ## Fixed 64-bit wire type for any Nim `ptr T` / `pointer`.
 const CppPtrType* = "uint64_t"
@@ -45,6 +45,38 @@ const cppMap = NativeTypeMap(
 
 proc nimTypeToCpp*(typeName: string): string =
   renderNative(cppMap, parseFFIType(typeName))
+
+proc emitEnumCborCodec(lines: var seq[string], t: FFITypeMeta) =
+  ## Appends the `enum class` plus its TinyCBOR codec pair. The wire form is the
+  ## CBOR text `$value` yields on the Nim side, so the codec maps name ↔ value.
+  lines.add("enum class $1 {" % [t.name])
+  for v in t.enumValues:
+    lines.add("    $1 = $2," % [v.name, $v.ord])
+  lines.add("};")
+
+  lines.add("inline CborError encode_cbor(CborEncoder& e, const $1& v) {" % [t.name])
+  lines.add("    switch (v) {")
+  for v in t.enumValues:
+    lines.add(
+      "    case $1::$2: return cbor_encode_text_stringz(&e, \"$3\");" %
+        [t.name, v.name, v.wire]
+    )
+  lines.add("    }")
+  lines.add("    return CborErrorImproperValue;")
+  lines.add("}")
+
+  lines.add("inline CborError decode_cbor(CborValue& it, $1& v) {" % [t.name])
+  lines.add("    std::string name;")
+  lines.add("    CborError err = decode_cbor(it, name);")
+  lines.add("    if (err) return err;")
+  for v in t.enumValues:
+    lines.add(
+      "    if (name == \"$1\") { v = $2::$3; return CborNoError; }" %
+        [v.wire, t.name, v.name]
+    )
+  lines.add("    return CborErrorImproperValue;")
+  lines.add("}")
+  lines.add("")
 
 proc emitStructCborCodec(
     lines: var seq[string], structName: string, fields: seq[(string, string)]
@@ -112,6 +144,7 @@ proc emitEventDispatcher(
   for ev in events:
     let methodName =
       "addOn" & capitalizeFirstLetter(ev.nimProcName).substr(2) & "Listener"
+    lines.add(renderMemberDocComment(ev.doc))
     lines.add(
       "    ListenerHandle $1(std::function<void(const $2&)> handler) {" %
         [methodName, ev.payloadTypeName]
@@ -185,6 +218,7 @@ proc generateCppHeader*(
     types: seq[FFITypeMeta],
     libName: string,
     events: seq[FFIEventMeta] = @[],
+    consts: seq[FFIConstMeta] = @[],
 ): string =
   var lines: seq[string] = @[]
 
@@ -197,12 +231,39 @@ proc generateCppHeader*(
   # Generic CBOR overloads must precede the non-template struct codecs that call them (parse-time name lookup).
   lines.add(CborHelpersTpl)
 
-  if types.len > 0:
+  if consts.len > 0:
+    lines.add("// ============================================================")
+    lines.add("// Generated constants")
+    lines.add("// ============================================================")
+    lines.add("")
+    for c in consts:
+      let t = parseFFIType(c.typeName)
+      # A string const is a `const char*`, not std::string: constexpr can't own a heap value.
+      let cppType =
+        if t.kind == ftStr:
+          "const char*"
+        else:
+          nimTypeToCpp(c.typeName)
+      lines.add(
+        "constexpr $1 $2 = $3;" %
+          [cppType, identToUpperSnake(c.name), cConstValue(t, c.value)]
+      )
+    lines.add("")
+
+  # Enums first: a struct codec that takes one must see its overload already declared.
+  var structTypes: seq[FFITypeMeta] = @[]
+  for t in types:
+    if t.isEnum():
+      emitEnumCborCodec(lines, t)
+    else:
+      structTypes.add(t)
+
+  if structTypes.len > 0:
     lines.add("// ============================================================")
     lines.add("// User-declared FFI types")
     lines.add("// ============================================================")
     lines.add("")
-    for t in types:
+    for t in structTypes:
       lines.add("struct $1 {" % [t.name])
       for f in t.fields:
         lines.add("    $1 $2;" % [nimTypeToCpp(f.typeName), f.name])
@@ -251,6 +312,7 @@ proc generateCppHeader*(
   )
   lines.add("")
   for p in procs:
+    lines.add(renderBlockDocComment(p.doc))
     case p.kind
     of FFIKind.FFI:
       lines.add(
@@ -312,6 +374,7 @@ proc generateCppHeader*(
 
     # `create` yields the ctx via the callback's CBOR address (sync void* return discarded), owned as a unique_ptr since the class forbids copy/move.
     let createRet = "Result<std::unique_ptr<$1>>" % [ctxTypeName]
+    lines.add(renderMemberDocComment(ctor.doc))
     lines.add("    static $1 create($2) {" % [createRet, ctorParamsWithTimeout])
     lines.add("        const auto ffi_req_ = $1;" % [reqInit])
     lines.add("        auto ffi_enc_ = encodeCborFFI(ffi_req_);")
@@ -363,6 +426,7 @@ proc generateCppHeader*(
         epNames.join(", ") & ", timeout"
       else:
         "timeout"
+    lines.add(renderMemberDocComment(ctor.doc))
     lines.add(
       "    static std::future<Result<std::unique_ptr<$1>>> createAsync($2) {" %
         [ctxTypeName, ctorParamsWithTimeout]
@@ -405,6 +469,7 @@ proc generateCppHeader*(
     let reqInit = cppBracedInit(reqName, methParamNames)
 
     let methRet = "Result<$1>" % [retCppType]
+    lines.add(renderMemberDocComment(m.doc))
     lines.add("    $1 $2($3) const {" % [methRet, methodName, methParamsStr])
     lines.add("        const auto ffi_req_ = $1;" % [reqInit])
     lines.add("        auto ffi_enc_ = encodeCborFFI(ffi_req_);")
@@ -425,6 +490,7 @@ proc generateCppHeader*(
     lines.add("    }")
     lines.add("")
     # `this->methodName(...)` so a same-named param can't shadow the call target.
+    lines.add(renderMemberDocComment(m.doc))
     if methParamsStr.len > 0:
       lines.add(
         "    std::future<$1> $2Async($3) const {" % [methRet, methodName, methParamsStr]
@@ -472,9 +538,11 @@ proc generateCppBindings*(
     outputDir: string,
     nimSrcRelPath: string,
     events: seq[FFIEventMeta] = @[],
+    consts: seq[FFIConstMeta] = @[],
 ) =
   createDir(outputDir)
   writeFile(
-    outputDir / (libName & ".hpp"), generateCppHeader(procs, types, libName, events)
+    outputDir / (libName & ".hpp"),
+    generateCppHeader(procs, types, libName, events, consts),
   )
   writeFile(outputDir / "CMakeLists.txt", generateCppCMakeLists(libName, nimSrcRelPath))

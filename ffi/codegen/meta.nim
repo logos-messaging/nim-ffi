@@ -26,6 +26,7 @@ type
     libName*: string
     kind*: FFIKind
     libTypeName*: string
+    doc*: string
     extraParams*: seq[FFIParamMeta] # all params except the lib param
     returnTypeName*: string
     returnIsPtr*: bool
@@ -39,10 +40,26 @@ type
     name*: string
     typeName*: string
 
+  FFIEnumValueMeta* = object
+    ## One `{.ffi.}` enum value. `wire` is what `$value` yields — the symbol name,
+    ## or the associated string if the enum declares one — which is exactly what
+    ## cbor_serialization puts on the wire.
+    name*: string
+    wire*: string
+    ord*: int
+
   FFITypeMeta* = object
     name*: string
     fields*: seq[FFIFieldMeta]
     abiFormat*: ABIFormat
+    enumValues*: seq[FFIEnumValueMeta] ## non-empty iff the type is an enum
+
+  FFIConstMeta* = object
+    ## A `{.ffiConst.}` value. `value` is the compile-time-evaluated result of
+    ## `$theConst`, re-rendered as a literal by each backend.
+    name*: string
+    typeName*: string
+    value*: string
 
   FFIEventMeta* = object
     ## Library-initiated event from `{.ffiEvent: "wire_name".}`; `wireName` is
@@ -52,10 +69,12 @@ type
     libName*: string
     payloadTypeName*: string
     abiFormat*: ABIFormat
+    doc*: string
 
 var ffiProcRegistry* {.compileTime.}: seq[FFIProcMeta]
 var ffiTypeRegistry* {.compileTime.}: seq[FFITypeMeta]
 var ffiEventRegistry* {.compileTime.}: seq[FFIEventMeta]
+var ffiConstRegistry* {.compileTime.}: seq[FFIConstMeta]
 var currentLibName* {.compileTime.}: string
 
 # Set by `declareLibrary`; the FFI annotations require it.
@@ -117,6 +136,15 @@ var ffiHandleTypeNames* {.compileTime.}: seq[string]
 
 proc isFFIHandleTypeName*(name: string): bool {.compileTime.} =
   name in ffiHandleTypeNames
+
+func isEnum*(t: FFITypeMeta): bool =
+  return t.enumValues.len > 0
+
+# Names of `{.ffi.}` enum types; the `abi = c` wire path has to reject them.
+var ffiEnumTypeNames* {.compileTime.}: seq[string]
+
+proc isFFIEnumTypeName*(name: string): bool {.compileTime.} =
+  name in ffiEnumTypeNames
 
 proc ridesAsPtr*(ep: FFIParamMeta): bool =
   ## True if the param crosses the wire as an opaque uint64 (raw ptr or handle).

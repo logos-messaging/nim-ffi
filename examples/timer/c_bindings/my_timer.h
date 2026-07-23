@@ -3,6 +3,14 @@
 #include "nim_ffi_cbor.h"
 
 /* ============================================================ */
+/* Generated constants                                          */
+/* ============================================================ */
+
+static const int64_t MAX_DELAY_MS = 5000;
+static const uint32_t DEFAULT_BACKOFF_MS = 250;
+static const char* const TIMER_VERSION = "nim-timer v0.1.0";
+
+/* ============================================================ */
 /* Generated types (user-declared + per-proc request envelopes) */
 /* ============================================================ */
 
@@ -48,10 +56,15 @@ typedef struct {
     NimFfiStr message;
     int64_t echoCount;
 } EchoEvent;
+typedef enum {
+    JOB_PRIORITY_JP_LOW = 0,
+    JOB_PRIORITY_JP_NORMAL = 1,
+    JOB_PRIORITY_JP_HIGH = 2
+} JobPriority;
 typedef struct {
     NimFfiStr name;
     MyTimerSeq_Str payload;
-    int64_t priority;
+    JobPriority priority;
 } JobSpec;
 typedef struct {
     int64_t maxAttempts;
@@ -68,6 +81,7 @@ typedef struct {
     int64_t willRunCount;
     int64_t firstRunAtMs;
     int64_t effectiveBackoffMs;
+    JobPriority priority;
 } ScheduleResult;
 typedef struct {
     TimerConfig config;
@@ -431,6 +445,32 @@ static inline void my_timer_free_EchoEvent(EchoEvent* v) {
     if (!v) return;
     nimffi_free_str(&v->message);
 }
+static inline CborError my_timer_enc_JobPriority(
+        CborEncoder* e, const JobPriority* v) {
+    switch (*v) {
+    case JOB_PRIORITY_JP_LOW: return cbor_encode_text_stringz(e, "low");
+    case JOB_PRIORITY_JP_NORMAL: return cbor_encode_text_stringz(e, "normal");
+    case JOB_PRIORITY_JP_HIGH: return cbor_encode_text_stringz(e, "high");
+    }
+    return CborErrorImproperValue;
+}
+static inline CborError my_timer_dec_JobPriority(
+        CborValue* it, JobPriority* out) {
+    if (!cbor_value_is_text_string(it)) return CborErrorImproperValue;
+    size_t len = 0;
+    CborError err = cbor_value_get_string_length(it, &len);
+    if (err) return err;
+    char buf[7];
+    if (len >= sizeof(buf)) return CborErrorImproperValue;
+    size_t copied = sizeof(buf);
+    err = cbor_value_copy_text_string(it, buf, &copied, NULL);
+    if (err) return err;
+    buf[len] = '\0';
+    if (strcmp(buf, "low") == 0) { *out = JOB_PRIORITY_JP_LOW; return cbor_value_advance(it); }
+    if (strcmp(buf, "normal") == 0) { *out = JOB_PRIORITY_JP_NORMAL; return cbor_value_advance(it); }
+    if (strcmp(buf, "high") == 0) { *out = JOB_PRIORITY_JP_HIGH; return cbor_value_advance(it); }
+    return CborErrorImproperValue;
+}
 static inline CborError my_timer_enc_JobSpec(
         CborEncoder* e, const JobSpec* v) {
     CborEncoder m;
@@ -446,7 +486,7 @@ static inline CborError my_timer_enc_JobSpec(
     if (err) return err;
     err = cbor_encode_text_stringz(&m, "priority");
     if (err) return err;
-    err = nimffi_enc_i64(&m, &v->priority);
+    err = my_timer_enc_JobPriority(&m, &v->priority);
     if (err) return err;
     return cbor_encoder_close_container(e, &m);
 }
@@ -468,7 +508,7 @@ static inline CborError my_timer_dec_JobSpec(
     err = cbor_value_map_find_value(it, "priority", &field);
     if (err) return err;
     if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
-    err = nimffi_dec_i64(&field, &out->priority);
+    err = my_timer_dec_JobPriority(&field, &out->priority);
     if (err) return err;
     return cbor_value_advance(it);
 }
@@ -566,7 +606,7 @@ static inline CborError my_timer_dec_ScheduleConfig(
 static inline CborError my_timer_enc_ScheduleResult(
         CborEncoder* e, const ScheduleResult* v) {
     CborEncoder m;
-    CborError err = cbor_encoder_create_map(e, &m, 4);
+    CborError err = cbor_encoder_create_map(e, &m, 5);
     if (err) return err;
     err = cbor_encode_text_stringz(&m, "jobId");
     if (err) return err;
@@ -583,6 +623,10 @@ static inline CborError my_timer_enc_ScheduleResult(
     err = cbor_encode_text_stringz(&m, "effectiveBackoffMs");
     if (err) return err;
     err = nimffi_enc_i64(&m, &v->effectiveBackoffMs);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "priority");
+    if (err) return err;
+    err = my_timer_enc_JobPriority(&m, &v->priority);
     if (err) return err;
     return cbor_encoder_close_container(e, &m);
 }
@@ -610,6 +654,11 @@ static inline CborError my_timer_dec_ScheduleResult(
     if (err) return err;
     if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
     err = nimffi_dec_i64(&field, &out->effectiveBackoffMs);
+    if (err) return err;
+    err = cbor_value_map_find_value(it, "priority", &field);
+    if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = my_timer_dec_JobPriority(&field, &out->priority);
     if (err) return err;
     return cbor_value_advance(it);
 }
@@ -766,11 +815,16 @@ static inline void my_timer_free_MyTimerScheduleReq(MyTimerScheduleReq* v) {
 extern "C" {
 #endif
 
+/** Creates the FFIContext + MyTimer; async via chronos. */
 void* my_timer_create(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback callback, void* user_data);
+/** Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`. */
 int my_timer_echo(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+/** Returns the library's version string. */
 int my_timer_version(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int my_timer_complex(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+/** Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope. */
 int my_timer_schedule(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+/** Tears down the FFI context; blocks until FFI + watchdog threads join. */
 int my_timer_destroy(void* ctx);
 uint64_t my_timer_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
 int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
@@ -871,6 +925,7 @@ static void my_timer_create_trampoline(int ret, const char* msg, size_t len, voi
     free(box);
 }
 
+/** Creates the FFIContext + MyTimer; async via chronos. */
 static inline int my_timer_ctx_create(const TimerConfig* config, MyTimerCreateFn on_created, void* user_data) {
     MyTimerCreateCtorReq ffi_req;
     memset(&ffi_req, 0, sizeof(ffi_req));
@@ -896,14 +951,20 @@ static inline int my_timer_ctx_create(const TimerConfig* config, MyTimerCreateFn
     return 0;
 }
 
-static inline void my_timer_ctx_destroy(MyTimerCtx* ctx) {
-    if (!ctx) return;
-    if (ctx->ptr) { my_timer_destroy(ctx->ptr); ctx->ptr = NULL; }
-    for (size_t i = 0; i < ctx->listeners_len; i++) free(ctx->listeners[i].box);
+/** Tears down the FFI context; blocks until FFI + watchdog threads join. */
+static inline int my_timer_ctx_destroy(MyTimerCtx* ctx) {
+    if (!ctx) return NIMFFI_RET_OK;
+    int rc = NIMFFI_RET_OK;
+    if (ctx->ptr) { rc = my_timer_destroy(ctx->ptr); ctx->ptr = NULL; }
+    if (rc == NIMFFI_RET_OK) {
+        for (size_t i = 0; i < ctx->listeners_len; i++) free(ctx->listeners[i].box);
+    }
     free(ctx->listeners);
     free(ctx);
+    return rc;
 }
 
+/** Fired by `myTimerEcho` once the reply is ready. */
 static inline uint64_t my_timer_ctx_add_on_echo_fired_listener(MyTimerCtx* ctx, MyTimerOnEchoFiredFn fn, void* user_data) {
     MyTimerOnEchoFiredBox* box = (MyTimerOnEchoFiredBox*)malloc(sizeof(MyTimerOnEchoFiredBox));
     if (!box) return 0;
@@ -970,6 +1031,7 @@ static void my_timer_echo_reply_trampoline(int ret, const char* msg, size_t len,
     my_timer_free_EchoResponse(&out);
     free(box);
 }
+/** Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`. */
 static inline int my_timer_ctx_echo(const MyTimerCtx* ctx, const EchoRequest* req, MyTimerEchoReplyFn on_reply, void* user_data) {
     MyTimerEchoReq ffi_req;
     memset(&ffi_req, 0, sizeof(ffi_req));
@@ -1032,6 +1094,7 @@ static void my_timer_version_reply_trampoline(int ret, const char* msg, size_t l
     nimffi_free_str(&out);
     free(box);
 }
+/** Returns the library's version string. */
 static inline int my_timer_ctx_version(const MyTimerCtx* ctx, MyTimerVersionReplyFn on_reply, void* user_data) {
     MyTimerVersionReq ffi_req;
     memset(&ffi_req, 0, sizeof(ffi_req));
@@ -1155,6 +1218,7 @@ static void my_timer_schedule_reply_trampoline(int ret, const char* msg, size_t 
     my_timer_free_ScheduleResult(&out);
     free(box);
 }
+/** Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope. */
 static inline int my_timer_ctx_schedule(const MyTimerCtx* ctx, const JobSpec* job, const RetryPolicy* retry, const ScheduleConfig* schedule, MyTimerScheduleReplyFn on_reply, void* user_data) {
     MyTimerScheduleReq ffi_req;
     memset(&ffi_req, 0, sizeof(ffi_req));

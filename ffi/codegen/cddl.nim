@@ -2,7 +2,7 @@
 ## ffi/cbor_serial.nim: types become rules, procs get request/response rules.
 
 import std/[os, strutils, unicode]
-import ./meta
+import ./meta, ./string_helpers
 
 proc innerOf(typeName, prefix: string): string =
   if typeName.startsWith(prefix) and typeName.endsWith("]"):
@@ -81,6 +81,14 @@ proc emitMap(
     parts.add(f.name & ": " & cddlType)
   "{ " & parts.join(", ") & " }"
 
+proc emitEnumAlternatives(t: FFITypeMeta): string =
+  ## An enum rides as the CBOR text `$value` yields, so the rule is a choice of
+  ## string literals.
+  var alts: seq[string] = @[]
+  for v in t.enumValues:
+    alts.add("\"" & v.wire & "\"")
+  alts.join(" / ")
+
 proc emitObjectFields(t: FFITypeMeta): string =
   var fields: seq[tuple[name: string, typeName: string, isPtr: bool]] = @[]
   for f in t.fields:
@@ -125,7 +133,12 @@ proc generateCddlSchema*(
       "; ─── User-declared FFI types ──────────────────────────────────────"
     )
     for t in types:
-      L.add(t.name & " = " & emitObjectFields(t))
+      let rule =
+        if t.isEnum():
+          emitEnumAlternatives(t)
+        else:
+          emitObjectFields(t)
+      L.add(t.name & " = " & rule)
     L.add("")
 
   # Per-proc request envelopes (one CBOR blob per request).
@@ -154,6 +167,7 @@ proc generateCddlSchema*(
       of FFIKind.DTOR: "dtor"
       of FFIKind.FFI: "ffi"
     L.add("; " & p.procName & " (" & kindTag & ")")
+    L.add(renderDocComment(p.doc, "", "; "))
     if p.kind != FFIKind.DTOR:
       L.add(p.procName & "-request = " & reqStructName(p))
     L.add(p.procName & "-response = " & responseRule(p))
