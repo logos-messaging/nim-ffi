@@ -12,7 +12,7 @@ No hand-written `.h` files, no manual request enums, no shared-memory plumbing.
 Add nim-ffi to your library's `.nimble`, then `import ffi`:
 
 ```nim
-requires "https://github.com/logos-messaging/nim-ffi >= 0.2.0"
+requires "https://github.com/logos-messaging/nim-ffi >= 0.3.0"
 ```
 
 ## Mental model

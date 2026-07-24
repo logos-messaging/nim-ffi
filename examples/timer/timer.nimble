@@ -8,7 +8,7 @@ requires "nim >= 2.2.6"
 requires "chronos"
 requires "chronicles"
 requires "taskpools"
-requires "https://github.com/logos-messaging/nim-ffi >= 0.2.0"
+requires "https://github.com/logos-messaging/nim-ffi >= 0.3.0"
 
 const nimFlags = "--mm:orc -d:chronicles_log_level=WARN"
 

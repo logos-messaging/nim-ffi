@@ -2,7 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [0.3.0] - 2026-07-24
+
+[Full changelog](https://github.com/logos-messaging/nim-ffi/compare/v0.2.0...v0.3.0)
+
+Breaking release. `declareLibrary` is now required before any FFI annotation;
+the per-request handler timeout and its `{.ffi: "timeout = <ms>".}` override are
+replaced by the non-terminal `RET_STALE_WARN` progress callback; reaching an
+`enum` from an `abi = c` type or proc is a compile error; and the generated C
+`<lib>_ctx_destroy()` returns `int` instead of `void`.
+
+New surface: `{.ffiStatic.}` for context-independent procs, `{.ffiConst.}`,
+`{.ffi.}` enums, doc-comment propagation into the generated bindings, a C
+binding generator (`-d:targetLang=c`), and a CBOR-free `abi = c` path in both
+directions. Internally the watchdog thread is gone — the heartbeat now runs on
+the dedicated event thread that also isolates user callbacks from the FFI thread.
 
 ### Changed
 - **`abi = c` non-scalar procs no longer marshal through CBOR.** The foreign
