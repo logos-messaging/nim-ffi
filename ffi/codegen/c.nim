@@ -677,12 +677,15 @@ proc emitListenerApi(
   lines.add("}")
   lines.add("")
 
-proc emitMethod(
+proc emitProcWrapper(
     lines: var seq[string],
     reg: var CTypeReg,
     ctxType, libType, libName: string,
     m: FFIProcMeta,
 ) =
+  ## Reply trampoline + wrapper: `<lib>_ctx_<name>`, or `<lib>_static_<name>` for a
+  ## static; `<lib>_<name>` itself is the raw symbol the dylib exports.
+  let isStatic = m.isStatic()
   let stripped = stripLibPrefix(m.procName, libName)
   let reqName = reqStructName(m)
   let retC = cReturnType(reg, m)
@@ -722,7 +725,11 @@ proc emitMethod(
   lines.add("}")
 
   let head =
-    "static inline int " & libName & "_ctx_" & stripped & "(const " & ctxType & "* ctx, "
+    if isStatic:
+      "static inline int " & libName & "_static_" & stripped & "("
+    else:
+      "static inline int " & libName & "_ctx_" & stripped & "(const " & ctxType &
+        "* ctx, "
   let sig =
     if params.len > 0:
       head & params.join(", ") & ", " & fnType & " on_reply, void* user_data) {"
@@ -757,8 +764,9 @@ proc emitMethod(
   lines.add("    }")
   lines.add("    box->fn = on_reply;")
   lines.add("    box->user_data = user_data;")
+  let ctxArg = if isStatic: "" else: "ctx->ptr, "
   lines.add(
-    "    int ret = " & m.procName & "(ctx->ptr, " & tramp & ", box, req_buf, req_len);"
+    "    int ret = " & m.procName & "(" & ctxArg & tramp & ", box, req_buf, req_len);"
   )
   lines.add("    free(req_buf);")
   lines.add("    if (ret == NIMFFI_RET_MISSING_CALLBACK) {")
@@ -787,7 +795,7 @@ proc newCTypeReg(
 proc monomorphiseAll(
     reg: var CTypeReg,
     types: seq[FFITypeMeta],
-    procs, methods: seq[FFIProcMeta],
+    procs, replyProcs: seq[FFIProcMeta],
     events: seq[FFIEventMeta],
 ): tuple[reqTypes, respTypes: seq[string]] =
   ## Runs every type, Req, return type and event payload through ensureCType,
@@ -801,8 +809,8 @@ proc monomorphiseAll(
       discard ensureCType(reg, n)
       reqTypes.add(n)
   var respTypes: seq[string] = @[]
-  for m in methods:
-    respTypes.add(cReturnType(reg, m))
+  for p in replyProcs:
+    respTypes.add(cReturnType(reg, p))
   for ev in events:
     discard ensureCType(reg, ev.payloadTypeName)
   return (reqTypes, respTypes)
@@ -852,12 +860,12 @@ proc generateCLibHeader*(
   ## The `<lib>.h` header: library structs, monomorphised codecs and async API.
   let classified = classifyProcs(procs)
   let ctors = classified.ctors
-  let methods = classified.methods
   let libType = libTypeName(ctors, libName)
   let ctxType = libType & "Ctx"
 
   var reg = newCTypeReg(libName, libType, types, procs)
-  let (reqTypes, respTypes) = monomorphiseAll(reg, types, procs, methods, events)
+  let (reqTypes, respTypes) =
+    monomorphiseAll(reg, types, procs, classified.replyProcs(), events)
 
   let guard = "NIM_FFI_LIB_" & libName.toUpperAscii() & "_H_INCLUDED"
   var lines: seq[string] = @[]
@@ -892,6 +900,11 @@ proc generateCLibHeader*(
     of FFIKind.FFI:
       lines.add(
         "int " & p.procName & "(void* ctx, FFICallback callback, void* user_data, " &
+          "const uint8_t* req_cbor, size_t req_cbor_len);"
+      )
+    of FFIKind.STATIC:
+      lines.add(
+        "int " & p.procName & "(FFICallback callback, void* user_data, " &
           "const uint8_t* req_cbor, size_t req_cbor_len);"
       )
     of FFIKind.CTOR:
@@ -943,8 +956,8 @@ proc generateCLibHeader*(
   emitConstructors(lines, reg, ctxType, libType, libName, ctors)
   emitDestructor(lines, ctxType, libName, classified.dtor, events)
   emitListenerApi(lines, ctxType, libType, libName, events)
-  for m in methods:
-    emitMethod(lines, reg, ctxType, libType, libName, m)
+  for m in classified.replyProcs():
+    emitProcWrapper(lines, reg, ctxType, libType, libName, m)
 
   lines.add("#endif /* " & guard & " */")
   return lines.join("\n") & "\n"
@@ -1198,6 +1211,12 @@ proc emitAbiExternDecls(
           "int " & p.procName & "(void* ctx, " & info.fnType &
             " on_reply, void* user_data, const " & reqStructName(p) & "* req);"
         )
+    of FFIKind.STATIC:
+      let info = abiMethodReplyInfo(reg, libType, p)
+      lines.add(
+        "int " & p.procName & "(" & info.fnType & " on_reply, void* user_data, const " &
+          reqStructName(p) & "* req);"
+      )
     of FFIKind.CTOR:
       lines.add(
         "void* " & p.procName & "(const " & reqStructName(p) & "* req, " & createRawFn &
@@ -1304,18 +1323,23 @@ proc emitAbiCtxAndCtor(
     lines.add("}")
     lines.add("")
 
-proc emitAbiMethod(
+proc emitAbiProcWrapper(
     lines: var seq[string],
     reg: var AbiReg,
     ctxType, libName, libType: string,
     m: FFIProcMeta,
 ) =
+  let isStatic = m.isStatic()
   let stripped = stripLibPrefix(m.procName, m.libName)
   let reqStruct = reqStructName(m)
   let info = abiMethodReplyInfo(reg, libType, m)
   let (params, assigns) = abiReqParamsAndAssigns(reg, m.extraParams)
   let head =
-    "static inline int " & libName & "_ctx_" & stripped & "(const " & ctxType & "* ctx, "
+    if isStatic:
+      "static inline int " & libName & "_static_" & stripped & "("
+    else:
+      "static inline int " & libName & "_ctx_" & stripped & "(const " & ctxType &
+        "* ctx, "
   let sig =
     if params.len > 0:
       head & params.join(", ") & ", " & info.fnType & " on_reply, void* user_data) {"
@@ -1327,7 +1351,10 @@ proc emitAbiMethod(
   lines.add("    memset(&ffi_req, 0, sizeof(ffi_req));")
   for a in assigns:
     lines.add(a)
-  lines.add("    return " & m.procName & "(ctx->ptr, on_reply, user_data, &ffi_req);")
+  let ctxArg = if isStatic: "" else: "ctx->ptr, "
+  lines.add(
+    "    return " & m.procName & "(" & ctxArg & "on_reply, user_data, &ffi_req);"
+  )
   lines.add("}")
   lines.add("")
 
@@ -1499,7 +1526,7 @@ proc generateCAbiLibHeader*(
     lines.add(decl)
   lines.add("")
 
-  emitAbiReplyTypedefs(lines, reg, libType, classified.methods)
+  emitAbiReplyTypedefs(lines, reg, libType, classified.replyProcs())
   lines.add("")
   emitAbiExternDecls(lines, reg, libName, libType, procs)
 
@@ -1507,11 +1534,12 @@ proc generateCAbiLibHeader*(
   emitAbiCtxAndCtor(lines, reg, libName, libType, ctxType, classified.ctors)
   # abi = c has no events, so the destructor is the CBOR one minus the listener sweep.
   emitDestructor(lines, ctxType, libName, classified.dtor, @[])
-  for m in classified.methods:
+  # A static is never scalar-fast-path (`isScalarOnly` gates on FFIKind.FFI).
+  for m in classified.replyProcs():
     if m.scalarFastPath:
       emitAbiScalarMethod(lines, reg, ctxType, libName, libType, m)
     else:
-      emitAbiMethod(lines, reg, ctxType, libName, libType, m)
+      emitAbiProcWrapper(lines, reg, ctxType, libName, libType, m)
 
   lines.add("#endif /* " & guard & " */")
   return lines.join("\n") & "\n"

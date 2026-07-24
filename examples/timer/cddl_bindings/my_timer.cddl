@@ -19,6 +19,7 @@ ScheduleResult = { jobId: tstr, willRunCount: int, firstRunAtMs: int, effectiveB
 MyTimerCreateCtorReq = { config: TimerConfig }
 MyTimerEchoReq = { req: EchoRequest }
 MyTimerVersionReq = { }
+MyTimerLibVersionReq = { }
 MyTimerComplexReq = { req: ComplexRequest }
 MyTimerScheduleReq = { job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig }
 
@@ -37,6 +38,10 @@ my_timer_echo-response = EchoResponse
 ; Returns the library's version string.
 my_timer_version-request = MyTimerVersionReq
 my_timer_version-response = tstr
+
+; my_timer_lib_version (ffiStatic)
+my_timer_lib_version-request = MyTimerLibVersionReq
+my_timer_lib_version-response = tstr
 
 ; my_timer_complex (ffi)
 my_timer_complex-request = MyTimerComplexReq

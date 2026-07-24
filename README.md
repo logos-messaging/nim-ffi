@@ -19,7 +19,7 @@ requires "https://github.com/logos-messaging/nim-ffi >= 0.2.0"
 
 - You **declare a library** once with `declareLibrary(name, LibType)`.
 - You **annotate procs and types** with pragmas (`{.ffi.}`, `{.ffiCtor.}`,
-  `{.ffiDtor.}`, `{.ffiEvent.}`).
+  `{.ffiDtor.}`, `{.ffiStatic.}`, `{.ffiEvent.}`).
 - You **call `genBindings()` last**, which emits the foreign bindings.
 
 By default, every request/response crosses the boundary as a single CBOR blob
@@ -78,6 +78,7 @@ The generated C export names are the snake_case form of the proc names, e.g.
 | `declareLibrary(name, LibType[, defaultABIFormat])` | call | Registers the library, its state type, and the default wire format. Must run before any annotation. |
 | `{.ffi.}` on a `type` | `object`, `enum` | Registers the type for binding generation; it serializes via the library's ABI format (CBOR by default). Enums are CBOR-only — see below. |
 | `{.ffi.}` on a `proc` | proc | Exposes a method. First param is the library value, then typed params; returns `Future[Result[T, string]]`. |
+| `{.ffiStatic.}` | proc | Exposes a context-independent proc: no library param, and its wrapper takes no ctx — see below. |
 | `{.ffiCtor.}` | proc | The constructor. Returns `Future[Result[LibType, string]]`; creates the FFI context. |
 | `{.ffiDtor.}` | proc | The destructor. Exactly one param `(x: LibType)`; tears the context down. |
 | `{.ffiEvent[: "wire_name"].}` | proc (empty body) | A library-initiated callback. Call the proc from any `{.ffi.}` handler to fire it. The wire name is optional — see below. |
@@ -174,6 +175,44 @@ Every `{.ffi.}` / `{.ffiCtor.}` proc must have an explicit
 `Future[Result[T, string]]` return type — even for synchronous logic (just
 `return ok(...)` without awaiting). The `Result`'s error string is delivered to
 the foreign caller as the failure message.
+
+### Context-independent procs
+
+A `{.ffi.}` proc is a method: it takes the library value, and its wrapper takes a
+`ctx`, so the host must construct the library to call it. A stateless utility
+shouldn't have to pay for that. Annotate it `{.ffiStatic.}` instead — drop the
+library param, and the ctx disappears from the generated wrapper:
+
+```nim
+proc counterParse*(text: string): Future[Result[BumpRequest, string]] {.ffiStatic.} =
+  return ok(BumpRequest(by: text.parseInt()))
+```
+
+```c
+/* {.ffi.} method              */ counter_ctx_bump(ctx, &req, on_reply, ud);
+/* {.ffiStatic.} — no ctx      */ counter_static_parse(text, on_reply, ud);
+```
+
+The wrapper is `<lib>_static_<proc>`, not `<lib>_<proc>`, for the same reason a
+method's is `<lib>_ctx_<proc>`: `<lib>_<proc>` is the raw symbol the dylib
+exports. In C++ and Rust a static is an associated function on the ctx type
+(`EchoCtx::lib_version()`), taking the `timeout` a method reads from its ctx.
+
+The handler still needs an FFI thread, so it runs on the library's **static
+context**: created on the first `{.ffiStatic.}` call, then alive for the rest of
+the process — no ctx owns it, so nothing tears its thread pair down, and it holds
+one of the pool's slots. It has no `myLib`, which is why a static proc cannot
+take the library value.
+
+There is no foreign teardown for it. From Nim, `destroyStaticFFIContext(pool)`
+stops the thread pair and frees the slot; it is only sound once nothing will call
+a `{.ffiStatic.}` proc again, so it is meant for process shutdown and tests.
+
+The macro rejects an `{.ffiHandle.}` parameter or return: a handle is registered
+in the context that created it, which a static proc cannot reach. Under
+`abi = c` a static replies with a `string` or an `{.ffi.}` object type — a scalar
+return is wired only for an all-scalar `{.ffi.}` method, which rides the
+[CBOR-free fast path](#abi-format) through the ctx a static doesn't have.
 
 ### The result callback contract
 

@@ -118,12 +118,35 @@ static void test_version(EchoCtx* ctx) {
     assert(strcmp(w.text_a, "nim-echo v0.1.0") == 0);
 }
 
+/* No EchoCtx: this call creates the library's static context. Runs before
+ * make_ctx() so nothing else has initialised the Nim runtime first. */
+static void test_static_no_ctx(void) {
+    ReplyWaiter v;
+    memset(&v, 0, sizeof(v));
+    echo_static_lib_version(on_version, &v);
+    wait_done(&v.done);
+    assert(v.err_code == 0);
+    assert(strcmp(v.text_a, "nim-echo v0.1.0") == 0);
+
+    ReplyWaiter s;
+    memset(&s, 0, sizeof(s));
+    ShoutRequest req = {"hello"};
+    echo_static_shout_anon(&req, on_shout, &s);
+    wait_done(&s.done);
+    assert(s.err_code == 0);
+    assert(strcmp(s.text_a, "HELLO") == 0);
+    assert(strcmp(s.text_b, "") == 0);
+}
+
 int main(void) {
+    test_static_no_ctx();
     EchoCtx* ctx = make_ctx();
     test_shout(ctx);
     test_shout_too_long(ctx);
     test_version(ctx);
     assert(echo_ctx_destroy(ctx) == NIMFFI_RET_OK);
+    /* A static still works after every ctx is gone: its context is its own. */
+    test_static_no_ctx();
     printf("all abi=c echo e2e checks passed\n");
     return 0;
 }

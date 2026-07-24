@@ -15,6 +15,7 @@ extern "C" {
     pub fn my_timer_echo(ctx: *mut c_void, callback: FFICallback, user_data: *mut c_void, req_cbor: *const u8, req_cbor_len: usize) -> c_int;
     /// Returns the library's version string.
     pub fn my_timer_version(ctx: *mut c_void, callback: FFICallback, user_data: *mut c_void, req_cbor: *const u8, req_cbor_len: usize) -> c_int;
+    pub fn my_timer_lib_version(callback: FFICallback, user_data: *mut c_void, req_cbor: *const u8, req_cbor_len: usize) -> c_int;
     pub fn my_timer_complex(ctx: *mut c_void, callback: FFICallback, user_data: *mut c_void, req_cbor: *const u8, req_cbor_len: usize) -> c_int;
     /// Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
     pub fn my_timer_schedule(ctx: *mut c_void, callback: FFICallback, user_data: *mut c_void, req_cbor: *const u8, req_cbor_len: usize) -> c_int;

@@ -78,6 +78,14 @@ suite "generateCAbiLibHeader":
         scalarFastPath: true,
       ),
       FFIProcMeta(
+        procName: "timer_parse",
+        libName: "timer",
+        kind: FFIKind.STATIC,
+        libTypeName: "Timer",
+        extraParams: @[param("req", "EchoRequest")],
+        returnTypeName: "EchoResponse",
+      ),
+      FFIProcMeta(
         procName: "timer_destroy",
         libName: "timer",
         kind: FFIKind.DTOR,
@@ -179,6 +187,17 @@ static inline int timer_ctx_destroy(TimerCtx* ctx) {
     check "char* reply = nimffi_abi_dup_cstr_n(msg ? msg : \"\", msg ? len : 0);" in
       header
     check "if (n == SIZE_MAX) return NULL;" in header
+
+  test "a static's raw symbol and wrapper both drop the ctx":
+    check "int timer_parse(TimerParseReplyFn on_reply, void* user_data, " &
+      "const TimerParseReq* req);" in header
+    check "timer_static_parse(const EchoRequest* req, TimerParseReplyFn on_reply, void* user_data)" in
+      header
+    check "return timer_parse(on_reply, user_data, &ffi_req);" in header
+
+  test "a static replies through the same typed ReplyFn surface as a method":
+    check "typedef void (*TimerParseReplyFn)(int err_code, const EchoResponse* reply," in
+      header
 
   test "events are rejected (CBOR-only for now)":
     expect ValueError:

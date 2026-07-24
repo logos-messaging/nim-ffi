@@ -705,6 +705,19 @@ inline CborError decode_cbor(CborValue& it, MyTimerVersionReq&) {
     return cbor_value_advance(&it);
 }
 
+struct MyTimerLibVersionReq {
+};
+inline CborError encode_cbor(CborEncoder& e, const MyTimerLibVersionReq&) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(&e, &m, 0);
+    if (err) return err;
+    return cbor_encoder_close_container(&e, &m);
+}
+inline CborError decode_cbor(CborValue& it, MyTimerLibVersionReq&) {
+    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
+    return cbor_value_advance(&it);
+}
+
 struct MyTimerComplexReq {
     ComplexRequest req;
 };
@@ -772,6 +785,7 @@ void* my_timer_create(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback 
 int my_timer_echo(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 /** Returns the library's version string. */
 int my_timer_version(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int my_timer_lib_version(FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 int my_timer_complex(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 /** Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope. */
 int my_timer_schedule(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
@@ -993,6 +1007,22 @@ public:
     /// Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
     std::future<Result<ScheduleResult>> scheduleAsync(const JobSpec& job, const RetryPolicy& retry, const ScheduleConfig& schedule) const {
         return std::async(std::launch::async, [this, job, retry, schedule]() { return this->schedule(job, retry, schedule); });
+    }
+
+    static Result<std::string> lib_version(std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
+        const auto ffi_req_ = MyTimerLibVersionReq{};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) return Result<std::string>::err(ffi_enc_.error());
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
+            return my_timer_lib_version(cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        }, timeout);
+        if (ffi_raw_.isErr()) return Result<std::string>::err(ffi_raw_.error());
+        return decodeCborFFI<std::string>(ffi_raw_.value());
+    }
+
+    static std::future<Result<std::string>> lib_versionAsync(std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
+        return std::async(std::launch::async, [timeout]() { return lib_version(timeout); });
     }
 
 private:

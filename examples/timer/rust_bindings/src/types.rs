@@ -110,6 +110,9 @@ pub struct MyTimerEchoReq {
 pub struct MyTimerVersionReq {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MyTimerLibVersionReq {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MyTimerComplexReq {
     pub req: ComplexRequest,
 }
