@@ -30,7 +30,9 @@ func rustOpt(elem: string): string =
 const rustMap = NativeTypeMap(
   scalar: rustScalar,
   str: "String",
-  bytes: "Vec<u8>",
+  # serde encodes a plain Vec<u8> as a CBOR integer array, which Nim rejects.
+  # ByteBuf gives the CBOR byte string that Nim decodes.
+  bytes: "serde_bytes::ByteBuf",
   ptrType: RustPtrType,
   seqOf: rustSeq,
   optOf: rustOpt,
@@ -68,8 +70,33 @@ proc reqStructName(p: FFIProcMeta): string =
   else:
     camel & "Req"
 
-proc generateCargoToml*(libName: string): string =
+func typeUsesBytes(typeName: string): bool =
+  ## True if `typeName` resolves to a `seq[byte]` at any depth of Seq or Option.
+  var t = parseFFIType(typeName)
+  while t.kind in {ftSeq, ftOpt}:
+    t = t.elem
+  t.kind == ftBytes
+
+func needsSerdeBytes*(types: seq[FFITypeMeta], procs: seq[FFIProcMeta]): bool =
+  ## True if a field, a parameter or a return type maps to `serde_bytes::ByteBuf`.
+  ## `types` holds every struct, thus a scan of the fields also finds the bytes
+  ## in a nested struct.
+  for t in types:
+    for f in t.fields:
+      if typeUsesBytes(f.typeName):
+        return true
+  for p in procs:
+    for ep in p.extraParams:
+      if typeUsesBytes(ep.typeName):
+        return true
+    if p.returnTypeName.len > 0 and typeUsesBytes(p.returnTypeName):
+      return true
+  false
+
+proc generateCargoToml*(libName: string, needsBytes = false): string =
   # flume: callback channel (recv_timeout + recv_async), default-features off. tokio: only the async timeout.
+  # Add serde_bytes only when a `seq[byte]` goes on the wire as a CBOR byte string.
+  let serdeBytesDep = if needsBytes: "\nserde_bytes = \"0.11\"" else: ""
   return
     """[package]
 name = "$1"
@@ -77,7 +104,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }$2
 ciborium = "0.2"
 flume = { version = "0.11", default-features = false, features = ["async"] }
 tokio = { version = "1", features = ["sync", "time"] }
@@ -85,7 +112,7 @@ tokio = { version = "1", features = ["sync", "time"] }
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 """ %
-    [libName]
+    [libName, serdeBytesDep]
 
 proc generateBuildRs*(libName: string, nimSrcRelPath: string): string =
   ## Generates build.rs that compiles the Nim library; nimSrcRelPath is relative
@@ -788,7 +815,9 @@ proc generateRustCrate*(
   createDir(outputDir)
   createDir(outputDir / "src")
 
-  writeFile(outputDir / "Cargo.toml", generateCargoToml(libName))
+  writeFile(
+    outputDir / "Cargo.toml", generateCargoToml(libName, needsSerdeBytes(types, procs))
+  )
   writeFile(outputDir / "build.rs", generateBuildRs(libName, nimSrcRelPath))
   writeFile(outputDir / "src" / "lib.rs", generateLibRs())
   writeFile(outputDir / "src" / "ffi.rs", generateFFIRs(procs))
