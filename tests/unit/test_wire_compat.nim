@@ -22,6 +22,16 @@ type WireWithVector {.ffi.} = object
 type WireWithBytes {.ffi.} = object
   blob: seq[byte]
 
+type WireBytesEntry {.ffi.} = object
+  ## A struct with a `seq[byte]` field. The type below uses it as a seq element.
+  id: string
+  data: seq[byte]
+
+type WireNestedBytes {.ffi.} = object
+  ## A `seq[byte]` in a struct that is a `seq` element. This shape broke the
+  ## Rust backend, which wrote an integer array in place of a ByteBuf.
+  entries: seq[WireBytesEntry]
+
 proc toHex(bytes: openArray[byte]): string =
   var buf = ""
   for b in bytes:
@@ -92,3 +102,40 @@ suite "wire format — seq[byte]":
     let v = WireWithBytes(blob: @[])
     let bytes = cborEncode(v)
     check toHex(bytes) == "a164626c6f6240"
+
+suite "wire format — seq[byte] nested in a seq-of-struct":
+  ## A `seq[byte]` field in a struct that is a `seq` element must stay a CBOR
+  ## byte string (major type 2) at depth. Every backend must match this wire
+  ## contract. The Rust generator broke it and wrote a `Vec<u8>` integer array.
+  test "each nested seq[byte] rides as a byte string, request and response alike":
+    let v = WireNestedBytes(
+      entries: @[
+        WireBytesEntry(id: "s0", data: @[0xAA'u8, 0xBB'u8]),
+        WireBytesEntry(id: "s1", data: @[1'u8, 2'u8, 3'u8]),
+      ]
+    )
+    let bytes = cborEncode(v)
+    check toHex(bytes) ==
+      "a167656e747269657382a2626964627330646461746142aabba26269646273316464617461" &
+      "43010203"
+    # The payloads must use byte-string headers (0x42 = bytes(2), 0x43 =
+    # bytes(3)), not array headers (0x82 or 0x83).
+    check "6461746142aabb" in toHex(bytes) # "data" + 0x42 <AA BB>
+    check "6461746143010203" in toHex(bytes) # "data" + 0x43 <01 02 03>
+    let back = cborDecode(bytes, WireNestedBytes)
+    check back.isOk
+    check back.value.entries.len == 2
+    check back.value.entries[0].data == @[0xAA'u8, 0xBB'u8]
+    check back.value.entries[1].data == @[1'u8, 2'u8, 3'u8]
+
+  test "empty and multi-byte-length nested seq[byte] round-trip":
+    let v = WireNestedBytes(
+      entries: @[
+        WireBytesEntry(id: "", data: @[]),
+        WireBytesEntry(id: "big", data: newSeq[byte](30)),
+      ]
+    )
+    let back = cborDecode(cborEncode(v), WireNestedBytes)
+    check back.isOk
+    check back.value.entries[0].data.len == 0
+    check back.value.entries[1].data.len == 30

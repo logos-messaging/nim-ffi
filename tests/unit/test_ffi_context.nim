@@ -75,6 +75,14 @@ registerReqFFI(SlowRequest, lib: ptr TestLib):
     await sleepAsync(500.milliseconds)
     return ok("slow-done")
 
+registerReqFFI(BytesReplyRequest, lib: ptr TestLib):
+  proc(): Future[Result[seq[byte], string]] {.async.} =
+    return ok(@[0xDE'u8, 0xAD'u8, 0xBE'u8, 0xEF'u8])
+
+registerReqFFI(EmptyBytesReplyRequest, lib: ptr TestLib):
+  proc(): Future[Result[seq[byte], string]] {.async.} =
+    return ok(newSeq[byte]())
+
 var gSyncBlockStarted: Channel[bool]
 gSyncBlockStarted.open()
 
@@ -319,6 +327,56 @@ suite "sendRequestToFFIThread":
     waitCallback(d)
     check d.retCode == RET_ERR
     check callbackErr(d) == "intentional failure"
+
+  test "seq[byte] result rides as a CBOR byte string, not raw bytes":
+    # A `seq[byte]` return must be CBOR, the same as every other reply. The
+    # generated C, C++ and Rust decoders call `nimffi_dec_bytes` on the payload
+    # and reject a raw reply with "value encoded in non-canonical form".
+    var d: CallbackData
+    initCallbackData(d)
+    defer:
+      deinitCallbackData(d)
+
+    var pool: FFIContextPool[TestLib]
+    let ctx = pool.createFFIContext().valueOr:
+      check false
+      return
+    defer:
+      discard pool.destroyFFIContext(ctx)
+
+    check sendRequestToFFIThread(ctx, BytesReplyRequest.ffiNewReq(testCallback, addr d))
+      .isOk()
+    waitCallback(d)
+    check d.retCode == RET_OK
+    let reply = callbackBytes(d)
+    # The wire contract is a CBOR byte-string header (major type 2, 0x40..0x5b)
+    # and then the 4 payload bytes.
+    check reply.len == 5
+    check reply[0] == 0x44'u8
+    check cborDecode(reply, seq[byte]).value == @[0xDE'u8, 0xAD'u8, 0xBE'u8, 0xEF'u8]
+
+  test "empty seq[byte] result rides as an empty CBOR byte string":
+    var d: CallbackData
+    initCallbackData(d)
+    defer:
+      deinitCallbackData(d)
+
+    var pool: FFIContextPool[TestLib]
+    let ctx = pool.createFFIContext().valueOr:
+      check false
+      return
+    defer:
+      discard pool.destroyFFIContext(ctx)
+
+    check sendRequestToFFIThread(
+      ctx, EmptyBytesReplyRequest.ffiNewReq(testCallback, addr d)
+    )
+      .isOk()
+    waitCallback(d)
+    check d.retCode == RET_OK
+    let reply = callbackBytes(d)
+    check reply == @[0x40'u8] # byte string, length 0
+    check cborDecode(reply, seq[byte]).value.len == 0
 
   test "empty ok response delivers empty message":
     var d: CallbackData

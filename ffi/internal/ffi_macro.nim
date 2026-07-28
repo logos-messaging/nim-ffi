@@ -524,9 +524,10 @@ proc replyEncode(
       return ok(cwireStructBytes(`wireIdent`))
 
   return quote:
-    when typeof(`typedResIdent`.value) is seq[byte]:
-      return ok(`typedResIdent`.value)
-    elif typeof(`typedResIdent`.value) is void:
+    # A `seq[byte]` result goes on the wire as CBOR, the same as every other
+    # `abi = cbor` return. The C, C++ and Rust decoders expect CBOR. They reject
+    # raw bytes with "value encoded in non-canonical form".
+    when typeof(`typedResIdent`.value) is void:
       return ok(newSeq[byte]())
     elif typeof(`typedResIdent`.value) is FFIHandleRoot:
       return ok(
