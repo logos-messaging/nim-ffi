@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- A `{.ffi.}` call against a `ref` library type whose `{.ffiCtor.}` never stored
+  a library (it failed, or none ran) no longer crashes. When no constructed
+  library is present the FFI thread points `myLib` at a default-valued fallback;
+  for an `object` that is a usable zero value, but for a `ref` it is `nil`, so
+  the user body faulted on its first field access. Such a request is now
+  rejected with `library is not initialized: the constructor failed or has not
+  run yet` through the callback. The check is emitted only for `ref` library
+  types — an `object` library keeps the fallback behaviour — and it runs on the
+  FFI thread behind any queued constructor, so a host that issues a call without
+  awaiting the create callback is unaffected.
+
 ## [0.3.0] - 2026-07-24
 
 [Full changelog](https://github.com/logos-messaging/nim-ffi/compare/v0.2.0...v0.3.0)

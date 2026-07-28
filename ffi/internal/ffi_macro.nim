@@ -1038,13 +1038,16 @@ proc buildFFIProc(
       lambdaParams.add(newIdentDefs(ident(extraParamNames[i]), extraParamTypes[i]))
 
     let helperCall = newTree(nnkCall, userProcName)
-    if not firstIsHandle and not isStatic:
+    let bindsLib = not firstIsHandle and not isStatic
+    if bindsLib:
       let ctxMyLib = newDotExpr(newTree(nnkDerefExpr, ctxHandlerName), ident("myLib"))
       helperCall.add(newTree(nnkDerefExpr, ctxMyLib))
     for name in extraParamNames:
       helperCall.add(ident(name))
 
     let lambdaBody = newStmtList()
+    if bindsLib:
+      lambdaBody.add(buildLibReadyGuard(ctxHandlerName, libTypeName))
     let retValIdent = ident("retVal")
     lambdaBody.add quote do:
       let `retValIdent` = (await `helperCall`).valueOr:
@@ -1298,9 +1301,13 @@ proc buildCtorProcessFFIRequestProc(
       return err($error)
 
   let myLibIdent = newDotExpr(newTree(nnkDerefExpr, ctxIdent), ident("myLib"))
+  let libReadyIdent = newDotExpr(newTree(nnkDerefExpr, ctxIdent), ident("libReady"))
   newBody.add quote do:
     `myLibIdent` = createShared(`libTypeName`)
     `myLibIdent`[] = `libValIdent`
+    # Publish only after the store: a handler that observes this is guaranteed
+    # to see the constructed library, not the fallback.
+    `libReadyIdent`.store(true)
 
   newBody.add quote do:
     return ok($cast[uint](`ctxIdent`))

@@ -17,6 +17,11 @@ export ffi_events, ffi_handles
 
 type FFIContext*[T] = object
   myLib*: ptr T # main library object (Waku, LibP2P, SDS, …)
+  libReady*: Atomic[bool]
+    # False until a {.ffiCtor.} has stored the constructed library. Before that
+    # `myLib` points at the FFI thread's default-valued fallback (see
+    # `processQueue`), which for a `ref` library type is a nil ref — handing it
+    # to a user body would crash inside it.
   ffiThread: Thread[(ptr FFIContext[T])]
   eventThread: Thread[(ptr FFIContext[T])]
   reqQueueBank: RequestQueueBank
@@ -100,6 +105,7 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   initHandleRegistry(ctx[].handles)
   initEventQueue(ctx[].eventQueue)
   ctx.ffiHeartbeat.store(0)
+  ctx.libReady.store(false)
   ctx.eventQueueStuck.store(false)
   ctx.ffiThreadExited.store(false)
   ctx.staleWarnInterval = StaleWarnInterval
