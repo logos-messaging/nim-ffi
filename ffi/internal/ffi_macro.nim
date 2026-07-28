@@ -1051,6 +1051,20 @@ proc buildFFIProc(
       helperCall.add(ident(name))
 
     let lambdaBody = newStmtList()
+    if not firstIsHandle:
+      # Reject a request that reached the FFI thread without a `{.ffiCtor.}`
+      # having stored a library — `myLibOwned` is what distinguishes that from
+      # the worker's default-valued stack fallback. Only for `ref` library
+      # types: an `object` fallback is a usable zero value callers may rely on,
+      # but a `ref` one is `nil`, so the user body would deref nil on its first
+      # field access. Emitted in the handler, i.e. on the FFI thread behind any
+      # queued ctor, so calling without awaiting the create callback still works.
+      lambdaBody.add quote do:
+        when `libTypeName` is ref:
+          if not `ctxHandlerName`[].myLibOwned:
+            return err(
+              "library is not initialized: the constructor failed or has not run yet"
+            )
     let retValIdent = ident("retVal")
     lambdaBody.add quote do:
       let `retValIdent` = (await `helperCall`).valueOr:
