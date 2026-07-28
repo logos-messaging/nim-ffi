@@ -83,11 +83,11 @@ suite "{.ffi.} call after a failed constructor":
     check not ctx.isNil()
     check s.retCode.load() == int(RET_ERR)
     # `myLib` is non-nil even here: the FFI thread points it at a default-valued
-    # fallback before dispatching. `myLibOwned` is what says the ctor stored a real
+    # fallback before dispatching. `libReady` is what says the ctor stored a real
     # library.
     check not ctx[].myLib.isNil() # the fallback, not a constructed library
     check ctx[].myLib[].isNil() # ...and for a `ref` lib that fallback is nil
-    check not ctx[].myLibOwned
+    check not ctx[].libReady.load()
 
   # The synchronous return only reports that the request was accepted; the
   # rejection itself comes back through the callback.

@@ -1044,27 +1044,16 @@ proc buildFFIProc(
       lambdaParams.add(newIdentDefs(ident(extraParamNames[i]), extraParamTypes[i]))
 
     let helperCall = newTree(nnkCall, userProcName)
-    if not firstIsHandle and not isStatic:
+    let bindsLib = not firstIsHandle and not isStatic
+    if bindsLib:
       let ctxMyLib = newDotExpr(newTree(nnkDerefExpr, ctxHandlerName), ident("myLib"))
       helperCall.add(newTree(nnkDerefExpr, ctxMyLib))
     for name in extraParamNames:
       helperCall.add(ident(name))
 
     let lambdaBody = newStmtList()
-    if not firstIsHandle:
-      # Reject a request that reached the FFI thread without a `{.ffiCtor.}`
-      # having stored a library — `myLibOwned` is what distinguishes that from
-      # the worker's default-valued stack fallback. Only for `ref` library
-      # types: an `object` fallback is a usable zero value callers may rely on,
-      # but a `ref` one is `nil`, so the user body would deref nil on its first
-      # field access. Emitted in the handler, i.e. on the FFI thread behind any
-      # queued ctor, so calling without awaiting the create callback still works.
-      lambdaBody.add quote do:
-        when `libTypeName` is ref:
-          if not `ctxHandlerName`[].myLibOwned:
-            return err(
-              "library is not initialized: the constructor failed or has not run yet"
-            )
+    if bindsLib:
+      lambdaBody.add(buildLibReadyGuard(ctxHandlerName, libTypeName))
     let retValIdent = ident("retVal")
     lambdaBody.add quote do:
       let `retValIdent` = (await `helperCall`).valueOr:
@@ -1330,6 +1319,7 @@ proc buildCtorProcessFFIRequestProc(
   let myLibIdent = newDotExpr(newTree(nnkDerefExpr, ctxIdent), ident("myLib"))
   let myLibOwnedIdent = newDotExpr(newTree(nnkDerefExpr, ctxIdent), ident("myLibOwned"))
   let myLibRefdIdent = newDotExpr(newTree(nnkDerefExpr, ctxIdent), ident("myLibRefd"))
+  let libReadyIdent = newDotExpr(newTree(nnkDerefExpr, ctxIdent), ident("libReady"))
   newBody.add quote do:
     `myLibIdent` = createShared(`libTypeName`)
     `myLibIdent`[] = `libValIdent`
@@ -1340,6 +1330,8 @@ proc buildCtorProcessFFIRequestProc(
       when `libTypeName` is ref:
         GC_ref(`myLibIdent`[])
         `myLibRefdIdent` = true
+    # After the store, so an observer never sees the fallback.
+    `libReadyIdent`.store(true)
 
   newBody.add quote do:
     return ok($cast[uint](`ctxIdent`))

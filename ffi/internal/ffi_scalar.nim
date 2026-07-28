@@ -3,6 +3,19 @@
 import std/macros
 import ../codegen/meta
 
+proc buildLibReadyGuard*(
+    ctxHandlerName, libTypeName: NimNode
+): NimNode {.compileTime.} =
+  ## Rejects a request that reached the FFI thread with no library constructed.
+  ## Only for `ref` types: an `object` fallback is a usable zero value callers may
+  ## rely on, a `ref` one is nil. Sits in the handler, behind any queued ctor, so
+  ## calling without awaiting the create callback still works.
+  quote:
+    when `libTypeName` is ref:
+      if not `ctxHandlerName`[].libReady.load():
+        return
+          err("library is not initialized: the constructor failed or has not run yet")
+
 const scalarPodTypeNames = [
   "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32",
   "uint64", "byte", "float", "float32", "float64", "bool",
@@ -61,6 +74,9 @@ proc buildScalarPath*(
   handlerBody.add quote do:
     let `reqIdent` = cast[ptr FFIThreadRequest](request)
     let `ctxHandlerName` = cast[`ctxType`](reqHandler)
+
+  # ctxType is `ptr FFIContext[LibType]`; the guard needs the library type.
+  handlerBody.add(buildLibReadyGuard(ctxHandlerName, ctxType[0][1]))
 
   let helperCall = newTree(nnkCall, userProcName)
   let ctxMyLib = newDotExpr(newTree(nnkDerefExpr, ctxHandlerName), ident("myLib"))

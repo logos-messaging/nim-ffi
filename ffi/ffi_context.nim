@@ -39,6 +39,9 @@ type FFIContext*[T] = object
   recycleDoneSignal: ThreadSignalPtr
     # fired by the recycle handler once the lib is freed and the slot released;
     # the synchronous recycleFFIContext caller waits on it.
+  libReady*: Atomic[bool]
+    # False until a {.ffiCtor.} stores the library; until then `myLib` is the
+    # FFI thread's default-valued fallback, which for a `ref` type is nil.
   ffiThread: Thread[(ptr FFIContext[T])]
   eventThread: Thread[(ptr FFIContext[T])]
   reqQueueBank: RequestQueueBank
@@ -131,6 +134,7 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   initHandleRegistry(ctx[].handles)
   initEventQueue(ctx[].eventQueue)
   ctx.ffiHeartbeat.store(0)
+  ctx.libReady.store(false)
   ctx.eventQueueStuck.store(false)
   ctx.ffiThreadExited.store(false)
   ctx.staleWarnInterval = StaleWarnInterval

@@ -93,6 +93,8 @@ const RecycleTimeout = 1500.milliseconds
 proc freeLib[T](ctx: ptr FFIContext[T]) {.gcsafe.} =
   ## Releases the library object the ctor stored in ctx.myLib. Only owned libs
   ## (createShared'd by a ctor) are freed; the worker's stack fallback is not.
+  # A reused slot skips initContextResources, so the recycle path clears this.
+  ctx.libReady.store(false)
   if not ctx.myLibOwned or ctx.myLib.isNil():
     ctx.myLib = nil
     return
