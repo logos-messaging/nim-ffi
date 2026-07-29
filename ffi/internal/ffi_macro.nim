@@ -9,6 +9,7 @@ import ./c_macro_helpers
 import ./ffi_scalar
 import ./ffi_route
 import ./ffi_export
+import ./ffi_codegen_common
 when defined(ffiGenBindings):
   import ../codegen/rust
   import ../codegen/cpp
@@ -394,12 +395,7 @@ proc buildFFINewReqProc(reqTypeName, body: NimNode): NimNode =
           `reqObjIdent`.`fieldName` = `fieldName`
       )
 
-  let reqNameLit = newLit(
-    if reqTypeName.kind == nnkPostfix:
-      $reqTypeName[1]
-    else:
-      $reqTypeName
-  )
+  let reqNameLit = newLit($unwrapPostfix(reqTypeName))
   newBody.add(
     quote do:
       # Encode into shared memory, avoiding a second seq[byte] copy.
@@ -1087,12 +1083,7 @@ proc buildFFIProc(
       ffiBody.add(stmt)
 
     let reqPtrIdent = genSym(nskLet, "reqPtr")
-    let reqNameLit = newLit(
-      if reqTypeName.kind == nnkPostfix:
-        $reqTypeName[1]
-      else:
-        $reqTypeName
-    )
+    let reqNameLit = newLit($unwrapPostfix(reqTypeName))
     ffiBody.add quote do:
       let `reqPtrIdent` = FFIThreadRequest.initFromPtr(
         callback, userData, cstring(`reqNameLit`), reqCbor, int(reqCborLen)
@@ -1173,15 +1164,16 @@ macro ffi*(args: varargs[untyped]): untyped =
     error("`.ffi.` must be applied to a type or a proc definition")
   requireLibraryDeclared("`.ffi.`")
 
-  let path = routeFFIProc(prc)
+  proc gatedABIFormat(what: string): ABIFormat =
+    let abiFormat = resolveFFISpecs(leading)
+    gateABIFormat(abiFormat, what)
+    return abiFormat
 
-  # An event may lead with a wire-name literal, which the ABI parser rejects, so
-  # it resolves its own specs.
-  if path == fpEvent:
+  case routeFFIProc(prc)
+  of fpEvent:
+    # An event may lead with a wire-name literal, which the ABI parser rejects,
+    # so it resolves its own specs.
     return buildFFIEventProc(prc, leading)
-
-  let abiFormat = resolveFFISpecs(leading)
-  case path
   of fpExport:
     # The export crosses the ABI with its own return value, so no ABI applies.
     if leading.len > 0:
@@ -1191,15 +1183,11 @@ macro ffi*(args: varargs[untyped]): untyped =
       )
     return buildFFIExportProc(prc)
   of fpDtor:
-    gateABIFormat(abiFormat, "`.ffi.` destructor")
-    return buildFFIDtorProc(prc, abiFormat)
+    return buildFFIDtorProc(prc, gatedABIFormat("`.ffi.` destructor"))
   of fpStatic:
-    gateABIFormat(abiFormat, "`.ffi.` static proc")
-    return buildFFIProc(prc, abiFormat, isStatic = true)
+    return buildFFIProc(prc, gatedABIFormat("`.ffi.` static proc"), isStatic = true)
   of fpMethod:
-    return buildFFIProc(prc, abiFormat, isStatic = false)
-  of fpEvent:
-    error("unreachable: the event path returns above")
+    return buildFFIProc(prc, resolveFFISpecs(leading), isStatic = false)
 
 macro ffiStatic*(args: varargs[untyped]): untyped =
   ## Context-independent `{.ffi.}`: no library receiver, and no `ctx` in the C
@@ -1259,12 +1247,7 @@ proc buildCtorFFINewReqProc(reqTypeName: NimNode, paramNames: seq[string]): NimN
   let retType = newTree(nnkPtrTy, ident("FFIThreadRequest"))
   formalParams = @[retType] & formalParams
 
-  let reqNameLit = newLit(
-    if reqTypeName.kind == nnkPostfix:
-      $reqTypeName[1]
-    else:
-      $reqTypeName
-  )
+  let reqNameLit = newLit($unwrapPostfix(reqTypeName))
   var newBody = newStmtList()
   newBody.add quote do:
     return FFIThreadRequest.initFromPtr(
@@ -1846,7 +1829,7 @@ proc buildFFIEventProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compileTi
     newStmtList(newCall(ident("dispatchFFIEventCbor"), wireNameLit, dispatchPayload))
 
   var newParams = newSeq[NimNode]()
-  newParams.add(formalParams[0]) # return type (typically empty/void)
+  newParams.add(formalParams[0])
   for i in 1 ..< formalParams.len:
     newParams.add(formalParams[i])
 

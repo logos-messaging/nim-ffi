@@ -37,8 +37,8 @@ type FFIContext*[T] = object
     # the FFI thread so the slot returns to the pool without recreating threads.
   lifecycle*: Atomic[CtxLifecycle]
   recycleDoneSignal: ThreadSignalPtr
-    # fired by the recycle handler once the lib is freed and the slot released;
-    # the synchronous recycleFFIContext caller waits on it.
+    # fired by the recycle handler once the lib is freed, just before it releases
+    # the slot; the synchronous recycleFFIContext caller waits on it.
   libReady*: Atomic[bool]
     # False until a {.ffiCtor.} stores the library. Before that, `myLib` points
     # at the default fallback of the FFI thread. For a `ref` type that fallback
@@ -67,10 +67,16 @@ var onFFIThread* {.threadvar.}: bool
 
 const git_version* {.strdefine.} = "n/a"
 
+const RecycleTimeoutMs* {.intdefine: "ffiRecycleTimeoutMs".} = 1500
+  ## Bounds one drain round of the recycle handler. The handler runs at most two
+  ## rounds: it waits for the in-flight handlers, then cancels them and waits
+  ## again. Override with `-d:ffiRecycleTimeoutMs=<ms>`.
+const RecycleTimeout* = RecycleTimeoutMs.milliseconds
+
 const
-  RecycleWaitTimeout* = 5.seconds
-    ## Caller-side bound for synchronous recycle; the FFI-thread drain itself is
-    ## bounded by RecycleTimeout, so this only guards against a wedged worker.
+  RecycleWaitTimeout* = 2 * RecycleTimeout + 2.seconds
+    ## Caller-side bound for synchronous recycle. It covers both drain rounds
+    ## plus slack, so it only fires when the worker itself is wedged.
   EventThreadTickInterval* = 1.seconds
   FFIHeartbeatStartDelay* = 10.seconds
   FFIHeartbeatStaleThreshold* = 1.seconds
@@ -209,7 +215,7 @@ proc tryClaim*[T](ctx: ptr FFIContext[T]): bool =
   var expected = false
   ctx.inUse.compareExchange(expected, true)
 
-proc release*[T](ctx: ptr FFIContext[T]) =
+proc releaseClaim*[T](ctx: ptr FFIContext[T]) =
   ctx.inUse.store(false)
 
 proc isInUse*[T](ctx: ptr FFIContext[T]): bool =
@@ -226,6 +232,10 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   var expected = CtxLifecycle.Active
   if not ctx.lifecycle.compareExchange(expected, CtxLifecycle.RecyclePending):
     return err("requestRecycle: context is not Active (already recycling)")
+
+  # A recycle that timed out can fire late. The CAS makes this the only recycle
+  # in flight, so drop that stale fire before the wait below can answer to it.
+  discard ctx.recycleDoneSignal.waitSync(ZeroDuration)
 
   let fired = ctx.reqSignal.fireSync().valueOr:
     return err("requestRecycle: failed to signal the FFI thread: " & $error)

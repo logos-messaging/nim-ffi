@@ -86,10 +86,6 @@ proc processRequest[T](
   except Exception as e:
     error "Unexpected exception in handleRes", error = e.msg
 
-const RecycleTimeout = 1500.milliseconds
-  ## Bounds how long the recycle handler waits for in-flight handlers before it
-  ## cancels them, so a wedged handler cannot block reuse forever.
-
 proc freeLib[T](ctx: ptr FFIContext[T]) {.gcsafe.} =
   ## Releases the library object the ctor stored in ctx.myLib. Only owned libs
   ## (createShared'd by a ctor) are freed; the worker's stack fallback is not.
@@ -102,8 +98,8 @@ proc freeLib[T](ctx: ptr FFIContext[T]) {.gcsafe.} =
     try:
       {.cast(gcsafe).}:
         `=destroy`(ctx.myLib[])
-    except Exception:
-      discard
+    except Exception as e:
+      error "destroying the library on recycle raised; freeing it anyway", error = e.msg
   else:
     when T is ref:
       if ctx.myLibRefd:
@@ -112,6 +108,23 @@ proc freeLib[T](ctx: ptr FFIContext[T]) {.gcsafe.} =
   freeShared(ctx.myLib)
   ctx.myLib = nil
   ctx.myLibOwned = false
+
+const RecycledReason =
+  "FFI context was recycled before this request ran; the caller is gone"
+
+proc rejectQueuedRequests[T](ctx: ptr FFIContext[T]) =
+  ## Fails every queued request instead of dispatching it. A request that a
+  ## destroyed context left behind still carries that host's `userData`, which
+  ## the host has freed; running it would answer a dead callback, and running it
+  ## after the slot is reused would run it against the library of the next owner.
+  var request = ctx.reqQueueBank.mergeQueues()
+  while not request.isNil():
+    let nextRequest = request[].next # read before handleRes frees it
+    try:
+      handleRes(Result[seq[byte], string].err(RecycledReason), request)
+    except Exception as e:
+      error "rejecting a queued request raised", error = e.msg
+    request = nextRequest
 
 proc recycleContext[T](
     ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]
@@ -125,18 +138,20 @@ proc recycleContext[T](
     drained = await allFutures(ongoing[]).withTimeout(RecycleTimeout)
   if not drained:
     for fut in ongoing[]:
-      if not fut.finished():
-        fut.cancelSoon()
+      fut.cancelSoon()
     drained = await allFutures(ongoing[]).withTimeout(RecycleTimeout)
 
   freeLib(ctx)
   clearListeners(ctx[].eventRegistry)
+  rejectQueuedRequests(ctx)
   ongoing[].setLen(0)
-  ctx.release()
 
+  # Fire before the release: a thread that claims the freed slot first would
+  # otherwise take this fire as the answer to its own recycle.
   let fireRes = ctx.recycleDoneSignal.fireSync()
   if fireRes.isErr():
     error "failed to fire recycleDoneSignal", err = fireRes.error
+  ctx.releaseClaim()
 
 var ffiEventQueueSignalPtr {.threadvar.}: ThreadSignalPtr
   # Stashed so the hook has no closure env.
@@ -213,6 +228,13 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
       var expected = CtxLifecycle.RecyclePending
       if ctx.lifecycle.compareExchange(expected, CtxLifecycle.Recycling):
         await recycleContext(ctx, addr pending)
+        continue
+
+      # A submit that read `Active` just before the recycle can still land here.
+      # Fail it rather than run it against the library of the next owner.
+      if ctx.lifecycle.load() != CtxLifecycle.Active:
+        rejectQueuedRequests(ctx)
+        discard await ctx.reqSignal.wait().withTimeout(chronos.milliseconds(100))
         continue
 
       cleanFinishedRequests()

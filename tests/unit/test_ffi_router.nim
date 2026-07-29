@@ -34,6 +34,21 @@ proc router_version*(): Future[Result[string, string]] {.ffi.} =
 proc router_alive*(): int {.ffi.} =
   7
 
+# `int` is pointer-wide, so the export must not narrow it to a C `int`.
+proc router_big*(): int {.ffi.} =
+  int(high(int32)) + 1
+
+proc router_banner*(): string {.ffi.} =
+  "router banner"
+
+var routerBeats = 0
+
+proc router_beat*() {.ffi.} =
+  inc routerBeats
+
+proc router_raises*(): int {.ffi.} =
+  raise newException(ValueError, "boom")
+
 # A library receiver and no result, so the router picks the destructor.
 proc router_destroy*(lib: RouterLib) {.ffi.} =
   discard
@@ -121,7 +136,21 @@ suite "{.ffi.} routes on the shape of the signature":
 
   test "no arguments and a plain return type route to the synchronous export":
     # The export returns its value directly, with no context and no callback.
-    check router_alive() == cint(7)
+    check router_alive() == clonglong(7)
+
+  test "an int export keeps its full width across the C ABI":
+    check router_big() == clonglong(int32.high) + 1
+
+  test "a string export returns bytes the caller can read":
+    check $router_banner() == "router banner"
+
+  test "a no-return export routes to a void C symbol":
+    let before = routerBeats
+    router_beat()
+    check routerBeats == before + 1
+
+  test "an exception in the body never crosses the C ABI":
+    check router_raises() == clonglong(0)
 
   test "a payload parameter and no result route to the event":
     var s: CallbackState

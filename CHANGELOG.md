@@ -11,7 +11,19 @@ All notable changes to this project are documented in this file.
   longer need a hand-written payload type. A single parameter still rides the
   wire directly (a scalar, or an existing `{.ffi.}` object). The foreign
   bindings gain the envelope as a first-class struct plus a typed handler.
-- `{.ffiExport.}`, for simple synchronous C exports, from the 0.2 line.
+- `{.ffiExport.}`, for simple synchronous C exports, from the 0.2 line. Each
+  wrapper carries `raises: []` and catches every exception of the body, because
+  an exception must not cross the C ABI. A return type with no C ABI mapping is
+  a compile error. `int` maps to `long long`, so a 64-bit value keeps its full
+  width. A `string` return rides in a buffer that belongs to the calling thread
+  and stays valid until that thread calls another string export.
+- Pooled FFI contexts are recycled instead of destroyed. Each slot builds its
+  worker thread, its event thread and its signal fds once, then reuses them, so
+  repeated create/destroy no longer churns fds past `FD_SETSIZE`. The `ffiDtor`
+  asks the FFI thread to drain the in-flight handlers, free the library and
+  return the slot, while the threads stay alive. A recycle also fails every
+  request still queued for that slot, because such a request carries the
+  `userData` of a host that is gone.
 - `{.ffi.}` now picks the path from the shape of the signature. One pragma
   covers the context method, the static call, the synchronous export, the
   destructor and the event. `ffi/internal/ffi_route.nim` holds the rules:

@@ -12,6 +12,7 @@
 
 import std/macros
 import ../codegen/meta
+import ./ffi_codegen_common
 
 type FFIPath* = enum
   fpMethod ## A library or handle receiver, and an async result.
@@ -56,16 +57,9 @@ proc isLibReceiver(t: NimNode): bool {.compileTime.} =
     return false
   return ($t == currentLibType and currentLibType.len > 0) or isFFIHandleTypeName($t)
 
-func procIdent*(prc: NimNode): NimNode =
-  return
-    if prc[0].kind == nnkPostfix:
-      prc[0][1]
-    else:
-      prc[0]
-
 proc routeFFIProc*(prc: NimNode): FFIPath {.compileTime.} =
   ## Reads the receiver and the return type, then names the path.
-  let params = prc[3]
+  let params = prc.params
   let ret = params[0]
   let hasReceiver = params.len > 1 and isLibReceiver(params[1][1])
 
@@ -88,7 +82,7 @@ proc assertFFIPath*(prc: NimNode, want: FFIPath) {.compileTime.} =
   # A receiver is the one mismatch a caller can read straight off the signature.
   if want == fpStatic and got == fpMethod:
     error(
-      "`.ffiStatic.` proc " & name & " takes " & prc[3][1][1].repr &
+      "`.ffiStatic.` proc " & name & " takes " & prc.params[1][1].repr &
         " as its first parameter, which is the library type or an {.ffiHandle.} type. " &
         "A receiver belongs to a context. Make it an `{.ffi.}` method instead."
     )

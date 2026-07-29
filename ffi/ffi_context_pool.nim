@@ -29,7 +29,7 @@ proc releaseSlot[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]) =
     if pool.contexts[i].addr == ctx:
       pool.initialized[i].store(false)
       break
-  ctx.release()
+  ctx.releaseClaim()
 
 proc createFFIContext*[T](
     pool: var FFIContextPool[T]
@@ -45,7 +45,7 @@ proc createFFIContext*[T](
       ctx.markAsActive()
       return ok(ctx)
     initContextResources(ctx).isOkOr:
-      ctx.release()
+      ctx.releaseClaim()
       return err("createFFIContext: initContextResources failed: " & $error)
     pool.initialized[i].store(true)
     return ok(ctx)
@@ -138,5 +138,5 @@ proc isValidCtx*[T](pool: var FFIContextPool[T], ctx: pointer): bool =
     return false
   for i in 0 ..< MaxFFIContexts:
     if cast[pointer](pool.contexts[i].addr) == ctx:
-      return cast[ptr FFIContext[T]](ctx).isInUse()
+      return pool.contexts[i].addr.isInUse()
   false
