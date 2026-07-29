@@ -10,5 +10,5 @@ import
 export atomics, tables
 export chronos, chronicles
 export
-  atomics, alloc, ffi_library, ffi_macro, ffi_export, ffi_types, ffi_events, ffi_handles,
-  ffi_context, ffi_context_pool, ffi_thread_request, cbor_serial, c_wire
+  atomics, alloc, ffi_library, ffi_macro, ffi_export, ffi_types, ffi_events,
+  ffi_handles, ffi_context, ffi_context_pool, ffi_thread_request, cbor_serial, c_wire
