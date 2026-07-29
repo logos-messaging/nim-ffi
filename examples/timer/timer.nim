@@ -45,6 +45,12 @@ type EchoEvent {.ffi.} = object
 proc onEchoFired*(evt: EchoEvent) {.ffiEvent: "on_echo_fired".} =
   ## Fired by `myTimerEcho` once the reply is ready.
 
+proc onJobScheduled*(
+    jobId: string, willRunCount: int
+) {.ffiEvent: "on_job_scheduled".} =
+  ## Fired by `myTimerSchedule`. Its two params ride the wire as a synthesised
+  ## `OnJobScheduledPayload` envelope, so the foreign side decodes one typed value.
+
 proc myTimerCreate*(config: TimerConfig): Future[Result[MyTimer, string]] {.ffiCtor.} =
   ## Creates the FFIContext + MyTimer; async via chronos.
   await sleepAsync(1.milliseconds) # proves chronos is live on the FFI thread
@@ -134,6 +140,7 @@ proc myTimerSchedule*(
     else:
       1
   let jitter = if schedule.jitter.isSome: schedule.jitter.get else: 0
+  onJobScheduled(timer.name & ":" & job.name, willRunCount)
   return ok(
     ScheduleResult(
       jobId: timer.name & ":" & job.name,

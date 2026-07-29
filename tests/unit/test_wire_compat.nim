@@ -29,7 +29,7 @@ type WireBytesEntry {.ffi.} = object
 
 type WireNestedBytes {.ffi.} = object
   ## A `seq[byte]` in a struct that is a `seq` element. This shape broke the
-  ## Rust backend, which wrote an integer array in place of a ByteBuf.
+  ## Rust backend. The backend wrote an integer array in place of a ByteBuf.
   entries: seq[WireBytesEntry]
 
 proc toHex(bytes: openArray[byte]): string =
@@ -105,7 +105,7 @@ suite "wire format — seq[byte]":
 
 suite "wire format — seq[byte] nested in a seq-of-struct":
   ## A `seq[byte]` field in a struct that is a `seq` element must stay a CBOR
-  ## byte string (major type 2) at depth. Every backend must match this wire
+  ## byte string (major type 2) at depth. Every backend must obey this wire
   ## contract. The Rust generator broke it and wrote a `Vec<u8>` integer array.
   test "each nested seq[byte] rides as a byte string, request and response alike":
     let v = WireNestedBytes(
@@ -118,8 +118,8 @@ suite "wire format — seq[byte] nested in a seq-of-struct":
     check toHex(bytes) ==
       "a167656e747269657382a2626964627330646461746142aabba26269646273316464617461" &
       "43010203"
-    # The payloads must use byte-string headers (0x42 = bytes(2), 0x43 =
-    # bytes(3)), not array headers (0x82 or 0x83).
+    # The payloads must use a byte-string header (0x42 = bytes(2), 0x43 =
+    # bytes(3)). An array header (0x82 or 0x83) is wrong.
     check "6461746142aabb" in toHex(bytes) # "data" + 0x42 <AA BB>
     check "6461746143010203" in toHex(bytes) # "data" + 0x43 <01 02 03>
     let back = cborDecode(bytes, WireNestedBytes)

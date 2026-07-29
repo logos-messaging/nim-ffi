@@ -16,6 +16,10 @@ proc sendRequestToFFIThread*(
       "reentrant ffi call: a handler invoked sendRequestToFFIThread on its own context"
     )
 
+  if ctx.lifecycle.load() != CtxLifecycle.Active:
+    deleteRequest(ffiRequest)
+    return err("FFI context is not accepting requests (being recycled)")
+
   # Wake only when the push found the queue empty: waking per submit kills scaling, and a skipped wake just waits the consumer's 100ms poll.
   let shouldWake = ctx.reqQueueBank.pushRequest(ffiRequest)
 
@@ -81,6 +85,73 @@ proc processRequest[T](
     handleRes(res, request)
   except Exception as e:
     error "Unexpected exception in handleRes", error = e.msg
+
+proc freeLib[T](ctx: ptr FFIContext[T]) {.gcsafe.} =
+  ## Releases the library object the ctor stored in ctx.myLib. Only owned libs
+  ## (createShared'd by a ctor) are freed; the worker's stack fallback is not.
+  # A reused slot skips initContextResources, so the recycle path clears this.
+  ctx.libReady.store(false)
+  if not ctx.myLibOwned or ctx.myLib.isNil():
+    ctx.myLib = nil
+    return
+  when not defined(gcRefc):
+    try:
+      {.cast(gcsafe).}:
+        `=destroy`(ctx.myLib[])
+    except Exception as e:
+      error "destroying the library on recycle raised; freeing it anyway", error = e.msg
+  else:
+    when T is ref:
+      if ctx.myLibRefd:
+        GC_unref(ctx.myLib[])
+        ctx.myLibRefd = false
+  freeShared(ctx.myLib)
+  ctx.myLib = nil
+  ctx.myLibOwned = false
+
+const RecycledReason =
+  "FFI context was recycled before this request ran; the caller is gone"
+
+proc rejectQueuedRequests[T](ctx: ptr FFIContext[T]) =
+  ## Fails every queued request instead of dispatching it. A request that a
+  ## destroyed context left behind still carries that host's `userData`, which
+  ## the host has freed; running it would answer a dead callback, and running it
+  ## after the slot is reused would run it against the library of the next owner.
+  var request = ctx.reqQueueBank.mergeQueues()
+  while not request.isNil():
+    let nextRequest = request[].next # read before handleRes frees it
+    try:
+      handleRes(Result[seq[byte], string].err(RecycledReason), request)
+    except Exception as e:
+      error "rejecting a queued request raised", error = e.msg
+    request = nextRequest
+
+proc recycleContext[T](
+    ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]
+) {.async.} =
+  ## Drain in-flight handlers, free the lib, clear listeners and release the
+  ## slot — all WITHOUT stopping the worker/event threads, so the next
+  ## createFFIContext reuses them (no fd churn). Then fire recycleDoneSignal.
+  ongoing[].keepItIf(not it.finished())
+  var drained = ongoing[].len == 0
+  if not drained:
+    drained = await allFutures(ongoing[]).withTimeout(RecycleTimeout)
+  if not drained:
+    for fut in ongoing[]:
+      fut.cancelSoon()
+    drained = await allFutures(ongoing[]).withTimeout(RecycleTimeout)
+
+  freeLib(ctx)
+  clearListeners(ctx[].eventRegistry)
+  rejectQueuedRequests(ctx)
+  ongoing[].setLen(0)
+
+  # Fire before the release: a thread that claims the freed slot first would
+  # otherwise take this fire as the answer to its own recycle.
+  let fireRes = ctx.recycleDoneSignal.fireSync()
+  if fireRes.isErr():
+    error "failed to fire recycleDoneSignal", err = fireRes.error
+  ctx.releaseClaim()
 
 var ffiEventQueueSignalPtr {.threadvar.}: ThreadSignalPtr
   # Stashed so the hook has no closure env.
@@ -151,6 +222,20 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
     while ctx.running.load():
       ctx.proveAlive()
+
+      # Recycle requested by the ffiDtor: drain + free lib + release the slot,
+      # keeping this thread alive for the next createFFIContext to reuse.
+      var expected = CtxLifecycle.RecyclePending
+      if ctx.lifecycle.compareExchange(expected, CtxLifecycle.Recycling):
+        await recycleContext(ctx, addr pending)
+        continue
+
+      # A submit that read `Active` just before the recycle can still land here.
+      # Fail it rather than run it against the library of the next owner.
+      if ctx.lifecycle.load() != CtxLifecycle.Active:
+        rejectQueuedRequests(ctx)
+        discard await ctx.reqSignal.wait().withTimeout(chronos.milliseconds(100))
+        continue
 
       cleanFinishedRequests()
 

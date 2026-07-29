@@ -2,6 +2,7 @@
 
 import std/macros
 import ../codegen/meta
+import ./ffi_codegen_common
 
 const scalarPodTypeNames = [
   "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32",
@@ -61,6 +62,9 @@ proc buildScalarPath*(
   handlerBody.add quote do:
     let `reqIdent` = cast[ptr FFIThreadRequest](request)
     let `ctxHandlerName` = cast[`ctxType`](reqHandler)
+
+  # ctxType is `ptr FFIContext[LibType]`; the guard needs the library type.
+  handlerBody.add(buildLibReadyGuard(ctxHandlerName, ctxType[0][1]))
 
   let helperCall = newTree(nnkCall, userProcName)
   let ctxMyLib = newDotExpr(newTree(nnkDerefExpr, ctxHandlerName), ident("myLib"))

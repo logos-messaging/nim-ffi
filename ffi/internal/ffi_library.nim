@@ -179,6 +179,12 @@ macro declareLibrary*(
   let addName = libraryName & "_add_event_listener"
   let addErr = "error: invalid context in " & addName
   let addBody = quote:
+    # This code runs on the foreign caller thread. That thread can differ from
+    # the thread of an earlier entry point. If the GC of the thread is not
+    # ready, the first Nim allocation ($eventName, the registry Table and seq)
+    # faults. Therefore initialize the GC here.
+    when declared(initializeLibrary):
+      initializeLibrary()
     var ret: uint64 = 0
     if isNil(ctx):
       echo `addErr`
@@ -210,6 +216,8 @@ macro declareLibrary*(
   let removeName = libraryName & "_remove_event_listener"
   let removeErr = "error: invalid context in " & removeName
   let removeBody = quote:
+    when declared(initializeLibrary):
+      initializeLibrary()
     var ret: cint = 1
     if isNil(ctx):
       echo `removeErr`

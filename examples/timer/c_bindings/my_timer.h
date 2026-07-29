@@ -56,6 +56,10 @@ typedef struct {
     NimFfiStr message;
     int64_t echoCount;
 } EchoEvent;
+typedef struct {
+    NimFfiStr jobId;
+    int64_t willRunCount;
+} OnJobScheduledPayload;
 typedef enum {
     JOB_PRIORITY_JP_LOW = 0,
     JOB_PRIORITY_JP_NORMAL = 1,
@@ -447,6 +451,42 @@ static inline CborError my_timer_dec_EchoEvent(
 static inline void my_timer_free_EchoEvent(EchoEvent* v) {
     if (!v) return;
     nimffi_free_str(&v->message);
+}
+static inline CborError my_timer_enc_OnJobScheduledPayload(
+        CborEncoder* e, const OnJobScheduledPayload* v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(e, &m, 2);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "jobId");
+    if (err) return err;
+    err = nimffi_enc_str(&m, &v->jobId);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "willRunCount");
+    if (err) return err;
+    err = nimffi_enc_i64(&m, &v->willRunCount);
+    if (err) return err;
+    return cbor_encoder_close_container(e, &m);
+}
+static inline CborError my_timer_dec_OnJobScheduledPayload(
+        CborValue* it, OnJobScheduledPayload* out) {
+    if (!cbor_value_is_map(it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(it, "jobId", &field);
+    if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = nimffi_dec_str(&field, &out->jobId);
+    if (err) return err;
+    err = cbor_value_map_find_value(it, "willRunCount", &field);
+    if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = nimffi_dec_i64(&field, &out->willRunCount);
+    if (err) return err;
+    return cbor_value_advance(it);
+}
+static inline void my_timer_free_OnJobScheduledPayload(OnJobScheduledPayload* v) {
+    if (!v) return;
+    nimffi_free_str(&v->jobId);
 }
 static inline CborError my_timer_enc_JobPriority(
         CborEncoder* e, const JobPriority* v) {
@@ -883,6 +923,25 @@ static void my_timer_on_echo_fired_trampoline(int ret, const char* msg, size_t l
     my_timer_free_EchoEvent(&payload);
 }
 
+typedef void (*MyTimerOnJobScheduledFn)(const OnJobScheduledPayload* evt, void* user_data);
+typedef struct { MyTimerOnJobScheduledFn fn; void* user_data; } MyTimerOnJobScheduledBox;
+static void my_timer_on_job_scheduled_trampoline(int ret, const char* msg, size_t len, void* ud) {
+    if (!ud || ret != 0 || !msg || len == 0) return;
+    MyTimerOnJobScheduledBox* box = (MyTimerOnJobScheduledBox*)ud;
+    if (!box->fn) return;
+    CborParser parser;
+    CborValue it;
+    if (cbor_parser_init((const uint8_t*)msg, len, 0, &parser, &it) != CborNoError) return;
+    if (!cbor_value_is_map(&it)) return;
+    CborValue payloadField;
+    if (cbor_value_map_find_value(&it, "payload", &payloadField) != CborNoError) return;
+    OnJobScheduledPayload payload;
+    memset(&payload, 0, sizeof(payload));
+    if (my_timer_dec_OnJobScheduledPayload(&payloadField, &payload) != CborNoError) return;
+    box->fn(&payload, box->user_data);
+    my_timer_free_OnJobScheduledPayload(&payload);
+}
+
 /* ============================================================ */
 /* High-level context wrapper                                   */
 /* ============================================================ */
@@ -990,6 +1049,30 @@ static inline uint64_t my_timer_ctx_add_on_echo_fired_listener(MyTimerCtx* ctx, 
     box->fn = fn;
     box->user_data = user_data;
     uint64_t id = my_timer_add_event_listener(ctx->ptr, "on_echo_fired", my_timer_on_echo_fired_trampoline, box);
+    if (id == 0) { free(box); return 0; }
+    if (ctx->listeners_len == ctx->listeners_cap) {
+        size_t ncap = ctx->listeners_cap ? ctx->listeners_cap * 2 : 4;
+        MyTimerCtxListener* grown = (MyTimerCtxListener*)realloc(ctx->listeners, ncap * sizeof(MyTimerCtxListener));
+        if (!grown) { my_timer_remove_event_listener(ctx->ptr, id); free(box); return 0; }
+        ctx->listeners = grown;
+        ctx->listeners_cap = ncap;
+    }
+    ctx->listeners[ctx->listeners_len].id = id;
+    ctx->listeners[ctx->listeners_len].box = box;
+    ctx->listeners_len++;
+    return id;
+}
+
+/**
+ * Fired by `myTimerSchedule`. Its two params ride the wire as a synthesised
+ * `OnJobScheduledPayload` envelope, so the foreign side decodes one typed value.
+ */
+static inline uint64_t my_timer_ctx_add_on_job_scheduled_listener(MyTimerCtx* ctx, MyTimerOnJobScheduledFn fn, void* user_data) {
+    MyTimerOnJobScheduledBox* box = (MyTimerOnJobScheduledBox*)malloc(sizeof(MyTimerOnJobScheduledBox));
+    if (!box) return 0;
+    box->fn = fn;
+    box->user_data = user_data;
+    uint64_t id = my_timer_add_event_listener(ctx->ptr, "on_job_scheduled", my_timer_on_job_scheduled_trampoline, box);
     if (id == 0) { free(box); return 0; }
     if (ctx->listeners_len == ctx->listeners_cap) {
         size_t ncap = ctx->listeners_cap ? ctx->listeners_cap * 2 : 4;

@@ -329,9 +329,9 @@ suite "sendRequestToFFIThread":
     check callbackErr(d) == "intentional failure"
 
   test "seq[byte] result rides as a CBOR byte string, not raw bytes":
-    # A `seq[byte]` return must be CBOR, the same as every other reply. The
-    # generated C, C++ and Rust decoders call `nimffi_dec_bytes` on the payload
-    # and reject a raw reply with "value encoded in non-canonical form".
+    # A `seq[byte]` return must be CBOR, the same as every other reply. The C,
+    # C++ and Rust decoders call `nimffi_dec_bytes` on the payload. They reject
+    # a raw reply with the error "value encoded in non-canonical form".
     var d: CallbackData
     initCallbackData(d)
     defer:
@@ -349,7 +349,7 @@ suite "sendRequestToFFIThread":
     waitCallback(d)
     check d.retCode == RET_OK
     let reply = callbackBytes(d)
-    # The wire contract is a CBOR byte-string header (major type 2, 0x40..0x5b)
+    # The wire contract is a CBOR byte-string header (major type 2, 0x40..0x5b),
     # and then the 4 payload bytes.
     check reply.len == 5
     check reply[0] == 0x44'u8
