@@ -36,8 +36,8 @@ proc deinitEventRegistry*(reg: var FFIEventRegistry) =
   reg.nextId = 0'u64
 
 proc clearListeners*(reg: var FFIEventRegistry) {.raises: [].} =
-  ## Drops all listeners (used when a context is recycled for reuse) without
-  ## touching the lock — the event thread keeps using it across recycles.
+  ## Removes all listeners. The pool calls this when it recycles a context. The
+  ## lock stays in place, because the event thread uses it across recycles.
   withLock reg.lock:
     reg.byEvent.clear()
     reg.nextId = 0'u64

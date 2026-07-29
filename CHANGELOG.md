@@ -11,6 +11,30 @@ All notable changes to this project are documented in this file.
   longer need a hand-written payload type. A single parameter still rides the
   wire directly (a scalar, or an existing `{.ffi.}` object). The foreign
   bindings gain the envelope as a first-class struct plus a typed handler.
+- `{.ffiExport.}`, for simple synchronous C exports, from the 0.2 line.
+- `{.ffi.}` now picks the path from the shape of the signature. One pragma
+  covers the context method, the static call, the synchronous export, the
+  destructor and the event. `ffi/internal/ffi_route.nim` holds the rules:
+
+  | Shape | Path |
+  |---|---|
+  | The first parameter is the library type or an `{.ffiHandle.}` type | Context method |
+  | No receiver, and the result is `Future[Result[T, string]]` | Static call |
+  | No parameters, and the result is a plain Nim type | Synchronous export |
+  | A library receiver, and no result or `Future[void]` | Destructor |
+  | A payload parameter, and no result | Event |
+
+  Every shape that the router claims failed to compile under any other pragma
+  before, so the router only turns a compile error into the intended meaning.
+
+  `{.ffiStatic.}`, `{.ffiExport.}`, `{.ffiDtor.}` and `{.ffiEvent.}` still work.
+  Each one now asserts its shape and names the right pragma when the shape does
+  not match.
+
+  `{.ffiCtor.}` stays explicit, because its shape is not free. A ctor differs
+  from a static call by one token: the type inside `Result`. A static call that
+  returns the library type builds today and exports a working C symbol, so a
+  router would silently give it the ctor ABI instead.
 
 ### Fixed
 - A `{.ffi.}` call against a `ref` library type whose `{.ffiCtor.}` never stored

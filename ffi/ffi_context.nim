@@ -40,8 +40,9 @@ type FFIContext*[T] = object
     # fired by the recycle handler once the lib is freed and the slot released;
     # the synchronous recycleFFIContext caller waits on it.
   libReady*: Atomic[bool]
-    # False until a {.ffiCtor.} stores the library; until then `myLib` is the
-    # FFI thread's default-valued fallback, which for a `ref` type is nil.
+    # False until a {.ffiCtor.} stores the library. Before that, `myLib` points
+    # at the default fallback of the FFI thread. For a `ref` type that fallback
+    # is nil.
   ffiThread: Thread[(ptr FFIContext[T])]
   eventThread: Thread[(ptr FFIContext[T])]
   reqQueueBank: RequestQueueBank

@@ -30,8 +30,8 @@ func rustOpt(elem: string): string =
 const rustMap = NativeTypeMap(
   scalar: rustScalar,
   str: "String",
-  # serde encodes a plain Vec<u8> as a CBOR integer array, which Nim rejects.
-  # ByteBuf gives the CBOR byte string that Nim decodes.
+  # serde encodes a plain Vec<u8> as a CBOR integer array, and Nim rejects that
+  # array. ByteBuf gives the CBOR byte string that Nim decodes.
   bytes: "serde_bytes::ByteBuf",
   ptrType: RustPtrType,
   seqOf: rustSeq,
@@ -71,7 +71,7 @@ proc reqStructName(p: FFIProcMeta): string =
     camel & "Req"
 
 func typeUsesBytes(typeName: string): bool =
-  ## True if `typeName` resolves to a `seq[byte]` at any depth of Seq or Option.
+  ## True if `typeName` is a `seq[byte]` at any depth of Seq or Option.
   var t = parseFFIType(typeName)
   while t.kind in {ftSeq, ftOpt}:
     t = t.elem
@@ -79,7 +79,7 @@ func typeUsesBytes(typeName: string): bool =
 
 func needsSerdeBytes*(types: seq[FFITypeMeta], procs: seq[FFIProcMeta]): bool =
   ## True if a field, a parameter or a return type maps to `serde_bytes::ByteBuf`.
-  ## `types` holds every struct, thus a scan of the fields also finds the bytes
+  ## `types` holds every struct. Thus a scan of the fields also finds the bytes
   ## in a nested struct.
   for t in types:
     for f in t.fields:

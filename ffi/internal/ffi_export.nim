@@ -1,63 +1,64 @@
 ## Simple synchronous C export for a nim-ffi library.
 ##
-## `{.ffi.}` / `{.ffiCtor.}` are the async, context-handle, CBOR-marshaled path —
-## the right tool for stateful, multi-call libraries. `{.ffiExport.}` covers the
-## other common case: a handful of DEAD-SIMPLE lifecycle/health entry points a host
-## loads with plain `dlopen` + `dlsym` and calls synchronously — no context, no
-## callback, no CBOR. The function's own return value crosses the ABI directly.
+## `{.ffi.}` and `{.ffiCtor.}` give the async path. That path uses a context
+## handle and encodes the data with CBOR. It fits a library that keeps state
+## across many calls. `{.ffiExport.}` covers the other common case: a few simple
+## lifecycle entry points. The host loads them with `dlopen` and `dlsym`, then
+## calls them synchronously. There is no context, no callback and no CBOR. The
+## return value of the function crosses the ABI directly.
 ##
-## You write NATIVE Nim types; `ffiExport` bridges to the C ABI for you:
+## Write native Nim types. `ffiExport` maps them to the C ABI:
 ##   int / bool  -> C  int
 ##   uint64      -> C  unsigned long long
-##   string      -> C  const char*   (kept alive in shared memory until the next call)
+##   string      -> C  const char*   (stays alive in shared memory until the next call)
 ##   (no return) -> C  void
-## and it injects the library's `initializeLibrary()` bootstrap so the Nim runtime
-## is up on first call — the host never invokes NimMain itself.
+## `ffiExport` also injects the `initializeLibrary()` call of the library. The Nim
+## runtime therefore starts on the first call, and the host never calls NimMain.
 ##
 ##   declareLibraryBase("myLib")                       # emits initializeLibrary()
 ##   proc my_start(): int {.ffiExport.} = 0            # -> int my_start(void)
 ##   proc my_alive(): uint64 {.ffiExport.} = beats     # -> unsigned long long my_alive(void)
 ##   proc my_error(): string {.ffiExport.} = lastErr   # -> const char* my_error(void)
 ##
-## Build the shared library with `--noMain --nimMainPrefix:libmyLib`. Arguments are
-## not supported (these are no-arg lifecycle calls); use `{.ffi.}` for calls that
-## take arguments.
+## Build the shared library with `--noMain --nimMainPrefix:libmyLib`. A proc with
+## `{.ffiExport.}` takes no arguments. For a call with arguments, use `{.ffi.}`.
 
 import std/macros
+import ./ffi_route
 
 proc cReturnType(t: NimNode): NimNode =
-  ## Native Nim return type -> the C-ABI type that actually crosses the boundary.
+  ## Maps the native Nim return type to the C ABI type that crosses the boundary.
   if t.kind == nnkEmpty:
-    return t                                   # void
+    return t # void
   if t.kind == nnkIdent:
     case $t
-    of "int", "int32", "bool": return ident("cint")
-    of "uint", "uint64": return ident("culonglong")
-    of "string": return ident("cstring")
-    else: discard
-  return t                                     # already a C-compatible type
+    of "int", "int32", "bool":
+      return ident("cint")
+    of "uint", "uint64":
+      return ident("culonglong")
+    of "string":
+      return ident("cstring")
+    else:
+      discard
+  return t # already a C-compatible type
 
-macro ffiExport*(prc: untyped): untyped =
-  ## Mark a no-argument proc as a simple synchronous C export (see module doc):
-  ## native Nim return type, bridged to the C ABI, with the runtime bootstrapped.
+proc buildFFIExportProc*(prc: NimNode): NimNode {.compileTime.} =
+  ## Emits the synchronous C export. `{.ffi.}` and `{.ffiExport.}` share it.
   prc.expectKind({nnkProcDef, nnkFuncDef})
-  let nameNode = if prc.name.kind == nnkPostfix: prc.name[1] else: prc.name
-  let exportName = $nameNode
+  let exportName = $procIdent(prc)
   let params = prc.params
-  if params.len > 1:
-    error("ffiExport supports no-argument procs; use {.ffi.} for calls with arguments")
-
   let nativeRet = params[0]
   let cRet = cReturnType(nativeRet)
 
-  # The user's body becomes a private impl proc; the exported wrapper converts.
+  # The user body becomes a private impl proc. The exported wrapper converts the
+  # result.
   let implName = genSym(nskProc, exportName & "Impl")
   var impl = copyNimTree(prc)
-  impl[0] = implName            # rename
-  impl[4] = newEmptyNode()      # drop pragmas (internal, not exported)
+  impl[0] = implName # rename
+  impl[4] = newEmptyNode() # remove the pragmas: this proc stays internal
 
   let wrapName = ident(exportName)
-  let boot = quote do:
+  let boot = quote:
     when declared(initializeLibrary):
       initializeLibrary()
 
@@ -71,16 +72,20 @@ macro ffiExport*(prc: untyped): untyped =
       proc `wrapName`(): cstring {.exportc: `exportName`, cdecl, dynlib.} =
         `boot`
         let s = `implName`()
-        if `buf` != nil: deallocShared(`buf`)
+        if `buf` != nil:
+          deallocShared(`buf`)
         `buf` = allocShared(s.len + 1)
-        if s.len > 0: copyMem(`buf`, unsafeAddr s[0], s.len)
+        if s.len > 0:
+          copyMem(`buf`, unsafeAddr s[0], s.len)
         cast[ptr char](cast[uint](`buf`) + uint(s.len))[] = '\0'
         return cast[cstring](`buf`)
+
   elif nativeRet.kind == nnkEmpty:
     res.add quote do:
       proc `wrapName`() {.exportc: `exportName`, cdecl, dynlib.} =
         `boot`
         `implName`()
+
   else:
     # scalar: convert the native result to the C return type (cint / culonglong / …).
     res.add quote do:
@@ -89,3 +94,12 @@ macro ffiExport*(prc: untyped): untyped =
         return `cRet`(`implName`())
 
   return res
+
+macro ffiExport*(prc: untyped): untyped =
+  ## Marks a proc that takes no arguments as a simple synchronous C export. The
+  ## macro maps the native Nim return type to the C ABI and starts the Nim
+  ## runtime. `{.ffi.}` reaches the same path from the shape alone. See the
+  ## module doc.
+  prc.expectKind({nnkProcDef, nnkFuncDef})
+  assertFFIPath(prc, fpExport)
+  return buildFFIExportProc(prc)

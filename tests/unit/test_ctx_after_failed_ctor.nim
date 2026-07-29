@@ -3,16 +3,17 @@ import unittest2
 import results
 import ffi
 
-# A failing {.ffiCtor.} still hands the caller a live context — the ctor body
-# runs on the FFI thread, long after the C entry point returned the pointer.
-# `myLib` is not nil (the FFI thread points it at a default-valued fallback), but
-# for a `ref` library type that default IS nil, so a later {.ffi.} call used to
-# hand the user body a nil ref and crash on its first field access.
+# A {.ffiCtor.} that fails still gives the caller a live context. The ctor body
+# runs on the FFI thread, long after the C entry point returns the pointer.
+# `myLib` is not nil, because the FFI thread points it at a default fallback.
+# For a `ref` library type that fallback is nil. A later {.ffi.} call therefore
+# gave the user body a nil ref and crashed on the first field access.
 
 type FailedCtorLib = ref object
   marker: int
 
-# Stub the importc NimMain declareLibrary emits (plain-exe link).
+# A stub for the NimMain proc that declareLibrary imports. The test links as a
+# plain executable.
 {.emit: "void libfailedctorNimMain(void) {}".}
 
 declareLibrary("failedctor", FailedCtorLib)
@@ -27,7 +28,7 @@ proc failedctor_create*(
     return err("ctor deliberately failed")
   return ok(FailedCtorLib(marker: 1))
 
-# Both bodies touch a field, which is what faults on a nil ref receiver.
+# Both bodies read a field. A nil ref receiver faults on that read.
 proc failedctor_ping*(lib: FailedCtorLib): Future[Result[string, string]] {.ffi.} =
   return ok("pong:" & $lib.marker)
 
@@ -65,7 +66,7 @@ proc waitCalled(s: var CallbackState): bool =
   s.called.load()
 
 proc createFailedCtx(s: var CallbackState): ptr FFIContext[FailedCtorLib] =
-  ## Drives the ctor down its error path and returns the still-live context.
+  ## Sends the ctor down its error path and returns the context, which stays alive.
   resetState(s)
   var cfg =
     cborEncode(FailedctorCreateCtorReq(config: FailedCtorConfig(shouldFail: true)))
@@ -82,15 +83,15 @@ suite "{.ffi.} call after a failed constructor":
     let ctx = createFailedCtx(s)
     check not ctx.isNil()
     check s.retCode.load() == int(RET_ERR)
-    # `myLib` is non-nil even here: the FFI thread points it at a default-valued
-    # fallback before dispatching. `libReady` is what says the ctor stored a real
-    # library.
-    check not ctx[].myLib.isNil() # the fallback, not a constructed library
-    check ctx[].myLib[].isNil() # ...and for a `ref` lib that fallback is nil
+    # `myLib` is not nil even here. The FFI thread points it at a default
+    # fallback before it dispatches the request. `libReady` shows if the ctor
+    # stored a real library.
+    check not ctx[].myLib.isNil() # the fallback, not a real library
+    check ctx[].myLib[].isNil() # for a `ref` lib the fallback is nil
     check not ctx[].libReady.load()
 
-  # The synchronous return only reports that the request was accepted; the
-  # rejection itself comes back through the callback.
+  # The synchronous return only reports that the FFI thread accepted the
+  # request. The callback delivers the rejection.
   test "a no-arg call on an uninitialized library reports RET_ERR, no crash":
     var s: CallbackState
     let ctx = createFailedCtx(s)
@@ -117,8 +118,8 @@ suite "{.ffi.} call after a failed constructor":
     check waitCalled(s)
     check s.retCode.load() == int(RET_ERR)
 
-  # The guard runs on the FFI thread, behind the queued ctor, so it must not
-  # penalise a host that fires a call without first awaiting the create callback.
+  # The guard runs on the FFI thread, behind the ctor in the queue. Thus a host
+  # can send a call before it waits for the create callback.
   test "a call issued before the successful ctor callback still succeeds":
     var ctorState: CallbackState
     resetState(ctorState)
@@ -130,7 +131,7 @@ suite "{.ffi.} call after a failed constructor":
     check not raw.isNil()
     let ctx = cast[ptr FFIContext[FailedCtorLib]](raw)
 
-    # Deliberately no wait: the request queues behind the in-flight ctor.
+    # No wait here, on purpose: the request goes into the queue behind the ctor.
     var callState: CallbackState
     resetState(callState)
     var req = cborEncode(FailedctorPingReq())

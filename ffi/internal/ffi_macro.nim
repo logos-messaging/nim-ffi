@@ -7,6 +7,8 @@ import ../ffi_thread_request
 import ../codegen/[meta, string_helpers]
 import ./c_macro_helpers
 import ./ffi_scalar
+import ./ffi_route
+import ./ffi_export
 when defined(ffiGenBindings):
   import ../codegen/rust
   import ../codegen/cpp
@@ -531,7 +533,7 @@ proc replyEncode(
   return quote:
     # A `seq[byte]` result goes on the wire as CBOR, the same as every other
     # `abi = cbor` return. The C, C++ and Rust decoders expect CBOR. They reject
-    # raw bytes with "value encoded in non-canonical form".
+    # raw bytes with the error "value encoded in non-canonical form".
     when typeof(`typedResIdent`.value) is void:
       return ok(newSeq[byte]())
     elif typeof(`typedResIdent`.value) is FFIHandleRoot:
@@ -1145,29 +1147,64 @@ proc buildFFIProc(
     echo stmts.repr
   return stmts
 
+proc buildFFIDtorProc(prc: NimNode, abiFormat: ABIFormat): NimNode {.compileTime.}
+proc buildFFIEventProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compileTime.}
+
 macro ffi*(args: varargs[untyped]): untyped =
-  ## Simplified FFI macro for procs or types: a type registers for binding gen; a
-  ## proc takes a library-type param plus optional Nim params, returns
-  ## Future[Result[RetType, string]], and gets a C wrapper taking one CBOR buffer.
+  ## Simplified FFI macro for a type or a proc. A type registers for binding
+  ## generation. For a proc, `routeFFIProc` reads the signature and picks the
+  ## path: a context method, a static call, a synchronous export, a destructor,
+  ## or an event. See `ffi/internal/ffi_route.nim` for the rules.
   requireBeforeGenBindings("`.ffi.`")
   # Annotated node is the last vararg; leading args are `"abi = ..."` specs.
   let prc = args[^1]
-  let abiFormat = resolveFFISpecs(args[0 ..^ 2])
+  let leading = args[0 ..^ 2]
 
   # A value type stands alone (no library required); its `c` companion is emitted later by `genBindings()`, since a type-pragma macro can only return a TypeDef.
   if prc.kind == nnkTypeDef:
-    gateFFITypeABIFormat(abiFormat, "`.ffi.` type")
+    let typeABIFormat = resolveFFISpecs(leading)
+    gateFFITypeABIFormat(typeABIFormat, "`.ffi.` type")
     var cleanTypeDef = prc.copyNimTree()
     if cleanTypeDef[0].kind == nnkPragmaExpr:
       cleanTypeDef[0] = cleanTypeDef[0][0]
-    return registerFFITypeInfo(cleanTypeDef, abiFormat)
+    return registerFFITypeInfo(cleanTypeDef, typeABIFormat)
 
+  if prc.kind notin {nnkProcDef, nnkFuncDef}:
+    error("`.ffi.` must be applied to a type or a proc definition")
   requireLibraryDeclared("`.ffi.`")
-  return buildFFIProc(prc, abiFormat, isStatic = false)
+
+  let path = routeFFIProc(prc)
+
+  # An event may lead with a wire-name literal, which the ABI parser rejects, so
+  # it resolves its own specs.
+  if path == fpEvent:
+    return buildFFIEventProc(prc, leading)
+
+  let abiFormat = resolveFFISpecs(leading)
+  case path
+  of fpExport:
+    # The export crosses the ABI with its own return value, so no ABI applies.
+    if leading.len > 0:
+      error(
+        "`.ffi.` proc " & $procIdent(prc) &
+          " is a synchronous export and takes no `abi = ...` spec"
+      )
+    return buildFFIExportProc(prc)
+  of fpDtor:
+    gateABIFormat(abiFormat, "`.ffi.` destructor")
+    return buildFFIDtorProc(prc, abiFormat)
+  of fpStatic:
+    gateABIFormat(abiFormat, "`.ffi.` static proc")
+    return buildFFIProc(prc, abiFormat, isStatic = true)
+  of fpMethod:
+    return buildFFIProc(prc, abiFormat, isStatic = false)
+  of fpEvent:
+    error("unreachable: the event path returns above")
 
 macro ffiStatic*(args: varargs[untyped]): untyped =
   ## Context-independent `{.ffi.}`: no library receiver, and no `ctx` in the C
-  ## wrapper, so a host calls it without constructing the library.
+  ## wrapper, so a host calls it without constructing the library. `{.ffi.}`
+  ## reaches the same path from the shape alone.
   requireBeforeGenBindings("`.ffiStatic.`")
   requireLibraryDeclared("`.ffiStatic.`")
   let prc = args[^1]
@@ -1175,6 +1212,7 @@ macro ffiStatic*(args: varargs[untyped]): untyped =
   gateABIFormat(abiFormat, "`.ffiStatic.` proc")
   if prc.kind notin {nnkProcDef, nnkFuncDef}:
     error("`.ffiStatic.` must be applied to a proc definition")
+  assertFFIPath(prc, fpStatic)
   return buildFFIProc(prc, abiFormat, isStatic = true)
 
 proc buildCtorRequestType(
@@ -1330,7 +1368,7 @@ proc buildCtorProcessFFIRequestProc(
       when `libTypeName` is ref:
         GC_ref(`myLibIdent`[])
         `myLibRefdIdent` = true
-    # After the store, so an observer never sees the fallback.
+    # Set the flag after the store, so an observer never sees the fallback.
     `libReadyIdent`.store(true)
 
   newBody.add quote do:
@@ -1602,16 +1640,9 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
     echo stmts.repr
   return stmts
 
-macro ffiDtor*(args: varargs[untyped]): untyped =
-  ## C-exported FFIContext destructor. Sync (no return) or async (`Future[void]`);
-  ## a non-empty body becomes an async `ffiTeardownHook` the FFI thread awaits at
-  ## shutdown, so teardown runs on the worker thread. RET_ERR on null/invalid ctx.
-  requireBeforeGenBindings("`.ffiDtor.`")
-  requireLibraryDeclared("`.ffiDtor.`")
-  let prc = args[^1]
-  let abiFormat = resolveABIFormat(args[0 ..^ 2])
-  gateABIFormat(abiFormat, "`.ffiDtor.` proc")
-
+proc buildFFIDtorProc(prc: NimNode, abiFormat: ABIFormat): NimNode {.compileTime.} =
+  ## Emits the C-exported FFIContext destructor. `{.ffi.}` and `{.ffiDtor.}`
+  ## share it.
   let procName = prc[0]
   let formalParams = prc[3]
   let bodyNode = prc[^1]
@@ -1723,30 +1754,30 @@ macro ffiDtor*(args: varargs[untyped]): untyped =
     echo stmts.repr
   return stmts
 
-macro ffiEvent*(args: varargs[untyped]): untyped =
-  ## Declares a library-initiated event: the empty-bodied proc is filled with a
-  ## `dispatchFFIEventCbor` call. Wire name defaults to `camelToSnakeCase` of the
-  ## proc name (a string literal overrides it) and is the cross-binding source of truth.
-  ##
+macro ffiDtor*(args: varargs[untyped]): untyped =
+  ## C-exported FFIContext destructor. Sync (no return) or async (`Future[void]`);
+  ## a non-empty body becomes an async `ffiTeardownHook` the FFI thread awaits at
+  ## shutdown, so teardown runs on the worker thread. RET_ERR on null/invalid ctx.
+  ## `{.ffi.}` reaches the same path from the shape alone.
+  requireBeforeGenBindings("`.ffiDtor.`")
+  requireLibraryDeclared("`.ffiDtor.`")
+  let prc = args[^1]
+  let abiFormat = resolveABIFormat(args[0 ..^ 2])
+  gateABIFormat(abiFormat, "`.ffiDtor.` proc")
+  assertFFIPath(prc, fpDtor)
+  return buildFFIDtorProc(prc, abiFormat)
+
+proc buildFFIEventProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compileTime.} =
+  ## Emits the event dispatcher. `{.ffi.}` and `{.ffiEvent.}` share it.
   ## One parameter rides the wire directly (a scalar, or an existing `{.ffi.}`
   ## object). Two or more are bundled into a synthesised, registered envelope
   ## object named `<WireNamePascalCase>Payload` whose fields are the parameters,
   ## so the foreign side still decodes one typed value.
-  requireBeforeGenBindings("`.ffiEvent.`")
-  requireLibraryDeclared("`.ffiEvent.`")
-  if args.len < 1:
-    error("ffiEvent must be applied to a proc declaration")
-
-  let prc = args[^1]
-  if prc.kind notin {nnkProcDef, nnkFuncDef}:
-    error("ffiEvent must be applied to a proc declaration")
-
   let procName = prc[0]
   var userProcName = procName
   if procName.kind == nnkPostfix:
     userProcName = procName[1]
 
-  let leading = args[0 ..^ 2]
   let (wireName, abiSpecStart) = resolveEventWireName(leading, userProcName)
   let abiFormat = resolveABIFormat(leading[abiSpecStart ..^ 1])
   gateABIFormat(abiFormat, "`.ffiEvent.` proc")
@@ -1848,6 +1879,22 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
   when defined(ffiDumpMacros):
     echo resultStmts.repr
   return resultStmts
+
+macro ffiEvent*(args: varargs[untyped]): untyped =
+  ## Declares a library-initiated event: the empty-bodied proc is filled with a
+  ## `dispatchFFIEventCbor` call. Wire name defaults to `camelToSnakeCase` of the
+  ## proc name (a string literal overrides it) and is the cross-binding source of truth.
+  ## `{.ffi.}` reaches the same path from the shape alone.
+  requireBeforeGenBindings("`.ffiEvent.`")
+  requireLibraryDeclared("`.ffiEvent.`")
+  if args.len < 1:
+    error("ffiEvent must be applied to a proc declaration")
+
+  let prc = args[^1]
+  if prc.kind notin {nnkProcDef, nnkFuncDef}:
+    error("ffiEvent must be applied to a proc declaration")
+  assertFFIPath(prc, fpEvent)
+  return buildFFIEventProc(prc, args[0 ..^ 2])
 
 proc reportScalarFastPathDrops(procs: seq[FFIProcMeta]) {.compileTime.} =
   ## Fail loudly on scalar-fast-path procs a target can't bind, unless

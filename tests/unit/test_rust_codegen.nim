@@ -44,10 +44,11 @@ suite "nimTypeToRust: strings, pointers and containers":
     check nimTypeToRust("echoRequest") == "EchoRequest"
 
 suite "generateTypesRs: seq[byte] rides as a CBOR byte string":
-  ## A `seq[byte]` in a struct that is a `seq` element became a `Vec<u8>` integer
-  ## array (CBOR major type 4). The Nim decoder rejects that array with "value
-  ## encoded in non-canonical form". ByteBuf makes ciborium write a byte string
-  ## (major type 2), the same as every other backend.
+  ## A struct with a `seq[byte]` field can be a `seq` element. For that shape the
+  ## Rust backend wrote a `Vec<u8>` integer array (CBOR major type 4). The Nim
+  ## decoder rejects that array with the error "value encoded in non-canonical
+  ## form". ByteBuf makes ciborium write a byte string (major type 2), the same
+  ## as every other backend.
   setup:
     let types = @[
       FFITypeMeta(

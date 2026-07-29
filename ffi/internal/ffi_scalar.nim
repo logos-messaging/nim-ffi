@@ -6,10 +6,11 @@ import ../codegen/meta
 proc buildLibReadyGuard*(
     ctxHandlerName, libTypeName: NimNode
 ): NimNode {.compileTime.} =
-  ## Rejects a request that reached the FFI thread with no library constructed.
-  ## Only for `ref` types: an `object` fallback is a usable zero value callers may
-  ## rely on, a `ref` one is nil. Sits in the handler, behind any queued ctor, so
-  ## calling without awaiting the create callback still works.
+  ## Rejects a request that reaches the FFI thread before the ctor stores a
+  ## library. The guard applies only to a `ref` type. For an `object` type the
+  ## fallback is a usable zero value, but for a `ref` type it is nil. The guard
+  ## runs in the handler, behind the ctor in the queue. Thus a host can send a
+  ## call before it waits for the create callback.
   quote:
     when `libTypeName` is ref:
       if not `ctxHandlerName`[].libReady.load():
