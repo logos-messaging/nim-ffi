@@ -87,6 +87,10 @@ var genBindingsEmitted* {.compileTime.}: bool = false
 # Library-wide default ABI, inherited by each annotation unless it overrides.
 var currentDefaultABIFormat* {.compileTime.}: ABIFormat = ABIFormat.Cbor
 
+# Optional "generated — do not edit" banner stamped at the top of each generated
+# header, set by declareLibrary's `headerBanner` argument (empty = no banner).
+var currentHeaderBanner* {.compileTime.}: string = ""
+
 proc abiCodegenImplemented*(fmt: ABIFormat): bool =
   ## Whether `fmt` has a working proc-dispatch path (both Cbor and C do).
   fmt in {ABIFormat.Cbor, ABIFormat.C}

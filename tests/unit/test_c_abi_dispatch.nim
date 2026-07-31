@@ -51,6 +51,9 @@ proc wirefast_greet*(
     return err("no items")
   return ok(lib.tag & " greets " & req.items[0])
 
+proc wirefast_destroy*(lib: WireLib) {.ffiDtor.} =
+  discard
+
 genBindings()
 
 type ReplyData = object

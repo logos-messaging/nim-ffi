@@ -1944,7 +1944,7 @@ when defined(ffiGenBindings):
     of "c":
       generateCBindings(
         genProcs, ffiTypeRegistry, libName, outDir, srcRel, ffiEventRegistry,
-        ffiConstRegistry,
+        ffiConstRegistry, currentHeaderBanner,
       )
     of "cddl":
       generateCddlBindings(genProcs, ffiTypeRegistry, libName, outDir, srcRel)
@@ -1961,6 +1961,17 @@ macro genBindings*(
   ## every {.ffi.}/{.ffiCtor.}/{.ffiDtor.} annotation, so place it at the compilation
   ## root's bottom. -d:targetLang picks languages; emission needs -d:ffiGenBindings.
   genBindingsEmitted = true
+
+  # A ctor allocates a context; without a dtor the caller has no way to release
+  # the underlying Nim library object, so require the pair (issue #3).
+  let classified = classifyProcs(ffiProcRegistry)
+  if classified.ctors.len > 0 and classified.dtor.isNone():
+    error(
+      "genBindings: library '" & classified.ctors[0].libName &
+        "' declares an {.ffiCtor.} (" & classified.ctors[0].procName &
+        ") but no {.ffiDtor.}. Add a `proc <lib>_destroy(x: <LibType>) {.ffiDtor.}` " &
+        "so the context it builds can be released."
+    )
 
   when defined(ffiGenBindings):
     let libName = deriveLibName(ffiProcRegistry)

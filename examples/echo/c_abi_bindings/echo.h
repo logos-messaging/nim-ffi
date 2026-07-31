@@ -13,6 +13,18 @@
    carrying the elapsed milliseconds as decimal text; always followed by a
    terminal RET_OK/RET_ERR. Ignore it unless you want progress. */
 #define NIMFFI_RET_STALE_WARN 3
+#ifndef RET_OK
+#define RET_OK NIMFFI_RET_OK
+#endif
+#ifndef RET_ERR
+#define RET_ERR NIMFFI_RET_ERR
+#endif
+#ifndef RET_MISSING_CALLBACK
+#define RET_MISSING_CALLBACK NIMFFI_RET_MISSING_CALLBACK
+#endif
+#ifndef RET_STALE_WARN
+#define RET_STALE_WARN NIMFFI_RET_STALE_WARN
+#endif
 
 /* ============================================================ */
 /* Generated constants                                          */
@@ -68,6 +80,10 @@ static inline char* nimffi_abi_dup_cstr_n(const char* s, size_t n) {
     return p;
 }
 #endif
+#ifndef NIMFFI_FFICALLBACK_DEFINED
+#define NIMFFI_FFICALLBACK_DEFINED
+typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_data);
+#endif
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -82,6 +98,8 @@ int echo_lib_version(EchoLibVersionReplyFn on_reply, void* user_data, const Echo
 int echo_shout_anon(EchoShoutAnonReplyFn on_reply, void* user_data, const EchoShoutAnonReq* req);
 /** Releases the echo context. */
 int echo_destroy(void* ctx);
+uint64_t echo_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
+int echo_remove_event_listener(void* ctx, uint64_t listener_id);
 
 #ifdef __cplusplus
 } /* extern "C" */
