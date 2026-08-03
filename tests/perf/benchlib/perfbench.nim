@@ -83,7 +83,9 @@ proc perfbenchTriggerPing*(
   ## inside a single clock domain.
   for i in 0 ..< req.count:
     onPerfPing(
-      PerfPingEvent(seqNo: i, stampNs: req.stampNs, data: newSeq[byte](req.payloadBytes))
+      PerfPingEvent(
+        seqNo: i, stampNs: req.stampNs, data: newSeq[byte](req.payloadBytes)
+      )
     )
   return ok(TriggerPingResponse(emitted: req.count))
 
