@@ -37,6 +37,7 @@
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -329,7 +330,7 @@ static void runScenario(const std::string& name, const std::string& csvTag,
     std::printf("── %s — %d msgs/thread (median of %d) ──────\n", name.c_str(),
                 k.perThread, k.iters);
     std::printf("  %-9s%-11s%-13s%-11s%-12s%-12s%s\n", "threads", "msgs", "msg/s",
-                "MB/s", "p50", "p99", "vs 1-thread");
+                "MB/s", "p50", "p99", "vs first row");
     double base = 0.0;
     for (int threads : k.threadCounts) {
         std::vector<double> rates;
@@ -365,8 +366,11 @@ static void runScenario(const std::string& name, const std::string& csvTag,
                     med, mbs, p50Buf, p99Buf,
                     (std::to_string(med / base).substr(0, 4) + "x").c_str());
         // CSV row: tag,threads,msg/s,p50_ns,p99_ns — diff-friendly capture.
+        // Lanes without per-call samples emit -1, distinguishing "not
+        // measured" from a measured 0 ns.
         std::printf("csv,perf_ffi,%s,%d,%.0f,%" PRId64 ",%" PRId64 "\n",
-                    csvTag.c_str(), threads, med, p50, p99);
+                    csvTag.c_str(), threads, med, lat.empty() ? int64_t{-1} : p50,
+                    lat.empty() ? int64_t{-1} : p99);
         std::fflush(stdout);
     }
     std::printf("\n");
@@ -381,8 +385,16 @@ int main() {
         envIntList("NIM_FFI_PERF_PAYLOAD_SIZES", "64,512,4096,65536");
     const int eventPayload = envInt("NIM_FFI_PERF_EVENT_PAYLOAD", 512);
     const int window = envInt("NIM_FFI_PERF_ASYNC_WINDOW", 64);
-    if (k.perThread < 1 || k.iters < 1 || window < 1 || k.threadCounts.empty() ||
-        payloadSizes.empty()) {
+    // Element-level validation: a negative size would wrap to a huge size_t
+    // in makePayload, and a 0 thread count (also what atoi turns garbage
+    // into) would produce empty runs and nonsense scaling ratios.
+    bool listsOk = !k.threadCounts.empty() && !payloadSizes.empty();
+    for (int t : k.threadCounts)
+        if (t < 1) listsOk = false;
+    for (int s : payloadSizes)
+        if (s < 0) listsOk = false;
+    if (k.perThread < 1 || k.iters < 1 || window < 1 || eventPayload < 0 ||
+        !listsOk) {
         std::fprintf(stderr, "invalid NIM_FFI_PERF_* configuration\n");
         return 2;
     }
