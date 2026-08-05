@@ -80,6 +80,15 @@ jobs:
       nim-versions:   ${{ needs.versions.outputs.nim-versions }}
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
+  foreign-thread-c-abi:
+    name: Foreign Thread (abi = c)
+    needs: versions
+    uses: ./.github/workflows/test.yml
+    with:
+      test: test_foreign_thread_c_abi
+      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
+      nimble-version: ${{ needs.versions.outputs.nimble }}
+
   c-wire:
     # The `c`-ABI cwire codec is layout-/allocator-sensitive (malloc/free, flat
     # struct packing, allocShared for seq/Option), so cover it across the full

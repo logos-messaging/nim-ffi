@@ -711,8 +711,18 @@ proc ctxBindingGuard(
 ): NimNode {.compileTime.} =
   ## Prologue that binds `ctxIdent`: a method validates the ctx it was handed, a
   ## static resolves the library's shared one.
+  #
+  # Any call can be a host thread's first entry. The body allocates via the GC
+  # on the calling thread, so register it first; initializeLibrary is idempotent.
+  # Raw AST: `when declared` of an undeclared symbol inside `quote` ICEs.
+  let initGuard = nnkWhenStmt.newTree(
+    nnkElifBranch.newTree(
+      newCall(ident("declared"), ident("initializeLibrary")),
+      newStmtList(newCall(ident("initializeLibrary"))),
+    )
+  )
   if not isStatic:
-    return quote:
+    let methodGuard = quote:
       if onReply.isNil():
         return RET_MISSING_CALLBACK
       if not `poolIdent`.isValidCtx(cast[pointer](`ctxIdent`)):
@@ -720,6 +730,8 @@ proc ctxBindingGuard(
           RET_ERR, `emptyReply`, "ctx is not a valid FFI context".cstring, userData
         )
         return RET_ERR
+    methodGuard.insert(0, initGuard)
+    return methodGuard
   let guard = quote:
     if onReply.isNil():
       return RET_MISSING_CALLBACK
@@ -727,17 +739,7 @@ proc ctxBindingGuard(
       let errStr = "ffiStatic: " & error
       onReply(RET_ERR, `emptyReply`, errStr.cstring, userData)
       return RET_ERR
-  # A static call may be the host's first entry into the library. Raw AST, not
-  # `quote`: `when declared` over an undeclared symbol inside `quote` ICEs.
-  guard.insert(
-    0,
-    nnkWhenStmt.newTree(
-      nnkElifBranch.newTree(
-        newCall(ident("declared"), ident("initializeLibrary")),
-        newStmtList(newCall(ident("initializeLibrary"))),
-      )
-    ),
-  )
+  guard.insert(0, initGuard)
   guard
 
 proc exportedProc(
@@ -745,7 +747,9 @@ proc exportedProc(
     boxName, envWire, trampName, poolIdent, cbType: NimNode,
     isStatic: bool,
 ): NimNode =
-  # No `foreignThreadGc`: `cwireUnpack`/`cwirePack` alloc on the calling thread (already GC-registered); wrapping would free its live ORC heap.
+  # `cwireUnpack`/`cwirePack` alloc on the calling thread; `ctxBindingGuard`
+  # registered it. No teardown: it would free the heap of a host thread still
+  # calling in. A host thread that exits leaks its heap; accepted.
   let envName = spec.envelope
   let ctxIdent = ident("ctx")
   # String reply: empty non-nil cstring on error; object reply: nil ptr gated by err_code.
