@@ -74,18 +74,15 @@ const RecycleTimeoutMs* {.intdefine: "ffiRecycleTimeoutMs".} = 1500
 const RecycleTimeout* = RecycleTimeoutMs.milliseconds
 
 const TeardownTimeoutMs* {.intdefine: "ffiTeardownTimeoutMs".} = 10000
-  ## Bounds one `{.ffiDtor.}` teardown. A real library stop (network switch,
-  ## discovery loops, storage threads) outlasts a drain round, so this gets its
-  ## own budget. Override with `-d:ffiTeardownTimeoutMs=<ms>`.
+  ## Cancels a `{.ffiDtor.}` teardown that overruns; a real library stop outlasts
+  ## a drain round. Override with `-d:ffiTeardownTimeoutMs=<ms>`.
 const TeardownTimeout* = TeardownTimeoutMs.milliseconds
 
 const
   RecycleWaitTimeout* = 2 * RecycleTimeout + TeardownTimeout + 2.seconds
-    ## Caller-side bound for synchronous recycle. It covers both drain rounds,
-    ## the teardown hook and slack, so it only fires when the worker itself is
-    ## wedged. The generated C destructor blocks its calling thread for up to
-    ## this long — 15 s at the default budgets — so a host should not call it
-    ## from a thread that must stay responsive.
+    ## Caller-side bound for synchronous recycle: both drain rounds, the teardown
+    ## hook and slack, so it only fires when the worker itself is wedged. The
+    ## generated C destructor blocks its caller this long — 15 s by default.
   EventThreadTickInterval* = 1.seconds
   FFIHeartbeatStartDelay* = 10.seconds
   FFIHeartbeatStaleThreshold* = 1.seconds
@@ -258,9 +255,8 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ok()
 
 ## Per-thread exit wait before stopAndJoinThreads leaks ctx rather than hanging. Kept
-## short so a wedged worker fails fast; raise it past `ffiTeardownTimeoutMs` when the
-## async `{.ffiDtor.}` teardown the exit epilogue awaits is slow.
-## Override `-d:ffiThreadExitTimeoutMs=<ms>`.
+## short so a wedged worker fails fast; raise it past `ffiTeardownTimeoutMs` for a slow
+## `{.ffiDtor.}`. Override `-d:ffiThreadExitTimeoutMs=<ms>`.
 const ThreadExitTimeoutMs* {.intdefine: "ffiThreadExitTimeoutMs".} = 1500
 const ThreadExitTimeout* = ThreadExitTimeoutMs.milliseconds
 

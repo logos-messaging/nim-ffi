@@ -3,9 +3,8 @@ import unittest2
 import results
 import ffi
 
-# Exercises async {.ffiDtor.}: both the destroy path and the recycle path must
-# block until teardown finishes. test_ffi_teardown.nim.cfg shortens
-# TeardownTimeout for every suite here, so read timings against 1s, not 10s.
+# Exercises async {.ffiDtor.} on the destroy and the recycle path.
+# test_ffi_teardown.nim.cfg cuts TeardownTimeout to 1s for every suite here.
 
 type TeardownLib = object
 
@@ -27,9 +26,8 @@ proc teardownlib_create*(
   return ok(TeardownLib())
 
 proc teardownlib_destroy*(lib: TeardownLib): Future[void] {.ffiDtor.} =
-  ## Async teardown: sleeps, then records that it ran and on which thread. While
-  ## `gTeardownHangs` is set it sleeps far past every timeout in play, so no
-  ## sanitizer slowdown can make a natural finish look like a cancelled one.
+  ## Records that it ran and on which thread. `gTeardownHangs` makes it sleep
+  ## past every timeout in play, well clear of any sanitizer slowdown.
   if gTeardownHangs.load():
     await sleepAsync(TeardownTimeout + 60.seconds)
   else:
@@ -49,9 +47,8 @@ proc encodedPtr(bytes: var seq[byte]): ptr byte =
     cast[ptr byte](addr bytes[0])
 
 proc createCtxWithLib(): ptr FFIContext[TeardownLib] =
-  ## Spins up a context via the ctor and waits until the library is ready.
-  # Waits on `libReady`, not `myLib`: the ctor sets the flag after the pointer,
-  # and `libReady` is what gates the teardown hook.
+  ## Spins up a context and waits on `libReady`, the flag the teardown gates on.
+  # Not `myLib`: the worker points that at its fallback before the ctor runs.
   var cfg = cborEncode(TeardownlibCreateCtorReq(config: NoopConfig(dummy: 0)))
   let ret = teardownlib_create(encodedPtr(cfg), cfg.len.csize_t, noopCallback, nil)
   if ret.isNil():
@@ -87,8 +84,7 @@ suite "async {.ffiDtor.} teardown hook":
     check gTeardownRan.load()
 
 suite "{.ffiDtor.} teardown on the recycle path":
-  # Recycle is the path the generated C destroy wrapper takes, so a dtor body
-  # that only ran on destroy would never run in a real host.
+  # Recycle is the path the generated C destroy wrapper takes.
   test "recycle blocks until the async teardown body completes":
     let ctx = createCtxWithLib()
     check not ctx.isNil()
@@ -120,8 +116,7 @@ suite "{.ffiDtor.} teardown on the recycle path":
     gTeardownRan.store(false)
     let second = createCtxWithLib()
     check not second.isNil()
-    # createFFIContext claims the lowest free slot, so a released slot comes
-    # back. Without this the test would pass on a fresh slot and prove nothing.
+    # Lowest free slot wins, so a fresh slot here would prove nothing.
     check second == first
     check not second[].myLib.isNil()
     check TeardownlibFFIPool.recycleFFIContext(second).isOk()
@@ -138,16 +133,11 @@ suite "{.ffiDtor.} teardown on the recycle path":
     let elapsed = Moment.now() - t0
     gTeardownHangs.store(false)
 
-    # The timeout is what ended the wait, not an early bail: the hook outlasts
-    # TeardownTimeout, and its tail never ran because cancellation took it.
+    # The timeout ended the wait, not an early bail or the body finishing.
     check elapsed >= TeardownTimeout
-    # The body sleeps a further minute, so returning inside the caller's own
-    # ceiling proves the timeout ended the wait, not the body finishing. Bounding
-    # by RecycleWaitTimeout keeps the isOk() check above the first to fail.
     check elapsed < RecycleWaitTimeout
     check not gTeardownRan.load()
 
-    # The slot is usable again, and the next owner tears down normally.
     let next = createCtxWithLib()
     check not next.isNil()
     check next == ctx

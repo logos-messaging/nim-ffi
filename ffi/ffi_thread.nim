@@ -127,12 +127,8 @@ proc rejectQueuedRequests[T](ctx: ptr FFIContext[T]) =
     request = nextRequest
 
 proc runTeardown[T](ctx: ptr FFIContext[T]) {.async.} =
-  ## Awaits the library's `{.ffiDtor.}` body, the only place that stops the work
-  ## the library spawned itself. `libReady` gates it: without a constructed
-  ## library `myLib` points at the worker's zero-valued fallback, which is nil
-  ## for a `ref` type, so the body would fault on its first field access.
-  ## `TeardownTimeout` asks a slow body to cancel; one that ignores cancellation
-  ## still holds the recycle.
+  ## Awaits the library's `{.ffiDtor.}` body. `libReady` gates it: without a ctor
+  ## `myLib` is the zero-valued fallback, nil for a `ref` type.
   let teardown = ffiTeardownHook[T]()
   if teardown.isNil() or ctx.myLib.isNil() or not ctx.libReady.load():
     return
@@ -151,9 +147,8 @@ proc recycleContext[T](
   ## listeners, then fire recycleDoneSignal and release the slot — all WITHOUT
   ## stopping the worker/event threads, so the next createFFIContext reuses them
   ## (no fd churn).
-  # Deferred so a raise out of the library teardown cannot strand the slot in
-  # `Recycling`. Fire before the release: a thread that claims the freed slot
-  # first would otherwise take this fire as the answer to its own recycle.
+  # Deferred: a raise out of the teardown must not strand the slot. Fire before
+  # the release, or a thread claiming the slot would take this as its own answer.
   defer:
     let fireRes = ctx.recycleDoneSignal.fireSync()
     if fireRes.isErr():
@@ -169,7 +164,7 @@ proc recycleContext[T](
       fut.cancelSoon()
     drained = await allFutures(ongoing[]).withTimeout(RecycleTimeout)
 
-  # Between the drain and freeLib: the hook still needs `myLib` and its listeners.
+  # Before freeLib: the hook still needs `myLib` and its listeners.
   await runTeardown(ctx)
 
   freeLib(ctx)
@@ -276,7 +271,6 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
       except CatchableError as e:
         error "draining pending FFI requests on shutdown raised", error = e.msg
 
-    # Same teardown the recycle path runs; here it precedes the thread join.
     await runTeardown(ctx)
 
   waitFor ffiRun(ctx)
