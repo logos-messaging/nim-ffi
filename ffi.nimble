@@ -18,6 +18,7 @@ const nimFlagsRefc = "--mm:refc -d:chronicles_log_level=WARN"
 
 const timerSrc = "examples/timer/timer.nim"
 const echoSrc = "examples/echo/echo.nim"
+const perfbenchSrc = "tests/perf/benchlib/perfbench.nim"
 
 import std/[algorithm, os, strutils]
 
@@ -152,6 +153,43 @@ task bench_ffi_submit,
     applyTsanSuppressions()
   for flags in mmModes():
     exec "nim c -r " & flags & " -d:danger" & extra & " tests/bench/bench_ffi_submit.nim"
+
+proc buildPerfbenchLib(flags: string) =
+  ## Builds libperfbench for the perf harness. The cpp_bindings cmake template
+  ## builds Nim libs as debug orc — useless for perf numbers — so the harness
+  ## builds the dylib itself: -d:danger to match the tests/bench methodology,
+  ## `flags` supplying the mm.
+  mkDir "tests/perf/build"
+  var cmd =
+    "nim c " & flags & " -d:danger --app:lib --noMain --nimMainPrefix:libperfbench"
+  when defined(windows):
+    # mingw gcc emits no import library unless told to; MSVC consumers need it.
+    cmd.add " --passL:-Wl,--out-implib,tests/perf/build/perfbench.lib"
+    cmd.add " -o:tests/perf/build/perfbench.dll"
+  elif defined(macosx):
+    cmd.add " -o:tests/perf/build/libperfbench.dylib"
+  else:
+    cmd.add " -o:tests/perf/build/libperfbench.so"
+  cmd.add " " & perfbenchSrc
+  runOrQuit cmd
+
+task genbindings_cpp_perfbench, "Generate C++ bindings for the perf bench library":
+  exec genBindingsCmd(nimFlagsOrc, perfbenchSrc, "cpp")
+
+task perf_cpp_e2e,
+  "Build and run the C++ e2e perf harness (NIM_FFI_MM matrix, -d:danger; NIM_FFI_PERF_* knobs)":
+  # Not part of `test` — timing is a measurement, not a gate. The driver still
+  # exits non-zero on any correctness failure (bad reply, lost event).
+  runOrQuit "nimble genbindings_cpp_perfbench"
+  for flags in mmModes():
+    echo "\n=== perf_cpp_e2e: " & flags & " (danger) ==="
+    buildPerfbenchLib(flags)
+    runOrQuit "cmake -S tests/perf/cpp -B tests/perf/cpp/build -DCMAKE_BUILD_TYPE=Release"
+    runOrQuit "cmake --build tests/perf/cpp/build --config Release"
+    when defined(windows):
+      runOrQuit "tests/perf/build/perf_driver.exe"
+    else:
+      runOrQuit "tests/perf/build/perf_driver"
 
 task test_cpp_e2e, "Build and run the C++ end-to-end tests for the timer example":
   # Regenerate the C++ bindings so the suite always runs against fresh codegen.
