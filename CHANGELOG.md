@@ -49,6 +49,22 @@ All notable changes to this project are documented in this file.
   router would silently give it the ctor ABI instead.
 
 ### Fixed
+- A `{.ffiDtor.}` body now runs when the context is recycled. The C destructor
+  the macro emits calls `recycleFFIContext`, but only the thread-exit epilogue of
+  the full-shutdown path awaited the teardown hook, and no generated wrapper
+  takes that path. A dtor body was therefore dead code, and a library kept every
+  loop it had spawned itself: the pooled worker survives a recycle by design, so
+  its dispatcher went on servicing them, invisible to a host whose handle was
+  gone. The recycle handler now awaits the hook after it drains the in-flight
+  requests and before it frees the library, so the dtor still sees `myLib` and
+  its events still reach the listeners. It runs only once a constructor has
+  stored a library, because `myLib` otherwise points at the zero-valued
+  fallback. At `-d:ffiTeardownTimeoutMs` (10 s by default) a slow body is asked
+  to cancel, and `RecycleWaitTimeout` covers that budget; a body that ignores
+  cancellation still holds the recycle, so keep the dtor cancellable. The slot
+  is released on every exit path, including a raise out of the dtor. Consumers
+  that already ship a non-empty dtor body should read it again: it went from
+  dead code to live shutdown code.
 - A `{.ffi.}` call against a `ref` library type whose `{.ffiCtor.}` never stored
   a library (it failed, or none ran) no longer crashes. Without a constructed
   library the FFI thread points `myLib` at a default-valued fallback; for an

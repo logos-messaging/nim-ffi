@@ -126,12 +126,40 @@ proc rejectQueuedRequests[T](ctx: ptr FFIContext[T]) =
       error "rejecting a queued request raised", error = e.msg
     request = nextRequest
 
+proc runTeardown[T](ctx: ptr FFIContext[T]) {.async.} =
+  ## Awaits the library's `{.ffiDtor.}` body, the only place that stops the work
+  ## the library spawned itself. `libReady` gates it: without a constructed
+  ## library `myLib` points at the worker's zero-valued fallback, which is nil
+  ## for a `ref` type, so the body would fault on its first field access.
+  ## `TeardownTimeout` asks a slow body to cancel; one that ignores cancellation
+  ## still holds the recycle.
+  let teardown = ffiTeardownHook[T]()
+  if teardown.isNil() or ctx.myLib.isNil() or not ctx.libReady.load():
+    return
+  try:
+    let done = await teardown(ctx.myLib).withTimeout(TeardownTimeout)
+    if not done:
+      error "library teardown cancelled at the timeout; releasing the library",
+        timeoutMs = TeardownTimeoutMs
+  except CatchableError as e:
+    error "library teardown raised", error = e.msg
+
 proc recycleContext[T](
     ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]
 ) {.async.} =
-  ## Drain in-flight handlers, free the lib, clear listeners and release the
-  ## slot — all WITHOUT stopping the worker/event threads, so the next
-  ## createFFIContext reuses them (no fd churn). Then fire recycleDoneSignal.
+  ## Drain in-flight handlers, run the library teardown, free the lib, clear
+  ## listeners, then fire recycleDoneSignal and release the slot — all WITHOUT
+  ## stopping the worker/event threads, so the next createFFIContext reuses them
+  ## (no fd churn).
+  # Deferred so a raise out of the library teardown cannot strand the slot in
+  # `Recycling`. Fire before the release: a thread that claims the freed slot
+  # first would otherwise take this fire as the answer to its own recycle.
+  defer:
+    let fireRes = ctx.recycleDoneSignal.fireSync()
+    if fireRes.isErr():
+      error "failed to fire recycleDoneSignal", err = fireRes.error
+    ctx.releaseClaim()
+
   ongoing[].keepItIf(not it.finished())
   var drained = ongoing[].len == 0
   if not drained:
@@ -141,17 +169,13 @@ proc recycleContext[T](
       fut.cancelSoon()
     drained = await allFutures(ongoing[]).withTimeout(RecycleTimeout)
 
+  # Between the drain and freeLib: the hook still needs `myLib` and its listeners.
+  await runTeardown(ctx)
+
   freeLib(ctx)
   clearListeners(ctx[].eventRegistry)
   rejectQueuedRequests(ctx)
   ongoing[].setLen(0)
-
-  # Fire before the release: a thread that claims the freed slot first would
-  # otherwise take this fire as the answer to its own recycle.
-  let fireRes = ctx.recycleDoneSignal.fireSync()
-  if fireRes.isErr():
-    error "failed to fire recycleDoneSignal", err = fireRes.error
-  ctx.releaseClaim()
 
 var ffiEventQueueSignalPtr {.threadvar.}: ThreadSignalPtr
   # Stashed so the hook has no closure env.
@@ -252,12 +276,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
       except CatchableError as e:
         error "draining pending FFI requests on shutdown raised", error = e.msg
 
-    # Run the library's async {.ffiDtor.} shutdown before join if one exists and a request populated `myLib`; exceptions logged, never propagated.
-    let teardown = ffiTeardownHook[T]()
-    if not teardown.isNil() and not ctx.myLib.isNil():
-      try:
-        await teardown(ctx.myLib)
-      except CatchableError as e:
-        error "library teardown raised on shutdown", error = e.msg
+    # Same teardown the recycle path runs; here it precedes the thread join.
+    await runTeardown(ctx)
 
   waitFor ffiRun(ctx)

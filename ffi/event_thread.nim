@@ -116,7 +116,12 @@ proc eventRun[T](ctx: ptr FFIContext[T]) {.async.} =
       if not notifiedStuck and ctx.eventQueueStuck.load():
         onNotResponding(ctx)
         notifiedStuck = true
-      hb.check(ctx)
+      # A recycle parks the FFI loop in the library teardown on purpose, so the
+      # heartbeat is meant to stall there. Reporting it would cry wolf on every
+      # shutdown, and the matching onResponding could never reach a host whose
+      # listeners clearListeners is about to drop.
+      if ctx.lifecycle.load() == CtxLifecycle.Active:
+        hb.check(ctx)
 
   # Catch anything enqueued between the last drain and the FFI thread's exit.
   ctx.drainEventQueue()
