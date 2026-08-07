@@ -49,6 +49,14 @@ All notable changes to this project are documented in this file.
   router would silently give it the ctor ABI instead.
 
 ### Fixed
+- A `{.ffiDtor.}` body now runs when the context is recycled. Only the
+  thread-exit epilogue awaited the teardown hook, and the emitted C destructor
+  never takes that path, so a dtor body was dead code and the library kept every
+  loop it had spawned on the pooled worker. The recycle handler now awaits the
+  hook between the drain and `freeLib`, once a constructor has stored a library.
+  A body that overruns `-d:ffiTeardownTimeoutMs` (10 s) is cancelled, so keep the
+  dtor cancellable; the slot is released on every exit path. Consumers shipping a
+  non-empty dtor body should read it again: it is live now.
 - A `{.ffi.}` call against a `ref` library type whose `{.ffiCtor.}` never stored
   a library (it failed, or none ran) no longer crashes. Without a constructed
   library the FFI thread points `myLib` at a default-valued fallback; for an

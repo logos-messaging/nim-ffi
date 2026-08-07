@@ -73,10 +73,16 @@ const RecycleTimeoutMs* {.intdefine: "ffiRecycleTimeoutMs".} = 1500
   ## again. Override with `-d:ffiRecycleTimeoutMs=<ms>`.
 const RecycleTimeout* = RecycleTimeoutMs.milliseconds
 
+const TeardownTimeoutMs* {.intdefine: "ffiTeardownTimeoutMs".} = 10000
+  ## Cancels a `{.ffiDtor.}` teardown that overruns; a real library stop outlasts
+  ## a drain round. Override with `-d:ffiTeardownTimeoutMs=<ms>`.
+const TeardownTimeout* = TeardownTimeoutMs.milliseconds
+
 const
-  RecycleWaitTimeout* = 2 * RecycleTimeout + 2.seconds
-    ## Caller-side bound for synchronous recycle. It covers both drain rounds
-    ## plus slack, so it only fires when the worker itself is wedged.
+  RecycleWaitTimeout* = 2 * RecycleTimeout + TeardownTimeout + 2.seconds
+    ## Caller-side bound for synchronous recycle: both drain rounds, the teardown
+    ## hook and slack, so it only fires when the worker itself is wedged. The
+    ## generated C destructor blocks its caller this long — 15 s by default.
   EventThreadTickInterval* = 1.seconds
   FFIHeartbeatStartDelay* = 10.seconds
   FFIHeartbeatStaleThreshold* = 1.seconds
@@ -248,8 +254,9 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     return err("requestRecycle: recycle did not complete in time")
   ok()
 
-## Per-thread exit wait before stopAndJoinThreads leaks ctx rather than hanging; async
-## `{.ffiDtor.}` teardown can outlast the default. Override `-d:ffiThreadExitTimeoutMs=<ms>`.
+## Per-thread exit wait before stopAndJoinThreads leaks ctx rather than hanging. Kept
+## short so a wedged worker fails fast; raise it past `ffiTeardownTimeoutMs` for a slow
+## `{.ffiDtor.}`. Override `-d:ffiThreadExitTimeoutMs=<ms>`.
 const ThreadExitTimeoutMs* {.intdefine: "ffiThreadExitTimeoutMs".} = 1500
 const ThreadExitTimeout* = ThreadExitTimeoutMs.milliseconds
 

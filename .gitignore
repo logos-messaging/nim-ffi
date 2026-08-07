@@ -45,3 +45,4 @@ PLAN.md
 # Compiled test binaries (extensionless executables, also under tests/unit/)
 tests/unit/test_*
 !tests/unit/test_*.nim
+!tests/unit/test_*.nim.cfg

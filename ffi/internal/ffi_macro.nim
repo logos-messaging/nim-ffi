@@ -1739,9 +1739,11 @@ proc buildFFIDtorProc(prc: NimNode, abiFormat: ABIFormat): NimNode {.compileTime
 
 macro ffiDtor*(args: varargs[untyped]): untyped =
   ## C-exported FFIContext destructor. Sync (no return) or async (`Future[void]`);
-  ## a non-empty body becomes an async `ffiTeardownHook` the FFI thread awaits at
-  ## shutdown, so teardown runs on the worker thread. RET_ERR on null/invalid ctx.
-  ## `{.ffi.}` reaches the same path from the shape alone.
+  ## a non-empty body becomes an async `ffiTeardownHook` the FFI thread awaits on
+  ## the recycle and the shutdown path. The wrapper blocks its caller until the
+  ## body finishes, up to `RecycleWaitTimeout` (15 s by default). Keep the body
+  ## cancellable: one that ignores `TeardownTimeout` holds the recycle. RET_ERR
+  ## on null/invalid ctx. `{.ffi.}` reaches the same path from the shape alone.
   requireBeforeGenBindings("`.ffiDtor.`")
   requireLibraryDeclared("`.ffiDtor.`")
   let prc = args[^1]
