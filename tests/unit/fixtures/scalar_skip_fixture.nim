@@ -23,4 +23,7 @@ proc scalarskip_add*(
   ## library.
   return ok(lib.base + a + b)
 
+proc scalarskip_destroy*(lib: SkipLib) {.ffiDtor.} =
+  discard
+
 genBindings()

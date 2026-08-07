@@ -19,4 +19,7 @@ proc staticscalarCreate*(
 proc staticscalarAdd*(a: int, b: int): Future[Result[int, string]] {.ffiStatic.} =
   return ok(a + b)
 
+proc staticscalar_destroy*(lib: ScalarLib) {.ffiDtor.} =
+  discard
+
 genBindings()
