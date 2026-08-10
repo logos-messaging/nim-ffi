@@ -134,7 +134,7 @@ proc makeCtx(tag: string): ptr FFIContext[WireLib] =
   doAssert not WirefastCreateCtorReqCAbiExport(addr wire, onStringReply, addr d).isNil()
   waitReply(d)
   doAssert d.retCode == RET_OK
-  cast[ptr FFIContext[WireLib]](cast[uint](parseBiggestUInt(d.text)))
+  WireLibFFIPool.resolveCtx(cast[FFICtxToken](parseBiggestUInt(d.text)))
 
 suite "abi = c non-scalar dispatch — CBOR-free wire transport":
   test "seq + Option request round-trips into an object reply":
@@ -153,7 +153,8 @@ suite "abi = c non-scalar dispatch — CBOR-free wire transport":
     defer:
       cwireFree(req)
 
-    check WirefastBulkReqCAbiExport(ctx, onBulkReply, addr d, addr req) == RET_OK
+    check WirefastBulkReqCAbiExport(ctx.ffiToken(), onBulkReply, addr d, addr req) ==
+      RET_OK
     waitReply(d)
 
     check d.retCode == RET_OK
@@ -177,7 +178,8 @@ suite "abi = c non-scalar dispatch — CBOR-free wire transport":
     defer:
       cwireFree(req)
 
-    check WirefastBulkReqCAbiExport(ctx, onBulkReply, addr d, addr req) == RET_OK
+    check WirefastBulkReqCAbiExport(ctx.ffiToken(), onBulkReply, addr d, addr req) ==
+      RET_OK
     waitReply(d)
 
     check d.retCode == RET_OK
@@ -201,7 +203,8 @@ suite "abi = c non-scalar dispatch — CBOR-free wire transport":
     defer:
       cwireFree(req)
 
-    check WirefastGreetReqCAbiExport(ctx, onStringReply, addr d, addr req) == RET_OK
+    check WirefastGreetReqCAbiExport(ctx.ffiToken(), onStringReply, addr d, addr req) ==
+      RET_OK
     waitReply(d)
 
     check d.retCode == RET_OK
@@ -223,7 +226,8 @@ suite "abi = c non-scalar dispatch — CBOR-free wire transport":
     defer:
       cwireFree(req)
 
-    check WirefastGreetReqCAbiExport(ctx, onStringReply, addr d, addr req) == RET_OK
+    check WirefastGreetReqCAbiExport(ctx.ffiToken(), onStringReply, addr d, addr req) ==
+      RET_OK
     waitReply(d)
 
     check d.retCode == RET_ERR

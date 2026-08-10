@@ -15,14 +15,19 @@ import
 
 export ffi_events, ffi_handles
 
+type FFICtxToken* = distinct pointer
+  ## Opaque handle the host holds for a context. Distinct from `pointer` so a raw
+  ## address cannot be passed where a token belongs.
+
+proc isNil*(token: FFICtxToken): bool {.borrow.}
+proc `==`*(a, b: FFICtxToken): bool {.borrow.}
+
 type CtxLifecycle* {.pure.} = enum
-  ## State machine guarding a pooled FFI context (Atomic on FFIContext).
-  ##   Active         -> RecyclePending   when the ffiDtor requests recycle
-  ##   RecyclePending -> Recycling        FFI loop claimed it, draining handlers
-  ##   Recycling      -> Active           createFFIContext reuses the slot
+  ## Active -> RecyclePending (ffiDtor asks) -> Recycling (FFI loop drains) -> Active (slot reused) or RecycleFailed (drain timed out).
   Active
   RecyclePending
   Recycling
+  RecycleFailed # terminal: only the recycle handler writes it, nothing clears it
 
 type FFIContext*[T] = object
   myLib*: ptr T # main library object (Waku, LibP2P, SDS, …)
@@ -32,13 +37,14 @@ type FFIContext*[T] = object
   myLibOwned*: bool
     # true once a ctor stored a createShared'd lib into myLib (vs the worker's
     # stack fallback). freeLib only frees/destroys owned libs.
-  inUse*: Atomic[bool]
-    # Whether this pooled context is claimed. The recycle handler clears it on
-    # the FFI thread so the slot returns to the pool without recreating threads.
+  generation*: Atomic[uint]
+    # Seqlock-style claim marker, never reset: even = free, odd = claimed. One CAS both claims the slot and opens the new generation, so no token can see a half-claimed slot. The host token carries the odd value it was issued under, so it stops resolving once the slot serves a new owner.
+  token*: FFICtxToken
+    # The opaque handle the host holds for the current claim. Written by
+    # createFFIContext under the claim; read only by the owner.
   lifecycle*: Atomic[CtxLifecycle]
   recycleDoneSignal: ThreadSignalPtr
-    # fired by the recycle handler once the lib is freed, just before it releases
-    # the slot; the synchronous recycleFFIContext caller waits on it.
+    # fired by the recycle handler once the lib is freed, just before it releases the slot; the synchronous recycleFFIContext caller waits on it.
   libReady*: Atomic[bool]
     # False until a {.ffiCtor.} stores the library. Before that, `myLib` points
     # at the default fallback of the FFI thread. For a `ref` type that fallback
@@ -217,15 +223,28 @@ proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ok()
 
 proc tryClaim*[T](ctx: ptr FFIContext[T]): bool =
-  ## Atomically claim a free pooled context (false -> true).
-  var expected = false
-  ctx.inUse.compareExchange(expected, true)
+  ## Claims a free pooled context by moving its generation from even to odd: the slot keeps its address, so one CAS both claims it and opens the generation that separates this owner from the last.
+  let generation = ctx.generation.load()
+  if (generation and 1) == 1:
+    return false
+  var expected = generation
+  ctx.generation.compareExchange(expected, generation + 1)
+
+proc ffiToken*[T](ctx: ptr FFIContext[T]): FFICtxToken =
+  ## The opaque handle the host holds for `ctx`. Never a raw address: an address
+  ## outlives the claim it was handed out under.
+  ctx.token
 
 proc releaseClaim*[T](ctx: ptr FFIContext[T]) =
-  ctx.inUse.store(false)
+  ## Back to even, which is a generation no token was ever issued under.
+  ctx.generation.atomicInc()
 
 proc isInUse*[T](ctx: ptr FFIContext[T]): bool =
-  ctx.inUse.load()
+  (ctx.generation.load() and 1) == 1
+
+proc currentGeneration*[T](ctx: ptr FFIContext[T]): uint =
+  ## The generation of the live claim; a request carries it so the FFI thread can drop it once the slot changes owner.
+  ctx.generation.load()
 
 proc markAsActive*[T](ctx: ptr FFIContext[T]) =
   ## Reused context: its worker threads are still alive; re-arm for requests.
@@ -235,6 +254,8 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Ask the FFI thread to drain, free the lib and release the slot, WITHOUT
   ## stopping its worker/event threads, so the next createFFIContext reuses them.
   ## Synchronous: waits on recycleDoneSignal. No fd churn -> no select() limit.
+  ## An err means the caller must keep the callback userData of every in-flight
+  ## request alive: teardown did not complete. A request the host races against its own recycle is rejected or silently dropped, never answered.
   var expected = CtxLifecycle.Active
   if not ctx.lifecycle.compareExchange(expected, CtxLifecycle.RecyclePending):
     return err("requestRecycle: context is not Active (already recycling)")
@@ -252,6 +273,11 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     return err("requestRecycle: failed waiting for recycle: " & $error)
   if not done:
     return err("requestRecycle: recycle did not complete in time")
+  if ctx.lifecycle.load() == CtxLifecycle.RecycleFailed:
+    return err(
+      "requestRecycle: in-flight handlers did not drain; the library and the pool " &
+        "slot are leaked, and their callbacks can still fire"
+    )
   ok()
 
 ## Per-thread exit wait before stopAndJoinThreads leaks ctx rather than hanging. Kept

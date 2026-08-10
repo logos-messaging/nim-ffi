@@ -166,7 +166,6 @@ macro declareLibrary*(
     when not declared(`poolIdent`):
       var `poolIdent`*: FFIContextPool[`libType`]
 
-  let ctxType = nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), libType))
   let cdeclExportPragma = newTree(
     nnkPragma,
     ident("dynlib"),
@@ -178,6 +177,8 @@ macro declareLibrary*(
   # {libraryName}_add_event_listener
   let addName = libraryName & "_add_event_listener"
   let addErr = "error: invalid context in " & addName
+  # `ctxIdent` is substituted so the body below sees it (`quote` gensyms).
+  let ctxIdent = ident("ctx")
   let addBody = quote:
     # This code runs on the foreign caller thread. That thread can differ from
     # the thread of an earlier entry point. If the GC of the thread is not
@@ -186,7 +187,8 @@ macro declareLibrary*(
     when declared(initializeLibrary):
       initializeLibrary()
     var ret: uint64 = 0
-    if isNil(ctx):
+    let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
+    if `ctxIdent`.isNil():
       echo `addErr`
       return ret
     let evtName =
@@ -194,7 +196,7 @@ macro declareLibrary*(
         ""
       else:
         $eventName
-    ret = addEventListener(ctx[].eventRegistry, evtName, callback, userData)
+    ret = addEventListener(`ctxIdent`[].eventRegistry, evtName, callback, userData)
     return ret
 
   stmts.add(
@@ -202,7 +204,7 @@ macro declareLibrary*(
       name = ident(addName),
       params = @[
         ident("uint64"),
-        newIdentDefs(ident("ctx"), ctxType),
+        newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
         newIdentDefs(ident("eventName"), ident("cstring")),
         newIdentDefs(ident("callback"), ident("FFICallBack")),
         newIdentDefs(ident("userData"), ident("pointer")),
@@ -219,10 +221,11 @@ macro declareLibrary*(
     when declared(initializeLibrary):
       initializeLibrary()
     var ret: cint = 1
-    if isNil(ctx):
+    let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
+    if `ctxIdent`.isNil():
       echo `removeErr`
       return ret
-    if removeEventListener(ctx[].eventRegistry, listenerId):
+    if removeEventListener(`ctxIdent`[].eventRegistry, listenerId):
       ret = 0
     return ret
 
@@ -231,7 +234,7 @@ macro declareLibrary*(
       name = ident(removeName),
       params = @[
         ident("cint"),
-        newIdentDefs(ident("ctx"), ctxType),
+        newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
         newIdentDefs(ident("listenerId"), ident("uint64")),
       ],
       body = removeBody,

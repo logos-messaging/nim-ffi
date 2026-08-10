@@ -53,7 +53,7 @@ proc createCtxWithLib(): ptr FFIContext[TeardownLib] =
   let ret = teardownlib_create(encodedPtr(cfg), cfg.len.csize_t, noopCallback, nil)
   if ret.isNil():
     return nil
-  let ctx = cast[ptr FFIContext[TeardownLib]](ret)
+  let ctx = TeardownLibFFIPool.resolveCtx(ret)
   var tries = 0
   while not ctx[].libReady.load() and tries < 500:
     os.sleep(5)
@@ -105,7 +105,7 @@ suite "{.ffiDtor.} teardown on the recycle path":
     check not ctx.isNil()
 
     gTeardownRan.store(false)
-    check teardownlib_destroy(cast[pointer](ctx)) == RET_OK
+    check teardownlib_destroy(ctx.ffiToken()) == RET_OK
     check gTeardownRan.load()
 
   test "a slot reused after teardown tears down again":

@@ -32,6 +32,8 @@ type FFIThreadRequest* = object
     ## ORC-heap alloc.
   responded*: bool
     ## De-dupes the callback across timeout/completion; both on FFI thread, no race.
+  generation*: uint
+    ## Claim the submitter resolved its context under; the FFI thread drops the request when the slot has since changed owner.
 
 func ffiPackScalar*[T](x: T): uint64 =
   ## Bit-cast one scalar into a uint64 request slot. Reverse with `ffiUnpackScalar`.
@@ -55,11 +57,24 @@ func ffiUnpackScalar*[T](u: uint64, _: typedesc[T]): T =
   else:
     T(u)
 
+proc deleteRequest*(request: ptr FFIThreadRequest) =
+  if request.isNil():
+    return
+  if not request[].data.isNil:
+    c_free(request[].data)
+  if not request[].reqId.isNil:
+    c_free(cast[pointer](request[].reqId))
+  c_free(request)
+
 proc allocBaseRequest(
     callback: FFICallBack, userData: pointer, reqId: cstring
 ): ptr FFIThreadRequest =
   ## c_malloc the envelope and set routing fields; payload set by a helper below.
+  ## Nil when the allocation fails; every caller passes that nil on, and
+  ## `sendRequestToFFIThread` turns it into an error for the host.
   var ret = cast[ptr FFIThreadRequest](c_malloc(csize_t(sizeof(FFIThreadRequest))))
+  if ret.isNil():
+    return nil
   ret[].callback = callback
   ret[].userData = userData
   ret[].reqId = reqId.alloc()
@@ -68,14 +83,21 @@ proc allocBaseRequest(
   ret[].rawReply = false
   ret[].next = nil
   ret[].responded = false
+  ret[].generation = 0
   return ret
 
-proc copySharedPayload(req: ptr FFIThreadRequest, data: ptr byte, dataLen: int) =
-  ## c_malloc a fresh buffer and copy `dataLen` bytes in; empty payload is a no-op.
-  if dataLen > 0 and not data.isNil():
-    req[].data = cast[ptr UncheckedArray[byte]](c_malloc(csize_t(dataLen)))
-    copyMem(req[].data, data, dataLen)
-    req[].dataLen = dataLen
+proc copySharedPayload(req: ptr FFIThreadRequest, data: ptr byte, dataLen: int): bool =
+  ## c_malloc a fresh buffer and copy `dataLen` bytes in; empty payload is a
+  ## no-op. False only when the allocation fails.
+  if dataLen <= 0 or data.isNil():
+    return true
+  let buf = cast[ptr UncheckedArray[byte]](c_malloc(csize_t(dataLen)))
+  if buf.isNil():
+    return false
+  copyMem(buf, data, dataLen)
+  req[].data = buf
+  req[].dataLen = dataLen
+  return true
 
 proc adoptOwnedSharedPayload(
     req: ptr FFIThreadRequest, data: ptr UncheckedArray[byte], dataLen: int
@@ -97,8 +119,13 @@ proc initFromPtr*(
     dataLen: int,
 ): ptr type T =
   ## Copies raw ptr+len into a fresh buffer owned by the returned request.
+  ## Nil when an allocation fails.
   var ret = allocBaseRequest(callback, userData, reqId)
-  copySharedPayload(ret, data, dataLen)
+  if ret.isNil():
+    return nil
+  if not copySharedPayload(ret, data, dataLen):
+    deleteRequest(ret)
+    return nil
   return ret
 
 proc init*(
@@ -128,7 +155,13 @@ proc initFromOwnedShared*(
   ## Adopts an already-c_malloc'd buffer (no copy); `deleteRequest` c_frees it.
   ## Pass `(nil, 0)` for an empty payload. Set `rawReply` when the handler answers
   ## with raw (non-CBOR) bytes, so an empty reply reads as a real empty value.
+  ## Nil when the allocation fails, in which case it frees the adopted buffer:
+  ## nobody else owns it any more.
   var ret = allocBaseRequest(callback, userData, reqId)
+  if ret.isNil():
+    if not data.isNil():
+      c_free(data)
+    return nil
   adoptOwnedSharedPayload(ret, data, dataLen)
   ret[].rawReply = rawReply
   return ret
@@ -141,10 +174,13 @@ proc initScalar*(
     args: varargs[uint64],
 ): ptr type T =
   ## Scalar-fast-path request: packed args ride inline, no payload c_malloc.
+  ## Nil when the allocation fails.
   doAssert args.len <= MaxScalarArgs,
     "initScalar: " & $args.len & " scalar args exceed MaxScalarArgs (" & $MaxScalarArgs &
       ")"
   var ret = allocBaseRequest(callback, userData, reqId)
+  if ret.isNil():
+    return nil
   ret[].rawReply = true
   for i in 0 ..< args.len:
     ret[].scalarArgs[i] = args[i]
@@ -169,13 +205,6 @@ func ffiRawRetBytes*[T](x: T): seq[byte] =
     var b = newSeq[byte](sizeof(uint64))
     copyMem(addr b[0], unsafeAddr u, sizeof(uint64))
     b
-
-proc deleteRequest*(request: ptr FFIThreadRequest) =
-  if not request[].data.isNil:
-    c_free(request[].data)
-  if not request[].reqId.isNil:
-    c_free(cast[pointer](request[].reqId))
-  c_free(request)
 
 proc fireCallback*(res: Result[seq[byte], string], request: ptr FFIThreadRequest) =
   ## Answers the foreign callback at most once (timeout and completion both call

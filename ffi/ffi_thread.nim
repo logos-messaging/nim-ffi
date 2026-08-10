@@ -3,8 +3,14 @@
 ## `ctx.ffiHeartbeat` so the event thread can spot a wedged FFI thread.
 
 proc sendRequestToFFIThread*(
-    ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest
+    ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, generation: uint
 ): Result[void, string] =
+  ## `generation` is the claim the caller resolved its token under; the request carries it so a slot that changes owner between the resolve and the dispatch answers nobody.
+
+  # A nil request means the allocator failed; report it instead of dereferencing.
+  if ffiRequest.isNil():
+    return err("out of memory: could not allocate the FFI request")
+
   if ctx.eventQueueStuck.load():
     deleteRequest(ffiRequest)
     return err("event queue stuck - library cannot accept new requests")
@@ -20,6 +26,11 @@ proc sendRequestToFFIThread*(
     deleteRequest(ffiRequest)
     return err("FFI context is not accepting requests (being recycled)")
 
+  ffiRequest.generation = generation
+  if generation != ctx.currentGeneration():
+    deleteRequest(ffiRequest)
+    return err("FFI context was recycled; the token names an owner that is gone")
+
   # Wake only when the push found the queue empty: waking per submit kills scaling, and a skipped wake just waits the consumer's 100ms poll.
   let shouldWake = ctx.reqQueueBank.pushRequest(ffiRequest)
 
@@ -31,6 +42,12 @@ proc sendRequestToFFIThread*(
 
   ok()
 
+proc sendRequestToFFIThread*(
+    ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest
+): Result[void, string] =
+  ## For a caller holding the context itself (a ctor, the static ctx, a test): no token, so the live claim is the generation to stamp.
+  sendRequestToFFIThread(ctx, ffiRequest, ctx.currentGeneration())
+
 proc awaitWithStaleWarnings(
     retFut: Future[Result[seq[byte], string]],
     request: ptr FFIThreadRequest,
@@ -39,15 +56,22 @@ proc awaitWithStaleWarnings(
 ): Future[Result[seq[byte], string]] {.async.} =
   ## Pings RET_STALE_WARN every `interval` while the handler runs, then returns
   ## its real result. Never cancels the handler: a hard-cancel mid-call could
-  ## leave the underlying library partially applied.
+  ## leave the underlying library partially applied. A cancel of this future
+  ## therefore waits for the handler too — the recycle drain counts this future,
+  ## so an early unwind would report a slot as drained while its handler runs.
   let intervalMs = interval.milliseconds
   if intervalMs <= 0:
-    return await retFut
+    return await noCancel(retFut)
   var elapsed = 0'i64
   while not retFut.finished():
     let timer = sleepAsync(interval)
     # `race` doesn't cancel the loser, so the handler keeps running.
-    discard await race(retFut, timer)
+    try:
+      discard await race(retFut, timer)
+    except CancelledError:
+      if not timer.finished():
+        await noCancel(timer.cancelAndWait())
+      return await noCancel(retFut)
     if retFut.finished():
       if not timer.finished():
         await timer.cancelAndWait()
@@ -120,6 +144,10 @@ proc rejectQueuedRequests[T](ctx: ptr FFIContext[T]) =
   var request = ctx.reqQueueBank.mergeQueues()
   while not request.isNil():
     let nextRequest = request[].next # read before handleRes frees it
+    if request[].generation != ctx.currentGeneration():
+      deleteRequest(request)
+      request = nextRequest
+      continue
     try:
       handleRes(Result[seq[byte], string].err(RecycledReason), request)
     except Exception as e:
@@ -140,37 +168,53 @@ proc runTeardown[T](ctx: ptr FFIContext[T]) {.async.} =
   except CatchableError as e:
     error "library teardown raised", error = e.msg
 
+proc drainOngoing(ongoing: ptr seq[Future[void]]): Future[bool] {.async.} =
+  ## Waits out the in-flight dispatchers, then cancels them and waits again.
+  ## False when both rounds time out and handlers are still running.
+  ongoing[].keepItIf(not it.finished())
+  if ongoing[].len == 0:
+    return true
+  if await allFutures(ongoing[]).withTimeout(RecycleTimeout):
+    return true
+  for fut in ongoing[]:
+    fut.cancelSoon()
+  return await allFutures(ongoing[]).withTimeout(RecycleTimeout)
+
+proc resetForNextOwner[T](ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]) =
+  freeLib(ctx)
+  clearListeners(ctx[].eventRegistry)
+  # A reused slot skips initContextResources, so the handle ids of the old owner
+  # would otherwise resolve for the next one.
+  ctx[].handles.releaseAll()
+  rejectQueuedRequests(ctx)
+  ongoing[].setLen(0)
+
 proc recycleContext[T](
     ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]
 ) {.async.} =
-  ## Drain in-flight handlers, run the library teardown, free the lib, clear
-  ## listeners, then fire recycleDoneSignal and release the slot — all WITHOUT
-  ## stopping the worker/event threads, so the next createFFIContext reuses them
-  ## (no fd churn).
-  # Deferred: a raise out of the teardown must not strand the slot. Fire before
-  # the release, or a thread claiming the slot would take this as its own answer.
+  ## Drain in-flight handlers, run the library teardown, reset the slot, then fire recycleDoneSignal and release the slot, all WITHOUT stopping the worker/event threads, so the next createFFIContext reuses them (no fd churn). A drain that times out aborts the recycle: the slot stays claimed, the library stays alive, and the terminal `RecycleFailed` tells the host so.
+  var drained = false
+  # Deferred: a raise out of the teardown must not strand the slot. Fire before the release, or a thread claiming the slot would take this as its own answer.
   defer:
+    if not drained:
+      ctx.lifecycle.store(CtxLifecycle.RecycleFailed)
     let fireRes = ctx.recycleDoneSignal.fireSync()
     if fireRes.isErr():
       error "failed to fire recycleDoneSignal", err = fireRes.error
-    ctx.releaseClaim()
+    if drained:
+      ctx.releaseClaim()
 
-  ongoing[].keepItIf(not it.finished())
-  var drained = ongoing[].len == 0
+  drained = await drainOngoing(ongoing)
   if not drained:
-    drained = await allFutures(ongoing[]).withTimeout(RecycleTimeout)
-  if not drained:
-    for fut in ongoing[]:
-      fut.cancelSoon()
-    drained = await allFutures(ongoing[]).withTimeout(RecycleTimeout)
+    # A handler that still runs answers a callback carrying userData the host
+    # frees as soon as teardown reports success.
+    error "recycle drain timed out; leaking the pool slot and keeping the library",
+      inFlight = ongoing[].len, timeoutMs = RecycleTimeoutMs
+    return
 
-  # Before freeLib: the hook still needs `myLib` and its listeners.
+  # Before the reset: the teardown hook still needs `myLib` and its listeners.
   await runTeardown(ctx)
-
-  freeLib(ctx)
-  clearListeners(ctx[].eventRegistry)
-  rejectQueuedRequests(ctx)
-  ongoing[].setLen(0)
+  resetForNextOwner(ctx, ongoing)
 
 var ffiEventQueueSignalPtr {.threadvar.}: ThreadSignalPtr
   # Stashed so the hook has no closure env.
@@ -232,6 +276,11 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
           let nextRequest = request[].next # read before processRequest frees it
           # Tick per dispatch so a backlog can't flatline the heartbeat mid-drain.
           ctx.proveAlive()
+          if request[].generation != ctx.currentGeneration():
+            # A past owner submitted this; its callback carries userData that host frees once its recycle returns ok, so drop it unanswered.
+            deleteRequest(request)
+            request = nextRequest
+            continue
           if ctx.myLib.isNil():
             # Must stay inside the closure: keeps `ffiReqHandler` alive across awaits.
             ctx.myLib = addr ffiReqHandler

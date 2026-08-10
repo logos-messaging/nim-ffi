@@ -4,6 +4,22 @@ import ./ffi_context
 
 const MaxFFIContexts* = 32
 
+const
+  SlotBits = 5
+  SlotMask = (1'u shl SlotBits) - 1
+
+static:
+  doAssert MaxFFIContexts <= int(SlotMask) + 1,
+    "SlotBits is too small for MaxFFIContexts"
+
+proc makeToken(slot: int, generation: uint): FFICtxToken =
+  ## Host handle: the generation of the claim above the slot index. A claim makes the generation odd and non-zero, so a nil token never resolves.
+  cast[FFICtxToken]((generation shl SlotBits) or (uint(slot) and SlotMask))
+
+func tokenGeneration*(token: FFICtxToken): uint =
+  ## The claim a token was issued under: odd by construction, and 0 for a nil token.
+  cast[uint](token) shr SlotBits
+
 type
   StaticCtxState = enum
     ## Lifecycle of the pool's `{.ffiStatic.}` context; see `staticFFIContext`.
@@ -40,6 +56,7 @@ proc createFFIContext*[T](
     let ctx = pool.contexts[i].addr
     if not ctx.tryClaim():
       continue
+    ctx.token = makeToken(i, ctx.generation.load())
     if pool.initialized[i].load():
       # Reused slot: a prior recycle drained and released it; worker still alive.
       ctx.markAsActive()
@@ -63,6 +80,9 @@ proc recycleFFIContext*[T](
   ## Normal teardown: drains in-flight handlers, frees the lib and returns the
   ## slot to the pool WITHOUT stopping its threads, so a later createFFIContext
   ## reuses them. Synchronous (waits for the FFI thread to finish draining).
+  # `resolveCtx` answers nil for a stale token, and its result lands here.
+  if ctx.isNil():
+    return err("recycleFFIContext(pool): no context (nil)")
   # Recycling it would release the slot while `staticState` still points at it.
   if pool.isStaticCtx(ctx):
     return err("recycleFFIContext(pool): the {.ffiStatic.} context outlives every ctx")
@@ -75,6 +95,8 @@ proc destroyFFIContext*[T](
   ## uninitialised so a later createFFIContext rebuilds it; normal cleanup uses
   ## recycleFFIContext. On thread-exit timeout the slot is leaked; closing
   ## live-thread resources is unsafe.
+  if ctx.isNil():
+    return err("destroyFFIContext(pool): no context (nil)")
   # Destroying it would release the slot while `staticState` still points at it.
   if pool.isStaticCtx(ctx):
     return err("destroyFFIContext(pool): the {.ffiStatic.} context outlives every ctx")
@@ -132,11 +154,20 @@ proc destroyStaticFFIContext*[T](pool: var FFIContextPool[T]): Result[void, stri
     return err("destroyStaticFFIContext: " & $error)
   ok()
 
-proc isValidCtx*[T](pool: var FFIContextPool[T], ctx: pointer): bool =
-  ## Rejects nil / dangling pointers at the API boundary.
-  if ctx.isNil():
-    return false
-  for i in 0 ..< MaxFFIContexts:
-    if cast[pointer](pool.contexts[i].addr) == ctx:
-      return pool.contexts[i].addr.isInUse()
-  false
+proc resolveCtx*[T](
+    pool: var FFIContextPool[T], token: FFICtxToken
+): ptr FFIContext[T] =
+  ## The context a host token names, or nil when the token is nil, forged, or
+  ## issued for an earlier owner of the slot.
+  let generation = token.tokenGeneration()
+  if generation == 0:
+    return nil
+  # An issued generation is odd, so matching it also proves the slot is claimed.
+  let ctx = pool.contexts[int(cast[uint](token) and SlotMask)].addr
+  if ctx.generation.load() != generation:
+    return nil
+  ctx
+
+proc isValidCtx*[T](pool: var FFIContextPool[T], token: FFICtxToken): bool =
+  ## Rejects a nil, forged or stale token at the API boundary.
+  not pool.resolveCtx(token).isNil()

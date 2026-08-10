@@ -153,7 +153,7 @@ suite "FFIContextPool":
       return
     check staticPool.staticFFIContext().tryGet() == first
     # Occupies a pool slot like any other context.
-    check staticPool.isValidCtx(first)
+    check staticPool.isValidCtx(first.ffiToken())
     check staticPool.destroyFFIContext(first).isErr()
     # Still live, and still the same context.
     check staticPool.staticFFIContext().tryGet() == first
@@ -462,7 +462,7 @@ suite "ffiCtor macro":
 
     let ctxAddr = ctorAddrFromCbor(callbackBytes(d))
     check ctxAddr != 0
-    let ctx = cast[ptr FFIContext[SimpleLib]](ctxAddr)
+    let ctx = SimpleLibFFIPool.resolveCtx(cast[FFICtxToken](ctxAddr))
 
     check not ctx[].myLib.isNil
     check ctx[].myLib[].value == 42
@@ -494,7 +494,7 @@ suite "simplified .ffi. macro":
 
     let ctxAddr = ctorAddrFromCbor(callbackBytes(ctorD))
     check ctxAddr != 0
-    let ctx = cast[ptr FFIContext[SimpleLib]](ctxAddr)
+    let ctx = SimpleLibFFIPool.resolveCtx(cast[FFICtxToken](ctxAddr))
     defer:
       check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
 
@@ -505,7 +505,7 @@ suite "simplified .ffi. macro":
 
     var reqBytes = cborEncode(TestlibSendReq(cfg: SendConfig(message: "hello")))
     let ret = testlib_send(
-      ctx, testCallback, addr d, encodedPtr(reqBytes), reqBytes.len.csize_t
+      ctx.ffiToken(), testCallback, addr d, encodedPtr(reqBytes), reqBytes.len.csize_t
     )
     check ret == RET_OK
 
@@ -535,7 +535,7 @@ suite "sync-body .ffi. is dispatched on FFI thread":
 
     let ctxAddr = ctorAddrFromCbor(callbackBytes(ctorD))
     check ctxAddr != 0
-    let ctx = cast[ptr FFIContext[SimpleLib]](ctxAddr)
+    let ctx = SimpleLibFFIPool.resolveCtx(cast[FFICtxToken](ctxAddr))
     defer:
       check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
 
@@ -546,7 +546,11 @@ suite "sync-body .ffi. is dispatched on FFI thread":
 
     var emptyBytes = cborEncode(TestlibVersionReq())
     let ret = testlib_version(
-      ctx, testCallback, addr d2, encodedPtr(emptyBytes), emptyBytes.len.csize_t
+      ctx.ffiToken(),
+      testCallback,
+      addr d2,
+      encodedPtr(emptyBytes),
+      emptyBytes.len.csize_t,
     )
     check ret == RET_OK
     waitCallback(d2)
@@ -596,7 +600,7 @@ suite "sync-body .ffi. runs on FFI thread (PR #23 regression)":
     check ctorD.retCode == RET_OK
     let ctxAddr = ctorAddrFromCbor(callbackBytes(ctorD))
     check ctxAddr != 0
-    let ctx = cast[ptr FFIContext[SimpleLib]](ctxAddr)
+    let ctx = SimpleLibFFIPool.resolveCtx(cast[FFICtxToken](ctxAddr))
     defer:
       check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
 
@@ -610,7 +614,7 @@ suite "sync-body .ffi. runs on FFI thread (PR #23 regression)":
 
     var reqBytes = cborEncode(TestlibRecordTidReq(req: RecordTidReq(dummy: 1)))
     let ret = testlib_record_tid(
-      ctx, testCallback, addr d, encodedPtr(reqBytes), reqBytes.len.csize_t
+      ctx.ffiToken(), testCallback, addr d, encodedPtr(reqBytes), reqBytes.len.csize_t
     )
     check ret == RET_OK
     waitCallback(d)
@@ -701,7 +705,7 @@ proc createSimpleCtx(): ptr FFIContext[SimpleLib] =
   let ctxAddr = ctorAddrFromCbor(callbackBytes(ctorD))
   if ctxAddr == 0:
     return nil
-  cast[ptr FFIContext[SimpleLib]](ctxAddr)
+  SimpleLibFFIPool.resolveCtx(cast[FFICtxToken](ctxAddr))
 
 ## Keeps stale pings apart from the one terminal answer so a test can assert both.
 type StaleData = object
@@ -765,7 +769,7 @@ suite "non-terminal RET_STALE_WARN progress signal":
 
     var reqBytes = cborEncode(TestlibSlowStaleReq(cfg: StaleConfig(dummy: 0)))
     let ret = testlib_slow_stale(
-      ctx, staleCallback, addr d, encodedPtr(reqBytes), reqBytes.len.csize_t
+      ctx.ffiToken(), staleCallback, addr d, encodedPtr(reqBytes), reqBytes.len.csize_t
     )
     check ret == RET_OK
 
