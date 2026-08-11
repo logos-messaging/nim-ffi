@@ -48,6 +48,21 @@ All notable changes to this project are documented in this file.
   returns the library type builds today and exports a working C symbol, so a
   router would silently give it the ctor ABI instead.
 
+### Changed
+- **A submit now has two limits, and fails instead of accepting without bound.**
+  The ingress queue took every request a producer offered, so a producer faster
+  than the FFI thread — or any producer once that thread is wedged — grew memory
+  without bound, and no request carried a maximum size. A submit is rejected once
+  its ingress queue holds `-d:ffiRequestQueueDepth` (1024) requests, or once its
+  payload passes `-d:ffiMaxRequestPayloadBytes` (8 MiB). Ingress is sharded over
+  16 queues, so a context holds at most 16384 requests. The payload cap measures
+  the buffer the request owns: on the `abi = c` path that is the packed wire
+  struct, and the buffers its fields point at stay uncounted, because that path
+  trusts its caller. Both limits come back as the error the submit already
+  returns, which the generated entry points report as `RET_ERR` through the
+  callback, so a host that stays under the limits sees no change. Raise either
+  define if your host needs more.
+
 ### Fixed
 - A `{.ffiDtor.}` body now runs when the context is recycled. Only the
   thread-exit epilogue awaited the teardown hook, and the emitted C destructor

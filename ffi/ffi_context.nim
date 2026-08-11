@@ -14,6 +14,7 @@ import
   ./cbor_serial
 
 export ffi_events, ffi_handles
+export ffi_request_queue.RequestQueueDepth
 
 type CtxLifecycle* {.pure.} = enum
   ## State machine guarding a pooled FFI context (Atomic on FFIContext).

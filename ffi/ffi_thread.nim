@@ -20,11 +20,23 @@ proc sendRequestToFFIThread*(
     deleteRequest(ffiRequest)
     return err("FFI context is not accepting requests (being recycled)")
 
-  # Wake only when the push found the queue empty: waking per submit kills scaling, and a skipped wake just waits the consumer's 100ms poll.
-  let shouldWake = ctx.reqQueueBank.pushRequest(ffiRequest)
+  let payloadLen = ffiRequest[].dataLen
+  if payloadLen > MaxRequestPayloadBytes:
+    deleteRequest(ffiRequest)
+    return err(
+      "request payload of " & $payloadLen & " bytes exceeds the " &
+        $MaxRequestPayloadBytes & " byte cap"
+    )
 
-  # A failed wake is non-fatal (poll-drain still dispatches); erroring here would double-fire the callback for a request that still completes.
-  if shouldWake:
+  # Wake only when the push found the queue empty: waking per submit kills scaling, and a skipped wake just waits the consumer's 100ms poll.
+  case ctx.reqQueueBank.pushRequest(ffiRequest)
+  of QueueFull:
+    deleteRequest(ffiRequest)
+    return err("request queue full: " & $RequestQueueDepth & " requests already queued")
+  of Queued:
+    discard
+  of QueuedWake:
+    # A failed wake is non-fatal (poll-drain still dispatches); erroring here would double-fire the callback for a request that still completes.
     ctx.reqSignal.fireSync().isOkOr:
       error "failed to wake FFI thread after enqueue (request still queued)",
         error = error
