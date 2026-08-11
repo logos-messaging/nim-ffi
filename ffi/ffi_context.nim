@@ -215,7 +215,7 @@ proc waitExitOrErr(
   ok()
 
 proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  # Skip onNotResponding on error: it takes reg.lock a stuck listener may hold (deadlock risk).
+  # Skip onNotResponding on error: it runs the listeners here, and a stuck one blocks the stop.
   ctx.running.store(false)
   ?ctx.reqSignal.fireOrErr("reqSignal")
   ?ctx.stopSignal.fireOrErr("stopSignal")

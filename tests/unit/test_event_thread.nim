@@ -232,7 +232,7 @@ proc deinitBackpressure(b: var BackpressureState) =
 proc backpressureCb(
     retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
-  ## First call signals entered then blocks under reg.lock to fill the queue.
+  ## First call signals entered then blocks the drain to fill the queue.
   let b = cast[ptr BackpressureState](userData)
   if not b[].entered.exchange(true):
     acquire(b[].enteredLock)
@@ -267,7 +267,7 @@ suite "queue overflow":
         ctx[].eventRegistry, NotRespondingEventName, captureCb, addr notif
       )
 
-      # Listener holds reg.lock so later enqueues pile up undrained.
+      # Listener blocks the drain so later enqueues pile up undrained.
       check sendRequestToFFIThread(
         ctx, EmitLatchEvent.ffiNewReq(captureCb, addr rsp, -1)
       )
