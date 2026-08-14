@@ -629,7 +629,9 @@ macro processReq*(
   let newReqCall = newCall(ident("ffiNewReq"), callArgs)
 
   let sendCall = newCall(
-    newDotExpr(ident("ffi_context"), ident("sendRequestToFFIThread")), ctx, newReqCall,
+    newDotExpr(ident("ffi_context"), ident("sendRequestToFFIThread")),
+    ctx,
+    newReqCall,
     ctxGen,
   )
 
