@@ -167,6 +167,7 @@ proc emitEventDispatcher(
     lines.add("        return ListenerHandle{id};")
     lines.add("    }")
     lines.add("")
+  lines.add(renderMemberDocComment(CtxRemoveListenerDoc))
   lines.add("    bool removeEventListener(ListenerHandle handle) {")
   lines.add("        if (handle.id == 0) return false;")
   lines.add(
@@ -339,6 +340,7 @@ proc generateCppHeader*(
     "uint64_t $1_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);" %
       [libName]
   )
+  lines.add(renderBlockDocComment(RemoveListenerDoc))
   lines.add(
     "int $1_remove_event_listener(void* ctx, uint64_t listener_id);" % [libName]
   )

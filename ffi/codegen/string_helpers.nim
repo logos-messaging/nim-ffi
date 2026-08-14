@@ -43,6 +43,22 @@ func renderBlockDocComment*(doc: string, indent = ""): seq[string] =
   rendered.add(indent & " */")
   return rendered
 
+const RemoveListenerDoc* = """Unregister a listener by id.
+A call from another thread returns after the last delivery to that listener,
+so its user data is then safe to free.
+A call from inside a listener callback returns at once, and the dispatch in
+flight can still deliver to a listener that you remove that way. Keep the user
+data of that listener alive until the dispatch ends."""
+
+const RemoveListenerBoxDoc* =
+  """Call it from inside a listener callback only for the listener that runs.
+A remove of a different listener releases a box that the dispatch in flight can
+still call."""
+
+const CtxRemoveListenerDoc* =
+  "Unregister a listener and release the box that holds the handler.\n" &
+  RemoveListenerBoxDoc
+
 proc toLower*(s: string): string =
   ## Unicode-aware lowercase for an entire string.
   var buf = ""

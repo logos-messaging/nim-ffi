@@ -89,6 +89,17 @@ jobs:
       nim-versions:   ${{ needs.versions.outputs.nim-versions }}
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
+  listener-reentrancy:
+    # The dispatch barrier is a pthread condvar; cover the OSes whose mutex and
+    # condvar behaviour differ, not only the Linux sanitizer jobs.
+    name: Listener Reentrancy
+    needs: versions
+    uses: ./.github/workflows/test.yml
+    with:
+      test: test_event_listener_reentrancy
+      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
+      nimble-version: ${{ needs.versions.outputs.nimble }}
+
   c-wire:
     # The `c`-ABI cwire codec is layout-/allocator-sensitive (malloc/free, flat
     # struct packing, allocShared for seq/Option), so cover it across the full

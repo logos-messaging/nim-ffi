@@ -152,6 +152,23 @@ All notable changes to this project are documented in this file.
   through the callback. The check is emitted only for `ref` library types, and
   it runs on the FFI thread behind any queued constructor, so a host that issues
   a call without awaiting the create callback is unaffected.
+- A listener callback that calls `<lib>_remove_event_listener` or
+  `<lib>_add_event_listener` no longer deadlocks the event thread. The dispatch
+  held the non-reentrant registry lock across the callbacks, so a listener that
+  dropped itself waited on the thread it ran on. The dispatch now calls the
+  listeners off a snapshot with the lock released, and the removed listener gets
+  one last delivery from that snapshot. A remove from another thread still waits
+  the delivery out, so the `userData` of a listener stays safe to free as soon as
+  the remove returns. Under `--mm:refc` a listener may only remove, not add: a
+  registration grows the registry, and the event thread must not allocate into
+  the thread-local heap that owns it.
+  A remove from inside a callback cannot wait for its own dispatch, so it returns
+  at once. If it drops a different listener, the snapshot in flight can still
+  deliver to that listener, and its `userData` must stay alive until the dispatch
+  ends. The generated wrappers (`<lib>_ctx_remove_event_listener` in C,
+  `removeEventListener` in C++, `remove_event_listener` in Rust) release the box
+  that holds the handler, so call them from inside a callback only for the
+  listener that runs.
 
 ## [0.3.0] - 2026-07-24
 

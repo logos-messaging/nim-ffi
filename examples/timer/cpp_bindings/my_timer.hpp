@@ -819,6 +819,14 @@ int my_timer_schedule(void* ctx, FFICallback callback, void* user_data, const ui
 /** Tears down the FFI context; blocks until FFI + watchdog threads join. */
 int my_timer_destroy(void* ctx);
 uint64_t my_timer_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
+/**
+ * Unregister a listener by id.
+ * A call from another thread returns after the last delivery to that listener,
+ * so its user data is then safe to free.
+ * A call from inside a listener callback returns at once, and the dispatch in
+ * flight can still deliver to a listener that you remove that way. Keep the user
+ * data of that listener alive until the dispatch ends.
+ */
 int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
 } // extern "C"
 
@@ -971,6 +979,10 @@ public:
         return ListenerHandle{id};
     }
 
+    /// Unregister a listener and release the box that holds the handler.
+    /// Call it from inside a listener callback only for the listener that runs.
+    /// A remove of a different listener releases a box that the dispatch in flight can
+    /// still call.
     bool removeEventListener(ListenerHandle handle) {
         if (handle.id == 0) return false;
         const auto rc = my_timer_remove_event_listener(ptr_, handle.id);

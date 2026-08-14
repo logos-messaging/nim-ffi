@@ -245,6 +245,9 @@ impl MyTimerCtx {
 
     /// Remove a previously-registered listener by handle. Returns true
     /// if the listener existed and was removed; false otherwise.
+    /// Call it from inside a listener callback only for the listener that runs.
+    /// A remove of a different listener releases a box that the dispatch in flight can
+    /// still call.
     pub fn remove_event_listener(&self, handle: ListenerHandle) -> bool {
         if handle.id == 0 { return false; }
         let rc = unsafe {

@@ -22,18 +22,51 @@ type
     lock*: Lock
     nextId*: uint64 # 0 is reserved as "invalid"; ids start at 1.
     byEvent*: Table[string, seq[FFIEventListener]]
+    dispatchDone*: Cond
+    dispatching*: int # deliveries in flight, over every dispatching thread.
+
+var ffiInDispatch {.threadvar.}: int
+  # Dispatch depth of this thread, so a listener never waits for its own delivery.
 
 proc initEventRegistry*(reg: var FFIEventRegistry) =
   ## Run once on the owning thread before sharing (re-initLock is UB).
   reg.lock.initLock()
+  reg.dispatchDone.initCond()
   reg.nextId = 0'u64
   reg.byEvent = initTable[string, seq[FFIEventListener]]()
+  reg.dispatching = 0
 
 proc deinitEventRegistry*(reg: var FFIEventRegistry) =
   ## Mirror of `initEventRegistry`; resets GC fields so slot reuse sees no dtor.
+  reg.dispatchDone.deinitCond()
   reg.lock.deinitLock()
   reg.byEvent = default(Table[string, seq[FFIEventListener]])
   reg.nextId = 0'u64
+
+proc awaitDispatch(reg: var FFIEventRegistry) {.raises: [].} =
+  ## Call with `reg.lock` held.
+  while reg.dispatching > 0 and ffiInDispatch == 0:
+    wait(reg.dispatchDone, reg.lock)
+
+proc beginDispatch*(
+    reg: var FFIEventRegistry, eventName: string
+): seq[FFIEventListener] {.raises: [].} =
+  ## Snapshots the listeners of `eventName` and counts the delivery in. The
+  ## caller invokes the callbacks with the lock released, and pairs every call
+  ## with `endDispatch`.
+  var listeners: seq[FFIEventListener] = @[]
+  withLock reg.lock:
+    for l in reg.byEvent.getOrDefault(eventName):
+      listeners.add(l)
+    reg.dispatching.inc()
+  ffiInDispatch.inc()
+  return listeners
+
+proc endDispatch*(reg: var FFIEventRegistry) {.raises: [].} =
+  ffiInDispatch.dec()
+  withLock reg.lock:
+    reg.dispatching.dec()
+    broadcast(reg.dispatchDone)
 
 proc clearListeners*(reg: var FFIEventRegistry) {.raises: [].} =
   ## Removes all listeners. The pool calls this when it recycles a context. The
@@ -41,6 +74,7 @@ proc clearListeners*(reg: var FFIEventRegistry) {.raises: [].} =
   withLock reg.lock:
     reg.byEvent.clear()
     reg.nextId = 0'u64
+    reg.awaitDispatch()
 
 proc addEventListener*(
     reg: var FFIEventRegistry,
@@ -63,7 +97,7 @@ proc addEventListener*(
   assigned
 
 proc removeEventListener*(reg: var FFIEventRegistry, id: uint64): bool {.raises: [].} =
-  ## Safe from inside a dispatch; the in-flight snapshot still delivers once.
+  ## Waits an in-flight delivery out, except for a caller inside a dispatch: that one returns first, so the `userData` it drops must outlive the dispatch.
   if id == 0'u64:
     return false
 
@@ -84,12 +118,15 @@ proc removeEventListener*(reg: var FFIEventRegistry, id: uint64): bool {.raises:
         break
     if prune:
       reg.byEvent.del(pruneKey)
+    if removed:
+      reg.awaitDispatch()
   removed
 
 proc removeAllEventListeners*(reg: var FFIEventRegistry) {.raises: [].} =
   ## Does not reset the id counter.
   withLock reg.lock:
     reg.byEvent.clear()
+    reg.awaitDispatch()
 
 proc snapshotListeners*(
     reg: var FFIEventRegistry, eventName: string
@@ -284,7 +321,8 @@ var ffiCurrentNotifyEventEnqueued* {.threadvar.}: proc() {.gcsafe, raises: [].}
 
 template enqueueOrMarkStuck(eventName: string, src: pointer, dataLen: int) =
   ## Enqueues into the reused slot buffers; on queue-full sets the sticky stuck
-  ## flag and wakes the event thread (firing onNotResponding here could deadlock).
+  ## flag and wakes the event thread (firing onNotResponding here would run the
+  ## listeners on the FFI thread).
   block enqueueBlock:
     let q = ffiCurrentEventQueue
     if q.isNil():

@@ -13,21 +13,22 @@ const
 proc dispatchToListeners[T](
     ctx: ptr FFIContext[T], eventName: string, data: pointer, dataLen: int
 ) =
-  ## Holds reg.lock across snapshot + invocation so concurrent add/remove blocks
-  ## until dispatch returns.
-  withLock ctx[].eventRegistry.lock:
-    let listeners = ctx[].eventRegistry.byEvent.getOrDefault(eventName)
-    if listeners.len == 0:
-      chronicles.debug "no listener registered", event = eventName
-      return
-    foreignThreadGc:
-      try:
-        notifyListeners(listeners, RET_OK, data, dataLen)
-      except Exception, CatchableError:
-        notifyListenersErr(
-          listeners,
-          "Exception dispatching " & eventName & ": " & getCurrentExceptionMsg(),
-        )
+  ## Calls the listeners off a snapshot with reg.lock released, so a listener may
+  ## mutate the registry. A remove from another thread waits the delivery out.
+  let listeners = ctx[].eventRegistry.beginDispatch(eventName)
+  defer:
+    ctx[].eventRegistry.endDispatch()
+  if listeners.len == 0:
+    chronicles.debug "no listener registered", event = eventName
+    return
+  foreignThreadGc:
+    try:
+      notifyListeners(listeners, RET_OK, data, dataLen)
+    except Exception, CatchableError:
+      notifyListenersErr(
+        listeners,
+        "Exception dispatching " & eventName & ": " & getCurrentExceptionMsg(),
+      )
 
 proc emitLivenessEvent[T, P](ctx: ptr FFIContext[T], name: string, payload: P) =
   ## Dispatches directly to listeners, bypassing the (possibly wedged) queue.
@@ -112,7 +113,7 @@ proc eventRun[T](ctx: ptr FFIContext[T]) {.async.} =
 
     # Liveness only while running; skip during the teardown drain.
     if ctx.running.load():
-      # Fire after drain so reg.lock is free (FFI thread would deadlock here).
+      # Fire after the drain so the notice does not queue behind a dispatch.
       if not notifiedStuck and ctx.eventQueueStuck.load():
         onNotResponding(ctx)
         notifiedStuck = true
