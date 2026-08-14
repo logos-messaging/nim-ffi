@@ -75,7 +75,7 @@ proc createFailedCtx(s: var CallbackState): ptr FFIContext[FailedCtorLib] =
   if ret.isNil():
     return nil
   discard waitCalled(s)
-  cast[ptr FFIContext[FailedCtorLib]](ret)
+  FailedCtorLibFFIPool.resolveCtx(ret)
 
 suite "{.ffi.} call after a failed constructor":
   test "the failed ctor reports the error but leaves the context alive":
@@ -99,8 +99,9 @@ suite "{.ffi.} call after a failed constructor":
 
     resetState(s)
     var req = cborEncode(FailedctorPingReq())
-    let ret =
-      failedctor_ping(ctx, recordingCallback, addr s, encodedPtr(req), req.len.csize_t)
+    let ret = failedctor_ping(
+      ctx.ffiToken(), recordingCallback, addr s, encodedPtr(req), req.len.csize_t
+    )
     check ret == RET_OK
     check waitCalled(s)
     check s.retCode.load() == int(RET_ERR)
@@ -112,8 +113,9 @@ suite "{.ffi.} call after a failed constructor":
 
     resetState(s)
     var req = cborEncode(FailedctorEchoReq(note: "hello"))
-    let ret =
-      failedctor_echo(ctx, recordingCallback, addr s, encodedPtr(req), req.len.csize_t)
+    let ret = failedctor_echo(
+      ctx.ffiToken(), recordingCallback, addr s, encodedPtr(req), req.len.csize_t
+    )
     check ret == RET_OK
     check waitCalled(s)
     check s.retCode.load() == int(RET_ERR)
@@ -129,14 +131,18 @@ suite "{.ffi.} call after a failed constructor":
       encodedPtr(cfg), cfg.len.csize_t, recordingCallback, addr ctorState
     )
     check not raw.isNil()
-    let ctx = cast[ptr FFIContext[FailedCtorLib]](raw)
+    let ctx = FailedCtorLibFFIPool.resolveCtx(raw)
 
     # No wait here, on purpose: the request goes into the queue behind the ctor.
     var callState: CallbackState
     resetState(callState)
     var req = cborEncode(FailedctorPingReq())
     let ret = failedctor_ping(
-      ctx, recordingCallback, addr callState, encodedPtr(req), req.len.csize_t
+      ctx.ffiToken(),
+      recordingCallback,
+      addr callState,
+      encodedPtr(req),
+      req.len.csize_t,
     )
     check ret == RET_OK
     check waitCalled(callState)

@@ -93,7 +93,8 @@ proc encodedPtr(b: var seq[byte]): ptr byte =
 template runCall(d, ctx, reqBytes, exportProc) =
   initCallbackData(d)
   var rb = reqBytes
-  check exportProc(ctx, testCallback, addr d, encodedPtr(rb), rb.len.csize_t) == RET_OK
+  check exportProc(ctx.ffiToken(), testCallback, addr d, encodedPtr(rb), rb.len.csize_t) ==
+    RET_OK
   waitCallback(d)
 
 suite "{.ffiHandle.} round-trip":

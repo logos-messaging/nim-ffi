@@ -707,7 +707,7 @@ proc stringTrampBody(boxName: NimNode): NimNode =
       box.fn(RET_ERR, "".cstring, e.msg.cstring, box.ud)
 
 proc ctxBindingGuard(
-    poolIdent, emptyReply, ctxIdent: NimNode, isStatic: bool
+    poolIdent, emptyReply, ctxIdent, ctxGenIdent: NimNode, isStatic: bool
 ): NimNode {.compileTime.} =
   ## Prologue that binds `ctxIdent`: a method validates the ctx it was handed, a
   ## static resolves the library's shared one.
@@ -725,11 +725,13 @@ proc ctxBindingGuard(
     let methodGuard = quote:
       if onReply.isNil():
         return RET_MISSING_CALLBACK
-      if not `poolIdent`.isValidCtx(cast[pointer](`ctxIdent`)):
+      let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
+      if `ctxIdent`.isNil():
         onReply(
           RET_ERR, `emptyReply`, "ctx is not a valid FFI context".cstring, userData
         )
         return RET_ERR
+      let `ctxGenIdent` = ctxToken.tokenGeneration()
     methodGuard.insert(0, initGuard)
     return methodGuard
   let guard = quote:
@@ -739,6 +741,8 @@ proc ctxBindingGuard(
       let errStr = "ffiStatic: " & error
       onReply(RET_ERR, `emptyReply`, errStr.cstring, userData)
       return RET_ERR
+    # No token to carry a claim: the static context holds its slot for the life of the library.
+    let `ctxGenIdent` = `ctxIdent`.currentGeneration()
   guard.insert(0, initGuard)
   guard
 
@@ -752,6 +756,7 @@ proc exportedProc(
   # calling in. A host thread that exits leaks its heap; accepted.
   let envName = spec.envelope
   let ctxIdent = ident("ctx")
+  let ctxGenIdent = ident("ctxGen")
   # String reply: empty non-nil cstring on error; object reply: nil ptr gated by err_code.
   let emptyReply =
     if isStringType(spec.respType):
@@ -768,6 +773,11 @@ proc exportedProc(
       return RET_ERR
     let reqBuf = cast[ptr UncheckedArray[byte]](ownedCopy)
     let box = cast[ptr `boxName`](allocBox(sizeof(`boxName`)))
+    if box.isNil():
+      cwireFree(ownedWire)
+      freeBox(ownedCopy)
+      onReply(RET_ERR, `emptyReply`, "out of memory".cstring, userData)
+      return RET_ERR
     box.fn = onReply
     box.ud = userData
     let typeStr = $`envName`
@@ -776,19 +786,22 @@ proc exportedProc(
     )
     let sendRes =
       try:
-        ffi_context.sendRequestToFFIThread(`ctxIdent`, reqPtr)
+        ffi_context.sendRequestToFFIThread(`ctxIdent`, reqPtr, `ctxGenIdent`)
       except Exception as e:
         Result[void, string].err("sendRequestToFFIThread exception: " & e.msg)
     if sendRes.isErr():
       # A rejected send already `deleteRequest`ed the struct copy, which frees only
       # the struct itself; `ownedWire` still aliases its field buffers, so free them
-      # here — on success the FFI thread's unpack does it instead.
+      # here — on success the FFI thread's unpack does it instead. The box only
+      # ever reaches `freeBox` in the reply trampoline, which a rejected send
+      # never runs.
       cwireFree(ownedWire)
+      freeBox(box)
       onReply(RET_ERR, `emptyReply`, sendRes.error.cstring, userData)
       return RET_ERR
     return RET_OK
 
-  let fullBody = ctxBindingGuard(poolIdent, emptyReply, ctxIdent, isStatic)
+  let fullBody = ctxBindingGuard(poolIdent, emptyReply, ctxIdent, ctxGenIdent, isStatic)
   for stmt in body:
     fullBody.add(stmt)
 
@@ -799,9 +812,8 @@ proc exportedProc(
     newIdentDefs(ident("req"), nnkPtrTy.newTree(envWire)),
   ]
   if not isStatic:
-    let libFFICtx =
-      nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), spec.libType))
-    params.insert(newIdentDefs(ctxIdent, libFFICtx), 1)
+    # The host holds an opaque token; `ctxBindingGuard` resolves it into `ctx`.
+    params.insert(newIdentDefs(ident("ctxToken"), ident("FFICtxToken")), 1)
 
   newProc(
     name = ident($envName & "CAbiExport"),
@@ -836,18 +848,29 @@ proc exportedCtorProc(
           ("ffiCtor: failed to create FFIContext: " & $ctxRes.error).cstring,
           userData,
         )
-      return nil
+      return FFICtxToken(nil)
     let ctx = ctxRes.get()
     var ownedWire: `envWire`
     cwirePack(ownedWire, cwireUnpack(req[]))
     let ownedCopy = cwireOwnedCopy(ownedWire)
     if ownedCopy.isNil():
+      # The slot is already claimed and the caller gets nil, so nobody is left to
+      # destroy it. The callback carries the real error; a failure here has no
+      # channel left of its own.
+      discard `poolIdent`.recycleFFIContext(ctx)
       cwireFree(ownedWire)
       if not onCreated.isNil():
         onCreated(RET_ERR, "".cstring, "out of memory".cstring, userData)
-      return nil
+      return FFICtxToken(nil)
     let reqBuf = cast[ptr UncheckedArray[byte]](ownedCopy)
     let box = cast[ptr `boxName`](allocBox(sizeof(`boxName`)))
+    if box.isNil():
+      discard `poolIdent`.recycleFFIContext(ctx)
+      cwireFree(ownedWire)
+      freeBox(ownedCopy)
+      if not onCreated.isNil():
+        onCreated(RET_ERR, "".cstring, "out of memory".cstring, userData)
+      return FFICtxToken(nil)
     box.fn = onCreated
     box.ud = userData
     let typeStr = $`envName`
@@ -861,17 +884,19 @@ proc exportedCtorProc(
         Result[void, string].err("sendRequestToFFIThread exception: " & e.msg)
     if sendRes.isErr():
       # See exportedMethodProc: the rejected send freed the struct copy, not the
-      # field buffers `ownedWire` still aliases.
+      # field buffers `ownedWire` still aliases, and not the box.
+      discard `poolIdent`.recycleFFIContext(ctx)
       cwireFree(ownedWire)
+      freeBox(box)
       if not onCreated.isNil():
         onCreated(RET_ERR, "".cstring, sendRes.error.cstring, userData)
-      return nil
-    return cast[pointer](ctx)
+      return FFICtxToken(nil)
+    return ctx.ffiToken()
   body.insert(0, initGuard)
   newProc(
     name = ident($envName & "CAbiExport"),
     params = @[
-      ident("pointer"),
+      ident("FFICtxToken"),
       newIdentDefs(ident("req"), nnkPtrTy.newTree(envWire)),
       newIdentDefs(ident("onCreated"), cbType),
       newIdentDefs(ident("userData"), ident("pointer")),

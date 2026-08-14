@@ -45,8 +45,13 @@ proc lookup*(
     )
   ok(entry.obj)
 
-proc release*(reg: var FFIHandleRegistry, handle: uint64): bool {.discardable.} =
-  if not reg.byHandle.hasKey(handle):
+proc release*(
+    reg: var FFIHandleRegistry, handle: uint64, typeName: string
+): bool {.discardable.} =
+  ## Drops `handle`; false if absent or registered under another type. Same tag
+  ## check as `lookup`, so a release cannot cross types either.
+  let entry = reg.byHandle.getOrDefault(handle)
+  if entry.obj.isNil() or entry.typeName != typeName:
     return false
   reg.byHandle.del(handle)
   return true

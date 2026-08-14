@@ -147,7 +147,7 @@ proc makeCtx(base: int): ptr FFIContext[ScalarLib] =
   waitCallback(d)
   doAssert d.retCode == RET_OK
   let addrStr = cborDecode(callbackBytesOf(d), string).value
-  cast[ptr FFIContext[ScalarLib]](cast[uint](parseBiggestUInt(addrStr)))
+  ScalarLibFFIPool.resolveCtx(cast[FFICtxToken](parseBiggestUInt(addrStr)))
 
 suite "scalar fast path — C export shape":
   test "two int params + int return, threads through the base state":
@@ -160,7 +160,7 @@ suite "scalar fast path — C export shape":
     defer:
       deinitCallbackData(d)
 
-    check scalarfast_add(ctx, testCallback, addr d, 20, 3) == RET_OK
+    check scalarfast_add(ctx.ffiToken(), testCallback, addr d, 20, 3) == RET_OK
     waitCallback(d)
     check d.retCode == RET_OK
     check scalarInt(d) == 123
@@ -175,7 +175,7 @@ suite "scalar fast path — C export shape":
     defer:
       deinitCallbackData(d)
 
-    check scalarfast_version(ctx, testCallback, addr d) == RET_OK
+    check scalarfast_version(ctx.ffiToken(), testCallback, addr d) == RET_OK
     waitCallback(d)
     check d.retCode == RET_OK
     check scalarStr(d) == "scalarfast v1"
@@ -190,7 +190,7 @@ suite "scalar fast path — C export shape":
     defer:
       deinitCallbackData(d)
 
-    check scalarfast_blank(ctx, testCallback, addr d) == RET_OK
+    check scalarfast_blank(ctx.ffiToken(), testCallback, addr d) == RET_OK
     waitCallback(d)
     check d.retCode == RET_OK
     check d.msgLen == 0 # NOT 1 (would be the 0xf6 sentinel)
@@ -206,7 +206,7 @@ suite "scalar fast path — C export shape":
     defer:
       deinitCallbackData(d)
 
-    check scalarfast_scale(ctx, testCallback, addr d, 2.5) == RET_OK
+    check scalarfast_scale(ctx.ffiToken(), testCallback, addr d, 2.5) == RET_OK
     waitCallback(d)
     check d.retCode == RET_OK
     check scalarFloat(d) == 5.0
@@ -221,7 +221,7 @@ suite "scalar fast path — C export shape":
     defer:
       deinitCallbackData(d)
 
-    check scalarfast_positive(ctx, testCallback, addr d, -4) == RET_OK
+    check scalarfast_positive(ctx.ffiToken(), testCallback, addr d, -4) == RET_OK
     waitCallback(d)
     check d.retCode == RET_OK
     check scalarBool(d) == false
@@ -236,7 +236,7 @@ suite "scalar fast path — C export shape":
     defer:
       deinitCallbackData(d)
 
-    check scalarfast_checked(ctx, testCallback, addr d, -1) == RET_OK
+    check scalarfast_checked(ctx.ffiToken(), testCallback, addr d, -1) == RET_OK
     waitCallback(d)
     check d.retCode == RET_ERR
     check callbackErr(d) == "negative not allowed"
@@ -246,7 +246,7 @@ suite "scalar fast path — C export shape":
     initCallbackData(d)
     defer:
       deinitCallbackData(d)
-    let bogus = cast[ptr FFIContext[ScalarLib]](nil)
+    let bogus = cast[FFICtxToken](nil)
     check scalarfast_add(bogus, testCallback, addr d, 1, 2) == RET_ERR
 
 suite "scalar fast path — Nim-native shape":
