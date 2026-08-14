@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- The `abi = c` C header now declares the event-listener ABI that
+  `declareLibrary` always exports (`<lib>_add_event_listener` /
+  `<lib>_remove_event_listener`) and the `FFICallBack` typedef they take, so a
+  consumer needs no hand-written header. The typed listener machinery for
+  `{.ffiEvent.}` is still unsupported under `abi = c`.
+- The `abi = c` C header is self-contained: it emits the `<stdint.h>` /
+  `<stddef.h>` includes, the `NIMFFI_RET_*` status codes, and short
+  `#ifndef`-guarded `RET_*` aliases for consumers that use the unprefixed names.
+- Each `{.ffi.}` proc's `##` doc comment reaches the generated C header as a
+  `/** ... */` block above the declaration and its wrapper.
+- `declareLibrary` accepts the `ABIFormat` enum for `defaultABIFormat`, so
+  `defaultABIFormat = ABIFormat.C` compiles alongside the `"c"` string.
+- `declareLibrary` takes an optional `headerBanner` argument, stamped as a
+  `//`-comment block at the top of every generated C header.
+- `genBindings()` fails compilation when a library declares an `{.ffiCtor.}` but
+  no `{.ffiDtor.}`, so the context a constructor builds always has a way to be
+  released.
 - `{.ffiEvent.}` now accepts multiple parameters. The macro synthesises and
   registers an envelope object (`<WireNamePascalCase>Payload`) whose fields are
   the parameters and dispatches an instance of it, so multi-field events no
