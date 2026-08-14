@@ -49,6 +49,37 @@ All notable changes to this project are documented in this file.
   router would silently give it the ctor ABI instead.
 
 ### Fixed
+- **A claim and the generation it opens are one atomic operation.** `tryClaim`
+  set `inUse` and bumped `generation` in two steps, and between them a token of
+  the previous owner passed both checks in `resolveCtx`: `inUse` was already
+  true, and `generation` still held the value the token carried. The claim
+  marker is now the parity of the generation itself, seqlock style: even is
+  free, odd is claimed, and one CAS moves a slot from one to the other, so no
+  token can observe a half-claimed slot. Bumping the generation first was not
+  the answer: a claim that loses the race would then move the generation while
+  the winner holds a token issued under the old value. `inUse` is gone, and
+  `ctx.isInUse()` reads the parity.
+- **A request carries the claim it was submitted under.** Every entry point
+  resolved its token once and then enqueued with no second check, so a request
+  that landed in the queue during the recycle window survived into the next
+  claim, and the new library ran it and answered the callback of the old host.
+  `FFIThreadRequest` gains a `generation` field that the entry point stamps from
+  the resolved token. `sendRequestToFFIThread` rejects a stamp that no longer
+  matches the live claim, and the FFI thread drops a dequeued request whose
+  stamp does not match, without calling its callback: that callback carries
+  `userData` the old host frees as soon as its recycle returns ok. A host that
+  races a submit against its own recycle therefore loses that request silently,
+  which is the safe side of the trade.
+- **A losing `requestRecycle` can no longer swallow the drain failure of the
+  winner.** The `recycleFailed` flag was cleared before the lifecycle CAS, so a
+  concurrent caller could clear it between the moment the recycle handler set it
+  and the moment the winner read it, and the winner then returned ok for a
+  failed drain. A clear after the CAS races too, because the FFI thread polls
+  and can finish the whole recycle in between. The flag is gone: the outcome now
+  lives in the lifecycle state machine as the terminal `RecycleFailed`, which
+  only the recycle handler writes and nothing clears. A later `requestRecycle`
+  on such a slot gets the existing "not Active" error, which is the right answer
+  for a wedged slot.
 - **A recycled pool slot is reset before it serves the next owner.** The recycle
   handler computed whether its in-flight handlers had drained and then tore down
   regardless: it freed the library and returned the slot to the pool while

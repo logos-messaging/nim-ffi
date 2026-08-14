@@ -235,6 +235,19 @@ suite "recycle with a handler that does not drain":
     check not wasCalled(gBlockData)
     check not ctx[].myLib.isNil()
 
+    # The failure is terminal, so the wedged slot answers every later caller the same way.
+    check RecycleLibFFIPool.recycleFFIContext(ctx).isErr()
+
+    var rd: CallbackData
+    initCallbackData(rd)
+    defer:
+      deinitCallbackData(rd)
+    var rejected = cborEncode(RecyclelibOpenReq(req: OpenReq(name: "after-failure")))
+    check recyclelib_open(
+      ctx.ffiToken(), testCallback, addr rd, encodedPtr(rejected), rejected.len.csize_t
+    ) == RET_ERR
+    check rd.retCode == RET_ERR
+
     # The slot stays claimed: handing it to a new owner is what the failed drain
     # rules out.
     let other = RecycleLibFFIPool.createFFIContext().get()
