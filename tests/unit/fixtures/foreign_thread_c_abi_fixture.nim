@@ -29,6 +29,9 @@ proc threadedcabi_echo*(
   ## memory on the calling thread. That is the operation under test.
   return ok(lib.tag & ":" & text)
 
+proc threadedcabi_destroy*(lib: ThreadLib) {.ffiDtor.} =
+  discard
+
 genBindings()
 
 type ReplyData = object
@@ -69,7 +72,7 @@ proc packedWire[W, R](_: typedesc[W], envelope: R): W =
   cwirePack(wire, envelope)
   wire
 
-proc makeCtx(tag: string): ptr FFIContext[ThreadLib] =
+proc makeCtx(tag: string): FFICtxToken =
   var d: ReplyData
   initReplyData(d)
   defer:
@@ -86,8 +89,8 @@ proc makeCtx(tag: string): ptr FFIContext[ThreadLib] =
     .isNil()
   waitReply(d)
   doAssert d.retCode == RET_OK
-  # The ctor's reply text is the new ctx pointer as a decimal string.
-  cast[ptr FFIContext[ThreadLib]](cast[uint](parseBiggestUInt(d.text)))
+  # The ctor's reply text is the new ctx token as a decimal string.
+  cast[FFICtxToken](parseBiggestUInt(d.text))
 
 # Nim's createThread registers its new thread with the GC. A registered thread
 # cannot show the bug. The test thread must come from the platform API.
@@ -161,7 +164,7 @@ proc nimffi_call_on_foreign_thread(
 ): cint {.importc, nodecl.}
 
 proc callOnForeignThread(
-    ctx: ptr FFIContext[ThreadLib], req: ptr ThreadedcabiEchoReq_CWire, d: ptr ReplyData
+    ctx: FFICtxToken, req: ptr ThreadedcabiEchoReq_CWire, d: ptr ReplyData
 ): cint =
   ## This proc passes the export to C as an opaque pointer. Only the typedef
   ## above can differ from the generated signature.
@@ -193,7 +196,7 @@ proc runScenario(tag: string, rounds: int): bool =
       echo tag, ": round ", i, " failed: rc=", rc, " ret=", d.retCode, " text=", d.text
       return false
 
-  if ThreadLibFFIPool.destroyFFIContext(ctx).isErr():
+  if ThreadLibFFIPool.destroyFFIContext(ThreadLibFFIPool.resolveCtx(ctx)).isErr():
     echo tag, ": destroyFFIContext failed"
     return false
   return true

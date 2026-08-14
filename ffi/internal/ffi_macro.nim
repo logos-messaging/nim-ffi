@@ -274,13 +274,14 @@ proc unpackHandleField*(
         return err(`errPrefix` & error)
       cast[`userType`](ffiH)
 
-proc cExportedParams(ctxType: NimNode, withCtx = true): seq[NimNode] =
+proc cExportedParams(withCtx = true): seq[NimNode] =
   ## C-exported wrapper param list (cint; ctx, callback, userData, reqCbor,
-  ## reqCborLen). A `{.ffiStatic.}` wrapper drops the leading `ctx`.
+  ## reqCborLen). The leading param is the host's opaque context token, which the
+  ## guard resolves. A `{.ffiStatic.}` wrapper drops it.
   var params: seq[NimNode] = @[]
   params.add(ident("cint"))
   if withCtx:
-    params.add(newIdentDefs(ident("ctx"), ctxType))
+    params.add(newIdentDefs(ident("ctxToken"), ident("FFICtxToken")))
   params.add(newIdentDefs(ident("callback"), ident("FFICallBack")))
   params.add(newIdentDefs(ident("userData"), ident("pointer")))
   params.add(newIdentDefs(ident("reqCbor"), nnkPtrTy.newTree(ident("byte"))))
@@ -618,10 +619,9 @@ macro registerReqFFI*(reqTypeName, reqHandler, body: untyped): untyped =
   return stmts
 
 macro processReq*(
-    reqType, ctx, callback, userData: untyped, args: varargs[untyped]
+    reqType, ctx, ctxGen, callback, userData: untyped, args: varargs[untyped]
 ): untyped =
-  ## Expands T.processReq(ctx, callback, userData, args...) into a
-  ## sendRequestToFFIThread call, reporting errors via `callback`.
+  ## Expands T.processReq(ctx, ctxGen, callback, userData, args...) into a sendRequestToFFIThread call, reporting errors via `callback`.
   var callArgs = @[reqType, callback, userData]
   for a in args:
     callArgs.add a
@@ -629,7 +629,10 @@ macro processReq*(
   let newReqCall = newCall(ident("ffiNewReq"), callArgs)
 
   let sendCall = newCall(
-    newDotExpr(ident("ffi_context"), ident("sendRequestToFFIThread")), ctx, newReqCall
+    newDotExpr(ident("ffi_context"), ident("sendRequestToFFIThread")),
+    ctx,
+    newReqCall,
+    ctxGen,
   )
 
   let blockExpr = quote:
@@ -672,9 +675,11 @@ macro ffiRaw*(args: varargs[untyped]): untyped =
   let reqName = ident($procName & "Req")
   let returnType = ident("cint")
 
+  # The host holds an opaque token; the guard below resolves it into a context.
   var newParams = newSeq[NimNode]()
   newParams.add(returnType)
-  for i in 1 ..< formalParams.len:
+  newParams.add(newIdentDefs(ident("ctxToken"), ident("FFICtxToken")))
+  for i in 2 ..< formalParams.len:
     newParams.add(newIdentDefs(formalParams[i][0], formalParams[i][1]))
 
   let futReturnType = quote:
@@ -686,8 +691,10 @@ macro ffiRaw*(args: varargs[untyped]): untyped =
     for i in 4 ..< formalParams.len:
       userParams.add(newIdentDefs(formalParams[i][0], formalParams[i][1]))
 
-  var argsList = newSeq[NimNode]()
-  for i in 1 ..< formalParams.len:
+  let ctxIdent = formalParams[1][0]
+  let ctxGenIdent = ident("ctxGen")
+  var argsList = @[ctxIdent, ctxGenIdent]
+  for i in 2 ..< formalParams.len:
     argsList.add(formalParams[i][0])
 
   let dotExpr = newTree(nnkDotExpr, reqName, ident"processReq")
@@ -699,11 +706,15 @@ macro ffiRaw*(args: varargs[untyped]): untyped =
   let ffiBody = newStmtList(
     quote do:
       initializeLibrary()
-      if not `poolIdent`.isValidCtx(cast[pointer](ctx)):
-        return RET_ERR
-      ctx[].userData = userData
       if isNil(callback):
         return RET_MISSING_CALLBACK
+      let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
+      if `ctxIdent`.isNil():
+        let errStr = "ctx is not a valid FFI context"
+        callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
+        return RET_ERR
+      let `ctxGenIdent` = ctxToken.tokenGeneration()
+      `ctxIdent`[].userData = userData
   )
 
   ffiBody.add(callNode)
@@ -956,20 +967,23 @@ proc buildFFIProc(
   let poolIdent = ident($libTypeName & "FFIPool")
 
   proc buildCtxGuard(): NimNode =
-    ## Nil-checks callback and validates `ctx`, replying `RET_ERR` before build.
+    ## Nil-checks callback and resolves the host token, replying `RET_ERR` before build. `ctxIdent`/`ctxGenIdent` are substituted so the send below sees them (`quote` gensyms).
+    let ctxIdent = ident("ctx")
+    let ctxGenIdent = ident("ctxGen")
     quote:
       if callback.isNil:
         return RET_MISSING_CALLBACK
-      if not `poolIdent`.isValidCtx(cast[pointer](ctx)):
+      let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
+      if `ctxIdent`.isNil():
         let errStr = "ctx is not a valid FFI context"
         callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
         return RET_ERR
+      let `ctxGenIdent` = ctxToken.tokenGeneration()
 
   proc buildStaticCtxGuard(): NimNode =
-    ## Binds the library's static context; a static call may be the host's first
-    ## entry, hence `initializeLibrary`.
-    # `ctxIdent` is substituted so the send below sees it (`quote` gensyms).
+    ## Binds the library's static context; a static call may be the host's first entry, hence `initializeLibrary`.
     let ctxIdent = ident("ctx")
+    let ctxGenIdent = ident("ctxGen")
     quote:
       initializeLibrary()
       if callback.isNil():
@@ -978,6 +992,8 @@ proc buildFFIProc(
         let errStr = "ffiStatic: " & error
         callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
         return RET_ERR
+      # No token to carry a claim: the static context holds its slot for the life of the library.
+      let `ctxGenIdent` = `ctxIdent`.currentGeneration()
 
   proc buildSendAndReply(reqPtrIdent: NimNode): NimNode =
     ## Hands `reqPtrIdent` to the FFI thread and maps the outcome to a C return code.
@@ -985,7 +1001,7 @@ proc buildFFIProc(
     quote:
       let `sendResIdent` =
         try:
-          ffi_context.sendRequestToFFIThread(ctx, `reqPtrIdent`)
+          ffi_context.sendRequestToFFIThread(ctx, `reqPtrIdent`, ctxGen)
         except Exception as exc:
           Result[void, string].err("sendRequestToFFIThread exception: " & exc.msg)
       if `sendResIdent`.isErr():
@@ -1070,7 +1086,7 @@ proc buildFFIProc(
         `lambdaNode`
 
     # C-exported wrapper: (ctx, callback, userData, reqCbor, reqCborLen).
-    let exportedParams = cExportedParams(ctxType, withCtx = not isStatic)
+    let exportedParams = cExportedParams(withCtx = not isStatic)
 
     let ffiBody = newStmtList()
     # Flattened: the guard's `let ctx` must be a sibling of the send to be in scope.
@@ -1355,7 +1371,7 @@ proc buildCtorProcessFFIRequestProc(
     `libReadyIdent`.store(true)
 
   newBody.add quote do:
-    return ok($cast[uint](`ctxIdent`))
+    return ok($cast[uint](`ctxIdent`.ffiToken()))
 
   let processProc = newProc(
     name = postfix(ident("processFFIRequest"), "*"),
@@ -1494,9 +1510,9 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
   )
   let addToReg = addCtorRequestToRegistry(reqTypeName, libTypeName, abiFormat)
 
-  # C-exported proc: (reqCbor, reqCborLen, callback, userData) -> pointer
+  # C-exported proc: (reqCbor, reqCborLen, callback, userData) -> ctx token
   var exportedParams = newSeq[NimNode]()
-  exportedParams.add(ident("pointer"))
+  exportedParams.add(ident("FFICtxToken"))
   exportedParams.add(newIdentDefs(ident("reqCbor"), nnkPtrTy.newTree(ident("byte"))))
   exportedParams.add(newIdentDefs(ident("reqCborLen"), ident("csize_t")))
   exportedParams.add(newIdentDefs(ident("callback"), ident("FFICallBack")))
@@ -1516,7 +1532,7 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
       if not callback.isNil:
         let errStr = "ffiCtor: failed to create FFIContext: " & $error
         callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
-      return nil
+      return FFICtxToken(nil)
 
   # Early validation: decode the CBOR payload to verify it parses cleanly.
   ffiBody.add quote do:
@@ -1525,10 +1541,14 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
         cast[ptr UncheckedArray[byte]](reqCbor), int(reqCborLen), `reqTypeName`
       )
       if validateRes.isErr():
+        # The slot is already claimed and the caller gets nil, so nobody is left
+        # to destroy it. The callback carries the real error; a failure here has
+        # no channel left of its own.
+        discard `poolIdent`.recycleFFIContext(`ctxSym`)
         if not callback.isNil:
           let errStr = "ffiCtor: failed to decode request: " & $validateRes.error
           callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
-        return nil
+        return FFICtxToken(nil)
 
   let newReqCall = newCall(
     ident("ffiNewReq"),
@@ -1550,13 +1570,14 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
       except Exception as exc:
         Result[void, string].err("sendRequestToFFIThread exception: " & exc.msg)
     if `sendResIdent`.isErr():
+      discard `poolIdent`.recycleFFIContext(`ctxSym`)
       if not callback.isNil:
         let errStr = "ffiCtor: failed to send request: " & $`sendResIdent`.error
         callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
-      return nil
+      return FFICtxToken(nil)
 
   ffiBody.add quote do:
-    return cast[pointer](`ctxSym`)
+    return `ctxSym`.ffiToken()
 
   let ffiProc = newProc(
     name = postfix(cExportProcName, "*"),
@@ -1667,8 +1688,11 @@ proc buildFFIDtorProc(prc: NimNode, abiFormat: ABIFormat): NimNode {.compileTime
     when declared(initializeLibrary):
       initializeLibrary()
 
+  let poolIdent = ident($libTypeName & "FFIPool")
+  let ctxSym = genSym(nskLet, "ctx")
   ffiBody.add quote do:
-    if ctx.isNil or cast[ptr FFIContext[`libTypeName`]](ctx)[].myLib.isNil:
+    let `ctxSym` = `poolIdent`.resolveCtx(ctx)
+    if `ctxSym`.isNil() or `ctxSym`[].myLib.isNil:
       return RET_ERR
 
   let isNoop =
@@ -1690,10 +1714,8 @@ proc buildFFIDtorProc(prc: NimNode, abiFormat: ABIFormat): NimNode {.compileTime
 
         ffiTeardownHook[`libTypeName`]() = `teardownImplName`
 
-  let poolIdent = ident($libTypeName & "FFIPool")
   ffiBody.add quote do:
-    let `destroyResIdent` =
-      `poolIdent`.recycleFFIContext(cast[ptr FFIContext[`libTypeName`]](ctx))
+    let `destroyResIdent` = `poolIdent`.recycleFFIContext(`ctxSym`)
     if `destroyResIdent`.isErr():
       return RET_ERR
 
@@ -1702,7 +1724,7 @@ proc buildFFIDtorProc(prc: NimNode, abiFormat: ABIFormat): NimNode {.compileTime
 
   let ffiProc = newProc(
     name = postfix(cExportProcName, "*"),
-    params = @[ident("cint"), newIdentDefs(ident("ctx"), ident("pointer"))],
+    params = @[ident("cint"), newIdentDefs(ident("ctx"), ident("FFICtxToken"))],
     body = ffiBody,
     pragmas = newTree(
       nnkPragma,

@@ -96,7 +96,7 @@ proc waitCalled(s: var CallbackState): bool =
     inc tries
   s.called.load()
 
-proc createCtx(s: var CallbackState): pointer =
+proc createCtx(s: var CallbackState): FFICtxToken =
   resetState(s)
   var cfg = cborEncode(RouterCreateCtorReq(seed: 42))
   let ret = router_create(encodedPtr(cfg), cfg.len.csize_t, recordingCallback, addr s)
@@ -114,11 +114,7 @@ suite "{.ffi.} routes on the shape of the signature":
     resetState(s)
     var req = cborEncode(RouterMarkerReq())
     check router_marker(
-      cast[ptr FFIContext[RouterLib]](ctx),
-      recordingCallback,
-      addr s,
-      encodedPtr(req),
-      req.len.csize_t,
+      ctx, recordingCallback, addr s, encodedPtr(req), req.len.csize_t
     ) == RET_OK
     check waitCalled(s)
     check s.retCode.load() == int(RET_OK)
@@ -162,21 +158,13 @@ suite "{.ffi.} routes on the shape of the signature":
     var evt: CallbackState
     resetState(evt)
     check router_add_event_listener(
-      cast[ptr FFIContext[RouterLib]](ctx),
-      "on_router_tick".cstring,
-      recordingCallback,
-      addr evt,
+      ctx, "on_router_tick".cstring, recordingCallback, addr evt
     ) != 0'u64
 
     resetState(s)
     var req = cborEncode(RouterTickReq())
-    check router_tick(
-      cast[ptr FFIContext[RouterLib]](ctx),
-      recordingCallback,
-      addr s,
-      encodedPtr(req),
-      req.len.csize_t,
-    ) == RET_OK
+    check router_tick(ctx, recordingCallback, addr s, encodedPtr(req), req.len.csize_t) ==
+      RET_OK
     check waitCalled(evt)
     let env = cborDecode(cast[seq[byte]](evt.msg), EventEnvelope[RouterTick])
     check env.value.eventType == "on_router_tick"
@@ -187,4 +175,4 @@ suite "{.ffi.} routes on the shape of the signature":
     let ctx = createCtx(s)
     check not ctx.isNil()
     check router_destroy(ctx) == RET_OK
-    check router_destroy(nil) == RET_ERR
+    check router_destroy(cast[FFICtxToken](nil)) == RET_ERR

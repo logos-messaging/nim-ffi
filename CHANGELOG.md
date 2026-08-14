@@ -81,6 +81,60 @@ All notable changes to this project are documented in this file.
   define if your host needs more.
 
 ### Fixed
+- **A claim and the generation it opens are one atomic operation.** `tryClaim`
+  set `inUse` and bumped `generation` in two steps, and between them a token of
+  the previous owner passed both checks in `resolveCtx`: `inUse` was already
+  true, and `generation` still held the value the token carried. The claim
+  marker is now the parity of the generation itself, seqlock style: even is
+  free, odd is claimed, and one CAS moves a slot from one to the other, so no
+  token can observe a half-claimed slot. Bumping the generation first was not
+  the answer: a claim that loses the race would then move the generation while
+  the winner holds a token issued under the old value. `inUse` is gone, and
+  `ctx.isInUse()` reads the parity.
+- **A request carries the claim it was submitted under.** Every entry point
+  resolved its token once and then enqueued with no second check, so a request
+  that landed in the queue during the recycle window survived into the next
+  claim, and the new library ran it and answered the callback of the old host.
+  `FFIThreadRequest` gains a `generation` field that the entry point stamps from
+  the resolved token. `sendRequestToFFIThread` rejects a stamp that no longer
+  matches the live claim, and the FFI thread drops a dequeued request whose
+  stamp does not match, without calling its callback: that callback carries
+  `userData` the old host frees as soon as its recycle returns ok. A host that
+  races a submit against its own recycle therefore loses that request silently,
+  which is the safe side of the trade.
+- **A losing `requestRecycle` can no longer swallow the drain failure of the
+  winner.** The `recycleFailed` flag was cleared before the lifecycle CAS, so a
+  concurrent caller could clear it between the moment the recycle handler set it
+  and the moment the winner read it, and the winner then returned ok for a
+  failed drain. A clear after the CAS races too, because the FFI thread polls
+  and can finish the whole recycle in between. The flag is gone: the outcome now
+  lives in the lifecycle state machine as the terminal `RecycleFailed`, which
+  only the recycle handler writes and nothing clears. A later `requestRecycle`
+  on such a slot gets the existing "not Active" error, which is the right answer
+  for a wedged slot.
+- **A recycled pool slot is reset before it serves the next owner.** The recycle
+  handler computed whether its in-flight handlers had drained and then tore down
+  regardless: it freed the library and returned the slot to the pool while
+  handlers still ran, and each of those answers a callback carrying `userData`
+  the host frees once teardown reports success. A drain that runs out of both
+  rounds now aborts the recycle, so `requestRecycle` (and the generated
+  `<lib>_destroy`) returns an error, the library stays alive and the slot stays
+  claimed. A host that sees that error must keep the `userData` of its in-flight
+  requests alive. The drain also counted the dispatcher rather than the handler,
+  and the dispatcher unwound as soon as the cancel reached its `race`;
+  `awaitWithStaleWarnings` now waits out the handler, which is never cancelled by
+  design. The reset clears the handle registry as well: ids are monotonic from 1,
+  so the next owner of a slot could pass id `1` and read an object of the
+  previous one.
+- A `{.ffi.}` constructor that failed after `createFFIContext` returned nil and
+  left its slot claimed for the life of the process. Both ABI paths now recycle
+  the slot before they return.
+- The `abi = c` wrappers leaked their reply box on every send failure: `freeBox`
+  runs only in the reply trampoline, which a rejected send never reaches. One
+  trigger is sticky — once `eventQueueStuck` latches, every later call fails.
+- Every `c_malloc` result in the runtime is checked. An out-of-memory condition
+  used to become a nil dereference; it now becomes an error the host receives
+  through its callback.
 - A `{.ffiDtor.}` body now runs when the context is recycled. Only the
   thread-exit epilogue awaited the teardown hook, and the emitted C destructor
   never takes that path, so a dtor body was dead code and the library kept every
@@ -116,6 +170,22 @@ directions. Internally the watchdog thread is gone — the heartbeat now runs on
 the dedicated event thread that also isolates user callbacks from the FFI thread.
 
 ### Changed
+- **The host holds an opaque context token, not the address of a pool slot.** A
+  slot keeps its address across a recycle, so a pointer from an earlier owner
+  passed validation again as soon as a new owner claimed the same slot, and then
+  dispatched onto the library of that new owner. A context now carries a
+  generation that every claim opens, and the value the constructors hand back is
+  an `FFICtxToken` packing the slot index and that generation; `resolveCtx`
+  rejects a token whose generation no longer matches. The two event-listener
+  entry points went through the same change — they used to dereference the host
+  pointer behind a nil check alone. **The C ABI is unchanged**: the token is
+  pointer-sized and the generated headers still declare `void* ctx`, so the
+  bindings are byte-identical and no foreign consumer changes. A Nim consumer
+  passes `ctx.ffiToken()` into a generated entry point and turns a token back
+  into a context with `<Lib>FFIPool.resolveCtx(token)`; `FFICtxToken` is a
+  distinct type, so every site is a compile error until it is updated.
+- `FFIHandleRegistry.release` takes the handle's `typeName` and applies the same
+  type-tag check as `lookup`, so a release cannot cross types.
 - **`abi = c` non-scalar procs no longer marshal through CBOR.** The foreign
   surface is unchanged — the generated headers and exported symbols are
   byte-identical — but the hop between the caller and the FFI thread now carries

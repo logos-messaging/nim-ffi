@@ -110,7 +110,7 @@ proc buildScalarPath*(
 
   var scalarParams = @[
     ident("cint"),
-    newIdentDefs(ident("ctx"), ctxType),
+    newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
     newIdentDefs(ident("callback"), ident("FFICallBack")),
     newIdentDefs(ident("userData"), ident("pointer")),
   ]
