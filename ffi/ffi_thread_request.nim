@@ -10,6 +10,12 @@ import ./ffi_types, ./alloc, ./cbor_serial
 const EmptyErrorMarker = "unknown error"
   ## RET_ERR fallback message; keeps the callback msg ptr non-nil.
 
+const MaxRequestPayloadBytes* {.intdefine: "ffiMaxRequestPayloadBytes".} =
+  8 * 1024 * 1024
+  ## Largest `data` a submit accepts. On the `abi = c` path `data` is the packed
+  ## wire struct, so the buffers its fields point at stay uncounted. Override
+  ## with `-d:ffiMaxRequestPayloadBytes=<n>`.
+
 const MaxScalarArgs* = 8
   ## Inline scalar fast-path capacity; more params can't use it (compile-time checked).
 

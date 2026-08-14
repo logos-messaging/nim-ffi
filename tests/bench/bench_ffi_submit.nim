@@ -85,14 +85,19 @@ proc runOnce(
   joinThreads(threads)
   let submitSec = (Moment.now() - start).nanoseconds.float / 1_000_000_000.0
 
-  if not waitForCompletions(total):
-    quit("timed out waiting for callbacks: got " & $gCompleted.load() & " of " & $total)
+  # A rejected submit fires no callback, so wait only for the accepted ones.
+  let sendErrors = gSendErrors.load()
+  let accepted = total - sendErrors
+  if not waitForCompletions(accepted):
+    quit(
+      "timed out waiting for callbacks: got " & $gCompleted.load() & " of " & $accepted
+    )
   os.sleep(50) # let any erroneous extra callbacks land before reading overruns
 
   IterResult(
     submitRate: total.float / submitSec,
-    sendErrors: gSendErrors.load(),
-    overruns: max(0, gCompleted.load() - total),
+    sendErrors: sendErrors,
+    overruns: max(0, gCompleted.load() - accepted),
   )
 
 proc enforceScalingGate(medianRate: seq[float]) =
