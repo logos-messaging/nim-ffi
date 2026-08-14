@@ -137,23 +137,14 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
 
   return res
 
-macro declareLibrary*(
-    libraryName: static[string],
-    libType: untyped,
-    defaultABIFormat: static[string] = "cbor",
-): untyped =
-  ## Declares a library and emits the C-exported event ABI (`_add_event_listener` /
-  ## `_remove_event_listener`) on its `FFIContext`. `defaultABIFormat` (`"cbor"`/`"c"`)
-  ## is inherited unless an annotation overrides via `"abi = ..."`.
+proc declareLibraryImpl(
+    libraryName: string, libType: NimNode, abiFmt: ABIFormat, headerBanner: string
+): NimNode {.compileTime.} =
+  ## Shared body behind both `declareLibrary` overloads: records the library-wide
+  ## defaults and emits the C-exported event ABI on its `FFIContext`.
   currentLibType = $libType # so handle-receiver `.ffi.` procs can resolve the pool
-
-  let (abiOk, abiFmt) = parseABIFormatName(defaultABIFormat)
-  if not abiOk:
-    error(
-      "declareLibrary: unknown defaultABIFormat '" & defaultABIFormat &
-        "'; valid values are \"c\" and \"cbor\""
-    )
   currentDefaultABIFormat = abiFmt
+  currentHeaderBanner = headerBanner
   libraryDeclared = true
 
   var stmts = newStmtList()
@@ -243,3 +234,31 @@ macro declareLibrary*(
   )
 
   return stmts
+
+macro declareLibrary*(
+    libraryName: static[string],
+    libType: untyped,
+    defaultABIFormat: static[string] = "cbor",
+    headerBanner: static[string] = "",
+): untyped =
+  ## Declares a library and emits the C-exported event ABI (`_add_event_listener` /
+  ## `_remove_event_listener`) on its `FFIContext`. `defaultABIFormat` (`"cbor"`/`"c"`)
+  ## is inherited unless an annotation overrides via `"abi = ..."`. `headerBanner`,
+  ## when set, is stamped as a comment at the top of every generated header.
+  let (abiOk, abiFmt) = parseABIFormatName(defaultABIFormat)
+  if not abiOk:
+    error(
+      "declareLibrary: unknown defaultABIFormat '" & defaultABIFormat &
+        "'; valid values are \"c\" and \"cbor\""
+    )
+  return declareLibraryImpl(libraryName, libType, abiFmt, headerBanner)
+
+macro declareLibrary*(
+    libraryName: static[string],
+    libType: untyped,
+    defaultABIFormat: static[ABIFormat],
+    headerBanner: static[string] = "",
+): untyped =
+  ## `ABIFormat` enum overload of `declareLibrary`, so a caller can pass
+  ## `defaultABIFormat = ABIFormat.C` instead of the `"c"` string.
+  return declareLibraryImpl(libraryName, libType, defaultABIFormat, headerBanner)

@@ -29,6 +29,9 @@ proc threadedcabi_echo*(
   ## memory on the calling thread. That is the operation under test.
   return ok(lib.tag & ":" & text)
 
+proc threadedcabi_destroy*(lib: ThreadLib) {.ffiDtor.} =
+  discard
+
 genBindings()
 
 type ReplyData = object

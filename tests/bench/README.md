@@ -19,6 +19,8 @@ FFI_SUBMIT_THREADS="1,8,16,32,64,100" nimble bench_ffi_submit
 
 It is also a correctness stress test: the aggregate callback count must match the submit count **exactly** (no drops or double-fires), with zero submit errors and (under asan/lsan/tsan) zero leaks or races.
 
+The bench submits far faster than the single FFI thread drains, so it raises the ingress cap in `bench_ffi_submit.nim.cfg` (`-d:ffiRequestQueueDepth=262144`) to keep timing the submit path alone. With the production default of 1024 the queue fills, the submits come back rejected, and the numbers would measure backpressure instead. Push `FFI_SUBMIT_PER_THREAD` or `FFI_SUBMIT_THREADS` past that cap and the run fails with the submit-error count.
+
 ```sh
 nimble bench_ffi_submit
 # smaller / faster (handy under sanitizers — they distort timing, so disable the gate):

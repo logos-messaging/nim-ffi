@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- The `abi = c` C header now declares the event-listener ABI that
+  `declareLibrary` always exports (`<lib>_add_event_listener` /
+  `<lib>_remove_event_listener`) and the `FFICallBack` typedef they take, so a
+  consumer needs no hand-written header. The typed listener machinery for
+  `{.ffiEvent.}` is still unsupported under `abi = c`.
+- The `abi = c` C header is self-contained: it emits the `<stdint.h>` /
+  `<stddef.h>` includes, the `NIMFFI_RET_*` status codes, and short
+  `#ifndef`-guarded `RET_*` aliases for consumers that use the unprefixed names.
+- Each `{.ffi.}` proc's `##` doc comment reaches the generated C header as a
+  `/** ... */` block above the declaration and its wrapper.
+- `declareLibrary` accepts the `ABIFormat` enum for `defaultABIFormat`, so
+  `defaultABIFormat = ABIFormat.C` compiles alongside the `"c"` string.
+- `declareLibrary` takes an optional `headerBanner` argument, stamped as a
+  `//`-comment block at the top of every generated C header.
+- `genBindings()` fails compilation when a library declares an `{.ffiCtor.}` but
+  no `{.ffiDtor.}`, so the context a constructor builds always has a way to be
+  released.
 - `{.ffiEvent.}` now accepts multiple parameters. The macro synthesises and
   registers an envelope object (`<WireNamePascalCase>Payload`) whose fields are
   the parameters and dispatches an instance of it, so multi-field events no
@@ -47,6 +64,21 @@ All notable changes to this project are documented in this file.
   from a static call by one token: the type inside `Result`. A static call that
   returns the library type builds today and exports a working C symbol, so a
   router would silently give it the ctor ABI instead.
+
+### Changed
+- **A submit now has two limits, and fails instead of accepting without bound.**
+  The ingress queue took every request a producer offered, so a producer faster
+  than the FFI thread — or any producer once that thread is wedged — grew memory
+  without bound, and no request carried a maximum size. A submit is rejected once
+  its ingress queue holds `-d:ffiRequestQueueDepth` (1024) requests, or once its
+  payload passes `-d:ffiMaxRequestPayloadBytes` (8 MiB). Ingress is sharded over
+  16 queues, so a context holds at most 16384 requests. The payload cap measures
+  the buffer the request owns: on the `abi = c` path that is the packed wire
+  struct, and the buffers its fields point at stay uncounted, because that path
+  trusts its caller. Both limits come back as the error the submit already
+  returns, which the generated entry points report as `RET_ERR` through the
+  callback, so a host that stays under the limits sees no change. Raise either
+  define if your host needs more.
 
 ### Fixed
 - **A claim and the generation it opens are one atomic operation.** `tryClaim`

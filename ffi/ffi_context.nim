@@ -14,6 +14,7 @@ import
   ./cbor_serial
 
 export ffi_events, ffi_handles
+export ffi_request_queue.RequestQueueDepth
 
 type FFICtxToken* = distinct pointer
   ## Opaque handle the host holds for a context. Distinct from `pointer` so a raw

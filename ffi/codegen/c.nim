@@ -842,6 +842,16 @@ func constDeclLines(consts: seq[FFIConstMeta]): seq[string] =
   lines.add("")
   return lines
 
+func headerBannerLines(banner: string): seq[string] =
+  ## `banner` as `//` line comments for the top of a generated header; [] if empty.
+  if banner.strip().len == 0:
+    return @[]
+  var rendered: seq[string] = @[]
+  for line in banner.splitLines():
+    # A trailing `\` would splice the next generated line into the `//` comment.
+    rendered.add("// " & line.strip(leading = false, chars = Whitespace + {'\\'}))
+  return rendered
+
 func generateCPreludeHeader*(): string =
   ## The library-agnostic `nim_ffi_prelude.h`, emitted verbatim.
   return HeaderPreludeTpl & "\n"
@@ -856,6 +866,7 @@ proc generateCLibHeader*(
     libName: string,
     events: seq[FFIEventMeta] = @[],
     consts: seq[FFIConstMeta] = @[],
+    banner: string = "",
 ): string =
   ## The `<lib>.h` header: library structs, monomorphised codecs and async API.
   let classified = classifyProcs(procs)
@@ -869,6 +880,7 @@ proc generateCLibHeader*(
 
   let guard = "NIM_FFI_LIB_" & libName.toUpperAscii() & "_H_INCLUDED"
   var lines: seq[string] = @[]
+  lines.add(headerBannerLines(banner))
   lines.add("#ifndef " & guard)
   lines.add("#define " & guard)
   lines.add("#include \"" & CborHeaderName & "\"")
@@ -1192,6 +1204,15 @@ proc emitAbiExternDecls(
     )
     for l in abiScalarDupHelper():
       lines.add(l)
+  # declareLibrary always exports the event-listener ABI on the FFIContext, so
+  # declare it here (and its FFICallback) — no hand-written header needed. The
+  # typed listener machinery isn't emitted yet (see generateCAbiLibHeader).
+  lines.add("#ifndef NIMFFI_FFICALLBACK_DEFINED")
+  lines.add("#define NIMFFI_FFICALLBACK_DEFINED")
+  lines.add(
+    "typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_data);"
+  )
+  lines.add("#endif")
   lines.add("#ifdef __cplusplus")
   lines.add("extern \"C\" {")
   lines.add("#endif")
@@ -1224,6 +1245,13 @@ proc emitAbiExternDecls(
       )
     of FFIKind.DTOR:
       lines.add("int " & p.procName & "(void* ctx);")
+  lines.add(
+    "uint64_t " & libName & "_add_event_listener(void* ctx, const char* event_name, " &
+      "FFICallback callback, void* user_data);"
+  )
+  lines.add(
+    "int " & libName & "_remove_event_listener(void* ctx, uint64_t listener_id);"
+  )
   lines.add("")
   lines.add("#ifdef __cplusplus")
   lines.add("} /* extern \"C\" */")
@@ -1481,6 +1509,7 @@ proc generateCAbiLibHeader*(
     libName: string,
     events: seq[FFIEventMeta] = @[],
     consts: seq[FFIConstMeta] = @[],
+    banner: string = "",
 ): string =
   if events.len > 0:
     raise newException(
@@ -1499,6 +1528,7 @@ proc generateCAbiLibHeader*(
 
   let guard = "NIM_FFI_LIB_" & libName.toUpperAscii() & "_C_ABI_H_INCLUDED"
   var lines: seq[string] = @[]
+  lines.add(headerBannerLines(banner))
   lines.add("#ifndef " & guard)
   lines.add("#define " & guard)
   lines.add("#include <stdint.h>")
@@ -1516,6 +1546,12 @@ proc generateCAbiLibHeader*(
   )
   lines.add("   terminal RET_OK/RET_ERR. Ignore it unless you want progress. */")
   lines.add("#define NIMFFI_RET_STALE_WARN 3")
+  # Unprefixed aliases for consumers that spell the codes RET_*; guarded so a
+  # co-included header that also defines them doesn't clash.
+  for suffix in ["OK", "ERR", "MISSING_CALLBACK", "STALE_WARN"]:
+    lines.add("#ifndef RET_" & suffix)
+    lines.add("#define RET_" & suffix & " NIMFFI_RET_" & suffix)
+    lines.add("#endif")
   lines.add("")
   lines.add(constDeclLines(consts))
   lines.add(
@@ -1573,6 +1609,7 @@ proc generateCBindings*(
     nimSrcRelPath: string,
     events: seq[FFIEventMeta] = @[],
     consts: seq[FFIConstMeta] = @[],
+    banner: string = "",
 ) =
   ## Emits the C binding for `libName`, picking the `abi = c` or CBOR shape.
   createDir(outputDir)
@@ -1580,7 +1617,7 @@ proc generateCBindings*(
   of ABIFormat.C:
     writeFile(
       outputDir / (libName & ".h"),
-      generateCAbiLibHeader(procs, types, libName, events, consts),
+      generateCAbiLibHeader(procs, types, libName, events, consts, banner),
     )
     writeFile(
       outputDir / "CMakeLists.txt", generateCAbiCMakeLists(libName, nimSrcRelPath)
@@ -1590,6 +1627,6 @@ proc generateCBindings*(
     writeFile(outputDir / CborHeaderName, generateCCborHeader())
     writeFile(
       outputDir / (libName & ".h"),
-      generateCLibHeader(procs, types, libName, events, consts),
+      generateCLibHeader(procs, types, libName, events, consts, banner),
     )
     writeFile(outputDir / "CMakeLists.txt", generateCCMakeLists(libName, nimSrcRelPath))
