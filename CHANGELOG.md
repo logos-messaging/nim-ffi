@@ -162,6 +162,13 @@ All notable changes to this project are documented in this file.
   the remove returns. Under `--mm:refc` a listener may only remove, not add: a
   registration grows the registry, and the event thread must not allocate into
   the thread-local heap that owns it.
+  A remove from inside a callback cannot wait for its own dispatch, so it returns
+  at once. If it drops a different listener, the snapshot in flight can still
+  deliver to that listener, and its `userData` must stay alive until the dispatch
+  ends. The generated wrappers (`<lib>_ctx_remove_event_listener` in C,
+  `removeEventListener` in C++, `remove_event_listener` in Rust) release the box
+  that holds the handler, so call them from inside a callback only for the
+  listener that runs.
 
 ## [0.3.0] - 2026-07-24
 

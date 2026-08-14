@@ -97,9 +97,7 @@ proc addEventListener*(
   assigned
 
 proc removeEventListener*(reg: var FFIEventRegistry, id: uint64): bool {.raises: [].} =
-  ## Safe from inside a dispatch; the in-flight snapshot still delivers once.
-  ## From another thread it returns after that delivery, so `userData` is then
-  ## safe to free.
+  ## Waits an in-flight delivery out, except for a caller inside a dispatch: that one returns first, so the `userData` it drops must outlive the dispatch.
   if id == 0'u64:
     return false
 

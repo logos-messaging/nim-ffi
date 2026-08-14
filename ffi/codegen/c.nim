@@ -659,6 +659,7 @@ proc emitListenerApi(
     lines.add("    return id;")
     lines.add("}")
     lines.add("")
+  lines.add(renderBlockDocComment(CtxRemoveListenerDoc))
   lines.add(
     "static inline bool " & libName & "_ctx_remove_event_listener(" & ctxType &
       "* ctx, uint64_t id) {"
@@ -930,6 +931,7 @@ proc generateCLibHeader*(
     "uint64_t " & libName & "_add_event_listener(void* ctx, const char* event_name, " &
       "FFICallback callback, void* user_data);"
   )
+  lines.add(renderBlockDocComment(RemoveListenerDoc))
   lines.add(
     "int " & libName & "_remove_event_listener(void* ctx, uint64_t listener_id);"
   )
