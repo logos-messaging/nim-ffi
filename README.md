@@ -80,7 +80,7 @@ The generated C export names are the snake_case form of the proc names, e.g.
 | `{.ffi.}` on a `proc` | proc | Exposes a method. First param is the library value, then typed params; returns `Future[Result[T, string]]`. |
 | `{.ffiStatic.}` | proc | Exposes a context-independent proc: no library param, and its wrapper takes no ctx — see below. |
 | `{.ffiCtor.}` | proc | The constructor. Returns `Future[Result[LibType, string]]`; creates the FFI context. |
-| `{.ffiDtor.}` | proc | The destructor. Exactly one param `(x: LibType)`; tears the context down. |
+| `{.ffiDtor.}` | proc | The destructor. Exactly one param `(x: LibType)`; tears the context down. Must cancel and await everything it spawned — see [the teardown contract](#the-teardown-contract). |
 | `{.ffiEvent[: "wire_name"].}` | proc (empty body) | A library-initiated callback. Call the proc from any `{.ffi.}` handler to fire it. The wire name is optional — see below. |
 | `{.ffiHandle.}` | `ref object` | Marks a type as an opaque handle: it stays server-side and crosses the wire as a `uint64` id. |
 | `{.ffiConst.}` | `const` | Re-emits the value as a native constant in every generated binding — see below. |
@@ -213,6 +213,32 @@ in the context that created it, which a static proc cannot reach. Under
 `abi = c` a static replies with a `string` or an `{.ffi.}` object type — a scalar
 return is wired only for an all-scalar `{.ffi.}` method, which rides the
 [CBOR-free fast path](#abi-format) through the ctx a static doesn't have.
+
+### The teardown contract
+
+A `{.ffiDtor.}` must cancel **and await** everything it spawned. The pool recycles
+a context by handing its slot — including the live FFI and event thread pair and
+their chronos dispatcher — to the next owner, and the only proof that the previous
+owner is gone from that thread is its teardown having run to the end. The runtime
+cannot make up for a teardown that gave up: chronos exposes no way to enumerate,
+let alone cancel, the futures of a thread outside a debug build, and a cancel is
+cooperative in any case.
+
+A teardown that overruns `-d:ffiTeardownTimeoutMs` (10 s) is cancelled at the
+timeout; one that raises stops there. Either way the runtime treats the context as
+unsafe to reuse and **quarantines** it:
+
+| | Teardown completed | Teardown cut short or raised |
+| --- | --- | --- |
+| `<lib>_ctx_destroy` | `RET_OK` | `RET_ERR` |
+| The library object | freed | kept alive — orphaned work may still hold pointers into it |
+| The pool slot | back in the pool | claimed for the life of the process |
+| In-flight callbacks | done before the destroy returned | can still fire, so keep their `userData` alive |
+
+Quarantine costs one of the 32 slots permanently, so a library that habitually
+overruns its teardown will exhaust the pool. `FFIContextPool.quarantinedSlots()`
+reports the count from Nim, every quarantine is logged at `error`, and so is the
+pool-exhausted error once any slot has been quarantined.
 
 ### The result callback contract
 

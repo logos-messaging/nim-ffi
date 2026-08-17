@@ -122,14 +122,15 @@ suite "{.ffiDtor.} teardown on the recycle path":
     check TeardownlibFFIPool.recycleFFIContext(second).isOk()
     check gTeardownRan.load()
 
-  test "a teardown past TeardownTimeout still releases the slot":
+  test "a teardown past TeardownTimeout quarantines the slot":
+    # Runs last in this file: the slot never comes back.
     let ctx = createCtxWithLib()
     check not ctx.isNil()
 
     gTeardownRan.store(false)
     gTeardownHangs.store(true)
     let t0 = Moment.now()
-    check TeardownlibFFIPool.recycleFFIContext(ctx).isOk()
+    let res = TeardownlibFFIPool.recycleFFIContext(ctx)
     let elapsed = Moment.now() - t0
     gTeardownHangs.store(false)
 
@@ -137,10 +138,15 @@ suite "{.ffiDtor.} teardown on the recycle path":
     check elapsed >= TeardownTimeout
     check elapsed < RecycleWaitTimeout
     check not gTeardownRan.load()
+    # A body that never finished cannot promise the thread is free of it, so the
+    # recycle fails and the library is kept. See test_ffi_dtor_orphan_reuse.
+    check res.isErr()
+    check not ctx[].myLib.isNil()
+    check TeardownlibFFIPool.quarantinedSlots() == 1
 
     let next = createCtxWithLib()
     check not next.isNil()
-    check next == ctx
+    check next != ctx
     check not next[].myLib.isNil()
     check TeardownlibFFIPool.recycleFFIContext(next).isOk()
     check gTeardownRan.load()
