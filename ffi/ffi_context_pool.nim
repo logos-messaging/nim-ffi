@@ -88,8 +88,8 @@ proc createFFIContext*[T](
       "does not finish costs a slot for the life of the process",
       quarantined = quarantined, max = MaxFFIContexts
   err(
-    "FFI context pool exhausted (max " & $MaxFFIContexts & " contexts, " &
-      $quarantined & " quarantined by a failed teardown)"
+    "FFI context pool exhausted (max " & $MaxFFIContexts & " contexts, " & $quarantined &
+      " quarantined by a failed teardown)"
   )
 
 proc isStaticCtx[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]): bool =

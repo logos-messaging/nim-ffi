@@ -112,6 +112,72 @@ jobs:
       nim-versions:   ${{ needs.versions.outputs.nim-versions }}
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
+  # The recycle/teardown family below all turn on thread reuse, thread exit and
+  # chronos dispatcher behaviour, which differ per OS. The Linux sanitizer jobs
+  # run every unit test, but they cannot speak for macOS or Windows.
+  dtor-orphan-reuse:
+    name: Dtor Orphan Reuse
+    needs: versions
+    uses: ./.github/workflows/test.yml
+    with:
+      test: test_ffi_dtor_orphan_reuse
+      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
+      nimble-version: ${{ needs.versions.outputs.nimble }}
+
+  ffi-teardown:
+    name: Async Teardown
+    needs: versions
+    uses: ./.github/workflows/test.yml
+    with:
+      test: test_ffi_teardown
+      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
+      nimble-version: ${{ needs.versions.outputs.nimble }}
+
+  recycle-reset:
+    name: Recycle Reset
+    needs: versions
+    uses: ./.github/workflows/test.yml
+    with:
+      test: test_ffi_recycle_reset
+      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
+      nimble-version: ${{ needs.versions.outputs.nimble }}
+
+  claim-generation:
+    name: Claim Generation
+    needs: versions
+    uses: ./.github/workflows/test.yml
+    with:
+      test: test_ffi_claim_generation
+      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
+      nimble-version: ${{ needs.versions.outputs.nimble }}
+
+  ingress-limits:
+    name: Ingress Limits
+    needs: versions
+    uses: ./.github/workflows/test.yml
+    with:
+      test: test_ffi_ingress_limits
+      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
+      nimble-version: ${{ needs.versions.outputs.nimble }}
+
+  ctx-after-failed-ctor:
+    name: Ctx After Failed Ctor
+    needs: versions
+    uses: ./.github/workflows/test.yml
+    with:
+      test: test_ctx_after_failed_ctor
+      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
+      nimble-version: ${{ needs.versions.outputs.nimble }}
+
+  event-thread:
+    name: Event Thread
+    needs: versions
+    uses: ./.github/workflows/test.yml
+    with:
+      test: test_event_thread
+      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
+      nimble-version: ${{ needs.versions.outputs.nimble }}
+
   cpp-e2e:
     # Codegen output doesn't vary with mm, so we matrix over OS and Nim only.
     # Windows runs MSVC by default and may surface codegen tweaks needed in
@@ -204,6 +270,19 @@ jobs:
     uses: ./.github/workflows/nimble-job.yml
     with:
       run: nimble check_bindings -y
+      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
+      nimble-version: ${{ needs.versions.outputs.nimble }}
+
+  unit-tests-all:
+    # Catch-all so a new tests/unit file cannot go unrun: `nimble test` discovers
+    # every test_*.nim and runs it under both orc and refc. Linux only, because
+    # the compile of ~40 files twice is the cost here and the jobs above already
+    # carry the OS-sensitive ones across the matrix.
+    name: All unit tests (orc + refc)
+    needs: versions
+    uses: ./.github/workflows/nimble-job.yml
+    with:
+      run: nimble test -y
       nim-versions:   ${{ needs.versions.outputs.nim-versions }}
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
