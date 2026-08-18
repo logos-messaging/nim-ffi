@@ -97,6 +97,15 @@ proc encodedPtr(b: var seq[byte]): ptr byte =
   else:
     cast[ptr byte](addr b[0])
 
+proc waitSlotFree[T](ctx: ptr FFIContext[T]) =
+  ## `requestRecycle` returns once the recycle fired its done signal, which is
+  ## one step before the FFI thread releases the claim (the fire has to come
+  ## first, or a thread claiming the slot would take it as its own answer). Wait
+  ## that step out before a check that depends on the slot being free.
+  let deadline = Moment.now() + 5.seconds
+  while ctx.isInUse() and Moment.now() < deadline:
+    os.sleep(1)
+
 template runCall(d, ctx, reqBytes, exportProc) =
   initCallbackData(d)
   var rb = reqBytes
@@ -115,6 +124,7 @@ suite "recycle opens a new generation on the slot":
     check RecycleLibFFIPool.isValidCtx(staleToken)
 
     check RecycleLibFFIPool.recycleFFIContext(first).isOk()
+    waitSlotFree(first)
     # Between the recycle and the next claim the slot is free, so the token is
     # already dead. Reuse is the case the generation exists for.
     check not RecycleLibFFIPool.isValidCtx(staleToken)
@@ -176,6 +186,7 @@ suite "recycle clears the handle registry":
     check first[].handles.byHandle.len == 1
 
     check RecycleLibFFIPool.recycleFFIContext(first).isOk()
+    waitSlotFree(first)
     check first[].handles.byHandle.len == 0
 
     let second = RecycleLibFFIPool.createFFIContext().get()

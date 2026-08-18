@@ -154,6 +154,15 @@ proc waitTicks(id: int, want: int, timeoutMs = 5000): bool =
     os.sleep(5)
   true
 
+proc waitSlotFree[T](ctx: ptr FFIContext[T]) =
+  ## `requestRecycle` returns once the recycle fired its done signal, which is
+  ## one step before the FFI thread releases the claim (the fire has to come
+  ## first, or a thread claiming the slot would take it as its own answer). Wait
+  ## that step out before a check that depends on the slot being free.
+  let deadline = Moment.now() + 5.seconds
+  while ctx.isInUse() and Moment.now() < deadline:
+    os.sleep(1)
+
 proc createCtxWithLib(): ptr FFIContext[OrphanLib] =
   ## Spins up a context and waits on `libReady`, the flag the teardown gates on.
   var cfg = cborEncode(OrphanlibCreateCtorReq(config: OrphanConfig(dummy: 0)))
@@ -203,6 +212,7 @@ suite "a {.ffiDtor.} that stops its offspring":
     check gTeardownRan.load()
     check not gRunning[0].load()
 
+    waitSlotFree(ctx)
     let settled = gTicks[0].load()
     os.sleep(60)
     check gTicks[0].load() == settled

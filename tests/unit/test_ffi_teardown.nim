@@ -46,6 +46,15 @@ proc encodedPtr(bytes: var seq[byte]): ptr byte =
   else:
     cast[ptr byte](addr bytes[0])
 
+proc waitSlotFree[T](ctx: ptr FFIContext[T]) =
+  ## `requestRecycle` returns once the recycle fired its done signal, which is
+  ## one step before the FFI thread releases the claim (the fire has to come
+  ## first, or a thread claiming the slot would take it as its own answer). Wait
+  ## that step out before a check that depends on the slot being free.
+  let deadline = Moment.now() + 5.seconds
+  while ctx.isInUse() and Moment.now() < deadline:
+    os.sleep(1)
+
 proc createCtxWithLib(): ptr FFIContext[TeardownLib] =
   ## Spins up a context and waits on `libReady`, the flag the teardown gates on.
   # Not `myLib`: the worker points that at its fallback before the ctor runs.
@@ -112,6 +121,7 @@ suite "{.ffiDtor.} teardown on the recycle path":
     let first = createCtxWithLib()
     check not first.isNil()
     check TeardownlibFFIPool.recycleFFIContext(first).isOk()
+    waitSlotFree(first)
 
     gTeardownRan.store(false)
     let second = createCtxWithLib()
