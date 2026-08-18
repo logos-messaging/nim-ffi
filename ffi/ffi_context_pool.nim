@@ -45,18 +45,13 @@ proc releaseSlot[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]) =
     if pool.contexts[i].addr == ctx:
       pool.initialized[i].store(false)
       break
-  # Joining the threads is the one way out of a quarantine: whatever a cut-short
-  # teardown left behind died with the thread, and the next claim rebuilds the
-  # pair. `initContextResources` would store this anyway; doing it here keeps
-  # `quarantinedSlots` from counting a slot that is no longer out of service.
+  # The join is the one exit from quarantine: the orphans died with the thread. Clear here so `quarantinedSlots` does not count a freed slot.
   ctx.lifecycle.store(CtxLifecycle.Active)
   ctx.recycleFailure.store(RecycleFailure.None)
   ctx.releaseClaim()
 
 proc quarantinedSlots*[T](pool: var FFIContextPool[T]): int =
-  ## Slots taken out of service by a recycle that could not prove the previous
-  ## owner was done with the thread. Only the recycle handler writes
-  ## `RecycleFailed`, and only a full destroy clears it, so counting it is exact.
+  ## Slots that a failed recycle took out of service; exact, because only a full destroy clears `RecycleFailed`.
   for i in 0 ..< MaxFFIContexts:
     if pool.contexts[i].lifecycle.load() == CtxLifecycle.RecycleFailed:
       inc result
@@ -82,10 +77,9 @@ proc createFFIContext*[T](
     return ok(ctx)
   let quarantined = pool.quarantinedSlots()
   if quarantined > 0:
-    # Capacity a failed teardown took away permanently: worth naming, because it
-    # looks like a plain leak from the outside.
-    error "FFI context pool exhausted with quarantined slots; a {.ffiDtor.} that " &
-      "does not finish costs a slot for the life of the process",
+    # Name the lost capacity: from the outside it looks like a plain leak.
+    error "FFI context pool exhausted; a {.ffiDtor.} that does not finish costs " &
+      "a slot for the life of the process",
       quarantined = quarantined, max = MaxFFIContexts
   err(
     "FFI context pool exhausted (max " & $MaxFFIContexts & " contexts, " & $quarantined &
@@ -125,8 +119,8 @@ proc destroyFFIContext*[T](
   if pool.isStaticCtx(ctx):
     return err("destroyFFIContext(pool): the {.ffiStatic.} context outlives every ctx")
   ctx.stopAndJoinThreads().isOkOr:
-    error "context threads did not exit; the pool slot and its resources are " &
-      "leaked rather than freed under live threads", reason = error
+    error "context threads did not exit; the pool slot and its resources leak " &
+      "(a free under live threads is unsafe)", reason = error
     return err("destroyFFIContext(pool): " & $error)
   let deinitRes = ctx.deinitContextResources()
   pool.releaseSlot(ctx)
@@ -172,7 +166,7 @@ proc destroyStaticFFIContext*[T](pool: var FFIContextPool[T]): Result[void, stri
     # Threads are still live: leak the slot rather than free resources under them.
     pool.staticState.store(StaticCtxReady)
     error "the {.ffiStatic.} context's threads did not exit; its slot and " &
-      "resources are leaked", reason = error
+      "resources leak", reason = error
     return err("destroyStaticFFIContext: " & $error)
   let deinitRes = ctx.deinitContextResources()
   pool.releaseSlot(ctx)

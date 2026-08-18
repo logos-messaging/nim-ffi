@@ -181,13 +181,12 @@ proc runTeardown[T](ctx: ptr FFIContext[T]): Future[TeardownOutcome] {.async.} =
     debug "no library teardown to run for this context"
     return TeardownOutcome.Skipped
   try:
-    # `withTimeout` cancels the body and completes once it has unwound, so no
-    # teardown code runs past this await.
+    # `withTimeout` cancels the body and waits for the unwind: no teardown code runs past this await.
     let done = await teardown(ctx.myLib).withTimeout(TeardownTimeout)
     if done:
       return TeardownOutcome.Completed
-    error "library teardown cut short at the timeout; whatever it had not " &
-      "cancelled still runs on this thread", timeoutMs = TeardownTimeoutMs
+    error "the timeout cancelled the library teardown; work it did not cancel " &
+      "still runs on this thread", timeoutMs = TeardownTimeoutMs
     return TeardownOutcome.TimedOut
   except CatchableError as e:
     error "library teardown raised", error = e.msg
@@ -211,8 +210,7 @@ proc resetForNextOwner[T](ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]
   # A reused slot skips initContextResources, so the handle ids of the old owner
   # would otherwise resolve for the next one.
   ctx[].handles.releaseAll()
-  # Same reason: the sticky overflow flag would reject every request of the next
-  # owner, including the ctor, for a queue that is no longer backed up.
+  # Same reason: the sticky overflow flag would reject every request of the next owner, ctor included.
   ctx.eventQueueStuck.store(false)
   rejectQueuedRequests(ctx)
   ongoing[].setLen(0)
@@ -220,28 +218,18 @@ proc resetForNextOwner[T](ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]
 proc recycleContext[T](
     ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]
 ) {.async.} =
-  ## Drain in-flight handlers, run the library teardown, reset the slot, then fire
-  ## recycleDoneSignal and release the slot, all WITHOUT stopping the
-  ## worker/event threads, so the next createFFIContext reuses them (no fd churn).
-  ## Anything short of a completed teardown quarantines the slot instead: it stays
-  ## claimed for the life of the process, the library is kept, and the terminal
-  ## `RecycleFailed` plus `recycleFailure` tell the host why. Reuse is only safe
-  ## when the previous owner is gone from this thread, and the only proof of that
-  ## is its `{.ffiDtor.}` having run to the end — chronos cannot enumerate, let
-  ## alone cancel, what a cut-short teardown left on the dispatcher.
+  ## Drain in-flight handlers, run the library teardown, reset the slot, then fire recycleDoneSignal and release the slot, all WITHOUT stopping the worker/event threads, so the next createFFIContext reuses them (no fd churn). Anything short of a completed teardown quarantines the slot instead: it stays claimed for the life of the process, the library stays alive, and `recycleFailure` tells the host why. Reuse is safe only when the previous owner is gone from this thread, and the one proof is a teardown that ran to the end; chronos cannot enumerate or cancel what a cut-short teardown left on the dispatcher.
   var failure = RecycleFailure.None
   # Deferred: a raise out of the teardown must not strand the slot. Fire before the release, or a thread claiming the slot would take this as its own answer.
   defer:
-    # A caller whose own wait expired was already told this failed, so its slot
-    # must not come back. Racing that flag is benign: losing it can only release
-    # a slot whose teardown did complete.
+    # A caller whose wait expired already saw a failure, so the slot must not come back; the race on the flag is benign, a lost race releases only a slot whose teardown completed.
     if failure == RecycleFailure.None and ctx.recycleAbandoned.load():
       failure = RecycleFailure.CallerAbandoned
     if failure != RecycleFailure.None:
       ctx.recycleFailure.store(failure)
       ctx.lifecycle.store(CtxLifecycle.RecycleFailed)
-      error "context quarantined; the pool slot and its threads are leaked, the " &
-        "library is kept alive and its callbacks can still fire",
+      error "context quarantined; the pool slot and its threads leak, the " &
+        "library stays alive and its callbacks can still fire",
         reason = failure.reason(), cause = $failure
     let fireRes = ctx.recycleDoneSignal.fireSync()
     if fireRes.isErr():
@@ -268,7 +256,7 @@ proc recycleContext[T](
     failure = RecycleFailure.TeardownRaised
     return
 
-  # Only now: the previous owner is provably done with this thread.
+  # Reset only now: the previous owner is provably done with this thread.
   resetForNextOwner(ctx, ongoing)
 
 var ffiEventQueueSignalPtr {.threadvar.}: ThreadSignalPtr
@@ -375,8 +363,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
       except CatchableError as e:
         error "draining pending FFI requests on shutdown raised", error = e.msg
 
-    # Full teardown: the thread stops either way, so the outcome only shapes the
-    # log `runTeardown` already emitted.
+    # The thread stops either way; runTeardown already logged the outcome.
     discard await runTeardown(ctx)
 
   waitFor ffiRun(ctx)

@@ -31,12 +31,10 @@ type CtxLifecycle* {.pure.} = enum
   RecycleFailed # terminal: only the recycle handler writes it, nothing clears it
 
 type RecycleFailure* {.pure.} = enum
-  ## Why a slot was quarantined. An enum and not a message: a `string` field on a
-  ## pooled context would be written by the FFI thread and read by the host one,
-  ## which under refc crosses thread-local heaps.
+  ## Why a slot is quarantined. Not a string: the host reads it from another thread, and refc heaps are thread-local.
   None
   DrainTimeout ## in-flight handlers outlasted both drain rounds
-  TeardownTimeout ## the `{.ffiDtor.}` body was cut short by TeardownTimeout
+  TeardownTimeout ## TeardownTimeout cancelled the `{.ffiDtor.}` body
   TeardownRaised ## the `{.ffiDtor.}` body raised
   CallerAbandoned ## the caller's own wait expired before the recycle finished
 
@@ -48,7 +46,7 @@ func reason*(failure: RecycleFailure): string =
   of RecycleFailure.DrainTimeout:
     "in-flight handlers did not drain"
   of RecycleFailure.TeardownTimeout:
-    "the {.ffiDtor.} teardown was cut short by its timeout"
+    "the timeout cancelled the {.ffiDtor.} teardown"
   of RecycleFailure.TeardownRaised:
     "the {.ffiDtor.} teardown raised"
   of RecycleFailure.CallerAbandoned:
@@ -69,10 +67,9 @@ type FFIContext*[T] = object
     # createFFIContext under the claim; read only by the owner.
   lifecycle*: Atomic[CtxLifecycle]
   recycleFailure*: Atomic[RecycleFailure]
-    # Why the slot was quarantined; written beside the terminal `RecycleFailed`.
+    # Why the slot is quarantined; the recycle handler writes it with `RecycleFailed`.
   recycleAbandoned*: Atomic[bool]
-    # Set by `requestRecycle` when its own wait expires. A recycle that finishes
-    # after that must quarantine: the caller was already told it failed.
+    # `requestRecycle` sets this when its wait expires; a recycle that finishes later must quarantine, because the caller already saw a failure.
   recycleDoneSignal: ThreadSignalPtr
     # fired by the recycle handler once the lib is freed, just before it releases the slot; the synchronous recycleFFIContext caller waits on it.
   libReady*: Atomic[bool]
@@ -286,11 +283,7 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Ask the FFI thread to drain, free the lib and release the slot, WITHOUT
   ## stopping its worker/event threads, so the next createFFIContext reuses them.
   ## Synchronous: waits on recycleDoneSignal. No fd churn -> no select() limit.
-  ## An err means the slot is quarantined: it never serves another owner, and the
-  ## caller must keep the callback userData of every in-flight request alive,
-  ## because teardown did not complete and those callbacks can still fire. A
-  ## request the host races against its own recycle is rejected or silently
-  ## dropped, never answered.
+  ## On err the slot is quarantined and its callbacks can still fire: keep the userData of every in-flight request alive.
   var expected = CtxLifecycle.Active
   if not ctx.lifecycle.compareExchange(expected, CtxLifecycle.RecyclePending):
     return err("requestRecycle: context is not Active (already recycling)")
@@ -309,8 +302,7 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   let done = ctx.recycleDoneSignal.waitSync(RecycleWaitTimeout).valueOr:
     return err("requestRecycle: failed waiting for recycle: " & $error)
   if not done:
-    # The recycle is still running. Tell it to quarantine the slot instead of
-    # releasing it: this caller already learned that the teardown failed.
+    # Quarantine, not release: this caller already saw the failure.
     ctx.recycleAbandoned.store(true)
     error "recycle did not complete in time; the pool slot is quarantined",
       timeoutMs = RecycleWaitTimeout.milliseconds
@@ -318,7 +310,7 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   if ctx.lifecycle.load() == CtxLifecycle.RecycleFailed:
     return err(
       "requestRecycle: " & ctx.recycleFailure.load().reason() &
-        "; the library and the pool slot are leaked, and their callbacks can still fire"
+        "; the library and the pool slot leak, and callbacks can still fire"
     )
   ok()
 

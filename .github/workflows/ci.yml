@@ -112,9 +112,7 @@ jobs:
       nim-versions:   ${{ needs.versions.outputs.nim-versions }}
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
-  # The recycle/teardown family below all turn on thread reuse, thread exit and
-  # chronos dispatcher behaviour, which differ per OS. The Linux sanitizer jobs
-  # run every unit test, but they cannot speak for macOS or Windows.
+  # The recycle/teardown jobs below depend on thread reuse, thread exit and chronos dispatcher behaviour, which differ per OS; the Linux sanitizer jobs run every unit test but cannot speak for macOS or Windows.
   dtor-orphan-reuse:
     name: Dtor Orphan Reuse
     needs: versions
@@ -274,10 +272,7 @@ jobs:
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
   unit-tests-all:
-    # Catch-all so a new tests/unit file cannot go unrun: `nimble test` discovers
-    # every test_*.nim and runs it under both orc and refc. Linux only, because
-    # the compile of ~40 files twice is the cost here and the jobs above already
-    # carry the OS-sensitive ones across the matrix.
+    # Catch-all: `nimble test` discovers and runs every test_*.nim under orc and refc, so a new file cannot ship with no run. Linux only: the double compile of ~40 files is the cost, and the jobs above carry the OS-sensitive files across the matrix.
     name: All unit tests (orc + refc)
     needs: versions
     uses: ./.github/workflows/nimble-job.yml

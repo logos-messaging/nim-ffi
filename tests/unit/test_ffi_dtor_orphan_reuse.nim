@@ -1,18 +1,10 @@
-## A `{.ffiDtor.}` cut short by `TeardownTimeout` abandons whatever async work it
-## never cancelled. Those orphans keep running on the FFI thread's dispatcher —
-## chronos offers no way to cancel every future of a thread — so the slot must be
-## quarantined instead of handed to the next owner.
-##
-## The orphan here ticks, fires an event and writes a sentinel through the `ptr`
-## it kept to its library, which is what a reused slot turns into: cross-owner
-## events and a write into the next owner's library object.
-##
-## Under `NIM_FFI_SAN=asan` the "the abandoned library is not freed" case is also
-## the use-after-free case: a slot that goes back into service frees the library
-## under the live orphan, and the orphan's next sentinel write lands in the freed
-## block. Nothing is freed once the slot is quarantined, so the run stays clean.
-##
-## test_ffi_dtor_orphan_reuse.nim.cfg cuts both timeouts for every suite here.
+## `TeardownTimeout` cuts a `{.ffiDtor.}` short and abandons the async work it did not cancel; the orphans still run on the FFI thread's dispatcher, chronos cannot cancel every future of a thread, so the slot must quarantine instead of serve the next owner.
+
+## The orphan here ticks, fires an event and writes a sentinel through the `ptr` it kept to its library; on a reused slot that becomes cross-owner events and a write into the next owner's library object.
+
+## Under `NIM_FFI_SAN=asan` the "library is not freed" case is also the use-after-free case: a slot that goes back into service frees the library under the live orphan, and the next sentinel write lands in the freed block; quarantine frees nothing, so the run stays clean.
+
+## The sibling .cfg cuts both timeouts for every suite here.
 
 import std/[atomics, os]
 import unittest2
@@ -37,8 +29,7 @@ type OrphanConfig {.ffi.} = object
   dummy: int
 
 var
-  # Per incarnation, so an orphan leaked by an earlier test cannot move the
-  # counters a later one asserts on.
+  # Per incarnation, so an orphan leaked by an earlier test cannot move the counters a later one asserts on.
   gTicks: array[MaxIncarnations, Atomic[int]]
   gStop: array[MaxIncarnations, Atomic[bool]]
   gRunning: array[MaxIncarnations, Atomic[bool]]
@@ -64,8 +55,7 @@ var watchdog: Thread[int]
 createThread(watchdog, watchdogBody, 120_000)
 
 proc orphanTick(id: int) {.async.} =
-  ## The offspring a real library leaves behind when its teardown is cut short:
-  ## spawned on the FFI thread's dispatcher, stopped by nothing but the dtor.
+  ## The offspring a library leaves behind when the timeout cuts its teardown: spawned on the FFI thread's dispatcher, and only the dtor stops it.
   gLoopThreadId.store(getThreadId())
   gRunning[id].store(true)
   while not gStop[id].load():
@@ -101,10 +91,7 @@ proc waitHold() {.async.} =
     await sleepAsync(10.milliseconds)
 
 proc orphanlib_destroy*(lib: OrphanLib): Future[void] {.ffiDtor.} =
-  ## Three shapes: `gTeardownHangs` sleeps past every timeout and is cut short by
-  ## `TeardownTimeout`; `gTeardownIgnoresCancel` cannot be cut short at all, so
-  ## the caller's own wait expires first; the default stops its offspring and
-  ## awaits it, which is the contract a dtor must meet.
+  ## Three shapes: `gTeardownHangs` sleeps past every timeout and `TeardownTimeout` cuts it short; `gTeardownIgnoresCancel` blocks the cancel, so the caller's own wait expires first; the default stops its offspring and awaits it, the contract a dtor must meet.
   if gTeardownIgnoresCancel.load():
     await noCancel(waitHold())
   elif gTeardownHangs.load():
@@ -129,7 +116,7 @@ proc replyCallback(
 proc injectCallback(
     retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
-  ## Registered by the next owner: a delivery here is an event of a past one.
+  ## The next owner registers this: a delivery here is an event of a past owner.
   gInjected.atomicInc()
 
 proc encodedPtr(bytes: var seq[byte]): ptr byte =
@@ -155,10 +142,7 @@ proc waitTicks(id: int, want: int, timeoutMs = 5000): bool =
   true
 
 proc waitSlotFree[T](ctx: ptr FFIContext[T]) =
-  ## `requestRecycle` returns once the recycle fired its done signal, which is
-  ## one step before the FFI thread releases the claim (the fire has to come
-  ## first, or a thread claiming the slot would take it as its own answer). Wait
-  ## that step out before a check that depends on the slot being free.
+  ## `requestRecycle` returns on the done signal, one step before the FFI thread releases the claim (the fire must come first, or a thread that claims the slot would take it as its own answer); wait that step out before a check that needs a free slot.
   let deadline = Moment.now() + 5.seconds
   while ctx.isInUse() and Moment.now() < deadline:
     os.sleep(1)
@@ -192,8 +176,7 @@ proc callPing(ctx: ptr FFIContext[OrphanLib]): bool =
     return false
   waitFlag(gReplied)
 
-# The quarantined slot outlives the test that made it: the next suite compares
-# against it, and its orphan never stops.
+# The quarantined slot outlives its test: the next suite compares against it, and its orphan never stops.
 var gQuarantined: ptr FFIContext[OrphanLib]
 
 suite "a {.ffiDtor.} that stops its offspring":
@@ -245,7 +228,7 @@ suite "a {.ffiDtor.} cut short by TeardownTimeout":
     let elapsed = Moment.now() - t0
     gTeardownHangs.store(false)
 
-    # The timeout ended the teardown, not an early bail or the body finishing.
+    # The timeout ended the teardown, not an early bail and not a completed body.
     check elapsed >= TeardownTimeout
     check elapsed < RecycleWaitTimeout
     check not gTeardownRan.load()
@@ -257,9 +240,7 @@ suite "a {.ffiDtor.} cut short by TeardownTimeout":
     let before = gTicks[1].load()
     check waitTicks(1, before + 3)
 
-    # Quarantine keeps the library alive, so the orphan's `ptr` stays valid.
-    # Guarded: a runtime that frees it leaves `myLib` nil, and the file has more
-    # to report than one segfault.
+    # Quarantine keeps the library alive, so the orphan's `ptr` stays valid; the nil guard keeps a runtime that frees it from a segfault here.
     check not ctx[].myLib.isNil()
     if not ctx[].myLib.isNil():
       check ctx[].myLib.canary == CtorCanary
@@ -291,9 +272,7 @@ suite "a {.ffiDtor.} cut short by TeardownTimeout":
     check waitTicks(1, before + 3)
     check gInjected.load() == 0
 
-    # The orphan's sentinel write must not reach the next owner's library. On a
-    # reused slot `freeLib` freed that object and the next ctor is handed the same
-    # block back, so the write lands in the library serving this context.
+    # The sentinel write must not reach the next owner's library: on a reused slot `freeLib` frees the object, the next ctor gets the same block back, and the write lands in the library of this context.
     gArmSentinel.store(true)
     let armed = gTicks[1].load()
     check waitTicks(1, armed + 3)
@@ -306,11 +285,7 @@ suite "a {.ffiDtor.} cut short by TeardownTimeout":
     check gTeardownRan.load()
 
   test "the abandoned library is not freed under the orphan":
-    # Armed before the recycle, with nothing allocating a context afterwards, so
-    # on a runtime that frees the library the orphan's next write lands in the
-    # freed block: this is the case the `NIM_FFI_SAN=asan` job reports as a
-    # heap-use-after-free. (Arming *after* the next owner exists instead hits the
-    # reallocated block, which the test above covers.)
+    # Arm before the recycle and allocate no context afterwards: a runtime that frees the library puts the orphan's next write in the freed block, which the asan job reports as a heap-use-after-free (an arm after the next owner exists hits the reallocated block; the test above covers that).
     gTeardownHangs.store(true)
     gTeardownRan.store(false)
     gIncarnation.store(4)
@@ -337,8 +312,7 @@ suite "a {.ffiDtor.} cut short by TeardownTimeout":
 
 suite "quarantine after the caller stopped waiting":
   test "a teardown that finishes past RecycleWaitTimeout does not release the slot":
-    # An uncancellable teardown outlasts the caller's wait, so the recycle it
-    # reported as failed must not hand the slot back when the body finally ends.
+    # A teardown that blocks the cancel outlasts the caller's wait; the caller saw a failed recycle, so the slot must not come back when the body ends.
     gTeardownIgnoresCancel.store(true)
     gTeardownHold.store(true)
     gTeardownRan.store(false)
