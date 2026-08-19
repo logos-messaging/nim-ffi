@@ -6,10 +6,16 @@ on:
       test:
         required: true
         type: string
+        description: Space-separated tests/unit base names, e.g. 'test_alloc' or 'test_a test_b'. Every one runs; the step fails at the end if any did.
       nim-versions:
         required: true
         type: string
         description: JSON array of Nim versions to run the matrix against, e.g. '["2.2.6","stable"]'.
+      oses:
+        required: false
+        type: string
+        default: '["ubuntu-22.04","macos-15","windows-latest"]'
+        description: JSON array of runner images. Narrow it when another job already covers an OS.
       nimble-version:
         required: true
         type: string
@@ -19,19 +25,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-15, windows-latest]
+        os: ${{ fromJSON(inputs.oses) }}
         nim-version: ${{ fromJSON(inputs.nim-versions) }}
         mm: [orc, refc]
-        include:
-          - os: ubuntu-22.04
-            label: Linux
-          - os: macos-15
-            label: macOS
-          - os: windows-latest
-            label: Windows
 
     runs-on: ${{ matrix.os }}
-    name: ${{ matrix.label }} · Nim ${{ matrix.nim-version }} · ${{ matrix.mm }}
+    # Mapped inline rather than through `include`: an include entry whose `os` is
+    # not in the matrix would add a combination of its own instead of a label.
+    name: ${{ matrix.os == 'ubuntu-22.04' && 'Linux' || matrix.os == 'macos-15' && 'macOS' || 'Windows' }} · Nim ${{ matrix.nim-version }} · ${{ matrix.mm }}
 
     steps:
       - uses: actions/checkout@v4
@@ -79,8 +80,19 @@ jobs:
 
       - name: Run ${{ inputs.test }} (${{ matrix.mm }})
         shell: bash
+        env:
+          TESTS: ${{ inputs.test }}
+          MM: ${{ matrix.mm }}
         run: |
           if [ "$RUNNER_OS" == "Windows" ]; then
             export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
           fi
-          nim c -r --mm:${{ matrix.mm }} -d:chronicles_log_level=WARN tests/unit/${{ inputs.test }}.nim
+          # Run every file even after one fails, or the first failure hides the rest.
+          failed=""
+          for t in $TESTS; do
+            nim c -r --mm:"$MM" -d:chronicles_log_level=WARN "tests/unit/$t.nim" || failed="$failed $t"
+          done
+          if [ -n "$failed" ]; then
+            echo "failed:$failed"
+            exit 1
+          fi
