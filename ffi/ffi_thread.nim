@@ -215,27 +215,34 @@ proc resetForNextOwner[T](ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]
   rejectQueuedRequests(ctx)
   ongoing[].setLen(0)
 
+proc finishRecycle[T](ctx: ptr FFIContext[T], failure: RecycleFailure) =
+  ## Ends a recycle: quarantines the slot or releases it, and answers the caller
+  ## either way. Fire before the release, or a thread claiming the slot would
+  ## take this as its own answer.
+  # A caller whose wait expired already saw a failure, so the slot must not come back; the race on the flag is benign, a lost race releases only a slot whose teardown completed.
+  var outcome = failure
+  if outcome == RecycleFailure.None and ctx.recycleAbandoned.load():
+    outcome = RecycleFailure.CallerAbandoned
+  if outcome != RecycleFailure.None:
+    ctx.recycleFailure.store(outcome)
+    ctx.lifecycle.store(CtxLifecycle.RecycleFailed)
+    error "context quarantined; the pool slot and its threads leak, the " &
+      "library stays alive and its callbacks can still fire",
+      reason = outcome.reason(), cause = $outcome
+  let fireRes = ctx.recycleDoneSignal.fireSync()
+  if fireRes.isErr():
+    error "failed to fire recycleDoneSignal", err = fireRes.error
+  if outcome == RecycleFailure.None:
+    ctx.releaseClaim()
+
 proc recycleContext[T](
     ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]
 ) {.async.} =
   ## Drain in-flight handlers, run the library teardown, reset the slot, then fire recycleDoneSignal and release the slot, all WITHOUT stopping the worker/event threads, so the next createFFIContext reuses them (no fd churn). Anything short of a completed teardown quarantines the slot instead: it stays claimed for the life of the process, the library stays alive, and `recycleFailure` tells the host why. Reuse is safe only when the previous owner is gone from this thread, and the one proof is a teardown that ran to the end; chronos cannot enumerate or cancel what a cut-short teardown left on the dispatcher.
   var failure = RecycleFailure.None
-  # Deferred: a raise out of the teardown must not strand the slot. Fire before the release, or a thread claiming the slot would take this as its own answer.
+  # Deferred so a raise out of the teardown cannot strand the slot.
   defer:
-    # A caller whose wait expired already saw a failure, so the slot must not come back; the race on the flag is benign, a lost race releases only a slot whose teardown completed.
-    if failure == RecycleFailure.None and ctx.recycleAbandoned.load():
-      failure = RecycleFailure.CallerAbandoned
-    if failure != RecycleFailure.None:
-      ctx.recycleFailure.store(failure)
-      ctx.lifecycle.store(CtxLifecycle.RecycleFailed)
-      error "context quarantined; the pool slot and its threads leak, the " &
-        "library stays alive and its callbacks can still fire",
-        reason = failure.reason(), cause = $failure
-    let fireRes = ctx.recycleDoneSignal.fireSync()
-    if fireRes.isErr():
-      error "failed to fire recycleDoneSignal", err = fireRes.error
-    if failure == RecycleFailure.None:
-      ctx.releaseClaim()
+    ctx.finishRecycle(failure)
 
   if not await drainOngoing(ongoing):
     # A handler that still runs answers a callback carrying userData the host

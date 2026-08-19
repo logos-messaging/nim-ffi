@@ -52,9 +52,11 @@ proc releaseSlot[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]) =
 
 proc quarantinedSlots*[T](pool: var FFIContextPool[T]): int =
   ## Slots that a failed recycle took out of service; exact, because only a full destroy clears `RecycleFailed`.
+  var count = 0
   for i in 0 ..< MaxFFIContexts:
     if pool.contexts[i].lifecycle.load() == CtxLifecycle.RecycleFailed:
-      inc result
+      count.inc()
+  count
 
 proc createFFIContext*[T](
     pool: var FFIContextPool[T]
