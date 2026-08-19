@@ -24,11 +24,33 @@ proc isNil*(token: FFICtxToken): bool {.borrow.}
 proc `==`*(a, b: FFICtxToken): bool {.borrow.}
 
 type CtxLifecycle* {.pure.} = enum
-  ## Active -> RecyclePending (ffiDtor asks) -> Recycling (FFI loop drains) -> Active (slot reused) or RecycleFailed (drain timed out).
+  ## Active -> RecyclePending (ffiDtor asks) -> Recycling (FFI loop drains) -> Active (slot reused) or RecycleFailed (teardown did not complete).
   Active
   RecyclePending
   Recycling
   RecycleFailed # terminal: only the recycle handler writes it, nothing clears it
+
+type RecycleFailure* {.pure.} = enum
+  ## Why a slot is quarantined. Not a string: the host reads it from another thread, and refc heaps are thread-local.
+  None
+  DrainTimeout ## in-flight handlers outlasted both drain rounds
+  TeardownTimeout ## TeardownTimeout cancelled the `{.ffiDtor.}` body
+  TeardownRaised ## the `{.ffiDtor.}` body raised
+  CallerAbandoned ## the caller's own wait expired before the recycle finished
+
+func reason*(failure: RecycleFailure): string =
+  ## The `requestRecycle` error text for a quarantine.
+  case failure
+  of RecycleFailure.None:
+    "recycle failed"
+  of RecycleFailure.DrainTimeout:
+    "in-flight handlers did not drain"
+  of RecycleFailure.TeardownTimeout:
+    "the timeout cancelled the {.ffiDtor.} teardown"
+  of RecycleFailure.TeardownRaised:
+    "the {.ffiDtor.} teardown raised"
+  of RecycleFailure.CallerAbandoned:
+    "the teardown outlasted the caller's wait"
 
 type FFIContext*[T] = object
   myLib*: ptr T # main library object (Waku, LibP2P, SDS, …)
@@ -44,6 +66,10 @@ type FFIContext*[T] = object
     # The opaque handle the host holds for the current claim. Written by
     # createFFIContext under the claim; read only by the owner.
   lifecycle*: Atomic[CtxLifecycle]
+  recycleFailure*: Atomic[RecycleFailure]
+    # Why the slot is quarantined; the recycle handler writes it with `RecycleFailed`.
+  recycleAbandoned*: Atomic[bool]
+    # `requestRecycle` sets this when its wait expires; a recycle that finishes later must quarantine, because the caller already saw a failure.
   recycleDoneSignal: ThreadSignalPtr
     # fired by the recycle handler once the lib is freed, just before it releases the slot; the synchronous recycleFFIContext caller waits on it.
   libReady*: Atomic[bool]
@@ -149,6 +175,8 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ctx.myLibOwned = false
   ctx.myLibRefd = false
   ctx.lifecycle.store(CtxLifecycle.Active)
+  ctx.recycleFailure.store(RecycleFailure.None)
+  ctx.recycleAbandoned.store(false)
   initRequestQueue(ctx[].reqQueueBank)
   initEventRegistry(ctx[].eventRegistry)
   initHandleRegistry(ctx[].handles)
@@ -255,11 +283,12 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Ask the FFI thread to drain, free the lib and release the slot, WITHOUT
   ## stopping its worker/event threads, so the next createFFIContext reuses them.
   ## Synchronous: waits on recycleDoneSignal. No fd churn -> no select() limit.
-  ## An err means the caller must keep the callback userData of every in-flight
-  ## request alive: teardown did not complete. A request the host races against its own recycle is rejected or silently dropped, never answered.
+  ## On err the slot is quarantined and its callbacks can still fire: keep the userData of every in-flight request alive.
   var expected = CtxLifecycle.Active
   if not ctx.lifecycle.compareExchange(expected, CtxLifecycle.RecyclePending):
     return err("requestRecycle: context is not Active (already recycling)")
+
+  ctx.recycleAbandoned.store(false)
 
   # A recycle that timed out can fire late. The CAS makes this the only recycle
   # in flight, so drop that stale fire before the wait below can answer to it.
@@ -273,11 +302,15 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   let done = ctx.recycleDoneSignal.waitSync(RecycleWaitTimeout).valueOr:
     return err("requestRecycle: failed waiting for recycle: " & $error)
   if not done:
+    # Quarantine, not release: this caller already saw the failure.
+    ctx.recycleAbandoned.store(true)
+    error "recycle did not complete in time; the pool slot is quarantined",
+      timeoutMs = RecycleWaitTimeout.milliseconds
     return err("requestRecycle: recycle did not complete in time")
   if ctx.lifecycle.load() == CtxLifecycle.RecycleFailed:
     return err(
-      "requestRecycle: in-flight handlers did not drain; the library and the pool " &
-        "slot are leaked, and their callbacks can still fire"
+      "requestRecycle: " & ctx.recycleFailure.load().reason() &
+        "; the library and the pool slot leak, and callbacks can still fire"
     )
   ok()
 

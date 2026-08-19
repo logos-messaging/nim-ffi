@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [master, main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # PRs only: a cancelled push run would leave master without a result.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # Single source of truth for Nim / Nimble versions used by every job and
   # every reusable workflow below. Values live in versions.env at the repo
@@ -112,6 +117,24 @@ jobs:
       nim-versions:   ${{ needs.versions.outputs.nim-versions }}
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
+  recycle-teardown:
+    # One job for the whole family: these tests run in seconds while a job's
+    # setup takes minutes, so six files share one setup instead of paying it six
+    # times. Stable Nim only — thread reuse, thread exit and chronos dispatcher
+    # behaviour are what differ here, and they differ per OS, not per compiler
+    # version. No ubuntu either: `unit-tests-all` already runs every file on
+    # Linux under both Nim versions and both mms.
+    name: Recycle & Teardown
+    needs: versions
+    uses: ./.github/workflows/test.yml
+    with:
+      test: >-
+        test_ffi_teardown test_ffi_recycle_reset test_ffi_claim_generation
+        test_ffi_ingress_limits test_ctx_after_failed_ctor test_event_thread
+      oses: '["macos-15","windows-latest"]'
+      nim-versions: '["stable"]'
+      nimble-version: ${{ needs.versions.outputs.nimble }}
+
   cpp-e2e:
     # Codegen output doesn't vary with mm, so we matrix over OS and Nim only.
     # Windows runs MSVC by default and may surface codegen tweaks needed in
@@ -204,6 +227,16 @@ jobs:
     uses: ./.github/workflows/nimble-job.yml
     with:
       run: nimble check_bindings -y
+      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
+      nimble-version: ${{ needs.versions.outputs.nimble }}
+
+  unit-tests-all:
+    # Catch-all: `nimble test` discovers and runs every test_*.nim under orc and refc, so a new file cannot ship with no run. Linux only: the double compile of ~40 files is the cost, and the jobs above carry the OS-sensitive files across the matrix.
+    name: All unit tests (orc + refc)
+    needs: versions
+    uses: ./.github/workflows/nimble-job.yml
+    with:
+      run: nimble test -y
       nim-versions:   ${{ needs.versions.outputs.nim-versions }}
       nimble-version: ${{ needs.versions.outputs.nimble }}
 

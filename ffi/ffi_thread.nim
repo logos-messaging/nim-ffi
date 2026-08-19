@@ -166,19 +166,31 @@ proc rejectQueuedRequests[T](ctx: ptr FFIContext[T]) =
       error "rejecting a queued request raised", error = e.msg
     request = nextRequest
 
-proc runTeardown[T](ctx: ptr FFIContext[T]) {.async.} =
+type TeardownOutcome = enum
+  ## Skipped is clean: there was nothing to tear down.
+  Skipped
+  Completed
+  TimedOut
+  Raised
+
+proc runTeardown[T](ctx: ptr FFIContext[T]): Future[TeardownOutcome] {.async.} =
   ## Awaits the library's `{.ffiDtor.}` body. `libReady` gates it: without a ctor
   ## `myLib` is the zero-valued fallback, nil for a `ref` type.
   let teardown = ffiTeardownHook[T]()
   if teardown.isNil() or ctx.myLib.isNil() or not ctx.libReady.load():
-    return
+    debug "no library teardown to run for this context"
+    return TeardownOutcome.Skipped
   try:
+    # `withTimeout` cancels the body and waits for the unwind: no teardown code runs past this await.
     let done = await teardown(ctx.myLib).withTimeout(TeardownTimeout)
-    if not done:
-      error "library teardown cancelled at the timeout; releasing the library",
-        timeoutMs = TeardownTimeoutMs
+    if done:
+      return TeardownOutcome.Completed
+    error "the timeout cancelled the library teardown; work it did not cancel " &
+      "still runs on this thread", timeoutMs = TeardownTimeoutMs
+    return TeardownOutcome.TimedOut
   except CatchableError as e:
     error "library teardown raised", error = e.msg
+    return TeardownOutcome.Raised
 
 proc drainOngoing(ongoing: ptr seq[Future[void]]): Future[bool] {.async.} =
   ## Waits out the in-flight dispatchers, then cancels them and waits again.
@@ -198,34 +210,60 @@ proc resetForNextOwner[T](ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]
   # A reused slot skips initContextResources, so the handle ids of the old owner
   # would otherwise resolve for the next one.
   ctx[].handles.releaseAll()
+  # Same reason: the sticky overflow flag would reject every request of the next owner, ctor included.
+  ctx.eventQueueStuck.store(false)
   rejectQueuedRequests(ctx)
   ongoing[].setLen(0)
+
+proc finishRecycle[T](ctx: ptr FFIContext[T], failure: RecycleFailure) =
+  ## Ends a recycle: quarantines the slot or releases it, and answers the caller
+  ## either way. Fire before the release, or a thread claiming the slot would
+  ## take this as its own answer.
+  # A caller whose wait expired already saw a failure, so the slot must not come back; the race on the flag is benign, a lost race releases only a slot whose teardown completed.
+  var outcome = failure
+  if outcome == RecycleFailure.None and ctx.recycleAbandoned.load():
+    outcome = RecycleFailure.CallerAbandoned
+  if outcome != RecycleFailure.None:
+    ctx.recycleFailure.store(outcome)
+    ctx.lifecycle.store(CtxLifecycle.RecycleFailed)
+    error "context quarantined; the pool slot and its threads leak, the " &
+      "library stays alive and its callbacks can still fire",
+      reason = outcome.reason(), cause = $outcome
+  let fireRes = ctx.recycleDoneSignal.fireSync()
+  if fireRes.isErr():
+    error "failed to fire recycleDoneSignal", err = fireRes.error
+  if outcome == RecycleFailure.None:
+    ctx.releaseClaim()
 
 proc recycleContext[T](
     ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]
 ) {.async.} =
-  ## Drain in-flight handlers, run the library teardown, reset the slot, then fire recycleDoneSignal and release the slot, all WITHOUT stopping the worker/event threads, so the next createFFIContext reuses them (no fd churn). A drain that times out aborts the recycle: the slot stays claimed, the library stays alive, and the terminal `RecycleFailed` tells the host so.
-  var drained = false
-  # Deferred: a raise out of the teardown must not strand the slot. Fire before the release, or a thread claiming the slot would take this as its own answer.
+  ## Drain in-flight handlers, run the library teardown, reset the slot, then fire recycleDoneSignal and release the slot, all WITHOUT stopping the worker/event threads, so the next createFFIContext reuses them (no fd churn). Anything short of a completed teardown quarantines the slot instead: it stays claimed for the life of the process, the library stays alive, and `recycleFailure` tells the host why. Reuse is safe only when the previous owner is gone from this thread, and the one proof is a teardown that ran to the end; chronos cannot enumerate or cancel what a cut-short teardown left on the dispatcher.
+  var failure = RecycleFailure.None
+  # Deferred so a raise out of the teardown cannot strand the slot.
   defer:
-    if not drained:
-      ctx.lifecycle.store(CtxLifecycle.RecycleFailed)
-    let fireRes = ctx.recycleDoneSignal.fireSync()
-    if fireRes.isErr():
-      error "failed to fire recycleDoneSignal", err = fireRes.error
-    if drained:
-      ctx.releaseClaim()
+    ctx.finishRecycle(failure)
 
-  drained = await drainOngoing(ongoing)
-  if not drained:
+  if not await drainOngoing(ongoing):
     # A handler that still runs answers a callback carrying userData the host
     # frees as soon as teardown reports success.
-    error "recycle drain timed out; leaking the pool slot and keeping the library",
+    error "recycle drain timed out; the teardown never ran",
       inFlight = ongoing[].len, timeoutMs = RecycleTimeoutMs
+    failure = RecycleFailure.DrainTimeout
     return
 
   # Before the reset: the teardown hook still needs `myLib` and its listeners.
-  await runTeardown(ctx)
+  case await runTeardown(ctx)
+  of TeardownOutcome.Skipped, TeardownOutcome.Completed:
+    discard
+  of TeardownOutcome.TimedOut:
+    failure = RecycleFailure.TeardownTimeout
+    return
+  of TeardownOutcome.Raised:
+    failure = RecycleFailure.TeardownRaised
+    return
+
+  # Reset only now: the previous owner is provably done with this thread.
   resetForNextOwner(ctx, ongoing)
 
 var ffiEventQueueSignalPtr {.threadvar.}: ThreadSignalPtr
@@ -332,6 +370,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
       except CatchableError as e:
         error "draining pending FFI requests on shutdown raised", error = e.msg
 
-    await runTeardown(ctx)
+    # The thread stops either way; runTeardown already logged the outcome.
+    discard await runTeardown(ctx)
 
   waitFor ffiRun(ctx)

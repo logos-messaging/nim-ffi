@@ -81,6 +81,31 @@ All notable changes to this project are documented in this file.
   define if your host needs more.
 
 ### Fixed
+- **A context whose teardown did not finish is quarantined, not recycled.**
+  `recycleContext` gated the slot release on the request drain alone, and
+  `runTeardown` returned nothing: a `{.ffiDtor.}` cut short by
+  `TeardownTimeout`, or one that raised, still had its library freed and its slot
+  handed to the next owner, while `requestRecycle` reported success. Whatever
+  async work the abandoned teardown never cancelled keeps running on that
+  thread's chronos dispatcher — and chronos exposes no way to enumerate, let
+  alone cancel, the futures of a thread outside a debug build, so the runtime
+  cannot clean up after a teardown that gave up. Reuse is only safe when the
+  previous owner is provably gone from the thread, and the only proof is its
+  teardown having run to the end. A recycle now releases the slot only when the
+  drain succeeded **and** the teardown either completed or had nothing to do.
+  Otherwise the slot stays claimed for the life of the process, the library is
+  kept alive (the orphans still hold pointers into it), the terminal
+  `RecycleFailed` records a `RecycleFailure` reason, and `requestRecycle`
+  returns that reason as an error. A recycle that finishes after the caller's own
+  `RecycleWaitTimeout` expired is quarantined too: that caller was already told
+  it failed. `FFIContextPool.quarantinedSlots()` reports how many slots this has
+  cost, and the pool-exhausted error names the count.
+- **A recycled slot no longer carries the previous owner's stuck-queue flag.**
+  `eventQueueStuck` is set on event-queue overflow and cleared only in
+  `initContextResources`, which a reused slot skips, so one overflow left the
+  slot rejecting every request of every later owner — including the constructor,
+  which made `createFFIContext` hand out the same poisoned slot again and again.
+  The recycle reset clears it.
 - **A claim and the generation it opens are one atomic operation.** `tryClaim`
   set `inUse` and bumped `generation` in two steps, and between them a token of
   the previous owner passed both checks in `resolveCtx`: `inUse` was already
