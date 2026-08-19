@@ -70,7 +70,9 @@ static inline CborError nimffi_enc_str(CborEncoder* e, const NimFfiStr* v) {
     return cbor_encode_text_string(e, v->data ? v->data : "", v->len);
 }
 static inline CborError nimffi_enc_bytes(CborEncoder* e, const NimFfiBytes* v) {
-    return cbor_encode_byte_string(e, v->data, v->len);
+    /* A null src is UB in memcpy even for len 0, and UBSan reports it. */
+    static const uint8_t nimffi_empty_byte = 0;
+    return cbor_encode_byte_string(e, v->data ? v->data : &nimffi_empty_byte, v->len);
 }
 
 /* ── leaf decoders ─────────────────────────────────────────────────────── */

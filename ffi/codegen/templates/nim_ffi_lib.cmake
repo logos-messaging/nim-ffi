@@ -9,6 +9,22 @@ get_filename_component(NIM_SRC
     "${CMAKE_CURRENT_SOURCE_DIR}/${NIM_FFI_SRC}"
     ABSOLUTE)
 
+# Memory-management mode and extra `nim c` arguments (a sanitizer, a `-d:` that
+# selects a variant of a shared example source). A parent project that sets
+# these must use `set(... CACHE ... FORCE)`: under CMP0126 OLD (our
+# `cmake_minimum_required(VERSION 3.14)`) the non-FORCE `set(... CACHE)` below
+# would otherwise delete the parent's normal variable and the dylib would build
+# with the defaults.
+set(NIM_FFI_MM "orc" CACHE STRING "Nim memory-management mode for the dylib")
+set(NIM_FFI_EXTRA_ARGS "" CACHE STRING "Extra nim c args when building the dylib")
+
+# The dylib path does not encode the mm or the sanitizer, so a rebuild under
+# different settings would reuse the previous binary. Depend on a stamp holding
+# those settings; `file(GENERATE)` rewrites it only when its content changes.
+set(NIM_BUILD_STAMP "${CMAKE_CURRENT_BINARY_DIR}/${NIM_FFI_LIB}_build_config.stamp")
+file(GENERATE OUTPUT "${NIM_BUILD_STAMP}"
+     CONTENT "mm=${NIM_FFI_MM} args=${NIM_FFI_EXTRA_ARGS}\n")
+
 find_program(NIM_EXECUTABLE nim REQUIRED)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
@@ -31,16 +47,17 @@ endif()
 add_custom_command(
     OUTPUT  "${NIM_LIB_FILE}"
     COMMAND "${NIM_EXECUTABLE}" c
-                --mm:orc
+                "--mm:${NIM_FFI_MM}"
                 -d:chronicles_log_level=WARN
                 --app:lib
                 --noMain
                 "--nimMainPrefix:lib${NIM_FFI_LIB}"
                 ${NIM_IMPLIB_PASSL}
+                ${NIM_FFI_EXTRA_ARGS}
                 "-o:${NIM_LIB_FILE}"
                 "${NIM_SRC}"
     WORKING_DIRECTORY "${REPO_ROOT}"
-    DEPENDS "${NIM_SRC}"
+    DEPENDS "${NIM_SRC}" "${NIM_BUILD_STAMP}"
     BYPRODUCTS "${NIM_IMPLIB_FILE}"
     COMMENT "Compiling Nim library lib${NIM_FFI_LIB}"
     VERBATIM

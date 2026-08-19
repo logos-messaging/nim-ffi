@@ -1,3 +1,7 @@
+//! Tokio (async) example: the `_async` API over the same consts, `version` and three-parameter `schedule` calls as `client.rs`.
+//!
+//! Run with: `cargo run --example tokio_client`
+
 use std::time::Duration;
 use my_timer::{
     EchoRequest, JobPriority, JobSpec, MyTimerCtx, RetryPolicy, ScheduleConfig,

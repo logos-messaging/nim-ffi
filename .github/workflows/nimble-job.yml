@@ -31,6 +31,7 @@ jobs:
       matrix:
         nim-version: ${{ fromJSON(inputs.nim-versions) }}
     runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 60
     name: Nim ${{ matrix.nim-version }}
     steps:
       - uses: actions/checkout@v4

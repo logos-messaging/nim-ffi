@@ -27,12 +27,14 @@ This command:
 
 ## Using as a Dependency
 
-The `rust_client` example consumes this crate:
+A consumer depends on the crate by path:
 
 ```toml
 [dependencies]
 my_timer = { path = "../rust_bindings" }
 ```
+
+The four clients under `examples/` are cargo examples of this crate, and they are hand-written: `nimble genbindings_rust` does not touch that directory. CI compiles them with `cargo build --locked --examples`, which is the only thing that type-checks the generated `api.rs` surface.
 
 ## Do Not Edit
 

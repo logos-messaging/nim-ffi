@@ -30,9 +30,6 @@ examples/**/rust_bindings/target/
 # Example C++ build artifacts
 examples/**/cpp_bindings/build/
 
-# Cargo build artifacts (rust clients / harnesses)
-examples/**/rust_client/target/
-
 # Development plans (local only — match PLAN.md and any `*-plan.md` notes)
 PLAN.md
 *-plan.md

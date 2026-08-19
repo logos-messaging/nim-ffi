@@ -428,9 +428,7 @@ proc generateApiRs*(
   lines.add(
     "    // lost the race, or the future was dropped before being awaited. This cannot"
   )
-  lines.add(
-    "    // happen with the current rust_client demo but may occur in arbitrary"
-  )
+  lines.add("    // happen with the crate's own examples but may occur in arbitrary")
   lines.add("    // downstream consumers, so we discard the Err safely.")
   lines.add(
     "    // Given that this is invoked from a Nim thread, we can't propagate the error by panicking or"
