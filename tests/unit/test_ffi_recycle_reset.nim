@@ -1,10 +1,11 @@
 ## Recycle hands the pool slot back with nothing of the previous owner left on
 ## it: no live handles, and no teardown at all while a handler still runs.
 
-import std/[atomics, locks, os]
+import std/[atomics, os]
 import unittest2
 import results
 import ffi
+import ./helpers
 
 type RecycleLib = object
 
@@ -42,66 +43,6 @@ proc recyclelib_block*(lib: RecycleLib): Future[Result[int, string]] {.ffi.} =
   gEntered.store(true)
   await noCancel(waitForRelease())
   return ok(1)
-
-type CallbackData = object
-  lock: Lock
-  cond: Cond
-  called: bool
-  retCode: cint
-  msg: array[1024, byte]
-  msgLen: int
-
-proc initCallbackData(d: var CallbackData) =
-  d.lock.initLock()
-  d.cond.initCond()
-
-proc deinitCallbackData(d: var CallbackData) =
-  d.cond.deinitCond()
-  d.lock.deinitLock()
-
-proc testCallback(
-    retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
-) {.cdecl, gcsafe, raises: [].} =
-  let d = cast[ptr CallbackData](userData)
-  acquire(d[].lock)
-  d[].retCode = retCode
-  let n = min(int(len), d[].msg.len)
-  if n > 0 and not msg.isNil:
-    copyMem(addr d[].msg[0], msg, n)
-  d[].msgLen = n
-  d[].called = true
-  signal(d[].cond)
-  release(d[].lock)
-
-proc waitCallback(d: var CallbackData) =
-  acquire(d.lock)
-  while not d.called:
-    wait(d.cond, d.lock)
-  release(d.lock)
-
-proc wasCalled(d: var CallbackData): bool =
-  acquire(d.lock)
-  let called = d.called
-  release(d.lock)
-  called
-
-proc payload(d: var CallbackData): seq[byte] =
-  var b = newSeq[byte](d.msgLen)
-  if d.msgLen > 0:
-    copyMem(addr b[0], addr d.msg[0], d.msgLen)
-  b
-
-proc encodedPtr(b: var seq[byte]): ptr byte =
-  if b.len == 0:
-    nil
-  else:
-    cast[ptr byte](addr b[0])
-
-proc waitSlotFree[T](ctx: ptr FFIContext[T]) =
-  ## `requestRecycle` returns on the done signal, one step before the FFI thread releases the claim (the fire must come first, or a thread that claims the slot would take it as its own answer); wait that step out before a check that needs a free slot.
-  let deadline = Moment.now() + 5.seconds
-  while ctx.isInUse() and Moment.now() < deadline:
-    os.sleep(1)
 
 template runCall(d, ctx, reqBytes, exportProc) =
   initCallbackData(d)

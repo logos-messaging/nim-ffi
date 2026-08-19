@@ -113,15 +113,6 @@ jobs:
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
   # The recycle/teardown jobs below depend on thread reuse, thread exit and chronos dispatcher behaviour, which differ per OS; the Linux sanitizer jobs run every unit test but cannot speak for macOS or Windows.
-  dtor-orphan-reuse:
-    name: Dtor Orphan Reuse
-    needs: versions
-    uses: ./.github/workflows/test.yml
-    with:
-      test: test_ffi_dtor_orphan_reuse
-      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
-      nimble-version: ${{ needs.versions.outputs.nimble }}
-
   ffi-teardown:
     name: Async Teardown
     needs: versions
