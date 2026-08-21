@@ -51,25 +51,22 @@ typedef struct {
     int flag;
 } ReplyWaiter;
 
-static inline void waiter_copy_err(char* dst, size_t cap, const char* em) {
-    if (em) {
-        snprintf(dst, cap, "%s", em);
+/* Copies the error out, then publishes `done` with release so wait_done sees every field. */
+static inline void waiter_settle(atomic_int* done, char* err, size_t cap, const char* err_msg) {
+    if (err_msg) {
+        snprintf(err, cap, "%s", err_msg);
     }
-}
-
-static inline void waiter_finish(atomic_int* done) {
     atomic_store_explicit(done, 1, memory_order_release);
 }
 
 /* Shared terminal callback for any proc returning a bare string. */
-static inline void on_str(int ec, const NimFfiStr* reply, const char* em, void* ud) {
-    ReplyWaiter* w = (ReplyWaiter*)ud;
-    w->err_code = ec;
+static inline void on_str(int err_code, const NimFfiStr* reply, const char* err_msg, void* user_data) {
+    ReplyWaiter* w = (ReplyWaiter*)user_data;
+    w->err_code = err_code;
     if (reply && reply->data) {
         snprintf(w->text_a, sizeof(w->text_a), "%s", reply->data);
     }
-    waiter_copy_err(w->err, sizeof(w->err), em);
-    waiter_finish(&w->done);
+    waiter_settle(&w->done, w->err, sizeof(w->err), err_msg);
 }
 
 #endif /* NIM_FFI_E2E_WAITER_H_INCLUDED */

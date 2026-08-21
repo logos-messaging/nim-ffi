@@ -1,6 +1,6 @@
 //! Synchronous example: consts, `version`, `echo`, and the three-complex-parameter `schedule` call.
 //!
-//! Run with: `cargo run --example client`
+//! Run with: `cargo run --example sync_client`
 
 use std::time::Duration;
 use my_timer::{

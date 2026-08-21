@@ -9,14 +9,9 @@ get_filename_component(NIM_SRC
     "${CMAKE_CURRENT_SOURCE_DIR}/${NIM_FFI_SRC}"
     ABSOLUTE)
 
-# Memory-management mode and extra `nim c` arguments (a sanitizer, a `-d:` that
-# selects a variant of a shared example source). A parent project that sets
-# these must use `set(... CACHE ... FORCE)`: under CMP0126 OLD (our
-# `cmake_minimum_required(VERSION 3.14)`) the non-FORCE `set(... CACHE)` below
-# would otherwise delete the parent's normal variable and the dylib would build
-# with the defaults.
-set(NIM_FFI_MM "orc" CACHE STRING "Nim memory-management mode for the dylib")
-set(NIM_FFI_EXTRA_ARGS "" CACHE STRING "Extra nim c args when building the dylib")
+# A parent project must set these with `set(... CACHE ... FORCE)`: under CMP0126 OLD a non-FORCE `set(... CACHE)` deletes the parent's normal variable, and the dylib builds with the defaults.
+set(NIM_FFI_MM "orc" CACHE STRING "Nim memory-management mode for the dylib: orc, arc, refc, none")
+set(NIM_FFI_EXTRA_ARGS "" CACHE STRING "Extra nim c args, e.g. -d:useMalloc --passC:-fsanitize=address -d:ffiEchoAbiC")
 
 # The dylib path does not encode the mm or the sanitizer, so a rebuild under
 # different settings would reuse the previous binary. Depend on a stamp holding

@@ -1,4 +1,4 @@
-//! Tokio (async) example: the `_async` API over the same consts, `version` and three-parameter `schedule` calls as `client.rs`.
+//! Tokio (async) example: the `_async` API over the same consts, `version` and three-parameter `schedule` calls as `sync_client.rs`.
 //!
 //! Run with: `cargo run --example tokio_client`
 

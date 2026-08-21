@@ -25,12 +25,11 @@ static void on_echo_fired(const EchoEvent* evt, void* user_data) {
 }
 
 /* Per library: the ctor callback's context parameter is a distinct type. */
-static void on_created(int ec, MyTimerCtx* ctx, const char* em, void* ud) {
-    CreateWaiter* w = (CreateWaiter*)ud;
-    w->err_code = ec;
+static void on_created(int err_code, MyTimerCtx* ctx, const char* err_msg, void* user_data) {
+    CreateWaiter* w = (CreateWaiter*)user_data;
+    w->err_code = err_code;
     w->ctx = ctx;
-    waiter_copy_err(w->err, sizeof(w->err), em);
-    waiter_finish(&w->done);
+    waiter_settle(&w->done, w->err, sizeof(w->err), err_msg);
 }
 
 static MyTimerCtx* make_ctx(void) {
@@ -56,16 +55,15 @@ static void test_version(MyTimerCtx* ctx) {
     assert(strcmp(w.text_a, TIMER_VERSION) == 0);
 }
 
-static void on_echo(int ec, const EchoResponse* reply, const char* em, void* ud) {
-    ReplyWaiter* w = (ReplyWaiter*)ud;
-    w->err_code = ec;
+static void on_echo(int err_code, const EchoResponse* reply, const char* err_msg, void* user_data) {
+    ReplyWaiter* w = (ReplyWaiter*)user_data;
+    w->err_code = err_code;
     if (reply) {
         if (reply->echoed.data) snprintf(w->text_a, sizeof(w->text_a), "%s", reply->echoed.data);
         if (reply->timerName.data)
             snprintf(w->text_b, sizeof(w->text_b), "%s", reply->timerName.data);
     }
-    waiter_copy_err(w->err, sizeof(w->err), em);
-    waiter_finish(&w->done);
+    waiter_settle(&w->done, w->err, sizeof(w->err), err_msg);
 }
 
 static void test_echo(MyTimerCtx* ctx) {
@@ -79,17 +77,16 @@ static void test_echo(MyTimerCtx* ctx) {
     assert(strcmp(w.text_b, "c-e2e") == 0);
 }
 
-static void on_complex(int ec, const ComplexResponse* reply, const char* em, void* ud) {
-    ReplyWaiter* w = (ReplyWaiter*)ud;
-    w->err_code = ec;
+static void on_complex(int err_code, const ComplexResponse* reply, const char* err_msg, void* user_data) {
+    ReplyWaiter* w = (ReplyWaiter*)user_data;
+    w->err_code = err_code;
     if (reply) {
         w->num_a = (long long)reply->itemCount;
         w->flag = (int)reply->hasNote;
         if (reply->summary.data)
             snprintf(w->text_a, sizeof(w->text_a), "%s", reply->summary.data);
     }
-    waiter_copy_err(w->err, sizeof(w->err), em);
-    waiter_finish(&w->done);
+    waiter_settle(&w->done, w->err, sizeof(w->err), err_msg);
 }
 
 static void test_complex(MyTimerCtx* ctx) {
@@ -115,17 +112,16 @@ static void test_complex(MyTimerCtx* ctx) {
     assert(strstr(w.text_a, "note=note") != NULL);
 }
 
-static void on_schedule(int ec, const ScheduleResult* reply, const char* em, void* ud) {
-    ReplyWaiter* w = (ReplyWaiter*)ud;
-    w->err_code = ec;
+static void on_schedule(int err_code, const ScheduleResult* reply, const char* err_msg, void* user_data) {
+    ReplyWaiter* w = (ReplyWaiter*)user_data;
+    w->err_code = err_code;
     if (reply) {
         w->num_a = (long long)reply->willRunCount;
         w->num_b = (long long)reply->effectiveBackoffMs;
         w->flag = (int)reply->priority;
         if (reply->jobId.data) snprintf(w->text_a, sizeof(w->text_a), "%s", reply->jobId.data);
     }
-    waiter_copy_err(w->err, sizeof(w->err), em);
-    waiter_finish(&w->done);
+    waiter_settle(&w->done, w->err, sizeof(w->err), err_msg);
 }
 
 static void test_schedule_ok(MyTimerCtx* ctx) {

@@ -3,12 +3,11 @@
 #include "waiter.h"
 
 /* Per library: the ctor callback's context parameter is a distinct type. */
-static void on_created(int ec, EchoCtx* ctx, const char* em, void* ud) {
-    CreateWaiter* w = (CreateWaiter*)ud;
-    w->err_code = ec;
+static void on_created(int err_code, EchoCtx* ctx, const char* err_msg, void* user_data) {
+    CreateWaiter* w = (CreateWaiter*)user_data;
+    w->err_code = err_code;
     w->ctx = ctx;
-    waiter_copy_err(w->err, sizeof(w->err), em);
-    waiter_finish(&w->done);
+    waiter_settle(&w->done, w->err, sizeof(w->err), err_msg);
 }
 
 static EchoCtx* make_ctx(void) {
@@ -25,17 +24,16 @@ static EchoCtx* make_ctx(void) {
     return (EchoCtx*)w.ctx;
 }
 
-static void on_shout(int ec, const ShoutResponse* reply, const char* em, void* ud) {
-    ReplyWaiter* w = (ReplyWaiter*)ud;
-    w->err_code = ec;
+static void on_shout(int err_code, const ShoutResponse* reply, const char* err_msg, void* user_data) {
+    ReplyWaiter* w = (ReplyWaiter*)user_data;
+    w->err_code = err_code;
     if (reply) {
         if (reply->shouted.data)
             snprintf(w->text_a, sizeof(w->text_a), "%s", reply->shouted.data);
         if (reply->prefix.data)
             snprintf(w->text_b, sizeof(w->text_b), "%s", reply->prefix.data);
     }
-    waiter_copy_err(w->err, sizeof(w->err), em);
-    waiter_finish(&w->done);
+    waiter_settle(&w->done, w->err, sizeof(w->err), err_msg);
 }
 
 static void test_shout(EchoCtx* ctx) {
