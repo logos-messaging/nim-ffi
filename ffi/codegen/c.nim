@@ -709,12 +709,18 @@ proc emitReverseMachinery(
       "static inline int " & libName & "_ctx_set_" & snake & "_impl(const " & ctxType &
         "* ctx, FFIReverseImpl impl, void* user_data) {"
     )
-    lines.add("    return " & libName & "_set_" & snake & "_impl(ctx->ptr, impl, user_data);")
+    lines.add(
+      "    return " & libName & "_set_" & snake & "_impl(ctx->ptr, impl, user_data);"
+    )
     lines.add("}")
     if r.argsTypeName.len > 0:
       let (argsC, _) = ensureCType(reg, r.argsTypeName)
       let argsFree = freeFn(reg, argsC)
-      let freeNote = if argsFree.len > 0: "; free `out` with " & argsFree else: ""
+      let freeNote =
+        if argsFree.len > 0:
+          "; free `out` with " & argsFree
+        else:
+          ""
       lines.add(
         "/* Decode the args of a `" & snake & "` invocation" & freeNote & ". */"
       )
@@ -745,7 +751,9 @@ proc emitReverseMachinery(
       lines.add("        free(err);")
       lines.add("        return -1;")
       lines.add("    }")
-      lines.add("    int rc = " & libName & "_reverse_reply(ctx->ptr, call_id, 0, buf, len);")
+      lines.add(
+        "    int rc = " & libName & "_reverse_reply(ctx->ptr, call_id, 0, buf, len);"
+      )
       lines.add("    free(buf);")
       lines.add("    return rc;")
       lines.add("}")
@@ -754,15 +762,17 @@ proc emitReverseMachinery(
         "static inline int " & libName & "_ctx_reverse_reply_" & snake & "(const " &
           ctxType & "* ctx, uint64_t call_id) {"
       )
-      lines.add("    return " & libName & "_reverse_reply(ctx->ptr, call_id, 0, NULL, 0);")
+      lines.add(
+        "    return " & libName & "_reverse_reply(ctx->ptr, call_id, 0, NULL, 0);"
+      )
       lines.add("}")
     lines.add("")
   for rev in reverseEvents:
     let (reqC, _) = ensureCType(reg, rev.reqTypeName)
     lines.add(renderBlockDocComment(rev.doc))
     lines.add(
-      "static inline int " & libName & "_ctx_emit_" & rev.wireName & "(const " &
-        ctxType & "* ctx, const " & reqC & "* payload) {"
+      "static inline int " & libName & "_ctx_emit_" & rev.wireName & "(const " & ctxType &
+        "* ctx, const " & reqC & "* payload) {"
     )
     lines.add("    uint8_t* buf = NULL;")
     lines.add("    size_t len = 0;")
@@ -774,7 +784,9 @@ proc emitReverseMachinery(
     lines.add("        free(err);")
     lines.add("        return -1;")
     lines.add("    }")
-    lines.add("    int rc = " & libName & "_emit_" & rev.wireName & "(ctx->ptr, buf, len);")
+    lines.add(
+      "    int rc = " & libName & "_emit_" & rev.wireName & "(ctx->ptr, buf, len);"
+    )
     lines.add("    free(buf);")
     lines.add("    return rc;")
     lines.add("}")
@@ -1057,9 +1069,7 @@ proc generateCLibHeader*(
   if reverse.len > 0:
     lines.add("#ifndef NIM_FFI_REVERSE_IMPL_DEFINED")
     lines.add("#define NIM_FFI_REVERSE_IMPL_DEFINED")
-    lines.add(
-      "/* Invoked on the library's event dispatch thread; return promptly and"
-    )
+    lines.add("/* Invoked on the library's event dispatch thread; return promptly and")
     lines.add(
       "   answer (inline or later, from any thread) via <lib>_reverse_reply. */"
     )
@@ -1077,12 +1087,8 @@ proc generateCLibHeader*(
     lines.add(
       "/* Answers a reverse call from ANY thread. ret_code 0 = ok (reply_cbor is"
     )
-    lines.add(
-      "   the CBOR reply), non-zero = error (reply_cbor is a UTF-8 message)."
-    )
-    lines.add(
-      "   Returns 0 accepted, 1 invalid ctx, 2 ctx not active, 3 payload too"
-    )
+    lines.add("   the CBOR reply), non-zero = error (reply_cbor is a UTF-8 message).")
+    lines.add("   Returns 0 accepted, 1 invalid ctx, 2 ctx not active, 3 payload too")
     lines.add("   large, 4 mailbox full. */")
     lines.add(
       "int " & libName & "_reverse_reply(void* ctx, uint64_t call_id, int ret_code, " &
@@ -1118,8 +1124,8 @@ proc generateCLibHeader*(
       adaptersDone.incl("enc" & tok)
       lines.add(
         "static inline CborError " & libName & "_encv_" & tok &
-          "(CborEncoder* e, const void* v) { return " & encFn(reg, n) &
-          "(e, (const " & n & "*)v); }"
+          "(CborEncoder* e, const void* v) { return " & encFn(reg, n) & "(e, (const " & n &
+          "*)v); }"
       )
   var respSet = respTypes
   respSet.add("NimFfiStr") # ctor address payload

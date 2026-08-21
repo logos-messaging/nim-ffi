@@ -33,7 +33,10 @@ proc ffiNoopCallback*(
   discard
 
 type FFIReverseImpl* = proc(
-  callId: uint64, argsCbor: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
+  callId: uint64,
+  argsCbor: ptr UncheckedArray[byte],
+  argsLen: csize_t,
+  userData: pointer,
 ) {.cdecl, gcsafe, raises: [].}
   ## Host-registered implementation of a `{.ffiReverse.}` proc. Invoked on the
   ## event dispatch thread; must return promptly and answer (inline or later,

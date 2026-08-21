@@ -111,7 +111,9 @@ registerReqFFI(CallAbandonedRequest, lib: ptr TestRevLib):
 ## Host implementations (run on the event dispatch thread).
 
 proc echoImpl(
-    callId: uint64, argsCbor: ptr UncheckedArray[byte], argsLen: csize_t,
+    callId: uint64,
+    argsCbor: ptr UncheckedArray[byte],
+    argsLen: csize_t,
     userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   ## Inline reply from within the invocation, on the event thread.
@@ -125,7 +127,9 @@ type ParkBox = object
   callId: uint64
 
 proc parkImpl(
-    callId: uint64, argsCbor: ptr UncheckedArray[byte], argsLen: csize_t,
+    callId: uint64,
+    argsCbor: ptr UncheckedArray[byte],
+    argsLen: csize_t,
     userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   ## No reply here: hands the call id to the test thread, which answers later.
@@ -137,7 +141,9 @@ proc parkImpl(
   release(box[].lock)
 
 proc silentImpl(
-    callId: uint64, argsCbor: ptr UncheckedArray[byte], argsLen: csize_t,
+    callId: uint64,
+    argsCbor: ptr UncheckedArray[byte],
+    argsLen: csize_t,
     userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   discard # never answers; the caller's deadline must fire
@@ -147,7 +153,9 @@ type SlowBox = object
   exited: Atomic[bool]
 
 proc slowImpl(
-    callId: uint64, argsCbor: ptr UncheckedArray[byte], argsLen: csize_t,
+    callId: uint64,
+    argsCbor: ptr UncheckedArray[byte],
+    argsLen: csize_t,
     userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   let box = cast[ptr SlowBox](userData)

@@ -126,7 +126,9 @@ type TokenBox = object
 ## generated `revmacro_reverse_reply` export (the full C-visible path).
 
 proc fetchConfigImpl(
-    callId: uint64, argsCbor: ptr UncheckedArray[byte], argsLen: csize_t,
+    callId: uint64,
+    argsCbor: ptr UncheckedArray[byte],
+    argsLen: csize_t,
     userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   # A C host calls the export from arbitrary threads; Nim's gcsafe analysis
@@ -136,19 +138,27 @@ proc fetchConfigImpl(
     let decoded = cborDecodePtr(argsCbor, int(argsLen), FetchConfigArgs).valueOr:
       let msg = "args decode failed"
       discard revmacro_reverse_reply(
-        box[].token, callId, RET_ERR, cast[ptr byte](unsafeAddr msg[0]),
+        box[].token,
+        callId,
+        RET_ERR,
+        cast[ptr byte](unsafeAddr msg[0]),
         csize_t(msg.len),
       )
       return
     let reply =
       cborEncode(RevConfig(name: decoded.key & "!", attempt: decoded.attempt + 1))
     discard revmacro_reverse_reply(
-      box[].token, callId, RET_OK, cast[ptr byte](unsafeAddr reply[0]),
+      box[].token,
+      callId,
+      RET_OK,
+      cast[ptr byte](unsafeAddr reply[0]),
       csize_t(reply.len),
     )
 
 proc ackNoteImpl(
-    callId: uint64, argsCbor: ptr UncheckedArray[byte], argsLen: csize_t,
+    callId: uint64,
+    argsCbor: ptr UncheckedArray[byte],
+    argsLen: csize_t,
     userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   {.cast(gcsafe).}:
@@ -156,7 +166,9 @@ proc ackNoteImpl(
     discard revmacro_reverse_reply(box[].token, callId, RET_OK, nil, 0)
 
 proc silentImpl(
-    callId: uint64, argsCbor: ptr UncheckedArray[byte], argsLen: csize_t,
+    callId: uint64,
+    argsCbor: ptr UncheckedArray[byte],
+    argsLen: csize_t,
     userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   discard
@@ -169,7 +181,9 @@ suite "{.ffiReverse.} through the generated exports":
       check revmacro_set_fetch_config_impl(token, fetchConfigImpl, addr box) ==
         REVERSE_ACCEPTED
 
-      check sendRequestToFFIThread(ctx, DriveFetchRequest.ffiNewReq(captureCb, addr rsp))
+      check sendRequestToFFIThread(
+        ctx, DriveFetchRequest.ffiNewReq(captureCb, addr rsp)
+      )
         .isOk()
       waitCallback(rsp)
       check rsp.retCode == RET_OK
@@ -179,8 +193,7 @@ suite "{.ffiReverse.} through the generated exports":
     setupCallbackData(rsp)
     withLibCtx(ctx, token):
       var box = TokenBox(token: token)
-      check revmacro_set_host_note_impl(token, ackNoteImpl, addr box) ==
-        REVERSE_ACCEPTED
+      check revmacro_set_host_note_impl(token, ackNoteImpl, addr box) == REVERSE_ACCEPTED
 
       check sendRequestToFFIThread(
         ctx, DriveNotifyRequest.ffiNewReq(captureCb, addr rsp)
@@ -205,7 +218,9 @@ suite "{.ffiReverse.} through the generated exports":
   test "unfulfilled interface fails fast; stale token is rejected":
     setupCallbackData(rsp)
     withLibCtx(ctx, token):
-      check sendRequestToFFIThread(ctx, DriveFetchRequest.ffiNewReq(captureCb, addr rsp))
+      check sendRequestToFFIThread(
+        ctx, DriveFetchRequest.ffiNewReq(captureCb, addr rsp)
+      )
         .isOk()
       waitCallback(rsp)
       check rsp.retCode == RET_ERR

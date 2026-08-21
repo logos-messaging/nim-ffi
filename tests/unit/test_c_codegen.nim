@@ -530,9 +530,8 @@ suite "generateCLibHeader: reverse FFI":
         reqTypeName: "OnHostPingReq",
       )
     ]
-    let header = generateCLibHeader(
-      procs, types, "timer", @[], @[], "", reverse, reverseEvents
-    )
+    let header =
+      generateCLibHeader(procs, types, "timer", @[], @[], "", reverse, reverseEvents)
 
   test "raw reverse exports are declared with the impl typedef":
     check "typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, size_t args_len, void* user_data);" in

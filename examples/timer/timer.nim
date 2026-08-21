@@ -156,9 +156,7 @@ type HostClock {.ffi.} = object
   unixMs: int
   zone: string
 
-proc fetchHostClock(
-  precision: string
-): Future[Result[HostClock, string]] {.ffiReverse.}
+proc fetchHostClock(precision: string): Future[Result[HostClock, string]] {.ffiReverse.}
   ## Asks the host for its wall clock. The host registers an implementation via
   ## `my_timer_set_fetch_host_clock_impl` and answers (from any thread) through
   ## `my_timer_reverse_reply`; an unfulfilled or silent host fails this call.
