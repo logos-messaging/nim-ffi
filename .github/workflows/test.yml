@@ -6,7 +6,7 @@ on:
       test:
         required: true
         type: string
-        description: Space-separated tests/unit base names, e.g. 'test_alloc' or 'test_a test_b'. Every one runs; the step fails at the end if any did.
+        description: Space-separated tests/unit base names, e.g. 'test_serial' or 'test_a test_b'. Every one runs; the step fails at the end if any did.
       nim-versions:
         required: true
         type: string

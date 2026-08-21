@@ -1,7 +1,16 @@
 ## Helpers shared by the C/C++ binding generators (cpp.nim, c.nim).
 
 import std/strutils
+import ../ffi_ret
 import ./meta, ./string_helpers
+
+func retCodeDefines*(): string =
+  ## The `#define NIMFFI_RET_*` block both header preludes stamp, from the one
+  ## Nim definition in `ffi/ffi_ret.nim`.
+  var lines: seq[string] = @[]
+  for code in ffiRetCodes:
+    lines.add("#define NIMFFI_RET_" & code.name & " " & $code.value)
+  return lines.join("\n")
 
 proc stripLibPrefix*(procName, libName: string): string =
   ## Drops the `<lib>_` prefix from an exported C symbol.

@@ -105,6 +105,3 @@ jobs:
 
       - name: Run C e2e tests (${{ inputs.sanitizer }})
         run: nimble test_c_e2e_sanitized -y
-
-      - name: Run abi=c C e2e test (${{ inputs.sanitizer }})
-        run: nimble test_c_abi_e2e_sanitized -y

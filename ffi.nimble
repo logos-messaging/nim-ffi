@@ -10,7 +10,6 @@ packageName = "ffi"
 requires "nim >= 2.2.6"
 requires "chronos"
 requires "chronicles"
-requires "taskpools"
 requires "cbor_serialization == 0.3.0"
 
 const nimFlagsOrc = "--mm:orc -d:chronicles_log_level=WARN"
@@ -109,15 +108,6 @@ proc genBindingsCmd(flags, src: string, langs = "rust", outDir = ""): string =
   cmd.add " " & src
   cmd
 
-proc removeStaleEchoLib() =
-  ## CMake keys the shared `libecho.so` rebuild on echo.nim's mtime, not on
-  ## `-d:ffiEchoAbiC`, so a stale lib from the other ABI is reused and segfaults.
-  ## Every echo e2e task deletes it first to force a fresh rebuild.
-  for name in ["libecho.so", "libecho.dylib", "echo.dll"]:
-    let path = thisDir() / name
-    if fileExists(path):
-      rmFile(path)
-
 task buildffi, "Compile the library":
   runOrQuit "nim c " & nimFlagsOrc & " --app:lib --noMain ffi.nim"
 
@@ -125,23 +115,6 @@ task test, "Run all tests under --mm:orc and --mm:refc":
   for flags in [nimFlagsOrc, nimFlagsRefc]:
     for t in unitTests:
       runOrQuit "nim c -r " & flags & " tests/unit/" & t & ".nim"
-
-task test_alloc, "Run alloc unit tests under --mm:orc and --mm:refc":
-  runOrQuit "nim c -r " & nimFlagsOrc & " tests/unit/test_alloc.nim"
-  runOrQuit "nim c -r " & nimFlagsRefc & " tests/unit/test_alloc.nim"
-
-task test_ffi, "Run FFI context integration tests under --mm:orc and --mm:refc":
-  runOrQuit "nim c -r " & nimFlagsOrc & " tests/unit/test_ffi_context.nim"
-  runOrQuit "nim c -r " & nimFlagsRefc & " tests/unit/test_ffi_context.nim"
-
-task test_serial, "Run CBOR codec unit tests":
-  runOrQuit "nim c -r " & nimFlagsOrc & " tests/unit/test_serial.nim"
-  runOrQuit "nim c -r " & nimFlagsRefc & " tests/unit/test_serial.nim"
-
-task bench_codec, "Microbenchmark: cbor vs c (cwire) wire-format codecs":
-  # Built with -d:danger so the numbers reflect optimized codegen, not the
-  # debug build. Not part of `test` — timing is a measurement, not a gate.
-  runOrQuit "nim c -r " & nimFlagsOrc & " -d:danger tests/bench/bench_codec.nim"
 
 task bench_ffi_submit,
   "Concurrent-submit stress + scaling gate for sendRequestToFFIThread":
@@ -196,9 +169,6 @@ task test_cpp_e2e, "Build and run the C++ end-to-end tests for the timer example
   # Regenerate the C++ bindings so the suite always runs against fresh codegen.
   runOrQuit "nimble genbindings_cpp"
   runOrQuit "nimble genbindings_cpp_echo"
-  # Force a fresh CBOR libecho: a prior abi=c run leaves a same-named dylib that
-  # cmake would otherwise reuse, mismatching the CBOR bindings (segfault).
-  removeStaleEchoLib()
   # Reset the cache: a previous *_sanitized configure left the sanitizer on.
   runOrQuit "cmake -S tests/e2e/cpp -B tests/e2e/cpp/build" &
     " -DNIM_FFI_MM=orc -DNIM_FFI_SANITIZER=none"
@@ -212,23 +182,11 @@ task test_c_e2e, "Build and run the C end-to-end tests (timer + echo)":
   # Regenerate the C bindings so the suite always runs against fresh codegen.
   runOrQuit "nimble genbindings_c"
   runOrQuit "nimble genbindings_c_echo"
-  # Force a fresh CBOR libecho: a prior abi=c run leaves a same-named dylib that
-  # cmake would otherwise reuse, mismatching the CBOR bindings (segfault).
-  removeStaleEchoLib()
   # Reset the cache: a previous *_sanitized configure left the sanitizer on.
   runOrQuit "cmake -S tests/e2e/c -B tests/e2e/c/build" &
     " -DNIM_FFI_MM=orc -DNIM_FFI_SANITIZER=none"
   runOrQuit "cmake --build tests/e2e/c/build --config Debug"
   runOrQuit "ctest --test-dir tests/e2e/c/build --output-on-failure -C Debug"
-
-task test_c_abi_e2e, "Build and run the CBOR-free abi=c C end-to-end test (echo)":
-  runOrQuit "nimble genbindings_c_abi_echo"
-  removeStaleEchoLib()
-  # Reset the cache: a previous *_sanitized configure left the sanitizer on.
-  runOrQuit "cmake -S tests/e2e/c_abi -B tests/e2e/c_abi/build" &
-    " -DNIM_FFI_SANITIZER=none"
-  runOrQuit "cmake --build tests/e2e/c_abi/build --config Debug"
-  runOrQuit "ctest --test-dir tests/e2e/c_abi/build --output-on-failure -C Debug"
 
 task test_sanitized,
   "Run all unit tests under a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
@@ -246,9 +204,6 @@ task test_cpp_e2e_sanitized,
   let san = getEnv("NIM_FFI_SAN", "none")
   runOrQuit "nimble genbindings_cpp"
   runOrQuit "nimble genbindings_cpp_echo"
-  # See test_cpp_e2e: force a fresh CBOR libecho so a prior abi=c dylib can't be
-  # reused against the CBOR bindings.
-  removeStaleEchoLib()
   runOrQuit "cmake -S tests/e2e/cpp -B tests/e2e/cpp/build" & " -DNIM_FFI_MM=" & mm &
     " -DNIM_FFI_SANITIZER=" & san
   runOrQuit "cmake --build tests/e2e/cpp/build --config Debug -j"
@@ -260,27 +215,10 @@ task test_c_e2e_sanitized,
   let san = getEnv("NIM_FFI_SAN", "none")
   runOrQuit "nimble genbindings_c"
   runOrQuit "nimble genbindings_c_echo"
-  # See test_c_e2e: force a fresh CBOR libecho so a prior abi=c dylib can't be
-  # reused against the CBOR bindings.
-  removeStaleEchoLib()
   runOrQuit "cmake -S tests/e2e/c -B tests/e2e/c/build" & " -DNIM_FFI_MM=" & mm &
     " -DNIM_FFI_SANITIZER=" & san
   runOrQuit "cmake --build tests/e2e/c/build --config Debug -j"
   runOrQuit "ctest --test-dir tests/e2e/c/build --output-on-failure -C Debug"
-
-task test_c_abi_e2e_sanitized,
-  "Build and run the abi=c C e2e test with a sanitizer (NIM_FFI_SAN)":
-  let san = getEnv("NIM_FFI_SAN", "none")
-  runOrQuit "nimble genbindings_c_abi_echo"
-  removeStaleEchoLib()
-  runOrQuit "cmake -S tests/e2e/c_abi -B tests/e2e/c_abi/build" & " -DNIM_FFI_SANITIZER=" &
-    san
-  runOrQuit "cmake --build tests/e2e/c_abi/build --config Debug -j"
-  runOrQuit "ctest --test-dir tests/e2e/c_abi/build --output-on-failure -C Debug"
-
-task genbindings_example, "Generate Rust bindings for the timer example":
-  runOrQuit genBindingsCmd(nimFlagsOrc, timerSrc)
-  runOrQuit genBindingsCmd(nimFlagsRefc, timerSrc)
 
 task genbindings_rust, "Generate Rust bindings for the timer example":
   runOrQuit genBindingsCmd(nimFlagsOrc, timerSrc, "rust")
@@ -304,13 +242,6 @@ task genbindings_c, "Generate C bindings for the timer example":
 task genbindings_c_echo, "Generate C bindings for the echo example":
   runOrQuit genBindingsCmd(nimFlagsOrc, echoSrc, "c")
   runOrQuit genBindingsCmd(nimFlagsRefc, echoSrc, "c")
-
-task genbindings_c_abi_echo, "Generate CBOR-free abi=c C bindings for the echo example":
-  # abiOut forces output beside the CBOR `c_bindings/` instead of overwriting it.
-  const abiOut = "examples/echo/c_abi_bindings"
-  const abiFlags = " -d:ffiEchoAbiC -d:ffiSrcPath=../echo.nim"
-  runOrQuit genBindingsCmd(nimFlagsOrc & abiFlags, echoSrc, "c", abiOut)
-  runOrQuit genBindingsCmd(nimFlagsRefc & abiFlags, echoSrc, "c", abiOut)
 
 task check_bindings_rust, "Verify checked-in Rust bindings match Nim source":
   runOrQuit "nimble genbindings_rust"
@@ -354,16 +285,6 @@ task check_bindings_c, "Verify checked-in C bindings match Nim source":
     ],
   )
 
-task check_bindings_c_abi, "Verify checked-in abi=c C bindings match Nim source":
-  runOrQuit "nimble genbindings_c_abi_echo"
-  checkBindingsDiff(
-    "nimble genbindings_c_abi_echo",
-    [
-      "examples/echo/c_abi_bindings/echo.h",
-      "examples/echo/c_abi_bindings/CMakeLists.txt",
-    ],
-  )
-
 task check_bindings_cddl, "Verify the checked-in CDDL schema matches Nim source":
   runOrQuit "nimble genbindings_cddl"
   checkBindingsDiff(
@@ -374,5 +295,4 @@ task check_bindings, "Verify all checked-in example bindings match Nim source":
   runOrQuit "nimble check_bindings_rust"
   runOrQuit "nimble check_bindings_cpp"
   runOrQuit "nimble check_bindings_c"
-  runOrQuit "nimble check_bindings_c_abi"
   runOrQuit "nimble check_bindings_cddl"

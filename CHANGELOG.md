@@ -5,20 +5,8 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
-- The `abi = c` C header now declares the event-listener ABI that
-  `declareLibrary` always exports (`<lib>_add_event_listener` /
-  `<lib>_remove_event_listener`) and the `FFICallBack` typedef they take, so a
-  consumer needs no hand-written header. The typed listener machinery for
-  `{.ffiEvent.}` is still unsupported under `abi = c`.
-- The `abi = c` C header is self-contained: it emits the `<stdint.h>` /
-  `<stddef.h>` includes, the `NIMFFI_RET_*` status codes, and short
-  `#ifndef`-guarded `RET_*` aliases for consumers that use the unprefixed names.
 - Each `{.ffi.}` proc's `##` doc comment reaches the generated C header as a
   `/** ... */` block above the declaration and its wrapper.
-- `declareLibrary` accepts the `ABIFormat` enum for `defaultABIFormat`, so
-  `defaultABIFormat = ABIFormat.C` compiles alongside the `"c"` string.
-- `declareLibrary` takes an optional `headerBanner` argument, stamped as a
-  `//`-comment block at the top of every generated C header.
 - `genBindings()` fails compilation when a library declares an `{.ffiCtor.}` but
   no `{.ffiDtor.}`, so the context a constructor builds always has a way to be
   released.
@@ -66,6 +54,15 @@ All notable changes to this project are documented in this file.
   router would silently give it the ctor ABI instead.
 
 ### Changed
+- **The event-queue defines are `ffi`-prefixed.** `-d:EventQueueCapacity`,
+  `-d:MaxEventPayloadBytes` and `-d:MaxEventNameBytes` are now
+  `-d:ffiEventQueueCapacity`, `-d:ffiMaxEventPayloadBytes` and
+  `-d:ffiMaxEventNameBytes`, so they cannot collide with another package's
+  defines. The Nim constant names are unchanged.
+- **The C header spells the error code `NIMFFI_RET_ERR`**, not
+  `NIMFFI_RET_ERROR`, matching the C++ header and Nim's `RET_ERR`. Every
+  generated copy of the `NIMFFI_RET_*` table is emitted from the one definition
+  in `ffi/ffi_ret.nim`. Regenerate your bindings to pick it up.
 - **A submit now has two limits, and fails instead of accepting without bound.**
   The ingress queue took every request a producer offered, so a producer faster
   than the FFI thread — or any producer once that thread is wedged — grew memory
@@ -73,12 +70,36 @@ All notable changes to this project are documented in this file.
   its ingress queue holds `-d:ffiRequestQueueDepth` (1024) requests, or once its
   payload passes `-d:ffiMaxRequestPayloadBytes` (8 MiB). Ingress is sharded over
   16 queues, so a context holds at most 16384 requests. The payload cap measures
-  the buffer the request owns: on the `abi = c` path that is the packed wire
-  struct, and the buffers its fields point at stay uncounted, because that path
-  trusts its caller. Both limits come back as the error the submit already
-  returns, which the generated entry points report as `RET_ERR` through the
+  the CBOR buffer the request owns. Both limits come back as the error the
+  submit already returns, which the generated entry points report as `RET_ERR` through the
   callback, so a host that stays under the limits sees no change. Raise either
   define if your host needs more.
+
+### Removed
+- **The `abi = c` wire is gone; CBOR is the only wire.** `declareLibrary` takes
+  the library name and its type alone, and no annotation accepts an
+  `"abi = ..."` argument. With it go the `_CWire` companions and their codec
+  (`c_macro_helpers.nim`, `c_wire.nim`), the CBOR-free scalar fast path
+  (`ffi_scalar.nim`, `-d:ffiAllowScalarSkip`), the second C header shape
+  (`generateCAbiLibHeader`), `examples/echo/c_abi_bindings/`, and the
+  `*_c_abi_*` tasks, tests and CI jobs. What the deleted `bench_codec` measured,
+  for the record: cwire beat CBOR by a large factor on small structs, where
+  CBOR's per-field tag and length framing dominates, and the two converged
+  toward 1x as `seq[byte]` payloads grew and both became memcpy-bound. Losing
+  that small-struct speed is the price of one wire, one set of generators, and
+  no struct layout to keep in step across a lib/header skew.
+- `declareLibrary`'s `headerBanner` argument, which nothing passed.
+- The `ffi/logging.nim` module. Every FFI thread called `setupLog` with the same
+  two hardcoded arguments, so up to 32 threads raced to install the same
+  process-global chronicles writer, and the `Json`/`NO_COLOR` paths were
+  unreachable. chronicles' own defaults do the same job.
+- `SharedSeq` / `allocSharedSeq` / `deallocSharedSeq` / `toSeq` from
+  `ffi/alloc.nim`, `cborFreeShared`, `eventQueueLen`, and the `git_version`
+  define: no call sites outside their own tests.
+- Nimble tasks `genbindings_example`, `test_alloc`, `test_ffi`, `test_serial`
+  and `bench_codec`, plus the unused `taskpools` dependency in `ffi.nimble` and
+  both example `.nimble` files. The example `.nimble` files keep `build` only:
+  their `genbindings_*` copies duplicated the root tasks.
 
 ### Fixed
 - **A context whose teardown did not finish is quarantined, not recycled.**

@@ -3,8 +3,9 @@ name: CI
 on:
   push:
     branches: [master, main]
+  # Unfiltered, like linters.yml: a PR stacked on a feature branch is a PR, and
+  # a base filter here means it merges with no test job ever having run.
   pull_request:
-    branches: [master, main]
   # Without this a merge queue runs linters.yml only and merges untested code.
   merge_group:
 
@@ -30,15 +31,6 @@ jobs:
       - uses: actions/checkout@v4
       - id: load
         run: cat versions.env >> "$GITHUB_OUTPUT"
-
-  alloc:
-    name: Alloc
-    needs: versions
-    uses: ./.github/workflows/test.yml
-    with:
-      test: test_alloc
-      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
-      nimble-version: ${{ needs.versions.outputs.nimble }}
 
   ffi-context:
     name: FFI Context
@@ -76,24 +68,15 @@ jobs:
       nim-versions:   ${{ needs.versions.outputs.nim-versions }}
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
-  abi-format:
+  foreign-thread:
     # Runs cross-OS to also guard declareLibrary's --app:lib linker-flag check:
-    # this test compiles FFI code as a plain executable, which would fail to
+    # the fixture compiles FFI code as a plain executable, which would fail to
     # link on macOS if the soname/install_name flags leaked into a non-lib build.
-    name: ABI Format
+    name: Foreign Thread
     needs: versions
     uses: ./.github/workflows/test.yml
     with:
-      test: test_abi_format
-      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
-      nimble-version: ${{ needs.versions.outputs.nimble }}
-
-  foreign-thread-c-abi:
-    name: Foreign Thread (abi = c)
-    needs: versions
-    uses: ./.github/workflows/test.yml
-    with:
-      test: test_foreign_thread_c_abi
+      test: test_foreign_thread
       nim-versions:   ${{ needs.versions.outputs.nim-versions }}
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
@@ -105,18 +88,6 @@ jobs:
     uses: ./.github/workflows/test.yml
     with:
       test: test_event_listener_reentrancy
-      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
-      nimble-version: ${{ needs.versions.outputs.nimble }}
-
-  c-wire:
-    # The `c`-ABI cwire codec is layout-/allocator-sensitive (malloc/free, flat
-    # struct packing, allocShared for seq/Option), so cover it across the full
-    # OS matrix, not just Linux.
-    name: C Wire Codec
-    needs: versions
-    uses: ./.github/workflows/test.yml
-    with:
-      test: test_c_wire
       nim-versions:   ${{ needs.versions.outputs.nim-versions }}
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
@@ -222,14 +193,6 @@ jobs:
             export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
           fi
           nimble test_c_e2e -y
-
-      # The CBOR-free abi=c C binding (issue #105). Linux-only: the generated
-      # header is platform-checked by the check-bindings job, and the runtime
-      # path only needs one OS to exercise the abi=c struct dispatch.
-      - name: Run abi=c C e2e test
-        if: matrix.label == 'Linux'
-        shell: bash
-        run: nimble test_c_abi_e2e -y
 
   check-bindings:
     # Single OS is enough — codegen output is platform-independent; the Nim

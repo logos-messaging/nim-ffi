@@ -94,6 +94,12 @@ proc awaitWithStaleWarnings(
     fireStaleWarn(request, elapsed)
   return await retFut
 
+proc requestHandler(reqId: cstring): FFIRequestProc {.gcsafe.} =
+  ## The registry is filled at module init, before any FFI thread starts, and is
+  ## never written again; the cast launders that immutability past the gcsafe check.
+  {.cast(gcsafe).}:
+    ffi_types.registeredRequests.getOrDefault(reqId, nil)
+
 proc processRequest[T](
     request: ptr FFIThreadRequest, ctx: ptr FFIContext[T]
 ) {.async.} =
@@ -102,11 +108,12 @@ proc processRequest[T](
   let reqId = $request[].reqId
   let reqIdCs = reqId.cstring # keeps reqId alive
 
+  let handler = requestHandler(reqIdCs)
   let retFut =
-    if not ctx[].registeredRequests[].contains(reqIdCs):
+    if handler.isNil():
       nilProcess(request[].reqId)
     else:
-      ctx[].registeredRequests[][reqIdCs](cast[pointer](request), ctx)
+      handler(cast[pointer](request), ctx)
 
   # One try over warn-loop + handler so a shutdown-drain cancel still reaches the response-and-free below.
   let res =
@@ -286,8 +293,6 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ffiEventQueueSignalPtr = ctx.eventQueueSignal
   ffiCurrentNotifyEventEnqueued = ffiNotifyEventEnqueuedHook
   onFFIThread = true
-
-  logging.setupLog(logging.LogLevel.DEBUG, logging.LogFormat.TEXT)
 
   defer:
     onFFIThread = false

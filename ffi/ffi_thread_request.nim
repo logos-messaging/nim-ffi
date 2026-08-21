@@ -12,27 +12,15 @@ const EmptyErrorMarker = "unknown error"
 
 const MaxRequestPayloadBytes* {.intdefine: "ffiMaxRequestPayloadBytes".} =
   8 * 1024 * 1024
-  ## Largest `data` a submit accepts. On the `abi = c` path `data` is the packed
-  ## wire struct, so the buffers its fields point at stay uncounted. Override
-  ## with `-d:ffiMaxRequestPayloadBytes=<n>`.
-
-const MaxScalarArgs* = 8
-  ## Inline scalar fast-path capacity; more params can't use it (compile-time checked).
+  ## Largest CBOR `data` a submit accepts. Override with
+  ## `-d:ffiMaxRequestPayloadBytes=<n>`.
 
 type FFIThreadRequest* = object
   callback*: FFICallBack
   userData*: pointer
   reqId*: cstring ## Req type name used to look up the handler.
-  data*: ptr UncheckedArray[byte]
-    ## Owned request payload: CBOR-encoded, or a packed `_CWire` struct on the
-    ## `abi = c` path. Nil on the scalar fast path.
+  data*: ptr UncheckedArray[byte] ## Owned, CBOR-encoded request payload.
   dataLen*: int
-  rawReply*: bool
-    ## CBOR-free request (scalar fast path or `abi = c`): the reply is raw bytes,
-    ## so a 0-length one is a real empty string, not a CBOR "no value".
-  scalarArgs*: array[MaxScalarArgs, uint64]
-    ## Inlined scalar args (no per-call c_malloc); a plain array keeps
-    ## `deleteRequest` unaliased.
   next*: ptr FFIThreadRequest
     ## Intrusive queue link; request doubles as its own node so enqueue needs no
     ## ORC-heap alloc.
@@ -40,28 +28,6 @@ type FFIThreadRequest* = object
     ## De-dupes the callback across timeout/completion; both on FFI thread, no race.
   generation*: uint
     ## Claim the submitter resolved its context under; the FFI thread drops the request when the slot has since changed owner.
-
-func ffiPackScalar*[T](x: T): uint64 =
-  ## Bit-cast one scalar into a uint64 request slot. Reverse with `ffiUnpackScalar`.
-  when T is SomeFloat:
-    cast[uint64](float64(x))
-  elif T is bool:
-    uint64(ord(x))
-  elif T is SomeSignedInt:
-    cast[uint64](int64(x))
-  else:
-    uint64(x)
-
-func ffiUnpackScalar*[T](u: uint64, _: typedesc[T]): T =
-  ## Inverse of `ffiPackScalar`.
-  when T is SomeFloat:
-    T(cast[float64](u))
-  elif T is bool:
-    u != 0'u64
-  elif T is SomeSignedInt:
-    T(cast[int64](u))
-  else:
-    T(u)
 
 proc deleteRequest*(request: ptr FFIThreadRequest) =
   if request.isNil():
@@ -86,7 +52,6 @@ proc allocBaseRequest(
   ret[].reqId = reqId.alloc()
   ret[].data = nil
   ret[].dataLen = 0
-  ret[].rawReply = false
   ret[].next = nil
   ret[].responded = false
   ret[].generation = 0
@@ -156,61 +121,17 @@ proc initFromOwnedShared*(
     reqId: cstring,
     data: ptr UncheckedArray[byte],
     dataLen: int,
-    rawReply: bool = false,
 ): ptr type T =
   ## Adopts an already-c_malloc'd buffer (no copy); `deleteRequest` c_frees it.
-  ## Pass `(nil, 0)` for an empty payload. Set `rawReply` when the handler answers
-  ## with raw (non-CBOR) bytes, so an empty reply reads as a real empty value.
-  ## Nil when the allocation fails, in which case it frees the adopted buffer:
-  ## nobody else owns it any more.
+  ## Pass `(nil, 0)` for an empty payload. Nil when the allocation fails, in which
+  ## case it frees the adopted buffer: nobody else owns it any more.
   var ret = allocBaseRequest(callback, userData, reqId)
   if ret.isNil():
     if not data.isNil():
       c_free(data)
     return nil
   adoptOwnedSharedPayload(ret, data, dataLen)
-  ret[].rawReply = rawReply
   return ret
-
-proc initScalar*(
-    T: typedesc[FFIThreadRequest],
-    callback: FFICallBack,
-    userData: pointer,
-    reqId: cstring,
-    args: varargs[uint64],
-): ptr type T =
-  ## Scalar-fast-path request: packed args ride inline, no payload c_malloc.
-  ## Nil when the allocation fails.
-  doAssert args.len <= MaxScalarArgs,
-    "initScalar: " & $args.len & " scalar args exceed MaxScalarArgs (" & $MaxScalarArgs &
-      ")"
-  var ret = allocBaseRequest(callback, userData, reqId)
-  if ret.isNil():
-    return nil
-  ret[].rawReply = true
-  for i in 0 ..< args.len:
-    ret[].scalarArgs[i] = args[i]
-  ret
-
-func ffiRawRetBytes*[T](x: T): seq[byte] =
-  ## CBOR-free handler result as raw bytes: string/cstring ride as UTF-8, other
-  ## scalars as the 8-byte native image of `ffiPackScalar(x)`.
-  when T is string:
-    var b = newSeq[byte](x.len)
-    if x.len > 0:
-      copyMem(addr b[0], unsafeAddr x[0], x.len)
-    b
-  elif T is cstring:
-    let n = x.len
-    var b = newSeq[byte](n)
-    if n > 0:
-      copyMem(addr b[0], cast[pointer](x), n)
-    b
-  else:
-    let u = ffiPackScalar(x)
-    var b = newSeq[byte](sizeof(uint64))
-    copyMem(addr b[0], unsafeAddr u, sizeof(uint64))
-    b
 
 proc fireCallback*(res: Result[seq[byte], string], request: ptr FFIThreadRequest) =
   ## Answers the foreign callback at most once (timeout and completion both call
@@ -234,12 +155,6 @@ proc fireCallback*(res: Result[seq[byte], string], request: ptr FFIThreadRequest
         cast[ptr cchar](unsafeAddr bytes[0]),
         cast[csize_t](bytes.len),
         request[].userData,
-      )
-    elif request[].rawReply:
-      # A CBOR-free 0-byte return is a real empty string, not CBOR "no value".
-      var empty: byte
-      request[].callback(
-        RET_OK, cast[ptr cchar](addr empty), 0.csize_t, request[].userData
       )
     else:
       # Always hand the callback a real buffer; CBOR null marks "no value".

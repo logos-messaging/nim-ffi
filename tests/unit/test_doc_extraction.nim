@@ -34,12 +34,6 @@ proc doctest_hash_commented*(lib: DocLib): Future[Result[string, string]] {.ffi.
   # not a doc comment
   return ok("ok")
 
-proc doctest_spec_documented*(
-    lib: DocLib, n: int
-): Future[Result[int, string]] {.ffi: "abi = cbor".} =
-  ## Doc survives alongside a pragma spec.
-  return ok(n)
-
 proc doctest_destroy*(lib: DocLib) {.ffiDtor.} =
   ## Tears it down.
   discard
@@ -67,7 +61,6 @@ const
   DocumentedDoc = docOf("doctest_documented")
   UndocumentedDoc = docOf("doctest_undocumented")
   HashCommentedDoc = docOf("doctest_hash_commented")
-  SpecDocumentedDoc = docOf("doctest_spec_documented")
   DestroyDoc = docOf("doctest_destroy")
   TockedDoc = eventDocOf("on_tocked")
   PlainEventDoc = eventDocOf("on_plain")
@@ -85,13 +78,10 @@ suite "extractDocComment: what lands on the registry":
   test "a plain `#` comment is not captured":
     check HashCommentedDoc == ""
 
-  test "a doc comment survives a pragma spec argument":
-    check SpecDocumentedDoc == "Doc survives alongside a pragma spec."
-
   test "the destructor's doc is captured":
     check DestroyDoc == "Tears it down."
 
-  test "an event proc's doc comment is captured":
+  test "an event proc's doc comment survives its wire-name argument":
     check TockedDoc == "Fires on every tock."
 
   test "an undocumented event proc gets an empty doc":
