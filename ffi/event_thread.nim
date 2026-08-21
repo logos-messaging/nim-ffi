@@ -52,9 +52,45 @@ proc onResponding*(ctx: ptr FFIContext) =
   ## Fired once when the heartbeat resumes after a NotRespondingEvent.
   emitLivenessEvent(ctx, RespondingEventName, RespondingEvent())
 
+proc wakeFFIThreadForReverseReply[T](ctx: ptr FFIContext[T]) =
+  ## Non-fatal on failure: the FFI thread's 100ms poll drains the mailbox anyway.
+  ctx.reqSignal.fireSync().isOkOr:
+    error "failed to wake FFI thread for a reverse reply", err = error
+
+proc dispatchReverseInvocation[T](ctx: ptr FFIContext[T], qe: QueuedEvent) =
+  ## Invokes the host impl of a `{.ffiReverse.}` proc with the reverse lock
+  ## released, so the impl may call set_impl/reverse_reply. An impl unregistered
+  ## between call and dispatch answers with an error reply now, instead of
+  ## leaving the parked future to its timeout.
+  if qe.dataLen < ReverseCallIdPrefixLen or qe.data.isNil():
+    error "reverse invocation record without a call-id prefix; dropping",
+      event = $qe.name, dataLen = qe.dataLen
+    return
+  var callId: uint64
+  copyMem(addr callId, qe.data, ReverseCallIdPrefixLen)
+  let args = cast[ptr UncheckedArray[byte]](addr qe.data[ReverseCallIdPrefixLen])
+  let argsLen = qe.dataLen - ReverseCallIdPrefixLen
+  let name = $qe.name
+  let (entry, found) = ctx[].reverse.beginReverseDispatch(name)
+  if not found:
+    let msg = "host implementation for " & name & " was unregistered before dispatch"
+    discard ctx[].reverse.pushReply(
+      callId, RET_ERR, cast[pointer](unsafeAddr msg[0]), msg.len
+    )
+    ctx.wakeFFIThreadForReverseReply()
+    return
+  defer:
+    ctx[].reverse.endReverseDispatch()
+  foreignThreadGc:
+    entry.fn(callId, args, csize_t(argsLen), entry.userData)
+
 proc dispatchQueuedEvent[T](ctx: ptr FFIContext[T], qe: QueuedEvent) =
   ## Reads the borrowed slab payload; `commitDequeue` frees any heap fallback.
-  ctx.dispatchToListeners($qe.name, qe.data, qe.dataLen)
+  case qe.kind
+  of ekListener:
+    ctx.dispatchToListeners($qe.name, qe.data, qe.dataLen)
+  of ekReverse:
+    ctx.dispatchReverseInvocation(qe)
 
 proc drainOneEvent[T](ctx: ptr FFIContext[T]): bool =
   ## Peek → dispatch → commit; slot stays pinned across dispatch, `defer` commits

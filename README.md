@@ -82,6 +82,8 @@ The generated C export names are the snake_case form of the proc names, e.g.
 | `{.ffiCtor.}` | proc | The constructor. Returns `Future[Result[LibType, string]]`; creates the FFI context. |
 | `{.ffiDtor.}` | proc | The destructor. Exactly one param `(x: LibType)`; tears the context down. Must cancel and await everything it spawned — see [the teardown contract](#the-teardown-contract). |
 | `{.ffiEvent[: "wire_name"].}` | proc (empty body) | A library-initiated callback. Call the proc from any `{.ffi.}` handler to fire it. The wire name is optional — see below. |
+| `{.ffiReverse[("wire_name", timeout = ms)].}` | proc (no body) | **Experimental.** A host-implemented interface (plugin direction): the library calls it, the host fulfils it at runtime — see below. |
+| `{.ffiReverseEvent[: "wire_name"].}` | proc (with body) | **Experimental.** A host-emitted event: the body is the handler, run on the FFI processing thread — see below. |
 | `{.ffiHandle.}` | `ref object` | Marks a type as an opaque handle: it stays server-side and crosses the wire as a `uint64` id. |
 | `{.ffiConst.}` | `const` | Re-emits the value as a native constant in every generated binding — see below. |
 | `genBindings()` | call | Emits the bindings. Must be the **last** FFI call in the compilation root. |
@@ -289,6 +291,61 @@ The wire name is **optional**: when omitted it is derived from the proc name
 (`onPeerConnected` → `on_peer_connected`), matching how `{.ffi.}` derives its C
 export symbol. Pass a string literal (`{.ffiEvent: "custom_name".}`) only when
 you need a name that differs from the proc.
+
+### Reverse FFI (experimental)
+
+Reverse FFI turns the direction around: the **library** declares an interface,
+the **host** fulfils it at runtime — the plugin pattern. Two pragmas, both
+CBOR-marshalled:
+
+```nim
+# Host-implemented interface: bodyless, returns Future[Result[T, string]].
+proc fetchHostClock(precision: string): Future[Result[HostClock, string]] {.ffiReverse.}
+
+# Host-emitted event: the body is the handler, run on the FFI processing thread.
+proc onHostTick(tickNo: int) {.ffiReverseEvent.} =
+  lastHostTick = tickNo
+```
+
+An `{.ffi.}` handler calls `fetchHostClock(...)` like any async proc. Under the
+hood the call parks on a chronos future keyed by a fresh call id, rides the
+event ring, and the host's registered implementation is invoked **on the event
+dispatch thread** with `(call_id, args_cbor, len, user_data)`. The FFI
+processing thread stays free the whole time. The host answers from **any**
+thread via `<lib>_reverse_reply` (the reply crosses threads as a libc-malloc'd
+CBOR buffer and is decoded on the FFI thread's own heap, so the same code is
+correct under `refc` and `orc`).
+
+Generated C surface per library (CBOR ABI only):
+
+```c
+int <lib>_set_<wire>_impl(void* ctx, FFIReverseImpl impl, void* user_data); /* NULL unregisters */
+int <lib>_reverse_reply(void* ctx, uint64_t call_id, int ret_code,
+                        const uint8_t* reply_cbor, size_t reply_len);
+int <lib>_emit_<wire>(void* ctx, const uint8_t* payload_cbor, size_t payload_len);
+```
+
+plus typed sugar on the ctx wrapper: `<lib>_ctx_set_<wire>_impl`,
+`<lib>_decode_<wire>_args`, `<lib>_ctx_reverse_reply_<wire>` (payload-less for a
+`void` reply), `<lib>_ctx_reverse_reply_err`, and `<lib>_ctx_emit_<wire>`.
+
+Semantics worth knowing:
+
+| Situation | Behavior | Why |
+| --- | --- | --- |
+| No impl registered at call time | The call fails immediately (`no host implementation registered for <wire>`). | Fail fast beats waiting out a deadline. |
+| Impl never replies | The call fails after its deadline — `ReverseCallTimeoutMs` (10 s, `-d:ffiReverseCallTimeoutMs=<ms>`), or per proc `{.ffiReverse("wire", timeout = ms).}`. | A handler parked forever would block context teardown. |
+| Late/duplicate/bogus `reverse_reply` | Accepted and silently dropped (call ids are monotonic and never reused within a slot claim). | The reply races the timeout by design; dropping is the safe outcome. |
+| `set_impl` during an in-flight invocation | Replaces for new calls; returns only after the old impl's invocation finished, so its `user_data` may be freed right after. | Mirrors `remove_event_listener`'s wait-out contract. |
+| Context recycle/shutdown with calls in flight | Pending reverse calls fail with a recycle/shutdown error *before* the drain. | Otherwise the drain would wait out the reverse deadline and risk quarantining the slot. |
+| A slow impl | Blocks **event delivery** (same thread), never request processing. | That containment is the point of delivering on the event dispatch thread. |
+| `{.ffiReverseEvent.}` emit | Fire-and-forget: the return code reports the enqueue only; the handler runs on the FFI processing thread via the normal request queue. | It is sugar over the one-way request path. |
+
+Current limits: CBOR ABI only (`abi = c` libraries with reverse declarations
+fail C binding generation), C bindings only (`cpp`/`rust`/`cddl` generators skip
+the reverse surface for now), `{.ffiHandle.}` params are rejected in reverse
+calls, and reverse calls must be awaited on the FFI processing thread (i.e. from
+inside `{.ffi.}` handlers).
 
 ### ABI format
 

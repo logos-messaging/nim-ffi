@@ -151,6 +151,34 @@ proc myTimerSchedule*(
     )
   )
 
+# {.ffiReverse.}: an interface the HOST fulfils at runtime (the plugin direction).
+type HostClock {.ffi.} = object
+  unixMs: int
+  zone: string
+
+proc fetchHostClock(precision: string): Future[Result[HostClock, string]] {.ffiReverse.}
+  ## Asks the host for its wall clock. The host registers an implementation via
+  ## `my_timer_set_fetch_host_clock_impl` and answers (from any thread) through
+  ## `my_timer_reverse_reply`; an unfulfilled or silent host fails this call.
+
+proc myTimerHostClock*(timer: MyTimer): Future[Result[string, string]] {.ffi.} =
+  ## Calls the host-implemented `fetch_host_clock` interface and formats it.
+  let clock = (await fetchHostClock("ms")).valueOr:
+    return err("host clock unavailable: " & error)
+  return ok(clock.zone & "@" & $clock.unixMs)
+
+# {.ffiReverseEvent.}: the HOST emits it, this body handles it on the FFI thread.
+var lastHostTick = 0 # FFI-thread-only: written by the handler, read by methods
+
+proc onHostTick(tickNo: int) {.ffiReverseEvent.} =
+  ## Emitted by the host via `my_timer_emit_on_host_tick` (typed helper:
+  ## `my_timer_ctx_emit_on_host_tick`); fire-and-forget for the host.
+  lastHostTick = tickNo
+
+proc myTimerLastHostTick*(timer: MyTimer): Future[Result[int, string]] {.ffi.} =
+  ## Reads the last tick number the `on_host_tick` reverse event recorded.
+  return ok(lastHostTick)
+
 proc my_timer_destroy*(timer: MyTimer) {.ffiDtor.} =
   ## Tears down the FFI context; blocks until FFI + watchdog threads join.
   discard

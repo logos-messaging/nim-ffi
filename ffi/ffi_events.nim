@@ -154,13 +154,25 @@ const emptyListenerPayload*: cstring = ""
   ## consumers doing memcpy even at len 0).
 
 type
+  EventRecordKind* = enum
+    ## `ekListener` is 0 so existing zero-init paths still read as plain events.
+    ekListener
+    ekReverse
+      ## `{.ffiReverse.}` invocation: `name` is the proc name, `data` the CBOR args.
+
   QueuedEvent* = object
     # `name`/`data` point into reused per-slot buffers, or a one-off c_malloc marked by `*HeapOwned` when oversize; both c_malloc'd so they outlive the FFI thread's heap.
+    # `kind` sits with the bools so the object stays 40 bytes: the ring is
+    # embedded 1024x per context and 32x per pool, and stack-allocated test
+    # pools already graze the 2MB Windows (mingw) stack reserve. An ekReverse
+    # record carries its call id as an 8-byte native-endian payload prefix for
+    # the same reason.
     name*: cstring
-    nameHeapOwned*: bool
     data*: ptr UncheckedArray[byte]
     dataLen*: int
+    nameHeapOwned*: bool
     dataHeapOwned*: bool
+    kind*: EventRecordKind
 
   EventQueue* = object # SPSC ring; plain lock since ops are short and uncontended.
     lock*: Lock
@@ -225,8 +237,8 @@ proc copyIntoSlot(
   copyMem(heapBuf, src, nbytes)
   (heapBuf, true, true)
 
-proc tryEnqueueEvent*(
-    q: var EventQueue, name: cstring, src: pointer, dataLen: int
+proc tryEnqueueRecord(
+    q: var EventQueue, name: cstring, src: pointer, dataLen: int, kind: EventRecordKind
 ): bool {.raises: [], gcsafe.} =
   ## Copies `name` (NUL included) and payload into the tail slot's reused buffers
   ## or a heap fallback; false when the ring is full or a fallback alloc fails.
@@ -255,6 +267,7 @@ proc tryEnqueueEvent*(
       else:
         cast[cstring](nameRes.buf)
     q.buf[slot] = QueuedEvent(
+      kind: kind,
       name: nameCStr,
       nameHeapOwned: nameRes.heap,
       data: dataRes.buf,
@@ -264,6 +277,32 @@ proc tryEnqueueEvent*(
     q.tail = (q.tail + 1) mod EventQueueCapacity
     q.count.inc()
   true
+
+proc tryEnqueueEvent*(
+    q: var EventQueue, name: cstring, src: pointer, dataLen: int
+): bool {.raises: [], gcsafe.} =
+  tryEnqueueRecord(q, name, src, dataLen, ekListener)
+
+const ReverseCallIdPrefixLen* = sizeof(uint64)
+  ## An ekReverse record's payload is `callId (native endian) ++ argsCbor`.
+
+proc tryEnqueueReverse*(
+    q: var EventQueue, name: cstring, src: pointer, dataLen: int, callId: uint64
+): bool {.raises: [], gcsafe.} =
+  ## `{.ffiReverse.}` invocation record: same ring and copy path as events, with
+  ## the call id riding as the payload prefix (see ReverseCallIdPrefixLen). On a
+  ## full ring the CALLER fails the parked future; the sticky stuck flag stays a
+  ## listener-overload signal.
+  let total = ReverseCallIdPrefixLen + max(dataLen, 0)
+  let staging = cast[ptr UncheckedArray[byte]](c_malloc(csize_t(total)))
+  if staging.isNil():
+    return false
+  var id = callId
+  copyMem(staging, addr id, ReverseCallIdPrefixLen)
+  if dataLen > 0 and not src.isNil():
+    copyMem(addr staging[ReverseCallIdPrefixLen], src, dataLen)
+  result = tryEnqueueRecord(q, name, staging, total, ekReverse)
+  c_free(staging)
 
 proc peekEvent*(q: var EventQueue): Option[QueuedEvent] {.raises: [], gcsafe.} =
   ## Returns the head without advancing (slot stays pinned so the producer can't

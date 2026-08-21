@@ -72,10 +72,35 @@ type
     abiFormat*: ABIFormat
     doc*: string
 
+  FFIReverseMeta* = object
+    ## Host-implemented interface from `{.ffiReverse.}`. `wireName` names both
+    ## the generated `<lib>_set_<wireName>_impl` export and the ring record.
+    wireName*: string
+    nimProcName*: string
+    libName*: string
+    params*: seq[FFIParamMeta]
+    argsTypeName*: string ## synthesized args object, single param type, or ""
+    replyTypeName*: string ## "" when the proc returns Future[Result[void, string]]
+    timeoutMs*: int ## 0 = library default (ReverseCallTimeoutMs)
+    doc*: string
+
+  FFIReverseEventMeta* = object
+    ## Host-emitted event from `{.ffiReverseEvent.}`: the host calls the
+    ## generated `<lib>_emit_<wireName>` export, the Nim proc body handles it on
+    ## the FFI processing thread.
+    wireName*: string
+    nimProcName*: string
+    libName*: string
+    reqTypeName*: string ## the Req object whose CBOR shape the host encodes
+    params*: seq[FFIParamMeta]
+    doc*: string
+
 var ffiProcRegistry* {.compileTime.}: seq[FFIProcMeta]
 var ffiTypeRegistry* {.compileTime.}: seq[FFITypeMeta]
 var ffiEventRegistry* {.compileTime.}: seq[FFIEventMeta]
 var ffiConstRegistry* {.compileTime.}: seq[FFIConstMeta]
+var ffiReverseRegistry* {.compileTime.}: seq[FFIReverseMeta]
+var ffiReverseEventRegistry* {.compileTime.}: seq[FFIReverseEventMeta]
 var currentLibName* {.compileTime.}: string
 
 # Set by `declareLibrary`; the FFI annotations require it.

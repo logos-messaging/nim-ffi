@@ -7,13 +7,14 @@ import chronicles, chronos, chronos/threadsync, results
 import
   ./ffi_types,
   ./ffi_events,
+  ./ffi_reverse,
   ./ffi_handles,
   ./ffi_thread_request,
   ./ffi_request_queue,
   ./logging,
   ./cbor_serial
 
-export ffi_events, ffi_handles
+export ffi_events, ffi_reverse, ffi_handles
 export ffi_request_queue.RequestQueueDepth
 
 type FFICtxToken* = distinct pointer
@@ -86,6 +87,7 @@ type FFIContext*[T] = object
   eventThreadExitSignal: ThreadSignalPtr
   userData*: pointer
   eventRegistry*: FFIEventRegistry
+  reverse*: FFIReverseState
   handles*: FFIHandleRegistry
   eventQueue*: EventQueue
   ffiHeartbeat*: Atomic[int64]
@@ -144,6 +146,7 @@ proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Mirror of `initContextResources`. Threads MUST be joined first; fields nil'd after close.
   deinitRequestQueue(ctx[].reqQueueBank)
   deinitEventRegistry(ctx[].eventRegistry)
+  deinitReverseState(ctx[].reverse)
   deinitHandleRegistry(ctx[].handles)
   deinitEventQueue(ctx[].eventQueue)
   when defined(gcRefc):
@@ -179,6 +182,7 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ctx.recycleAbandoned.store(false)
   initRequestQueue(ctx[].reqQueueBank)
   initEventRegistry(ctx[].eventRegistry)
+  initReverseState(ctx[].reverse)
   initHandleRegistry(ctx[].handles)
   initEventQueue(ctx[].eventQueue)
   ctx.ffiHeartbeat.store(0)
@@ -313,6 +317,24 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
         "; the library and the pool slot leak, and callbacks can still fire"
     )
   ok()
+
+proc submitReverseReply*[T](
+    ctx: ptr FFIContext[T], callId: uint64, retCode: cint, data: pointer, dataLen: int
+): cint =
+  ## Parks a `{.ffiReverse.}` reply for the FFI thread and wakes it. Callable
+  ## from ANY host thread (the generated `<lib>_reverse_reply` resolves the
+  ## token and calls this). Returns a REVERSE_* status.
+  if ctx.lifecycle.load() != CtxLifecycle.Active:
+    return REVERSE_NOT_ACTIVE
+  if dataLen > MaxRequestPayloadBytes:
+    return REVERSE_PAYLOAD_TOO_LARGE
+  let status = ctx[].reverse.pushReply(callId, retCode, data, dataLen)
+  if status != REVERSE_ACCEPTED:
+    return status
+  # A failed wake is non-fatal: the FFI thread's 100ms poll drains the mailbox.
+  ctx.reqSignal.fireSync().isOkOr:
+    error "failed to wake FFI thread for a reverse reply", error = error
+  REVERSE_ACCEPTED
 
 ## Per-thread exit wait before stopAndJoinThreads leaks ctx rather than hanging. Kept
 ## short so a wedged worker fails fast; raise it past `ffiTeardownTimeoutMs` for a slow
