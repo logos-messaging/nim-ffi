@@ -5,6 +5,8 @@ on:
     branches: [master, main]
   pull_request:
     branches: [master, main]
+  # Without this a merge queue runs linters.yml only and merges untested code.
+  merge_group:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -20,6 +22,7 @@ jobs:
   # `env` is not allowed there, which rules out plain workflow-level env vars.
   versions:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       nim-versions: ${{ steps.load.outputs.NIM_VERSIONS }}
       nimble:       ${{ steps.load.outputs.NIMBLE_VERSION }}
@@ -154,6 +157,7 @@ jobs:
           - os: windows-latest
             label: Windows
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     name: C++ E2E · ${{ matrix.label }} · Nim ${{ matrix.nim-version }}
     env:
       NIMBLE_VERSION: ${{ needs.versions.outputs.nimble }}
@@ -211,6 +215,14 @@ jobs:
           fi
           nimble test_cpp_e2e -y
 
+      - name: Run C e2e tests
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+          fi
+          nimble test_c_e2e -y
+
       # The CBOR-free abi=c C binding (issue #105). Linux-only: the generated
       # header is platform-checked by the check-bindings job, and the runtime
       # path only needs one OS to exercise the abi=c struct dispatch.
@@ -227,6 +239,16 @@ jobs:
     uses: ./.github/workflows/nimble-job.yml
     with:
       run: nimble check_bindings -y
+      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
+      nimble-version: ${{ needs.versions.outputs.nimble }}
+
+  rust-bindings:
+    # `--examples` reaches api.rs, which no other target uses; build.rs shells out to `nim c`, hence the nimble job.
+    name: Build generated Rust bindings
+    needs: versions
+    uses: ./.github/workflows/nimble-job.yml
+    with:
+      run: cargo build --locked --manifest-path examples/timer/rust_bindings/Cargo.toml --examples
       nim-versions:   ${{ needs.versions.outputs.nim-versions }}
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
@@ -259,12 +281,7 @@ jobs:
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
   submit-scaling-gate:
-    # Forcing function, red by design: asserts sendRequestToFFIThread submit
-    # throughput scales with producer-thread count. The per-request global lock
-    # serialises every submit, so this stays red until the lock is replaced with
-    # MPSC ingress — a standing reminder, not a transient failure. Pinned to orc +
-    # unsanitized because the gate is timing-based and the contention it measures
-    # is mm-independent. Full rationale and baseline numbers: tests/bench/README.md.
+    # Asserts sendRequestToFFIThread submit throughput scales with producer-thread count. It passes at ~11x on the sharded ingress (ffi/ffi_request_queue.nim), so a red run is a regression. Pinned to orc + unsanitized: the gate is timing-based and the contention it measures is mm-independent. Baselines: tests/bench/README.md.
     name: Submit Scaling Gate
     needs: versions
     uses: ./.github/workflows/nimble-job.yml
@@ -277,6 +294,7 @@ jobs:
     name: Auto-assign PR author
     if: github.event_name == 'pull_request' && github.event.action == 'opened'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       pull-requests: write
     steps:

@@ -27,19 +27,15 @@ This example is a self-contained Nimble project demonstrating how to import `nim
 
 ## Rust example clients
 
-The Rust client lives in `examples/timer/rust_client`.
+The Rust clients are cargo examples of the generated crate, in `examples/timer/rust_bindings/examples`. `sync_main` and `tokio_main` cover the typed event listeners; `sync_client` and `tokio_client` cover the constants and the multi-parameter `schedule` call.
 
-- Run the sync example:
-  ```sh
-  cd examples/timer/rust_client
-  cargo run --bin rust_client
-  ```
-
-- Run the Tokio example:
-  ```sh
-  cd examples/timer/rust_client
-  cargo run --bin tokio_client
-  ```
+```sh
+cd examples/timer/rust_bindings
+cargo run --example sync_main     # sync, event listeners
+cargo run --example tokio_main    # async, event listeners
+cargo run --example sync_client   # sync, schedule + consts
+cargo run --example tokio_client  # async, schedule + consts
+```
 
 ## C++ example
 

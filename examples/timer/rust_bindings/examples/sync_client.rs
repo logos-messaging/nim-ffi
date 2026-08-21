@@ -1,10 +1,7 @@
-// Rust client for the my_timer shared library built with nim-ffi + chronos.
-//
-// This file uses the generated `my_timer` crate, which wraps all the raw FFI
-// boilerplate (extern "C" declarations, callback machinery, CBOR encode/decode).
-//
-// To regenerate the `rust_bindings` crate:
-//   nimble genbindings_rust
+//! Synchronous example: consts, `version`, `echo`, and the three-complex-parameter `schedule` call.
+//!
+//! Run with: `cargo run --example sync_client`
+
 use std::time::Duration;
 use my_timer::{
     EchoRequest, JobPriority, JobSpec, MyTimerCtx, RetryPolicy, ScheduleConfig,

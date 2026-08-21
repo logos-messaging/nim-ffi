@@ -1,6 +1,6 @@
 //! Synchronous example: exercises the typed per-event listener API.
 //!
-//! Run with: `cargo run --example main`
+//! Run with: `cargo run --example sync_main`
 
 use my_timer::{EchoEvent, EchoRequest, MyTimerCtx, TimerConfig};
 use std::sync::mpsc;

@@ -145,7 +145,9 @@ inline CborError encode_cbor(CborEncoder& e, const std::vector<T>& v) {
 // template in overload resolution, so std::vector<std::uint8_t> fields use it
 // automatically.
 inline CborError encode_cbor(CborEncoder& e, const std::vector<std::uint8_t>& v) {
-    return cbor_encode_byte_string(&e, v.data(), v.size());
+    // An empty vector's data() is null, and a null src is UB in memcpy even for size 0.
+    static const std::uint8_t empty = 0;
+    return cbor_encode_byte_string(&e, v.empty() ? &empty : v.data(), v.size());
 }
 
 template<typename T>

@@ -34,6 +34,7 @@ jobs:
         mm: ${{ fromJSON(inputs.sanitizer == 'asan-ubsan' && '["orc"]' || '["orc","refc"]') }}
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     name: ${{ inputs.sanitizer }} · ${{ matrix.os }} · Nim ${{ matrix.nim-version }} · ${{ matrix.mm }}
 
     env:
@@ -46,7 +47,7 @@ jobs:
       # LSAN_OPTIONS is honoured for suppressions when LSan runs under ASan.
       ASAN_OPTIONS:  halt_on_error=1:abort_on_error=1:detect_leaks=1:strict_string_checks=1
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-      LSAN_OPTIONS:  suppressions=${{ github.workspace }}/tests/e2e/cpp/lsan.supp:print_suppressions=0
+      LSAN_OPTIONS:  suppressions=${{ github.workspace }}/lsan.supp:print_suppressions=0
       TSAN_OPTIONS:  halt_on_error=1:second_deadlock_stack=1:history_size=7
 
     steps:
@@ -101,6 +102,9 @@ jobs:
 
       - name: Run C++ e2e tests (${{ inputs.sanitizer }})
         run: nimble test_cpp_e2e_sanitized -y
+
+      - name: Run C e2e tests (${{ inputs.sanitizer }})
+        run: nimble test_c_e2e_sanitized -y
 
       - name: Run abi=c C e2e test (${{ inputs.sanitizer }})
         run: nimble test_c_abi_e2e_sanitized -y

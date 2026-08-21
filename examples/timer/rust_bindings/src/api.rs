@@ -58,7 +58,7 @@ unsafe extern "C" fn on_result(
     // `tx.send` returns Err only if the awaiting future was dropped (and with it
     // the Receiver): e.g. tokio::time::timeout elapsed, a tokio::select! branch
     // lost the race, or the future was dropped before being awaited. This cannot
-    // happen with the current rust_client demo but may occur in arbitrary
+    // happen with the crate's own examples but may occur in arbitrary
     // downstream consumers, so we discard the Err safely.
     // Given that this is invoked from a Nim thread, we can't propagate the error by panicking or
     // returning a Result. Furthermore, an API dev may intentionally set a timeout in the await,

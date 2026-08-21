@@ -16,6 +16,12 @@ leak:nimGC_setStackBottom
 leak:initStackBottomWith
 leak:setupForeignThreadGc
 
+# ORC's per-thread cycle-root table, allocated the first time a host thread
+# drops a cyclic ref. `tearDownForeignThreadGc` is a nop under arc/orc
+# (lib/system/arc.nim), so a foreign thread's table lives until process exit.
+leak:registerCycle
+leak:rememberCycle
+
 # Async / logging library globals (event loop singletons, logger
 # registries) — owned for the process lifetime.
 leak:chronos

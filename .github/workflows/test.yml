@@ -30,6 +30,7 @@ jobs:
         mm: [orc, refc]
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     # Mapped inline rather than through `include`: an include entry whose `os` is
     # not in the matrix would add a combination of its own instead of a label.
     name: ${{ matrix.os == 'ubuntu-22.04' && 'Linux' || matrix.os == 'macos-15' && 'macOS' || 'Windows' }} · Nim ${{ matrix.nim-version }} · ${{ matrix.mm }}

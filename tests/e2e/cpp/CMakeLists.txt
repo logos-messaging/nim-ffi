@@ -8,6 +8,20 @@ project(nim_ffi_cpp_e2e CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/../sanitizer.cmake")
+
+# Thread the sanitizer into every Nim dylib built below. `CACHE ... FORCE` is
+# required (see the note in nim_ffi_lib.cmake).
+set(NIM_FFI_EXTRA_ARGS ${NIM_SAN_ARGS}
+    CACHE STRING "Extra nim c args when building the dylib" FORCE)
+
+# Directory scope, not per target: gtest, tinycbor and the bindings' own example
+# clients all link against the instrumented dylib and need the same flags.
+if(SAN_CFLAGS)
+    add_compile_options(${SAN_CFLAGS})
+    add_link_options(${SAN_CFLAGS})
+endif()
+
 # ── Reuse the timer + echo cpp_bindings (exposing my_timer_headers / echo_headers) ──
 get_filename_component(_timer_cpp_bindings_dir
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../examples/timer/cpp_bindings"
@@ -36,11 +50,6 @@ add_executable(timer_e2e_tests test_timer_e2e.cpp)
 target_link_libraries(timer_e2e_tests PRIVATE my_timer_headers echo_headers GTest::gtest_main)
 add_dependencies(timer_e2e_tests my_timer_nim_lib echo_nim_lib)
 
-if(NIM_FFI_SAN_CFLAGS)
-    target_compile_options(timer_e2e_tests PRIVATE ${NIM_FFI_SAN_CFLAGS})
-    target_link_options(timer_e2e_tests PRIVATE ${NIM_FFI_SAN_LFLAGS})
-endif()
-
 # Nim-built dylibs use `@rpath/lib*.dylib` install_names on macOS and Linux, so embed
 # each IMPORTED target's build-tree dir as an rpath. Windows has no rpath —
 # stage the DLLs next to the exe in the POST_BUILD branch below instead.
@@ -61,24 +70,6 @@ else()
             "${echo_RUNTIME_LIB}"
             "$<TARGET_FILE_DIR:timer_e2e_tests>"
         COMMENT "Staging my_timer.dll + echo.dll next to timer_e2e_tests.exe")
-endif()
-
-# Per-sanitizer runtime options: halt and exit non-zero on any report so
-# ctest fails the job. The matching ASAN_OPTIONS / UBSAN_OPTIONS /
-# LSAN_OPTIONS / TSAN_OPTIONS in CI provide the same defaults; we set them
-# here too so local `ctest` runs behave identically.
-#
-# `asan-ubsan` runs LSan as part of ASan (detect_leaks=1). LSAN_OPTIONS
-# is still honoured for suppressions when LSan runs under ASan's runtime.
-set(_san_test_env "")
-if(NIM_FFI_SANITIZER STREQUAL "asan-ubsan")
-    list(APPEND _san_test_env
-        "ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=1:strict_string_checks=1"
-        "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1"
-        "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/lsan.supp:print_suppressions=0")
-elseif(NIM_FFI_SANITIZER STREQUAL "tsan")
-    list(APPEND _san_test_env
-        "TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:history_size=7")
 endif()
 
 # Discover at test time, not build time: a POST_BUILD discovery run launches the
