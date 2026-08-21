@@ -62,19 +62,27 @@ proc dispatchReverseInvocation[T](ctx: ptr FFIContext[T], qe: QueuedEvent) =
   ## released, so the impl may call set_impl/reverse_reply. An impl unregistered
   ## between call and dispatch answers with an error reply now, instead of
   ## leaving the parked future to its timeout.
+  if qe.dataLen < ReverseCallIdPrefixLen or qe.data.isNil():
+    error "reverse invocation record without a call-id prefix; dropping",
+      event = $qe.name, dataLen = qe.dataLen
+    return
+  var callId: uint64
+  copyMem(addr callId, qe.data, ReverseCallIdPrefixLen)
+  let args = cast[ptr UncheckedArray[byte]](addr qe.data[ReverseCallIdPrefixLen])
+  let argsLen = qe.dataLen - ReverseCallIdPrefixLen
   let name = $qe.name
   let (entry, found) = ctx[].reverse.beginReverseDispatch(name)
   if not found:
     let msg = "host implementation for " & name & " was unregistered before dispatch"
     discard ctx[].reverse.pushReply(
-      qe.callId, RET_ERR, cast[pointer](unsafeAddr msg[0]), msg.len
+      callId, RET_ERR, cast[pointer](unsafeAddr msg[0]), msg.len
     )
     ctx.wakeFFIThreadForReverseReply()
     return
   defer:
     ctx[].reverse.endReverseDispatch()
   foreignThreadGc:
-    entry.fn(qe.callId, qe.data, csize_t(qe.dataLen), entry.userData)
+    entry.fn(callId, args, csize_t(argsLen), entry.userData)
 
 proc dispatchQueuedEvent[T](ctx: ptr FFIContext[T], qe: QueuedEvent) =
   ## Reads the borrowed slab payload; `commitDequeue` frees any heap fallback.

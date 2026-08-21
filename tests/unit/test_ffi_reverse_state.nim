@@ -8,7 +8,9 @@ import results
 import ffi
 
 proc nopImpl(
-    callId: uint64, argsCbor: ptr UncheckedArray[byte], argsLen: csize_t,
+    callId: uint64,
+    argsCbor: ptr UncheckedArray[byte],
+    argsLen: csize_t,
     userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   discard
@@ -92,6 +94,16 @@ suite "reply mailbox":
 ## invocation record is read straight off the event ring where the event thread
 ## would, and the reply is pushed where the host would.
 
+proc recCallId(qe: QueuedEvent): uint64 =
+  ## An ekReverse payload is `callId ++ argsCbor` (native endian).
+  copyMem(addr result, qe.data, ReverseCallIdPrefixLen)
+
+proc recArgs(qe: QueuedEvent): seq[byte] =
+  let n = qe.dataLen - ReverseCallIdPrefixLen
+  result = newSeq[byte](n)
+  if n > 0:
+    copyMem(addr result[0], addr qe.data[ReverseCallIdPrefixLen], n)
+
 template withReverseHarness(stIdent, qIdent: untyped, body: untyped) =
   var stIdent: FFIReverseState
   var qIdent: EventQueue
@@ -124,13 +136,18 @@ suite "ffiReverseCall":
       let rec = q.peekEvent()
       check rec.isSome()
       check rec.get().kind == ekReverse
-      check rec.get().callId == 1'u64
+      check recCallId(rec.get()) == 1'u64
       check $rec.get().name == "echo"
-      check rec.get().dataLen == args.len
+      let recArgsBytes = recArgs(rec.get())
+      check recArgsBytes == args
 
       # Host answers inline with the args echoed back.
-      check st.pushReply(rec.get().callId, RET_OK, rec.get().data, rec.get().dataLen) ==
-        REVERSE_ACCEPTED
+      check st.pushReply(
+        recCallId(rec.get()),
+        RET_OK,
+        cast[pointer](unsafeAddr recArgsBytes[0]),
+        recArgsBytes.len,
+      ) == REVERSE_ACCEPTED
       q.commitDequeue()
       drainReverseReplies()
 
@@ -147,7 +164,7 @@ suite "ffiReverseCall":
       check rec.isSome()
       let msg = "host says no"
       check st.pushReply(
-        rec.get().callId, RET_ERR, cast[pointer](unsafeAddr msg[0]), msg.len
+        recCallId(rec.get()), RET_ERR, cast[pointer](unsafeAddr msg[0]), msg.len
       ) == REVERSE_ACCEPTED
       q.commitDequeue()
       drainReverseReplies()
@@ -161,7 +178,7 @@ suite "ffiReverseCall":
       let callFut = ffiReverseCall("void_ret", @[], 2000)
       let rec = q.peekEvent()
       check rec.isSome()
-      check st.pushReply(rec.get().callId, RET_OK, nil, 0) == REVERSE_ACCEPTED
+      check st.pushReply(recCallId(rec.get()), RET_OK, nil, 0) == REVERSE_ACCEPTED
       q.commitDequeue()
       drainReverseReplies()
       let res = waitFor callFut
@@ -174,7 +191,7 @@ suite "ffiReverseCall":
       let callFut = ffiReverseCall("silent", @[], 50)
       let rec = q.peekEvent()
       check rec.isSome()
-      let callId = rec.get().callId
+      let callId = recCallId(rec.get())
       q.commitDequeue()
 
       let res = waitFor callFut
