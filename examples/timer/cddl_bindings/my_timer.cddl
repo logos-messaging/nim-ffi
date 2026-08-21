@@ -15,6 +15,8 @@ JobSpec = { name: tstr, payload: [* tstr], priority: JobPriority }
 RetryPolicy = { maxAttempts: int, backoffMs: int, retryOn: [* tstr] }
 ScheduleConfig = { startAtMs: int, intervalMs: int, jitter: int / nil }
 ScheduleResult = { jobId: tstr, willRunCount: int, firstRunAtMs: int, effectiveBackoffMs: int, priority: JobPriority }
+HostClock = { unixMs: int, zone: tstr }
+OnHostTickReq = { tickNo: int }
 
 ; ─── Request envelopes (one CBOR blob per request) ────────────────
 MyTimerCreateCtorReq = { config: TimerConfig }
@@ -23,6 +25,8 @@ MyTimerVersionReq = { }
 MyTimerLibVersionReq = { }
 MyTimerComplexReq = { req: ComplexRequest }
 MyTimerScheduleReq = { job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig }
+MyTimerHostClockReq = { }
+MyTimerLastHostTickReq = { }
 
 ; ─── Procs ─────────────────────────────────────────────────────────
 ; my_timer_create (ctor)
@@ -52,6 +56,16 @@ my_timer_complex-response = ComplexResponse
 ; Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
 my_timer_schedule-request = MyTimerScheduleReq
 my_timer_schedule-response = ScheduleResult
+
+; my_timer_host_clock (ffi)
+; Calls the host-implemented `fetch_host_clock` interface and formats it.
+my_timer_host_clock-request = MyTimerHostClockReq
+my_timer_host_clock-response = tstr
+
+; my_timer_last_host_tick (ffi)
+; Reads the last tick number the `on_host_tick` reverse event recorded.
+my_timer_last_host_tick-request = MyTimerLastHostTickReq
+my_timer_last_host_tick-response = int
 
 ; my_timer_destroy (dtor)
 ; Tears down the FFI context; blocks until FFI + watchdog threads join.

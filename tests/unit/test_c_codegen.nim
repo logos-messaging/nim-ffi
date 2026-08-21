@@ -474,3 +474,106 @@ suite "shared headers: prelude and cbor split":
     check "NIM_FFI_PRELUDE_H_INCLUDED" in generateCPreludeHeader()
     check "NIM_FFI_CBOR_HELPERS_H_INCLUDED" in generateCCborHeader()
     check "NIM_FFI_LIB_TIMER_H_INCLUDED" in generateCLibHeader(@[], @[], "timer")
+
+suite "generateCLibHeader: reverse FFI":
+  setup:
+    let types = @[
+      FFITypeMeta(
+        name: "RevConfig", fields: @[field("name", "string"), field("attempt", "int")]
+      ),
+      FFITypeMeta(
+        name: "FetchConfigArgs",
+        fields: @[field("key", "string"), field("attempt", "int")],
+      ),
+      FFITypeMeta(name: "OnHostPingReq", fields: @[field("seqNo", "int")]),
+    ]
+    let procs = @[
+      FFIProcMeta(
+        procName: "timer_create",
+        libName: "timer",
+        kind: FFIKind.CTOR,
+        libTypeName: "Timer",
+        extraParams: @[],
+        returnTypeName: "Timer",
+      ),
+      FFIProcMeta(
+        procName: "timer_destroy",
+        libName: "timer",
+        kind: FFIKind.DTOR,
+        libTypeName: "Timer",
+        extraParams: @[],
+        returnTypeName: "",
+      ),
+    ]
+    let reverse = @[
+      FFIReverseMeta(
+        wireName: "fetch_config",
+        nimProcName: "fetchConfig",
+        libName: "timer",
+        argsTypeName: "FetchConfigArgs",
+        replyTypeName: "RevConfig",
+      ),
+      FFIReverseMeta(
+        wireName: "host_note",
+        nimProcName: "notifyHost",
+        libName: "timer",
+        argsTypeName: "string",
+        replyTypeName: "",
+        timeoutMs: 300,
+      ),
+    ]
+    let reverseEvents = @[
+      FFIReverseEventMeta(
+        wireName: "on_host_ping",
+        nimProcName: "onHostPing",
+        libName: "timer",
+        reqTypeName: "OnHostPingReq",
+      )
+    ]
+    let header = generateCLibHeader(
+      procs, types, "timer", @[], @[], "", reverse, reverseEvents
+    )
+
+  test "raw reverse exports are declared with the impl typedef":
+    check "typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, size_t args_len, void* user_data);" in
+      header
+    check "int timer_set_fetch_config_impl(void* ctx, FFIReverseImpl impl, void* user_data);" in
+      header
+    check "int timer_set_host_note_impl(void* ctx, FFIReverseImpl impl, void* user_data);" in
+      header
+    check "int timer_reverse_reply(void* ctx, uint64_t call_id, int ret_code, const uint8_t* reply_cbor, size_t reply_len);" in
+      header
+    check "int timer_emit_on_host_ping(void* ctx, const uint8_t* payload_cbor, size_t payload_len);" in
+      header
+
+  test "typed helpers ride the ctx wrapper":
+    check "static inline int timer_ctx_set_fetch_config_impl(const TimerCtx* ctx, FFIReverseImpl impl, void* user_data)" in
+      header
+    check "static inline int timer_decode_fetch_config_args(const uint8_t* args_cbor, size_t args_len, FetchConfigArgs* out, char** err)" in
+      header
+    check "static inline int timer_ctx_reverse_reply_fetch_config(const TimerCtx* ctx, uint64_t call_id, const RevConfig* reply)" in
+      header
+    check "static inline int timer_ctx_reverse_reply_err(const TimerCtx* ctx, uint64_t call_id, const char* msg)" in
+      header
+
+  test "a void reply gets the payload-less reply helper":
+    check "static inline int timer_ctx_reverse_reply_host_note(const TimerCtx* ctx, uint64_t call_id)" in
+      header
+
+  test "a string-args reverse proc decodes into NimFfiStr":
+    check "static inline int timer_decode_host_note_args(const uint8_t* args_cbor, size_t args_len, NimFfiStr* out, char** err)" in
+      header
+
+  test "reverse events get the typed emit helper":
+    check "static inline int timer_ctx_emit_on_host_ping(const TimerCtx* ctx, const OnHostPingReq* payload)" in
+      header
+
+  test "buffer adapters cover the reverse-direction types":
+    check "timer_encv_RevConfig" in header
+    check "timer_encv_OnHostPingReq" in header
+    check "timer_decv_FetchConfigArgs" in header
+
+  test "a header with no reverse procs stays reverse-free":
+    let plain = generateCLibHeader(procs, types, "timer")
+    check "FFIReverseImpl" notin plain
+    check "reverse_reply" notin plain

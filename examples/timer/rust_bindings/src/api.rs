@@ -339,6 +339,48 @@ impl MyTimerCtx {
         decode_cbor::<ScheduleResult>(&raw_bytes)
     }
 
+    /// Calls the host-implemented `fetch_host_clock` interface and formats it.
+    pub fn host_clock(&self) -> Result<String, String> {
+        let req = MyTimerHostClockReq {};
+        let req_bytes = encode_cbor(&req)?;
+        let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
+            ffi::my_timer_host_clock(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        })?;
+        decode_cbor::<String>(&raw_bytes)
+    }
+
+    /// Calls the host-implemented `fetch_host_clock` interface and formats it.
+    pub async fn host_clock_async(&self) -> Result<String, String> {
+        let req = MyTimerHostClockReq {};
+        let req_bytes = encode_cbor(&req)?;
+        let ptr = self.ptr as usize;
+        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
+            ffi::my_timer_host_clock(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        }).await?;
+        decode_cbor::<String>(&raw_bytes)
+    }
+
+    /// Reads the last tick number the `on_host_tick` reverse event recorded.
+    pub fn last_host_tick(&self) -> Result<i64, String> {
+        let req = MyTimerLastHostTickReq {};
+        let req_bytes = encode_cbor(&req)?;
+        let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
+            ffi::my_timer_last_host_tick(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        })?;
+        decode_cbor::<i64>(&raw_bytes)
+    }
+
+    /// Reads the last tick number the `on_host_tick` reverse event recorded.
+    pub async fn last_host_tick_async(&self) -> Result<i64, String> {
+        let req = MyTimerLastHostTickReq {};
+        let req_bytes = encode_cbor(&req)?;
+        let ptr = self.ptr as usize;
+        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
+            ffi::my_timer_last_host_tick(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        }).await?;
+        decode_cbor::<i64>(&raw_bytes)
+    }
+
     pub fn lib_version(timeout: Duration) -> Result<String, String> {
         let req = MyTimerLibVersionReq {};
         let req_bytes = encode_cbor(&req)?;

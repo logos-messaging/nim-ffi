@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Experimental reverse FFI** (#153): `{.ffiReverse.}` declares a
+  host-implemented interface (plugin direction) — the library awaits it from an
+  `{.ffi.}` handler, the host registers an implementation at runtime via the
+  generated `<lib>_set_<wire>_impl` export (invoked on the event dispatch
+  thread) and answers from any thread through `<lib>_reverse_reply`, with a
+  mandatory per-call deadline (`ReverseCallTimeoutMs` /
+  `{.ffiReverse("wire", timeout = ms).}`). `{.ffiReverseEvent.}` declares a
+  host-emitted event: the proc body is the handler, run on the FFI processing
+  thread when the host calls the generated fire-and-forget `<lib>_emit_<wire>`
+  export. Both ride CBOR; the C binding gains the raw declarations plus typed
+  helpers (`_ctx_set_*_impl`, `_decode_*_args`, `_ctx_reverse_reply_*`,
+  `_ctx_emit_*`). CBOR ABI and C bindings only for now.
 - The `abi = c` C header now declares the event-listener ABI that
   `declareLibrary` always exports (`<lib>_add_event_listener` /
   `<lib>_remove_event_listener`) and the `FFICallBack` typedef they take, so a
