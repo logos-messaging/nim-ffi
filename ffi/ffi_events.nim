@@ -154,8 +154,15 @@ const emptyListenerPayload*: cstring = ""
   ## consumers doing memcpy even at len 0).
 
 type
+  EventRecordKind* = enum
+    ## `ekListener` is 0 so existing zero-init paths still read as plain events.
+    ekListener
+    ekReverse ## `{.ffiReverse.}` invocation: `name` is the proc name, `data` the CBOR args.
+
   QueuedEvent* = object
     # `name`/`data` point into reused per-slot buffers, or a one-off c_malloc marked by `*HeapOwned` when oversize; both c_malloc'd so they outlive the FFI thread's heap.
+    kind*: EventRecordKind
+    callId*: uint64 # ekReverse only: the pending-future key the reply must carry
     name*: cstring
     nameHeapOwned*: bool
     data*: ptr UncheckedArray[byte]
@@ -225,8 +232,13 @@ proc copyIntoSlot(
   copyMem(heapBuf, src, nbytes)
   (heapBuf, true, true)
 
-proc tryEnqueueEvent*(
-    q: var EventQueue, name: cstring, src: pointer, dataLen: int
+proc tryEnqueueRecord(
+    q: var EventQueue,
+    name: cstring,
+    src: pointer,
+    dataLen: int,
+    kind: EventRecordKind,
+    callId: uint64,
 ): bool {.raises: [], gcsafe.} =
   ## Copies `name` (NUL included) and payload into the tail slot's reused buffers
   ## or a heap fallback; false when the ring is full or a fallback alloc fails.
@@ -255,6 +267,8 @@ proc tryEnqueueEvent*(
       else:
         cast[cstring](nameRes.buf)
     q.buf[slot] = QueuedEvent(
+      kind: kind,
+      callId: callId,
       name: nameCStr,
       nameHeapOwned: nameRes.heap,
       data: dataRes.buf,
@@ -264,6 +278,19 @@ proc tryEnqueueEvent*(
     q.tail = (q.tail + 1) mod EventQueueCapacity
     q.count.inc()
   true
+
+proc tryEnqueueEvent*(
+    q: var EventQueue, name: cstring, src: pointer, dataLen: int
+): bool {.raises: [], gcsafe.} =
+  tryEnqueueRecord(q, name, src, dataLen, ekListener, 0'u64)
+
+proc tryEnqueueReverse*(
+    q: var EventQueue, name: cstring, src: pointer, dataLen: int, callId: uint64
+): bool {.raises: [], gcsafe.} =
+  ## `{.ffiReverse.}` invocation record: same ring and copy path as events. On a
+  ## full ring the CALLER fails the parked future; the sticky stuck flag stays a
+  ## listener-overload signal.
+  tryEnqueueRecord(q, name, src, dataLen, ekReverse, callId)
 
 proc peekEvent*(q: var EventQueue): Option[QueuedEvent] {.raises: [], gcsafe.} =
   ## Returns the head without advancing (slot stays pinned so the producer can't

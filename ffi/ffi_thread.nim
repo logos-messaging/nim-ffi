@@ -207,6 +207,10 @@ proc drainOngoing(ongoing: ptr seq[Future[void]]): Future[bool] {.async.} =
 proc resetForNextOwner[T](ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]) =
   freeLib(ctx)
   clearListeners(ctx[].eventRegistry)
+  # Old owner's impls must not answer the next owner's calls; waits an in-flight
+  # invocation out like clearListeners. Straggler replies free with the mailbox.
+  ctx[].reverse.clearImpls()
+  ctx[].reverse.freeAllReplies()
   # A reused slot skips initContextResources, so the handle ids of the old owner
   # would otherwise resolve for the next one.
   ctx[].handles.releaseAll()
@@ -243,6 +247,11 @@ proc recycleContext[T](
   # Deferred so a raise out of the teardown cannot strand the slot.
   defer:
     ctx.finishRecycle(failure)
+
+  # Before the drain, not after: awaitWithStaleWarnings converts the drain's
+  # cancel into noCancel, so a handler parked on a reverse call would hold
+  # drainOngoing until the reverse timeout and risk a DrainTimeout quarantine.
+  failPendingReverse("FFI context is recycling; the reverse call was abandoned")
 
   if not await drainOngoing(ongoing):
     # A handler that still runs answers a callback carrying userData the host
@@ -283,6 +292,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ffiCurrentEventRegistry = addr ctx[].eventRegistry
   ffiCurrentEventQueue = addr ctx[].eventQueue
   ffiCurrentEventQueueStuck = addr ctx[].eventQueueStuck
+  ffiCurrentReverseState = addr ctx[].reverse
   ffiEventQueueSignalPtr = ctx.eventQueueSignal
   ffiCurrentNotifyEventEnqueued = ffiNotifyEventEnqueuedHook
   onFFIThread = true
@@ -360,9 +370,14 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
       # Block until a submit signals us, or at most 100ms.
       discard await ctx.reqSignal.wait().withTimeout(chronos.milliseconds(100))
       processQueue()
+      drainReverseReplies()
 
     # Drain once more for requests enqueued just before `running` flipped.
     processQueue()
+    drainReverseReplies()
+    # A handler parked on a reverse call would hold the wait below until the
+    # reverse timeout; the host is shutting down, so it will not answer.
+    failPendingReverse("FFI context is shutting down; the reverse call was abandoned")
     cleanFinishedRequests()
     if pending.len > 0:
       try:
