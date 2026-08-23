@@ -219,4 +219,23 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
     )
   )
 
+  # {libraryName}_shutdown
+  let shutdownName = libraryName & "_shutdown"
+  let shutdownBody = quote:
+    when declared(initializeLibrary):
+      initializeLibrary()
+    var ret: cint = 0
+    if `poolIdent`.shutdownFFIContextPool().isErr():
+      ret = 1
+    return ret
+
+  stmts.add(
+    newProc(
+      name = ident(shutdownName),
+      params = @[ident("cint")],
+      body = shutdownBody,
+      pragmas = cdeclExportPragma,
+    )
+  )
+
   return stmts

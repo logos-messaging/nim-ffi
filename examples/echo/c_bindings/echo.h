@@ -266,6 +266,14 @@ uint64_t echo_add_event_listener(void* ctx, const char* event_name, FFICallback 
  * data of that listener alive until the dispatch ends.
  */
 int echo_remove_event_listener(void* ctx, uint64_t listener_id);
+/**
+ * Stop every context the library still holds and join their threads.
+ * Call it once, from the host, before the process exits: a context released with
+ * <lib>_ctx_destroy() keeps its worker threads for reuse, and letting the C
+ * runtime finalize the library under them crashes the process.
+ * Returns 0 when every context stopped, 1 when one was left running.
+ */
+int echo_shutdown(void);
 
 #ifdef __cplusplus
 } /* extern "C" */

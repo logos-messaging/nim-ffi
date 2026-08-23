@@ -345,6 +345,8 @@ proc generateCppHeader*(
   lines.add(
     "int $1_remove_event_listener(void* ctx, uint64_t listener_id);" % [libName]
   )
+  lines.add(renderBlockDocComment(ShutdownDoc))
+  lines.add("int $1_shutdown(void);" % [libName])
   lines.add("} // extern \"C\"")
   lines.add("")
 

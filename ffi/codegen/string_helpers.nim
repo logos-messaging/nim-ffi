@@ -50,6 +50,13 @@ A call from inside a listener callback returns at once, and the dispatch in
 flight can still deliver to a listener that you remove that way. Keep the user
 data of that listener alive until the dispatch ends."""
 
+const ShutdownDoc* =
+  """Stop every context the library still holds and join their threads.
+Call it once, from the host, before the process exits: a context released with
+<lib>_ctx_destroy() keeps its worker threads for reuse, and letting the C
+runtime finalize the library under them crashes the process.
+Returns 0 when every context stopped, 1 when one was left running."""
+
 const RemoveListenerBoxDoc* =
   """Call it from inside a listener callback only for the listener that runs.
 A remove of a different listener releases a box that the dispatch in flight can

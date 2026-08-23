@@ -178,6 +178,24 @@ proc destroyStaticFFIContext*[T](pool: var FFIContextPool[T]): Result[void, stri
     return err("destroyStaticFFIContext: " & $error)
   ok()
 
+proc shutdownFFIContextPool*[T](pool: var FFIContextPool[T]): Result[void, string] =
+  ## Stops and joins every live slot, the `{.ffiStatic.}` one included, so a host
+  ## can exit without the C runtime finalizing the library under threads that are
+  ## still running. Best-effort: a slot whose threads do not exit keeps its
+  ## resources and is reported, the rest are still torn down.
+  var firstErr = ""
+  pool.destroyStaticFFIContext().isOkOr:
+    firstErr = error
+  for i in 0 ..< MaxFFIContexts:
+    if not pool.initialized[i].load():
+      continue
+    pool.destroyFFIContext(pool.contexts[i].addr).isOkOr:
+      if firstErr.len == 0:
+        firstErr = error
+  if firstErr.len > 0:
+    return err("shutdownFFIContextPool: " & firstErr)
+  ok()
+
 proc resolveCtx*[T](
     pool: var FFIContextPool[T], token: FFICtxToken
 ): ptr FFIContext[T] =
