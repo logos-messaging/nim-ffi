@@ -906,6 +906,12 @@ uint64_t my_timer_add_event_listener(void* ctx, const char* event_name, FFICallb
  * data of that listener alive until the dispatch ends.
  */
 int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
+
+// Reverse FFI: host-implemented interfaces + host-emitted events
+typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, size_t args_len, void* user_data);
+int my_timer_set_fetch_host_clock_impl(void* ctx, FFIReverseImpl impl, void* user_data);
+int my_timer_reverse_reply(void* ctx, uint64_t call_id, int ret_code, const uint8_t* reply_cbor, size_t reply_len);
+int my_timer_emit_on_host_tick(void* ctx, const uint8_t* payload_cbor, size_t payload_len);
 } // extern "C"
 
 // ============================================================
@@ -1068,6 +1074,48 @@ public:
         return rc == 0;
     }
 
+    // ── Reverse FFI: host-implemented interfaces ────────────
+    // Copyable answer token for one `fetch_host_clock` invocation; reply once,
+    // inline or later from any thread.
+    struct FetchHostClockCall {
+        void* ctx = nullptr;
+        std::uint64_t id = 0;
+        bool reply(const HostClock& r) const {
+            auto enc = encodeCborFFI(r);
+            if (enc.isErr()) return fail(enc.error());
+            const auto& b = enc.value();
+            return my_timer_reverse_reply(ctx, id, 0, b.data(), b.size()) == 0;
+        }
+        bool fail(const std::string& msg) const {
+            return my_timer_reverse_reply(ctx, id, 1, reinterpret_cast<const std::uint8_t*>(msg.data()), msg.size()) == 0;
+        }
+    };
+
+    bool setFetchHostClockImpl(std::function<void(FetchHostClockCall, const std::string&)> fn) {
+        auto owned = std::make_unique<FetchHostClockImplBox>(FetchHostClockImplBox{ptr_, std::move(fn)});
+        auto* raw = owned.get();
+        if (my_timer_set_fetch_host_clock_impl(ptr_, &MyTimerCtx::fetchHostClockImplTrampoline, raw) != 0) return false;
+        fetchHostClockImplBox_ = std::move(owned);
+        return true;
+    }
+
+    bool clearFetchHostClockImpl() {
+        if (my_timer_set_fetch_host_clock_impl(ptr_, nullptr, nullptr) != 0) return false;
+        fetchHostClockImplBox_.reset();
+        return true;
+    }
+
+    // ── Reverse FFI: host-emitted events (fire-and-forget) ──
+    /// Emitted by the host via `my_timer_emit_on_host_tick` (typed helper:
+    /// `my_timer_ctx_emit_on_host_tick`); fire-and-forget for the host.
+    bool emitOnHostTick(const int64_t& tickNo) const {
+        const auto payload_ = OnHostTickReq{tickNo};
+        auto enc = encodeCborFFI(payload_);
+        if (enc.isErr()) return false;
+        const auto& b = enc.value();
+        return my_timer_emit_on_host_tick(ptr_, b.data(), b.size()) == 0;
+    }
+
     /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
     Result<EchoResponse> echo(const EchoRequest& req) const {
         const auto ffi_req_ = MyTimerEchoReq{req};
@@ -1216,8 +1264,33 @@ private:
         listener->fn(payload);
     }
 
+    template <class T>
+    static CborError decodeReverseArgs_(const std::uint8_t* data, std::size_t len, T& out) {
+        CborParser parser; CborValue it;
+        CborError err = cbor_parser_init(data, len, 0, &parser, &it);
+        if (err) return err;
+        return decode_cbor(it, out);
+    }
+
+    struct FetchHostClockImplBox {
+        void* ctx = nullptr;
+        std::function<void(FetchHostClockCall, const std::string&)> fn;
+    };
+    static void fetchHostClockImplTrampoline(std::uint64_t call_id, const std::uint8_t* args, std::size_t len, void* ud) {
+        auto* box = static_cast<FetchHostClockImplBox*>(ud);
+        FetchHostClockCall call{box->ctx, call_id};
+        if (!box->fn) { call.fail("no C++ impl callable"); return; }
+        std::string a{};
+        if (decodeReverseArgs_(args, len, a) != CborNoError) {
+            call.fail("reverse args decode failed");
+            return;
+        }
+        box->fn(call, a);
+    }
+
     void* ptr_;
     std::chrono::milliseconds timeout_;
     std::unordered_map<std::uint64_t, std::unique_ptr<ListenerBase>> listeners_;
+    std::unique_ptr<FetchHostClockImplBox> fetchHostClockImplBox_;
     explicit MyTimerCtx(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}
 };

@@ -329,6 +329,31 @@ plus typed sugar on the ctx wrapper: `<lib>_ctx_set_<wire>_impl`,
 `<lib>_decode_<wire>_args`, `<lib>_ctx_reverse_reply_<wire>` (payload-less for a
 `void` reply), `<lib>_ctx_reverse_reply_err`, and `<lib>_ctx_emit_<wire>`.
 
+The C++ and Rust bindings expose the same surface natively. Both hand the impl a
+copyable **call token** whose `reply`/`fail` may be used inline or from any host
+thread after the impl returned:
+
+```cpp
+ctx->setFetchHostClockImpl([](MyTimerCtx::FetchHostClockCall call, const std::string& precision) {
+    std::thread([call] { call.reply(HostClock{now_ms(), "CET"}); }).detach();
+});
+auto r = ctx->host_clock();          // Nim awaits the C++ impl
+ctx->emitOnHostTick(7);              // reverse event, fire-and-forget
+```
+
+```rust
+ctx.set_fetch_host_clock_impl(|call, precision: String| {
+    std::thread::spawn(move || { call.reply(&HostClock { unix_ms: now_ms(), zone: "CET".into() }); });
+});
+let r = ctx.host_clock()?;           // Nim awaits the Rust impl
+ctx.emit_on_host_tick(7);            // reverse event, fire-and-forget
+```
+
+The impl box lifetime is owned by the ctx wrapper in both languages; replace or
+clear is safe mid-flight because the dylib's `set_impl` waits an in-flight
+invocation of the old impl out before returning. CDDL schemas carry the reverse
+args/reply/event payload types through the ordinary type registry.
+
 Semantics worth knowing:
 
 | Situation | Behavior | Why |
@@ -342,8 +367,7 @@ Semantics worth knowing:
 | `{.ffiReverseEvent.}` emit | Fire-and-forget: the return code reports the enqueue only; the handler runs on the FFI processing thread via the normal request queue. | It is sugar over the one-way request path. |
 
 Current limits: CBOR ABI only (`abi = c` libraries with reverse declarations
-fail C binding generation), C bindings only (`cpp`/`rust`/`cddl` generators skip
-the reverse surface for now), `{.ffiHandle.}` params are rejected in reverse
+fail C binding generation), `{.ffiHandle.}` params are rejected in reverse
 calls, and reverse calls must be awaited on the FFI processing thread (i.e. from
 inside `{.ffi.}` handlers).
 

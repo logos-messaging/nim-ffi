@@ -463,6 +463,80 @@ TEST(TimerE2E, RemoveEventListenerStopsDelivery) {
     EXPECT_EQ(removedHits.load(), 1) << "removed listener fired after removeEventListener";
 }
 
+// ── Reverse FFI: the library calls INTO this C++ host ───────────────────────
+
+TEST(ReverseFFI, UnfulfilledInterfaceFailsFast) {
+    auto ctx = makeCtx("rev-unfulfilled");
+    auto r = ctx->host_clock();
+    ASSERT_TRUE(r.isErr());
+    EXPECT_NE(r.error().find("no host implementation"), std::string::npos);
+}
+
+TEST(ReverseFFI, InlineTypedReplyRoundTrips) {
+    auto ctx = makeCtx("rev-inline");
+    ASSERT_TRUE(ctx->setFetchHostClockImpl(
+        [](MyTimerCtx::FetchHostClockCall call, const std::string& precision) {
+            EXPECT_EQ(precision, "ms");
+            EXPECT_TRUE(call.reply(HostClock{1700000123456, "UTC"}));
+        }));
+    auto r = ctx->host_clock();
+    ASSERT_FALSE(r.isErr()) << r.error();
+    EXPECT_EQ(r.value(), "UTC@1700000123456");
+}
+
+TEST(ReverseFFI, DeferredReplyFromAHostThread) {
+    auto ctx = makeCtx("rev-deferred");
+    // The call token is copyable: hand it to a host thread and return at once.
+    ASSERT_TRUE(ctx->setFetchHostClockImpl(
+        [](MyTimerCtx::FetchHostClockCall call, const std::string&) {
+            std::thread([call] {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                EXPECT_TRUE(call.reply(HostClock{42, "CET"}));
+            }).detach();
+        }));
+    auto r = ctx->host_clock();
+    ASSERT_FALSE(r.isErr()) << r.error();
+    EXPECT_EQ(r.value(), "CET@42");
+}
+
+TEST(ReverseFFI, FailPropagatesTheHostMessage) {
+    auto ctx = makeCtx("rev-fail");
+    ASSERT_TRUE(ctx->setFetchHostClockImpl(
+        [](MyTimerCtx::FetchHostClockCall call, const std::string&) {
+            EXPECT_TRUE(call.fail("host has no clock today"));
+        }));
+    auto r = ctx->host_clock();
+    ASSERT_TRUE(r.isErr());
+    EXPECT_NE(r.error().find("host has no clock today"), std::string::npos);
+}
+
+TEST(ReverseFFI, ClearImplRestoresFailFast) {
+    auto ctx = makeCtx("rev-clear");
+    ASSERT_TRUE(ctx->setFetchHostClockImpl(
+        [](MyTimerCtx::FetchHostClockCall call, const std::string&) {
+            EXPECT_TRUE(call.reply(HostClock{1, "UTC"}));
+        }));
+    ASSERT_FALSE(ctx->host_clock().isErr());
+    ASSERT_TRUE(ctx->clearFetchHostClockImpl());
+    auto r = ctx->host_clock();
+    ASSERT_TRUE(r.isErr());
+    EXPECT_NE(r.error().find("no host implementation"), std::string::npos);
+}
+
+TEST(ReverseFFI, EmittedReverseEventReachesTheNimHandler) {
+    auto ctx = makeCtx("rev-emit");
+    ASSERT_TRUE(ctx->emitOnHostTick(9));
+    // Fire-and-forget: observe the handler's effect through a normal method.
+    long long seen = -1;
+    for (int i = 0; i < 100 && seen != 9; i++) {
+        auto r = ctx->last_host_tick();
+        ASSERT_FALSE(r.isErr()) << r.error();
+        seen = r.value();
+        if (seen != 9) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    EXPECT_EQ(seen, 9);
+}
+
 // Cross-language byte-string contract: the generated C++ codec must round-trip
 // a std::vector<std::uint8_t> as a CBOR byte string (major type 2), byte-for-byte
 // identical to what Nim's cbor_serialization emits for `seq[byte]`. The goldens

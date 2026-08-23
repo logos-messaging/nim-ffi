@@ -16,7 +16,16 @@ All notable changes to this project are documented in this file.
   thread when the host calls the generated fire-and-forget `<lib>_emit_<wire>`
   export. Both ride CBOR; the C binding gains the raw declarations plus typed
   helpers (`_ctx_set_*_impl`, `_decode_*_args`, `_ctx_reverse_reply_*`,
-  `_ctx_emit_*`). CBOR ABI and C bindings only for now.
+  `_ctx_emit_*`). CBOR ABI only for now.
+- Reverse FFI in the C++ and Rust bindings: `set<X>Impl`/`set_<x>_impl` register
+  a `std::function` / `Fn` closure as the host implementation (invoked on the
+  event dispatch thread with decoded typed args), a copyable call token carries
+  typed `reply`/`fail` usable inline or from any host thread, `clear…` restores
+  fail-fast, and `emit<X>`/`emit_<x>` fire `{.ffiReverseEvent.}`s with flattened
+  typed parameters. Impl box lifetimes are owned by the ctx wrapper; replacement
+  is safe mid-flight because `set_impl` waits the old impl's in-flight
+  invocation out. CDDL schemas pick the reverse payload types up through the
+  ordinary type registry.
 - The `abi = c` C header now declares the event-listener ABI that
   `declareLibrary` always exports (`<lib>_add_event_listener` /
   `<lib>_remove_event_listener`) and the `FFICallBack` typedef they take, so a

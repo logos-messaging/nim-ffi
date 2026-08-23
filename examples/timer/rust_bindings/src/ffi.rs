@@ -27,4 +27,17 @@ extern "C" {
     pub fn my_timer_destroy(ctx: *mut c_void) -> c_int;
     pub fn my_timer_add_event_listener(ctx: *mut c_void, event_name: *const c_char, callback: FFICallback, user_data: *mut c_void) -> u64;
     pub fn my_timer_remove_event_listener(ctx: *mut c_void, listener_id: u64) -> c_int;
+    pub fn my_timer_set_fetch_host_clock_impl(ctx: *mut c_void, imp: Option<FFIReverseImpl>, user_data: *mut c_void) -> c_int;
+    pub fn my_timer_reverse_reply(ctx: *mut c_void, call_id: u64, ret_code: c_int, reply_cbor: *const u8, reply_len: usize) -> c_int;
+    pub fn my_timer_emit_on_host_tick(ctx: *mut c_void, payload_cbor: *const u8, payload_len: usize) -> c_int;
 }
+
+/// A host implementation of a `{.ffiReverse.}` interface. Invoked on the
+/// library's event dispatch thread; return promptly and answer (inline or
+/// later, from any thread) via `<lib>_reverse_reply`.
+pub type FFIReverseImpl = unsafe extern "C" fn(
+    call_id: u64,
+    args_cbor: *const u8,
+    args_len: usize,
+    user_data: *mut c_void,
+);

@@ -149,11 +149,53 @@ unsafe extern "C" fn on_job_scheduled_trampoline(
 #[derive(Debug, Clone, Copy)]
 pub struct ListenerHandle { pub id: u64 }
 
+/// Answer token for one `fetch_host_clock` invocation; reply once, inline or
+/// later from any thread.
+#[derive(Debug, Clone, Copy)]
+pub struct FetchHostClockCall { ctx: usize, id: u64 }
+
+impl FetchHostClockCall {
+    pub fn reply(&self, r: &HostClock) -> bool {
+        match encode_cbor(r) {
+            Ok(b) => unsafe { ffi::my_timer_reverse_reply(self.ctx as *mut c_void, self.id, 0, b.as_ptr(), b.len()) == 0 },
+            Err(e) => self.fail(&e),
+        }
+    }
+    pub fn fail(&self, msg: &str) -> bool {
+        unsafe { ffi::my_timer_reverse_reply(self.ctx as *mut c_void, self.id, 1, msg.as_ptr(), msg.len()) == 0 }
+    }
+}
+
+struct FetchHostClockImplBox {
+    ctx: usize,
+    f: Box<dyn Fn(FetchHostClockCall, String) + Send + Sync>,
+}
+
+unsafe extern "C" fn fetch_host_clock_impl_trampoline(
+    call_id: u64, args: *const u8, len: usize, ud: *mut c_void,
+) {
+    if ud.is_null() { return; }
+    let b = &*(ud as *const FetchHostClockImplBox);
+    let call = FetchHostClockCall { ctx: b.ctx, id: call_id };
+    let bytes = if args.is_null() || len == 0 {
+        &[][..]
+    } else {
+        slice::from_raw_parts(args, len)
+    };
+    match decode_cbor::<String>(bytes) {
+        Ok(a) => (b.f)(call, a),
+        Err(e) => {
+            let _ = call.fail(&format!("reverse args decode failed: {e}"));
+        }
+    }
+}
+
 /// High-level context for `MyTimer`.
 pub struct MyTimerCtx {
     ptr: *mut c_void,
     timeout: Duration,
     listeners: std::sync::Mutex<std::collections::HashMap<u64, Box<dyn std::any::Any + Send>>>,
+    fetch_host_clock_impl: std::sync::Mutex<Option<Box<FetchHostClockImplBox>>>,
 }
 
 // SAFETY: The `ptr` field points to an FFIContext owned by the Nim runtime.
@@ -188,7 +230,7 @@ impl MyTimerCtx {
         })?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
         let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
-        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })
+        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()), fetch_host_clock_impl: std::sync::Mutex::new(None) })
     }
 
     /// Creates the FFIContext + MyTimer; async via chronos.
@@ -201,7 +243,7 @@ impl MyTimerCtx {
         }).await?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
         let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
-        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })
+        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()), fetch_host_clock_impl: std::sync::Mutex::new(None) })
     }
 
     fn add_listener_inner(
@@ -255,6 +297,38 @@ impl MyTimerCtx {
         };
         self.listeners.lock().unwrap().remove(&handle.id);
         rc == 0
+    }
+
+    pub fn set_fetch_host_clock_impl<F>(&self, f: F) -> bool
+    where F: Fn(FetchHostClockCall, String) + Send + Sync + 'static,
+    {
+        let owned: Box<FetchHostClockImplBox> = Box::new(FetchHostClockImplBox { ctx: self.ptr as usize, f: Box::new(f) });
+        let raw = &*owned as *const FetchHostClockImplBox as *mut c_void;
+        let rc = unsafe {
+            ffi::my_timer_set_fetch_host_clock_impl(self.ptr, Some(fetch_host_clock_impl_trampoline), raw)
+        };
+        if rc != 0 { return false; }
+        *self.fetch_host_clock_impl.lock().unwrap() = Some(owned);
+        true
+    }
+
+    pub fn clear_fetch_host_clock_impl(&self) -> bool {
+        let rc = unsafe {
+            ffi::my_timer_set_fetch_host_clock_impl(self.ptr, None, std::ptr::null_mut())
+        };
+        if rc != 0 { return false; }
+        *self.fetch_host_clock_impl.lock().unwrap() = None;
+        true
+    }
+
+    /// Emitted by the host via `my_timer_emit_on_host_tick` (typed helper:
+    /// `my_timer_ctx_emit_on_host_tick`); fire-and-forget for the host.
+    pub fn emit_on_host_tick(&self, tick_no: i64) -> bool {
+        let payload = OnHostTickReq { tick_no };
+        match encode_cbor(&payload) {
+            Ok(b) => unsafe { ffi::my_timer_emit_on_host_tick(self.ptr, b.as_ptr(), b.len()) == 0 },
+            Err(_) => false,
+        }
     }
 
     /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
