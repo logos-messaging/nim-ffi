@@ -1,5 +1,4 @@
-## Compile fixture: a leftover `"abi = cbor"` on an `{.ffiEvent.}` must fail
-## rather than become an event whose wire name is `abi = cbor`.
+## Rejection fixture: the stale 0.3 `"abi = cbor"` must fail the build, not become a wire name.
 
 import results
 import ffi

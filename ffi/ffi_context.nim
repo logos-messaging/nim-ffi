@@ -10,6 +10,7 @@ import
   ./ffi_handles,
   ./ffi_thread_request,
   ./ffi_request_queue,
+  ./logging,
   ./cbor_serial
 
 export ffi_events, ffi_handles
@@ -92,6 +93,7 @@ type FFIContext*[T] = object
   ffiThreadExited*: Atomic[bool]
     # set once FFI thread (incl. async {.ffiDtor.}) is done; event thread drains until then
   running: Atomic[bool]
+  registeredRequests: ptr Table[cstring, FFIRequestProc]
   staleWarnInterval*: Duration
 
 var onFFIThread* {.threadvar.}: bool
@@ -197,6 +199,8 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   newSignalOrErr(ctx.eventQueueSignal, "eventQueueSignal")
   newSignalOrErr(ctx.eventThreadExitSignal, "eventThreadExitSignal")
   newSignalOrErr(ctx.recycleDoneSignal, "recycleDoneSignal")
+
+  ctx.registeredRequests = addr ffi_types.registeredRequests
 
   ctx.running.store(true)
 

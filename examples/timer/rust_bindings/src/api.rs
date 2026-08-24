@@ -35,7 +35,7 @@ unsafe fn ffi_payload(ret: c_int, msg: *const c_char, len: usize) -> FFIResult {
     else        { Err(String::from_utf8_lossy(&bytes).into_owned()) }
 }
 
-// nim-ffi result-callback status codes (mirror ffi/ffi_ret.nim).
+// nim-ffi result-callback status codes (mirror ffi/ffi_types.nim).
 const NIMFFI_RET_OK: c_int = 0;
 const NIMFFI_RET_MISSING_CALLBACK: c_int = 2;
 const NIMFFI_RET_STALE_WARN: c_int = 3;

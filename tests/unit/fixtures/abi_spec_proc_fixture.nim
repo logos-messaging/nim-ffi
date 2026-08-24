@@ -1,5 +1,4 @@
-## Compile fixture: a leftover `"abi = c"` argument on a `{.ffi.}` proc must
-## fail the build, since the wire selector is gone.
+## Rejection fixture: the stale 0.3 `"abi = c"` must fail the build, since the wire selector is gone.
 
 import results
 import ffi

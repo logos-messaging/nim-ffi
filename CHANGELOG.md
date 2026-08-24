@@ -59,10 +59,6 @@ All notable changes to this project are documented in this file.
   `-d:ffiEventQueueCapacity`, `-d:ffiMaxEventPayloadBytes` and
   `-d:ffiMaxEventNameBytes`, so they cannot collide with another package's
   defines. The Nim constant names are unchanged.
-- **The C header spells the error code `NIMFFI_RET_ERR`**, not
-  `NIMFFI_RET_ERROR`, matching the C++ header and Nim's `RET_ERR`. Every
-  generated copy of the `NIMFFI_RET_*` table is emitted from the one definition
-  in `ffi/ffi_ret.nim`. Regenerate your bindings to pick it up.
 - **A submit now has two limits, and fails instead of accepting without bound.**
   The ingress queue took every request a producer offered, so a producer faster
   than the FFI thread — or any producer once that thread is wedged — grew memory
@@ -82,17 +78,10 @@ All notable changes to this project are documented in this file.
   (`c_macro_helpers.nim`, `c_wire.nim`), the CBOR-free scalar fast path
   (`ffi_scalar.nim`, `-d:ffiAllowScalarSkip`), the second C header shape
   (`generateCAbiLibHeader`), `examples/echo/c_abi_bindings/`, and the
-  `*_c_abi_*` tasks, tests and CI jobs. What the deleted `bench_codec` measured,
-  for the record: cwire beat CBOR by a large factor on small structs, where
-  CBOR's per-field tag and length framing dominates, and the two converged
-  toward 1x as `seq[byte]` payloads grew and both became memcpy-bound. Losing
-  that small-struct speed is the price of one wire, one set of generators, and
-  no struct layout to keep in step across a lib/header skew.
+  `*_c_abi_*` tasks, tests and CI jobs, along with the `bench_codec` benchmark
+  that compared the two wires. A 0.3.x library that declared `abi = c` moves to
+  CBOR by dropping the argument and regenerating its bindings.
 - `declareLibrary`'s `headerBanner` argument, which nothing passed.
-- The `ffi/logging.nim` module. Every FFI thread called `setupLog` with the same
-  two hardcoded arguments, so up to 32 threads raced to install the same
-  process-global chronicles writer, and the `Json`/`NO_COLOR` paths were
-  unreachable. chronicles' own defaults do the same job.
 - `SharedSeq` / `allocSharedSeq` / `deallocSharedSeq` / `toSeq` from
   `ffi/alloc.nim`, `cborFreeShared`, `eventQueueLen`, and the `git_version`
   define: no call sites outside their own tests.

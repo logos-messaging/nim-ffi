@@ -227,7 +227,7 @@ proc generateCppHeader*(
 ): string =
   var lines: seq[string] = @[]
 
-  lines.add(HeaderPreludeTpl.replace("{{RET_CODES}}", retCodeDefines()))
+  lines.add(HeaderPreludeTpl)
   if events.len > 0:
     lines.add("#include <unordered_map>")
 

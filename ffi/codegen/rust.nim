@@ -1,7 +1,6 @@
 ## Rust binding generator: emits a complete Rust crate using CBOR (ciborium).
 
 import std/[os, strutils]
-import ../ffi_ret
 import ./meta, ./string_helpers, ./types_ir, ./consts
 
 ## Wire-format Rust type for any Nim `ptr T`/`pointer`; fixed 64-bit for a
@@ -394,12 +393,10 @@ proc generateApiRs*(
   lines.add("    else        { Err(String::from_utf8_lossy(&bytes).into_owned()) }")
   lines.add("}")
   lines.add("")
-  # Only the codes this crate reads: an unused `const` is a Rust dead_code warning.
-  lines.add("// nim-ffi result-callback status codes (mirror ffi/ffi_ret.nim).")
-  for code in ffiRetCodes:
-    if code.name == "ERR":
-      continue
-    lines.add("const NIMFFI_RET_" & code.name & ": c_int = " & $code.value & ";")
+  lines.add("// nim-ffi result-callback status codes (mirror ffi/ffi_types.nim).")
+  lines.add("const NIMFFI_RET_OK: c_int = 0;")
+  lines.add("const NIMFFI_RET_MISSING_CALLBACK: c_int = 2;")
+  lines.add("const NIMFFI_RET_STALE_WARN: c_int = 3;")
   lines.add("")
   lines.add("unsafe extern \"C\" fn on_result(")
   lines.add("    ret: c_int,")

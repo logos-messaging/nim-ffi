@@ -847,8 +847,8 @@ func generateCPreludeHeader*(): string =
   return HeaderPreludeTpl & "\n"
 
 func generateCCborHeader*(): string =
-  ## The library-agnostic `nim_ffi_cbor.h`; only the status codes are stamped in.
-  return CborHelpersTpl.replace("{{RET_CODES}}", retCodeDefines()) & "\n"
+  ## The library-agnostic `nim_ffi_cbor.h`, emitted verbatim.
+  return CborHelpersTpl & "\n"
 
 proc generateCLibHeader*(
     procs: seq[FFIProcMeta],
