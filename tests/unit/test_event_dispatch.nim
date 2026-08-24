@@ -4,65 +4,13 @@ import std/[locks, os]
 import unittest2
 import results
 import ffi
+import ./helpers
 
 type TestEvtLib = object
 
 type MessageSentBody* {.ffi.} = object
   requestId*: string
   messageHash*: string
-
-type CallbackData = object
-  lock: Lock
-  cond: Cond
-  called: bool
-  retCode: cint
-  msg: array[1024, byte]
-  msgLen: int
-
-proc initCallbackData(d: var CallbackData) =
-  d.lock.initLock()
-  d.cond.initCond()
-
-proc deinitCallbackData(d: var CallbackData) =
-  d.cond.deinitCond()
-  d.lock.deinitLock()
-
-template setupCallbackData(name: untyped) =
-  var name: CallbackData
-  initCallbackData(name)
-  defer:
-    deinitCallbackData(name)
-
-proc captureCb(
-    retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
-) {.cdecl, gcsafe, raises: [].} =
-  let d = cast[ptr CallbackData](userData)
-  acquire(d[].lock)
-  d[].retCode = retCode
-  let n = min(int(len), d[].msg.len)
-  if n > 0 and not msg.isNil:
-    copyMem(addr d[].msg[0], msg, n)
-  d[].msgLen = n
-  d[].called = true
-  signal(d[].cond)
-  release(d[].lock)
-
-proc waitCallback(d: var CallbackData) =
-  acquire(d.lock)
-  while not d.called:
-    wait(d.cond, d.lock)
-  release(d.lock)
-
-proc resetCalled(d: var CallbackData) =
-  acquire(d.lock)
-  d.called = false
-  release(d.lock)
-
-proc callbackBytes(d: var CallbackData): seq[byte] =
-  var bytes = newSeq[byte](d.msgLen)
-  if d.msgLen > 0:
-    copyMem(addr bytes[0], addr d.msg[0], d.msgLen)
-  bytes
 
 template withPool(ctxIdent: untyped, body: untyped) =
   var pool: FFIContextPool[TestEvtLib]
@@ -93,8 +41,9 @@ type SetterArgs =
 
 proc setterThreadBody(args: SetterArgs) {.thread.} =
   while not args.stop[].load():
-    let id =
-      addEventListener(args.ctx[].eventRegistry, "message_sent", captureCb, args.target)
+    let id = addEventListener(
+      args.ctx[].eventRegistry, "message_sent", testCallback, args.target
+    )
     discard removeEventListener(args.ctx[].eventRegistry, id)
 
 suite "dispatchFFIEventCbor":
@@ -104,17 +53,18 @@ suite "dispatchFFIEventCbor":
     setupCallbackData(rsp)
 
     withPool(ctx):
-      discard addEventListener(ctx[].eventRegistry, "message_sent", captureCb, addr evt)
+      discard
+        addEventListener(ctx[].eventRegistry, "message_sent", testCallback, addr evt)
 
       check sendRequestToFFIThread(
-        ctx, EmitCborEventRequest.ffiNewReq(captureCb, addr rsp)
+        ctx, EmitCborEventRequest.ffiNewReq(testCallback, addr rsp)
       )
         .isOk()
       waitCallback(rsp)
       waitCallback(evt)
 
       check evt.retCode == RET_OK
-      let decoded = cborDecode(callbackBytes(evt), EventEnvelope[MessageSentBody])
+      let decoded = cborDecode(payload(evt), EventEnvelope[MessageSentBody])
       check decoded.isOk()
       check decoded.value.eventType == "message_sent"
       check decoded.value.payload.requestId == "req-1"
@@ -126,17 +76,17 @@ suite "dispatchFFIEvent with seq[byte]":
     setupCallbackData(rsp)
 
     withPool(ctx):
-      discard addEventListener(ctx[].eventRegistry, "raw_bytes", captureCb, addr evt)
+      discard addEventListener(ctx[].eventRegistry, "raw_bytes", testCallback, addr evt)
 
       check sendRequestToFFIThread(
-        ctx, EmitRawBytesEventRequest.ffiNewReq(captureCb, addr rsp)
+        ctx, EmitRawBytesEventRequest.ffiNewReq(testCallback, addr rsp)
       )
         .isOk()
       waitCallback(rsp)
       waitCallback(evt)
 
       check evt.retCode == RET_OK
-      check callbackBytes(evt) == @[byte 0x01, 0x02, 0x03]
+      check payload(evt) == @[byte 0x01, 0x02, 0x03]
 
 when not defined(gcRefc):
   ## Skipped under refc: cross-thread listener-seq growth is unsafe with refc's GC.
@@ -148,7 +98,7 @@ when not defined(gcRefc):
 
       withPool(ctx):
         discard
-          addEventListener(ctx[].eventRegistry, "message_sent", captureCb, addr evt)
+          addEventListener(ctx[].eventRegistry, "message_sent", testCallback, addr evt)
 
         const NumSetterThreads = 4
         const NumDispatchIters = 200
@@ -162,7 +112,7 @@ when not defined(gcRefc):
         for _ in 0 ..< NumDispatchIters:
           resetCalled(rsp)
           check sendRequestToFFIThread(
-            ctx, EmitCborEventRequest.ffiNewReq(captureCb, addr rsp)
+            ctx, EmitCborEventRequest.ffiNewReq(testCallback, addr rsp)
           )
             .isOk()
           waitCallback(rsp)
@@ -199,7 +149,7 @@ suite "registry lock held during invocation":
       check id != 0'u64
 
       check sendRequestToFFIThread(
-        ctx, EmitCborEventRequest.ffiNewReq(captureCb, addr rsp)
+        ctx, EmitCborEventRequest.ffiNewReq(testCallback, addr rsp)
       )
         .isOk()
       waitCallback(rsp)
@@ -222,14 +172,14 @@ suite "liveness events":
 
     withPool(ctx):
       discard addEventListener(
-        ctx[].eventRegistry, NotRespondingEventName, captureCb, addr evt
+        ctx[].eventRegistry, NotRespondingEventName, testCallback, addr evt
       )
 
       onNotResponding(ctx)
 
       waitCallback(evt)
       check evt.retCode == RET_OK
-      let decoded = cborDecode(callbackBytes(evt), EventEnvelope[NotRespondingEvent])
+      let decoded = cborDecode(payload(evt), EventEnvelope[NotRespondingEvent])
       check decoded.isOk()
       check decoded.value.eventType == NotRespondingEventName
 
@@ -237,14 +187,15 @@ suite "liveness events":
     setupCallbackData(evt)
 
     withPool(ctx):
-      discard
-        addEventListener(ctx[].eventRegistry, RespondingEventName, captureCb, addr evt)
+      discard addEventListener(
+        ctx[].eventRegistry, RespondingEventName, testCallback, addr evt
+      )
 
       onResponding(ctx)
 
       waitCallback(evt)
       check evt.retCode == RET_OK
-      let decoded = cborDecode(callbackBytes(evt), EventEnvelope[RespondingEvent])
+      let decoded = cborDecode(payload(evt), EventEnvelope[RespondingEvent])
       check decoded.isOk()
       check decoded.value.eventType == RespondingEventName
 
@@ -259,7 +210,8 @@ suite "event thread drains queued events":
 
     withPool(ctx):
       const QueuedEvtName = "queued_evt"
-      discard addEventListener(ctx[].eventRegistry, QueuedEvtName, captureCb, addr evt)
+      discard
+        addEventListener(ctx[].eventRegistry, QueuedEvtName, testCallback, addr evt)
 
       let payload = @[byte 0xDE, 0xAD, 0xBE, 0xEF]
       check tryEnqueueEvent(
@@ -268,7 +220,7 @@ suite "event thread drains queued events":
 
       waitCallback(evt)
       check evt.retCode == RET_OK
-      check callbackBytes(evt) == payload
+      check payload(evt) == payload
 
 suite "oversize payload falls back to heap":
   ## Payloads over MaxEventPayloadBytes take the c_malloc'd heap fallback.
@@ -278,7 +230,7 @@ suite "oversize payload falls back to heap":
     withPool(ctx):
       const OversizeEvtName = "oversize_evt"
       discard
-        addEventListener(ctx[].eventRegistry, OversizeEvtName, captureCb, addr evt)
+        addEventListener(ctx[].eventRegistry, OversizeEvtName, testCallback, addr evt)
 
       var payload = newSeq[byte](MaxEventPayloadBytes + 64)
       for i in 0 ..< payload.len:
@@ -290,8 +242,8 @@ suite "oversize payload falls back to heap":
 
       waitCallback(evt)
       check evt.retCode == RET_OK
-      let n = min(payload.len, 1024) # captureCb caps at its 1024-byte buffer
-      check callbackBytes(evt) == payload[0 ..< n]
+      let n = min(payload.len, 1024) # testCallback caps at its 1024-byte buffer
+      check payload(evt) == payload[0 ..< n]
 
 suite "oversize event name falls back to heap":
   ## A name over MaxEventNameBytes takes the heap fallback and still routes.
@@ -302,7 +254,7 @@ suite "oversize event name falls back to heap":
       const LongEvtName =
         "oversize_event_name_that_is_deliberately_much_longer_than_the_name_slab_budget"
       check LongEvtName.len > MaxEventNameBytes
-      discard addEventListener(ctx[].eventRegistry, LongEvtName, captureCb, addr evt)
+      discard addEventListener(ctx[].eventRegistry, LongEvtName, testCallback, addr evt)
 
       let payload = @[byte 0x11, 0x22, 0x33]
       check tryEnqueueEvent(
@@ -311,4 +263,4 @@ suite "oversize event name falls back to heap":
 
       waitCallback(evt)
       check evt.retCode == RET_OK
-      check callbackBytes(evt) == payload
+      check payload(evt) == payload

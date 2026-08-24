@@ -6,7 +6,7 @@
 import system/ansi_c
 import std/[atomics, locks, sequtils, options, tables]
 import chronicles
-import ./ffi_types, ./cbor_serial, ./alloc
+import ./ffi_types, ./cbor_serial
 
 type EventEnvelope*[T] = object ## CBOR wire shape: { eventType: tstr, payload: <T> }.
   eventType*: string
@@ -138,16 +138,16 @@ proc snapshotListeners*(
       listeners.add(l)
   listeners
 
-const EventQueueCapacity* {.intdefine.} = 1024
-  ## Sustained backlog here means a listener is wedged. Override `-d:EventQueueCapacity=N`.
+const EventQueueCapacity* {.intdefine: "ffiEventQueueCapacity".} = 1024
+  ## Sustained backlog here means a listener is wedged. Override `-d:ffiEventQueueCapacity=N`.
 
-const MaxEventPayloadBytes* {.intdefine.} = 512
+const MaxEventPayloadBytes* {.intdefine: "ffiMaxEventPayloadBytes".} = 512
   ## Per-slot payload slab; larger payloads take a one-off c_malloc freed on
-  ## commit. Override `-d:MaxEventPayloadBytes=N`.
+  ## commit. Override `-d:ffiMaxEventPayloadBytes=N`.
 
-const MaxEventNameBytes* {.intdefine.} = 64
+const MaxEventNameBytes* {.intdefine: "ffiMaxEventNameBytes".} = 64
   ## Per-slot name slab (incl. NUL); longer names take the heap fallback.
-  ## Override `-d:MaxEventNameBytes=N`.
+  ## Override `-d:ffiMaxEventNameBytes=N`.
 
 const emptyListenerPayload*: cstring = ""
   ## Non-nil zero-length stand-in for empty payloads/names (nil would be UB for
@@ -282,10 +282,6 @@ proc commitDequeue*(q: var EventQueue) {.raises: [], gcsafe.} =
     q.buf[q.head] = QueuedEvent()
     q.head = (q.head + 1) mod EventQueueCapacity
     q.count.dec()
-
-proc eventQueueLen*(q: var EventQueue): int {.raises: [], gcsafe.} =
-  withLock q.lock:
-    return q.count
 
 proc notifyListeners*(
     listeners: seq[FFIEventListener], retCode: cint, data: pointer, dataLen: int

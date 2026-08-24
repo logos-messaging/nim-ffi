@@ -1,9 +1,8 @@
 # FFI benchmarks
 
-This directory holds Nim micro/stress benchmarks. Neither is part of `nimble test`.
+This directory holds a Nim stress benchmark. It is not part of `nimble test`.
 
-- `bench_codec.nim` — `cbor` vs `c` (cwire) wire-format codec microbenchmark (documented below). Pure measurement, not a gate.
-- `bench_ffi_submit.nim` — concurrent-submit stress test + throughput benchmark for `sendRequestToFFIThread` (documented next). Carries a **scaling gate** that fails CI until the per-request submit lock is replaced.
+- `bench_ffi_submit.nim` — concurrent-submit stress test + throughput benchmark for `sendRequestToFFIThread` (documented next). Carries a **scaling gate**, which the sharded ingress passes at ~11x, so a red run is a regression.
 
 ## `sendRequestToFFIThread` concurrent-submit stress / throughput
 
@@ -51,51 +50,3 @@ The fix replaces the single-slot channel + accept handshake with a **sharded, mu
 The sharded ingress tracks the hardware ceiling (~24M/s plateau, saturating the cores) and degrades gracefully past it; the single-hotspot lock-free queue collapses to a contention floor and gets *worse* with more threads. Both are correct at every level (callback count matches submits exactly, no drops/dupes).
 
 The gate runs in the non-sanitized **Submit Scaling Gate** CI job (`.github/workflows/ci.yml`); the sanitized jobs run the same bench with `FFI_SCALING_GATE=0` for leak/race coverage only, since sanitizer instrumentation makes throughput scaling meaningless.
-
-# FFI wire-format codec benchmark
-
-`bench_codec.nim` is a single-process Nim microbenchmark comparing the two FFI
-wire-format codecs head-to-head on identical payloads:
-
-- **cbor** — `cborEncode` / `cborDecode`, self-describing bytes over
-  `seq[byte]`. The codec the `cbor` ABI uses on every boundary crossing.
-- **c (cwire)** — `cwirePack` / `cwireUnpack` / `cwireFree`, `abi = c` C-struct
-  shared-memory packing. The codec the `c` ABI uses, emitted for every
-  `{.ffi: "abi = c".}` type as its `<T>_CWire` companion.
-
-Both paths run in the same process on the same values, so the numbers isolate
-**codec cost only** — no thread hop, no callback dispatch, no chronos work. The
-full FFI round-trip (thread channel + callback) is identical for both ABIs, so
-the codec is where the ABI difference actually lives.
-
-## Running
-
-```sh
-nimble bench_codec
-# or directly, with the size sweep extended to 1 MiB:
-nim c -r --mm:orc -d:danger tests/bench/bench_codec.nim --include-1mib
-```
-
-Build with `-d:danger` (the nimble task does) so the figures reflect optimized
-codegen rather than a debug build.
-
-## Payload shapes covered
-
-| Type             | Shape                                              |
-|------------------|----------------------------------------------------|
-| `EchoRequest`    | 1 string + 1 int (small struct)                    |
-| `EchoResponse`   | 2 strings                                          |
-| `ComplexRequest` | `seq[EchoRequest]`, `seq[string]`, `Option[...]`   |
-| `BytesPayload`   | `seq[byte]`, swept 100 B → 150 KiB (`--include-1mib` adds 1 MiB) |
-
-## Interpreting
-
-Small structs are dominated by CBOR's per-field tag/length framing, so cwire
-wins by a large factor. As payloads grow into big `seq[byte]` blobs, both codecs
-become `memcpy`-bound and the ratio converges toward ~1×. The byte-blob sweep
-also reports throughput (MiB/s) for each codec.
-
-> Note: this benchmark exercises the `c` ABI **codec** (the cwire companions on
-> the Nim side). Wiring the `c` ABI through the full proc-dispatch path and the
-> foreign (C++/Rust) generators is tracked separately; only `cbor` currently
-> generates working end-to-end bindings.

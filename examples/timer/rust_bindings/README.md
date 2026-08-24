@@ -13,10 +13,9 @@ This folder contains **auto-generated Rust bindings** (the `my_timer` crate) for
 
 ## How It's Generated
 
-Generate or regenerate these bindings by running from the parent directory:
+Generate or regenerate these bindings by running from the repository root:
 
 ```sh
-cd examples/timer
 nimble genbindings_rust
 ```
 

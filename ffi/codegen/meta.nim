@@ -1,15 +1,9 @@
 ## Compile-time metadata types for FFI binding generation, populated by the
 ## {.ffiCtor.}/{.ffi.} macros and consumed by codegen.
 
-import std/[strutils, options]
+import std/options
 
 type
-  ABIFormat* {.pure.} = enum
-    ## FFI payload wire format. `Cbor` is wired end-to-end; `C` has a type codec
-    ## but no proc-dispatch path yet.
-    Cbor = "cbor"
-    C = "c"
-
   FFIParamMeta* = object
     name*: string
     typeName*: string
@@ -32,10 +26,6 @@ type
     returnTypeName*: string
     returnIsPtr*: bool
     returnIsHandle*: bool
-    abiFormat*: ABIFormat
-    scalarFastPath*: bool
-      ## `abi = c` proc with an all-scalar signature: uses the CBOR-free fast
-      ## path, and binds only in the `abi = c` C header (see `bindableProcs`).
 
   FFIFieldMeta* = object
     name*: string
@@ -52,7 +42,6 @@ type
   FFITypeMeta* = object
     name*: string
     fields*: seq[FFIFieldMeta]
-    abiFormat*: ABIFormat
     enumValues*: seq[FFIEnumValueMeta] ## non-empty iff the type is an enum
 
   FFIConstMeta* = object
@@ -69,7 +58,6 @@ type
     nimProcName*: string
     libName*: string
     payloadTypeName*: string
-    abiFormat*: ABIFormat
     doc*: string
 
 var ffiProcRegistry* {.compileTime.}: seq[FFIProcMeta]
@@ -84,55 +72,6 @@ var libraryDeclared* {.compileTime.}: bool = false
 # Set by `genBindings()`. Annotations expanded after it register too late to be emitted, so the macros check this and fail loudly instead of dropping silently.
 var genBindingsEmitted* {.compileTime.}: bool = false
 
-# Library-wide default ABI, inherited by each annotation unless it overrides.
-var currentDefaultABIFormat* {.compileTime.}: ABIFormat = ABIFormat.Cbor
-
-# Optional "generated — do not edit" banner stamped at the top of each generated
-# header, set by declareLibrary's `headerBanner` argument (empty = no banner).
-var currentHeaderBanner* {.compileTime.}: string = ""
-
-proc abiCodegenImplemented*(fmt: ABIFormat): bool =
-  ## Whether `fmt` has a working proc-dispatch path (both Cbor and C do).
-  fmt in {ABIFormat.Cbor, ABIFormat.C}
-
-proc overrideKey*(override: string): string =
-  ## Lowercased key of a `key = value` pragma override, e.g. `"abi = c"` → `"abi"`.
-  override.split('=')[0].strip().toLowerAscii()
-
-proc parseABIFormatName*(name: string): tuple[ok: bool, fmt: ABIFormat] =
-  ## Bare format name ("c"/"cbor", case-insensitive) → ABIFormat; else ok=false.
-  case name.strip().toLowerAscii()
-  of "cbor":
-    (true, ABIFormat.Cbor)
-  of "c":
-    (true, ABIFormat.C)
-  else:
-    (false, ABIFormat.Cbor)
-
-proc parseAbiSpec*(override: string): tuple[ok: bool, fmt: ABIFormat, err: string] =
-  ## Parse an `"abi = <format>"` override; on bad grammar returns ok=false + err.
-  let parts = override.split('=')
-  if parts.len != 2:
-    return (
-      false,
-      ABIFormat.Cbor,
-      "invalid ABI override: '" & override & "'; expected `abi = c` or `abi = cbor`",
-    )
-  if parts[0].strip().toLowerAscii() != "abi":
-    return (
-      false,
-      ABIFormat.Cbor,
-      "invalid ABI override: '" & override & "'; expected `abi = c` or `abi = cbor`",
-    )
-  let (ok, fmt) = parseABIFormatName(parts[1])
-  if not ok:
-    return (
-      false,
-      ABIFormat.Cbor,
-      "unknown ABI format: '" & parts[1].strip() & "'; valid values are `c` and `cbor`",
-    )
-  (true, fmt, "")
-
 # Lib type name (set by declareLibrary) so handle-receiver procs resolve the pool.
 var currentLibType* {.compileTime.}: string
 
@@ -144,12 +83,6 @@ proc isFFIHandleTypeName*(name: string): bool {.compileTime.} =
 
 func isEnum*(t: FFITypeMeta): bool =
   return t.enumValues.len > 0
-
-# Names of `{.ffi.}` enum types; the `abi = c` wire path has to reject them.
-var ffiEnumTypeNames* {.compileTime.}: seq[string]
-
-proc isFFIEnumTypeName*(name: string): bool {.compileTime.} =
-  name in ffiEnumTypeNames
 
 func isStatic*(p: FFIProcMeta): bool =
   p.kind == FFIKind.STATIC
@@ -203,6 +136,3 @@ const ffiOutputDir* {.strdefine.} = ""
 
 # Nim src path override relative to outputDir (-d:ffiSrcPath); empty derives it.
 const ffiSrcPath* {.strdefine.} = ""
-
-# When true, targets without scalar codegen silently omit scalar-only `abi = c` procs rather than failing the build. Off by default so the drop is loud; see genBindings().
-const ffiAllowScalarSkip* {.booldefine.} = false

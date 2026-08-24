@@ -17,19 +17,8 @@ if(MSVC)
     add_compile_options(/Zc:__cplusplus)
 endif()
 
-# ── Locate the repository root (contains ffi.nimble) ─────────────────────────
-set(_search_dir "${CMAKE_CURRENT_SOURCE_DIR}")
-set(REPO_ROOT "")
-foreach(_i RANGE 10)
-    if(EXISTS "${_search_dir}/ffi.nimble")
-        set(REPO_ROOT "${_search_dir}")
-        break()
-    endif()
-    get_filename_component(_search_dir "${_search_dir}" DIRECTORY)
-endforeach()
-if("${REPO_ROOT}" STREQUAL "")
-    message(FATAL_ERROR "Cannot find repo root (no ffi.nimble in any ancestor)")
-endif()
+# This file lives at tests/perf/cpp/, so the repo root is three levels up.
+get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
 
 # ── Prebuilt libperfbench (built by the nimble task, not by cmake) ───────────
 if(NOT PERF_LIB_DIR)

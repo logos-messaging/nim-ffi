@@ -14,7 +14,7 @@ proc cborEncode*[T](x: T): seq[byte] =
   return Cbor.encode(x)
 
 proc cborEncodeShared*[T](x: T): tuple[data: ptr UncheckedArray[byte], len: int] =
-  ## Encodes `x` into a caller-owned `c_malloc` buffer (free via `cborFreeShared`).
+  ## Encodes `x` into a caller-owned `c_malloc` buffer, freed by `deleteRequest`.
   ## Empty payloads return `(nil, 0)` without allocating, and so does a failed
   ## allocation: the receiver reads an empty payload and answers a decode error.
   let bytes = Cbor.encode(x)
@@ -25,12 +25,6 @@ proc cborEncodeShared*[T](x: T): tuple[data: ptr UncheckedArray[byte], len: int]
     return (nil, 0)
   copyMem(buf, unsafeAddr bytes[0], bytes.len)
   return (buf, bytes.len)
-
-proc cborFreeShared*(data: var ptr UncheckedArray[byte]) =
-  ## Frees a `cborEncodeShared` buffer and nils the pointer. Nil-safe.
-  if not data.isNil():
-    c_free(data)
-    data = nil
 
 proc cborDecode*[T](data: openArray[byte], _: typedesc[T]): Result[T, string] =
   ## Decode `data` into a `T`, mapping any exception to `Result.err`.

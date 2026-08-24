@@ -1,10 +1,9 @@
 ## Unit-tests for the C binding generator: drives generateCLibHeader (and the
 ## shared-header generators) against a synthetic registry and asserts on the text.
 
-import std/[strutils, sequtils]
+import std/strutils
 import unittest2
 import ffi/codegen/[meta, c]
-import ffi/internal/ffi_scalar
 
 proc field(n, t: string): FFIFieldMeta =
   FFIFieldMeta(name: n, typeName: t)
@@ -321,141 +320,6 @@ static inline int timer_ctx_destroy(TimerCtx* ctx) {
 }""" in
         header
     )
-
-suite "generateCLibHeader: scalar-fast-path procs are excluded":
-  setup:
-    let procs = @[
-      FFIProcMeta(
-        procName: "calc_create",
-        libName: "calc",
-        kind: FFIKind.CTOR,
-        libTypeName: "Calc",
-        returnTypeName: "Calc",
-      ),
-      FFIProcMeta(
-        procName: "calc_echo",
-        libName: "calc",
-        kind: FFIKind.FFI,
-        libTypeName: "Calc",
-        extraParams: @[param("req", "EchoRequest")],
-        returnTypeName: "EchoResponse",
-      ),
-      FFIProcMeta(
-        procName: "calc_add",
-        libName: "calc",
-        kind: FFIKind.FFI,
-        libTypeName: "Calc",
-        extraParams: @[param("a", "int"), param("b", "int")],
-        returnTypeName: "int",
-        abiFormat: ABIFormat.C,
-        scalarFastPath: true,
-      ),
-    ]
-    let types = @[
-      FFITypeMeta(name: "EchoRequest", fields: @[field("m", "string")]),
-      FFITypeMeta(name: "EchoResponse", fields: @[field("echoed", "string")]),
-    ]
-
-  test "bindableProcs keeps the CBOR procs and drops the scalar one":
-    let kept = bindableProcs(procs)
-    check kept.anyIt(it.procName == "calc_create")
-    check kept.anyIt(it.procName == "calc_echo")
-    check not kept.anyIt(it.procName == "calc_add")
-
-  test "the C header emitted from the bindable set carries no scalar symbol":
-    let header = generateCLibHeader(bindableProcs(procs), types, "calc")
-    check "int calc_echo(void* ctx, FFICallback callback" in header
-    check "int calc_add(" notin header # note: calc_add_event_listener is unrelated
-
-  test "unfiltered, the generator would emit a wrong-ABI CBOR caller for it":
-    # Unfiltered, the generator emits a wrong-ABI CBOR prototype for the scalar proc.
-    let header = generateCLibHeader(procs, types, "calc")
-    check "int calc_add(void* ctx, FFICallback callback, void* user_data, " &
-      "const uint8_t* req_cbor, size_t req_cbor_len);" in header
-
-suite "generateCAbiLibHeader: self-contained header":
-  setup:
-    let procs = @[
-      FFIProcMeta(
-        procName: "widget_create",
-        libName: "widget",
-        kind: FFIKind.CTOR,
-        libTypeName: "Widget",
-        extraParams: @[param("config", "Cfg")],
-        returnTypeName: "Widget",
-      ),
-      FFIProcMeta(
-        procName: "widget_poke",
-        libName: "widget",
-        kind: FFIKind.FFI,
-        libTypeName: "Widget",
-        extraParams: @[param("req", "Cfg")],
-        returnTypeName: "Cfg",
-      ),
-      FFIProcMeta(
-        procName: "widget_destroy",
-        libName: "widget",
-        kind: FFIKind.DTOR,
-        libTypeName: "Widget",
-        returnTypeName: "",
-      ),
-    ]
-    let types = @[FFITypeMeta(name: "Cfg", fields: @[field("tag", "string")])]
-    let header = generateCAbiLibHeader(procs, types, "widget")
-
-  test "the header is self-contained: libc includes and NIMFFI_RET_* codes":
-    check "#include <stdint.h>" in header
-    check "#include <stddef.h>" in header
-    check "#define NIMFFI_RET_OK 0" in header
-    check "#define NIMFFI_RET_STALE_WARN 3" in header
-
-  test "short RET_* aliases are emitted, each #ifndef-guarded":
-    check "#ifndef RET_OK\n#define RET_OK NIMFFI_RET_OK\n#endif" in header
-    check "#ifndef RET_ERR\n#define RET_ERR NIMFFI_RET_ERR\n#endif" in header
-    check "#define RET_MISSING_CALLBACK NIMFFI_RET_MISSING_CALLBACK" in header
-    check "#define RET_STALE_WARN NIMFFI_RET_STALE_WARN" in header
-
-  test "the event-listener ABI and FFICallback are declared":
-    check "typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_data);" in
-      header
-    check "uint64_t widget_add_event_listener(void* ctx, const char* event_name, " &
-      "FFICallback callback, void* user_data);" in header
-    check "int widget_remove_event_listener(void* ctx, uint64_t listener_id);" in header
-
-  test "the callback typedef matches the CBOR header's spelling, not the Nim symbol":
-    check "FFICallBack" notin header # the Nim symbol; the C header uses FFICallback
-
-  test "the FFICallback typedef is include-guarded against co-inclusion":
-    check "#ifndef NIMFFI_FFICALLBACK_DEFINED" in header
-
-  test "no banner is emitted when none is requested":
-    check not header.startsWith("//")
-
-  test "a header banner is stamped above the include guard as // lines":
-    let banner = "GENERATED FILE — do not edit.\nRegenerate with nimble genbindings."
-    let withBanner = generateCAbiLibHeader(procs, types, "widget", banner = banner)
-    check withBanner.startsWith(
-      "// GENERATED FILE — do not edit.\n// Regenerate with nimble genbindings.\n#ifndef "
-    )
-
-  test "a banner line ending in a backslash cannot splice the include guard away":
-    let withBanner =
-      generateCAbiLibHeader(procs, types, "widget", banner = "edit me and lose\\")
-    check "// edit me and lose\n#ifndef " in withBanner
-
-suite "generateCLibHeader: header banner":
-  test "the CBOR lib header also stamps the banner above its include guard":
-    let procs = @[
-      FFIProcMeta(
-        procName: "timer_create",
-        libName: "timer",
-        kind: FFIKind.CTOR,
-        libTypeName: "Timer",
-        returnTypeName: "Timer",
-      )
-    ]
-    let header = generateCLibHeader(procs, @[], "timer", banner = "do not edit")
-    check header.startsWith("// do not edit\n#ifndef ")
 
 suite "shared headers: prelude and cbor split":
   test "the prelude owns the leaf types and libc/TinyCBOR includes":

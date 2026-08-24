@@ -22,10 +22,8 @@ requires "https://github.com/logos-messaging/nim-ffi >= 0.3.0"
   `{.ffiDtor.}`, `{.ffiStatic.}`, `{.ffiEvent.}`).
 - You **call `genBindings()` last**, which emits the foreign bindings.
 
-By default, every request/response crosses the boundary as a single CBOR blob
-(the wire format is configurable per library or per annotation — see
-[ABI format](#abi-format)); the ctx handle returned by the constructor is the
-only pointer that crosses. Each `{.ffi.}` proc runs on the library's own chronos
+Every request/response crosses the boundary as a single CBOR blob; the ctx
+handle returned by the constructor is the only pointer that crosses. Each `{.ffi.}` proc runs on the library's own chronos
 event loop, so bodies can `await` freely.
 
 ## Minimal example
@@ -40,8 +38,7 @@ type Counter = object
 declareLibrary("counter", Counter)
 
 # 2. Request/response shapes. Any {.ffi.} object or enum type becomes a
-#    first-class struct/class in the generated bindings and rides the wire in
-#    the library's ABI format (CBOR by default).
+#    first-class struct/class in the generated bindings and rides the CBOR wire.
 type BumpRequest {.ffi.} = object
   by: int
 
@@ -75,8 +72,8 @@ The generated C export names are the snake_case form of the proc names, e.g.
 
 | Pragma | Applies to | Purpose |
 | --- | --- | --- |
-| `declareLibrary(name, LibType[, defaultABIFormat])` | call | Registers the library, its state type, and the default wire format. Must run before any annotation. |
-| `{.ffi.}` on a `type` | `object`, `enum` | Registers the type for binding generation; it serializes via the library's ABI format (CBOR by default). Enums are CBOR-only — see below. |
+| `declareLibrary(name, LibType)` | call | Registers the library and its state type. Must run before any annotation. |
+| `{.ffi.}` on a `type` | `object`, `enum` | Registers the type for binding generation; it serializes as CBOR. |
 | `{.ffi.}` on a `proc` | proc | Exposes a method. First param is the library value, then typed params; returns `Future[Result[T, string]]`. |
 | `{.ffiStatic.}` | proc | Exposes a context-independent proc: no library param, and its wrapper takes no ctx — see below. |
 | `{.ffiCtor.}` | proc | The constructor. Returns `Future[Result[LibType, string]]`; creates the FFI context. |
@@ -110,10 +107,6 @@ reordering or renumbering values doesn't break an already-deployed peer.
 Explicit ordinals are carried into the foreign enum so the two sides agree if
 you ever cast.
 
-Enums are supported on the CBOR wire only. Reaching one from an `abi = c` type
-or proc is a compile error naming the type — the `abi = c` `_CWire` structs have
-no enum form yet.
-
 ### Constants
 
 `{.ffiConst.}` copies a Nim `const` into the generated bindings, so callers
@@ -145,7 +138,7 @@ compile error. The value is whatever the const evaluates to, so computed
 expressions arrive folded. Names are re-cased to `UPPER_SNAKE`, preserving
 acronyms (`httpTTL` → `HTTP_TTL`). A constant is a compile-time value in each
 language, not a symbol exported by the shared library — it never crosses the
-wire, so `{.ffiConst.}` is ABI-agnostic.
+wire.
 
 ### Doc comments
 
@@ -209,10 +202,7 @@ stops the thread pair and frees the slot; it is only sound once nothing will cal
 a `{.ffiStatic.}` proc again, so it is meant for process shutdown and tests.
 
 The macro rejects an `{.ffiHandle.}` parameter or return: a handle is registered
-in the context that created it, which a static proc cannot reach. Under
-`abi = c` a static replies with a `string` or an `{.ffi.}` object type — a scalar
-return is wired only for an all-scalar `{.ffi.}` method, which rides the
-[CBOR-free fast path](#abi-format) through the ctx a static doesn't have.
+in the context that created it, which a static proc cannot reach.
 
 ### The teardown contract
 
@@ -290,39 +280,6 @@ The wire name is **optional**: when omitted it is derived from the proc name
 export symbol. Pass a string literal (`{.ffiEvent: "custom_name".}`) only when
 you need a name that differs from the proc.
 
-### ABI format
-
-The wire format is chosen **in code**, never by a compile flag. Override the
-library default with `declareLibrary("lib", Lib, defaultABIFormat = "c")`, or
-per annotation with an `"abi = ..."` spec, e.g. `{.ffi: "abi = c".}`. The
-`-d:targetLang` flag (below) picks which *language* the bindings are emitted
-for; it does not change the wire.
-
-`cbor` is the default and fully-supported format: every proc, ctor, dtor and
-event serializes through the generic CBOR path, and all binding generators emit
-working callers for it.
-
-`abi = c` is a newer, native C-struct wire (no CBOR round-trip). The single `c`
-generator (`-d:targetLang=c`) emits its callers, choosing the `abi = c` or CBOR
-header shape from the library's ABI format. It carries two honest limits today:
-
-- **Events are CBOR-only.** Applying `abi = c` to an `{.ffiEvent.}` proc is a
-  hard compile error; declare events with `abi = cbor` (they ride CBOR
-  internally regardless of the library default).
-- **Enums are CBOR-only.** A `{.ffi.}` enum in an `abi = c` library, or reached
-  from an `abi = c` type or proc, is a hard compile error naming the type.
-- **All-scalar `abi = c` procs bind only in the `abi = c` C header.** A
-  `{.ffi: "abi = c".}` method whose params and return are all scalars — ints,
-  floats, bools; a `string` return is fine, a `string` param is not — takes a
-  CBOR-free fast path, and its C wrapper passes the args inline instead of
-  packing a request struct. Only the `abi = c` C header emits that shape. The
-  CBOR C header and the `cpp`, `rust` and `cddl` targets have no scalar codegen
-  and would silently omit the proc, so `genBindings()` fails and names it. Fix
-  it by generating C bindings from an `abi = c` library, switching the proc to
-  `abi = cbor`, giving it a non-scalar param, or passing
-  `-d:ffiAllowScalarSkip` to accept the omission — the proc still works over the
-  fast path, it's just absent from the bindings.
-
 ## Placement of `genBindings()`
 
 `genBindings()` reads the compile-time registries that the pragmas populate as
@@ -359,9 +316,7 @@ nim c -d:ffiGenBindings -d:targetLang=rust,cpp,c --compileOnly mylib.nim
 
 - `-d:targetLang` — which generator(s) run; pass a comma-separated list to emit
   several from one compile:
-  - **Language bindings:** `rust` (default), `cpp`, `c`. The `c` target follows
-    the library's ABI format — an `abi = c` C-struct header for `abi = c`, a CBOR
-    header otherwise; `rust`/`cpp` speak CBOR.
+  - **Language bindings:** `rust` (default), `cpp`, `c`. All three speak CBOR.
   - **`cddl`** — a CDDL schema of the CBOR wire, not a language binding at all.
 - `-d:ffiOutputDir` — override where the generated files land. Defaults to
   `<lang>_bindings/` next to the compiled source.

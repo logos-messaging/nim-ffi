@@ -19,7 +19,7 @@ This example is a self-contained Nimble project demonstrating how to import `nim
    nimble build
    ```
 
-4. Generate bindings:
+4. Generate bindings, from the repository root:
    ```sh
    nimble genbindings_rust
    nimble genbindings_cpp

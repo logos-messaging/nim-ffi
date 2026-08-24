@@ -1,14 +1,12 @@
-## This test runs the fixture in a child process. The fixture calls `abi = c`
-## entry points from threads that the Nim runtime does not know. A regression
-## crashes the child, not this suite. The child uses the same --mm switch as
-## this run. The regression is fatal under refc and harmless under orc.
+## Runs the fixture in a child process, under the same --mm switch as this run:
+## the fixture calls entry points from threads the Nim runtime does not know, and
+## a regression crashes the child rather than this suite (fatal under refc only).
 
 import std/[os, osproc, compilesettings]
 import unittest2
 
 const
-  fixture =
-    currentSourcePath().parentDir() / "fixtures" / "foreign_thread_c_abi_fixture.nim"
+  fixture = currentSourcePath().parentDir() / "fixtures" / "foreign_thread_fixture.nim"
   nimExe = getCurrentCompilerExe()
   ffiSearchPaths = querySettingSeq(searchPaths)
   mmFlag =
@@ -36,7 +34,7 @@ proc runFixture(): tuple[output: string, exitCode: int] =
   cmd.add(" " & quoteShell(fixture))
   execCmdEx(cmd)
 
-suite "abi = c entry points are callable from foreign host threads":
+suite "entry points are callable from foreign host threads":
   test "method calls from unregistered host threads succeed":
     let (output, code) = runFixture()
     checkpoint(output)

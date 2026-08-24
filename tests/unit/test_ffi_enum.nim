@@ -139,15 +139,3 @@ suite "{.ffi.} enum end-to-end generation":
   test "an enum return reaches the host through the reply callback":
     check "(*EnumLibPickReplyFn)(int err_code, const Color* reply," in header
     check "int enumlib_ctx_pick(const EnumLibCtx* ctx, Level level," in header
-
-suite "enums on the abi = c path are rejected, not silently mis-wired":
-  test "an enum in an abi = c library fails to compile":
-    let (output, code) = checkFixture("enum_abi_c_type_fixture")
-    check code != 0
-    check "`abi = c` does not support enum types yet" in output
-
-  test "an enum reached from an abi = c type fails to compile":
-    let (output, code) = checkFixture("enum_abi_c_field_fixture")
-    check code != 0
-    check "cwire: `abi = c` does not support enum types yet" in output
-    check "Color" in output

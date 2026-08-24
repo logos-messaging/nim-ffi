@@ -2,6 +2,7 @@ import std/[atomics, os]
 import unittest2
 import results
 import ffi
+import ./helpers
 
 # A {.ffiCtor.} that fails still gives the caller a live context. The ctor body
 # runs on the FFI thread, long after the C entry point returns the pointer.
@@ -51,12 +52,6 @@ proc recordingCallback(
   let s = cast[ptr CallbackState](userData)
   s[].retCode.store(int(retCode))
   s[].called.store(true)
-
-proc encodedPtr(bytes: var seq[byte]): ptr byte =
-  if bytes.len == 0:
-    nil
-  else:
-    cast[ptr byte](addr bytes[0])
 
 proc waitCalled(s: var CallbackState): bool =
   var tries = 0

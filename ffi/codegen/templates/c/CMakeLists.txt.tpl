@@ -4,19 +4,7 @@ project({{LIB}}_c_bindings C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# ── Locate the repository root (contains ffi.nimble) ─────────────────────────
-set(_search_dir "${CMAKE_CURRENT_SOURCE_DIR}")
-set(REPO_ROOT "")
-foreach(_i RANGE 10)
-    if(EXISTS "${_search_dir}/ffi.nimble")
-        set(REPO_ROOT "${_search_dir}")
-        break()
-    endif()
-    get_filename_component(_search_dir "${_search_dir}" DIRECTORY)
-endforeach()
-if("${REPO_ROOT}" STREQUAL "")
-    message(FATAL_ERROR "Cannot find repo root (no ffi.nimble in any ancestor)")
-endif()
+{{FIND_REPO_ROOT}}
 
 # Build the Nim dylib + vendored TinyCBOR (shared with the C++ backend).
 set(NIM_FFI_LIB {{LIB}})

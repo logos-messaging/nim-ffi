@@ -51,9 +51,18 @@ proc deinitCallbackData*(d: var CallbackData) =
   d.cond.deinitCond()
   d.lock.deinitLock()
 
+template setupCallbackData*(name: untyped) =
+  var name: CallbackData
+  initCallbackData(name)
+  defer:
+    deinitCallbackData(name)
+
 proc testCallback*(
     retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
+  # A progress ping is not a terminal answer; skip it here.
+  if retCode == RET_STALE_WARN:
+    return
   let d = cast[ptr CallbackData](userData)
   acquire(d[].lock)
   d[].retCode = retCode
@@ -71,6 +80,24 @@ proc waitCallback*(d: var CallbackData) =
     wait(d.cond, d.lock)
   release(d.lock)
 
+proc waitCallbackTimeout*(d: var CallbackData, timeoutMs: int): bool =
+  ## `waitCallback` for a reply that may never come; false on timeout.
+  let deadline = Moment.now() + timeoutMs.milliseconds
+  while true:
+    acquire(d.lock)
+    let done = d.called
+    release(d.lock)
+    if done:
+      return true
+    if Moment.now() >= deadline:
+      return false
+    os.sleep(10)
+
+proc resetCalled*(d: var CallbackData) =
+  acquire(d.lock)
+  d.called = false
+  release(d.lock)
+
 proc wasCalled*(d: var CallbackData): bool =
   acquire(d.lock)
   let called = d.called
@@ -82,6 +109,21 @@ proc payload*(d: var CallbackData): seq[byte] =
   if d.msgLen > 0:
     copyMem(addr b[0], addr d.msg[0], d.msgLen)
   b
+
+proc rawText*(d: var CallbackData): string =
+  ## The reply bytes as text: an error message, or a CBOR payload to decode.
+  var s = newString(d.msgLen)
+  if d.msgLen > 0:
+    copyMem(addr s[0], addr d.msg[0], d.msgLen)
+  s
+
+proc okString*(d: var CallbackData): string =
+  ## The CBOR-decoded `string` an OK reply carries; asserts the request succeeded,
+  ## so a failure reports the error text instead of an empty string.
+  doAssert d.retCode == RET_OK,
+    "okString on retCode " & $d.retCode & " (msg=" & d.rawText() & ")"
+  cborDecode(d.payload(), string).valueOr:
+    ""
 
 proc watchdogBody(args: (int, cstring)) {.thread.} =
   os.sleep(args[0])

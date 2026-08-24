@@ -98,8 +98,6 @@ type FFIContext*[T] = object
 
 var onFFIThread* {.threadvar.}: bool
 
-const git_version* {.strdefine.} = "n/a"
-
 const RecycleTimeoutMs* {.intdefine: "ffiRecycleTimeoutMs".} = 1500
   ## Bounds one drain round of the recycle handler. The handler runs at most two
   ## rounds: it waits for the in-flight handlers, then cancels them and waits
