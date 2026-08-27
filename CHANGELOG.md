@@ -6,12 +6,10 @@ All notable changes to this project are documented in this file.
 
 ### Added
 - `declareLibrary` exports `<lib>_shutdown()`, declared in the generated C and
-  C++ headers. It stops every context the pool still holds, including the
-  `{.ffiStatic.}` one, and returns 0 when they all stopped, 1 when one was left
-  running. It covers the two cases the automatic teardown cannot: a host that
-  exits while it still owns a context, and the shared context a `{.ffiStatic.}`
-  call builds. A context the host still owned is quarantined, so its later calls
-  fail instead of queueing to a thread that is gone.
+  C++ headers. It stops every context the pool still holds, the `{.ffiStatic.}`
+  one included, and returns 0 when they all stopped. A context the host still
+  owned is quarantined, so a later call on it fails instead of queueing to a
+  thread that is gone.
 - Each `{.ffi.}` proc's `##` doc comment reaches the generated C header as a
   `/** ... */` block above the declaration and its wrapper.
 - `genBindings()` fails compilation when a library declares an `{.ffiCtor.}` but
@@ -70,13 +68,12 @@ All notable changes to this project are documented in this file.
   `NIMFFI_RET_ERR` constant it lacked. A C host that used the old name must
   rename it.
 - **`<lib>_ctx_destroy` now takes the library's threads down with the last
-  context.** A destroy still recycles: it hands the slot's FFI and event thread
-  pair to the next owner. Once no context is live the pool joins that pair, so a
-  host that destroys what it created holds no thread of ours at process exit,
-  which is where the C runtime used to finalize the library under live threads
-  and crash. The next create restarts the pair. A create/destroy cycle still
-  costs no file descriptor: the slot keeps its `ThreadSignalPtr`s for the life of
-  the process, and each thread closes its chronos dispatcher on the way out.
+  context.** A destroy still recycles, handing the slot's thread pair to the next
+  owner; once no context is live the pool joins that pair, and the next create
+  restarts it. Before, those threads outlived every destroy, so the C runtime
+  finalized the library under them and the process crashed at exit. A cycle still
+  costs no fd: the slot keeps its `ThreadSignalPtr`s, and each thread closes its
+  chronos dispatcher on the way out.
 - **The event-queue defines are `ffi`-prefixed.** `-d:EventQueueCapacity`,
   `-d:MaxEventPayloadBytes` and `-d:MaxEventNameBytes` are now
   `-d:ffiEventQueueCapacity`, `-d:ffiMaxEventPayloadBytes` and

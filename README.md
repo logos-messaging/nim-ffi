@@ -232,23 +232,17 @@ pool-exhausted error once any slot has been quarantined.
 
 ### Process exit
 
-`<lib>_ctx_destroy` recycles a context: it drains the handlers, frees the library
-object and returns the slot to the pool, but the FFI and event thread pair stays
-up for the next owner. Once no context is live the pool reaps that pair, so a
-host that destroys what it created leaves no thread of the library running.
+`<lib>_ctx_destroy` recycles: the slot's FFI and event thread pair stays up for
+the next owner. Once no context is live the pool joins that pair, so a host that
+destroys what it created leaves no thread of the library running. A finalize
+under a live thread crashes the process, which is what this avoids.
 
-Two cases keep a thread pair alive at exit: a host that exits while it still owns
-a context, and a `{.ffiStatic.}` call, whose shared context holds its slot for
-the life of the process. `<lib>_shutdown()` covers both. It stops every context
-the pool still holds and joins their threads, and returns 0 when they all
-stopped, 1 when one was left running. Call it from `atexit`, or from the last
-line of `main`, before the C runtime finalizes the library: a finalize under a
-live thread crashes the process.
-
-A context the host still owned when it called `<lib>_shutdown()` never ran its
-`{.ffiDtor.}`, so its slot is quarantined rather than handed to a next owner: a
-later call on that handle fails instead of queueing to a thread that is gone,
-and the slot counts against the pool's 32 for the rest of the process.
+Two cases keep a pair alive anyway: a host that exits still owning a context, and
+a `{.ffiStatic.}` call, whose shared context holds its slot for the life of the
+process. `<lib>_shutdown()` stops both, from `atexit` or the last line of `main`.
+It returns 0 when every context stopped, 1 when one was left running. A context
+you had not destroyed never ran its `{.ffiDtor.}`, so its slot is quarantined:
+later calls on that handle fail, and the slot is gone from the pool's 32.
 
 ### The result callback contract
 

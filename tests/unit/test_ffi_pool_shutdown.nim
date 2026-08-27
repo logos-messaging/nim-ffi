@@ -1,4 +1,4 @@
-## Where the worker and event threads of a slot go: a recycle hands them to the next owner, recycling the last live context parks them, and shutdown takes down what a host still holds.
+## Where a slot's threads go: a recycle hands them on, the last recycle parks them, shutdown takes down what the host still holds.
 
 import std/[os, strutils]
 import unittest2
@@ -35,7 +35,7 @@ proc openFds(): int =
     -1
 
 template baselineThreads(): int =
-  ## After a full cycle: the runtime brings up threads of its own on first use (a sanitizer's background thread), and those never go away. A template so a failed step fails the test that asked, instead of killing the suite.
+  ## Measured after a full cycle: the runtime starts threads of its own (a sanitizer's) that never go away. A template so `check` fails the calling test.
   block:
     let warmup = ShutdownLibFFIPool.createFFIContext().get()
     check ShutdownLibFFIPool.recycleFFIContext(warmup).isOk()

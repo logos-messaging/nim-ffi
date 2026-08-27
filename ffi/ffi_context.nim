@@ -134,7 +134,7 @@ proc ffiTeardownHook*[T](): var FFITeardownProc[T] =
   hook
 
 proc closeThreadDispatcher() =
-  ## chronos builds one dispatcher per thread and never frees it, so a parked slot would leak its poller once per cycle. Call it as the thread exits, once nothing polls any more.
+  ## chronos never frees a thread's dispatcher, so a parked slot leaks a poller per cycle. Call it last, once nothing polls.
   when defined(windows):
     if closeHandle(getThreadDispatcher().getIoHandler()) == 0:
       error "failed to close the thread's IOCP port; the handle leaks"
@@ -146,7 +146,7 @@ include ./event_thread
 include ./ffi_thread
 
 proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## Mirror of `initContextResources`, for a slot that is rebuilt from scratch. Threads MUST be joined first, and the caller must own the heaps these structures grew on. The signals outlive it, for the next owner.
+  ## Mirror of `initContextResources`, for a slot rebuilt from scratch. Threads MUST be joined first, and only the thread owning these heaps may call it. The signals outlive it.
   deinitRequestQueue(ctx[].reqQueueBank)
   deinitEventRegistry(ctx[].eventRegistry)
   deinitHandleRegistry(ctx[].handles)
@@ -292,7 +292,7 @@ proc markAsActive*[T](ctx: ptr FFIContext[T]) =
   ctx.lifecycle.store(CtxLifecycle.Active)
 
 proc awaitClaimReleased[T](ctx: ptr FFIContext[T]): bool =
-  ## `finishRecycle` fires the done signal one step before it releases the claim, so a caller that acts on the free slot has to wait that step out. False when the claim outlasts the wait.
+  ## `finishRecycle` fires the done signal one step before it releases the claim. False when the claim outlasts the wait.
   const
     SpinRounds = 1000
     SleepRounds = 1000
@@ -308,7 +308,7 @@ proc awaitClaimReleased[T](ctx: ptr FFIContext[T]): bool =
   false
 
 proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## Ask the FFI thread to drain, free the lib and release the slot, WITHOUT stopping its worker/event threads, so the next createFFIContext reuses them. Synchronous: waits on recycleDoneSignal and then on the claim, so the slot is free once this returns ok. On err the slot is quarantined and its callbacks can still fire: keep the userData of every in-flight request alive.
+  ## Ask the FFI thread to drain, free the lib and release the slot, WITHOUT stopping its threads, so the next createFFIContext reuses them. Synchronous: on ok the slot is free. On err it is quarantined and its callbacks can still fire, so keep every in-flight `userData` alive.
   var expected = CtxLifecycle.Active
   if not ctx.lifecycle.compareExchange(expected, CtxLifecycle.RecyclePending):
     return err("requestRecycle: context is not Active (already recycling)")

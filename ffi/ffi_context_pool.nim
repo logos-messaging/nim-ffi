@@ -29,7 +29,7 @@ type
     StaticCtxReady
 
   FFIContextPool*[T] = object
-    ## Fixed pool of FFI contexts, plus the one `{.ffiStatic.}` context. A slot's resources are built on first use and live until the process ends, so a create/destroy cycle churns no fd. Its thread pair outlives a recycle for the next owner; `reapIfIdle` parks the pair once no context is live.
+    ## Fixed pool of FFI contexts, plus the one `{.ffiStatic.}` context. A slot's resources are built once and live until the process ends, so a cycle churns no fd. `reapIfIdle` parks its thread pair once no context is live.
     contexts: array[MaxFFIContexts, FFIContext[T]]
     initialized: array[MaxFFIContexts, Atomic[bool]]
     threadsUp: array[MaxFFIContexts, Atomic[bool]]
@@ -103,7 +103,7 @@ proc isStaticCtx[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]): bool =
 proc destroyFFIContext*[T](
     pool: var FFIContextPool[T], ctx: ptr FFIContext[T]
 ): Result[void, string] =
-  ## Full teardown: joins the threads, frees the resources and marks the slot for a rebuild; normal cleanup uses recycleFFIContext. On thread-exit timeout the slot leaks, because a free under live threads is unsafe. Only the thread that owns the context's heaps may call it: the free reaches structures the FFI and event threads grew.
+  ## Full teardown: joins the threads, frees the resources, marks the slot for a rebuild. Normal cleanup uses recycleFFIContext. The slot leaks on a thread-exit timeout, and only the thread owning the context's heaps may call it.
   if ctx.isNil():
     return err("destroyFFIContext(pool): no context (nil)")
   # Destroying it would release the slot while `staticState` still points at it.
@@ -124,7 +124,7 @@ proc destroyFFIContext*[T](
   ok()
 
 proc parkSlotThreads[T](pool: var FFIContextPool[T], slot: int): Result[void, string] =
-  ## Joins the slot's thread pair and keeps its resources: those heaps belong to the threads that just exited, so a free here can land on an allocator that is gone.
+  ## Joins the slot's thread pair, keeping its resources: those heaps belong to the threads that just exited.
   if slot < 0 or slot >= MaxFFIContexts:
     return err("parkSlotThreads: slot " & $slot & " is not a pool slot")
   ?pool.contexts[slot].addr.stopAndJoinThreads()
@@ -132,7 +132,7 @@ proc parkSlotThreads[T](pool: var FFIContextPool[T], slot: int): Result[void, st
   ok()
 
 proc hasLiveContext[T](pool: var FFIContextPool[T]): bool =
-  ## A slot a host still owns. Skips the `{.ffiStatic.}` slot and a quarantined one, which hold their claim for the life of the process.
+  ## A slot a host still owns. Skips the static and quarantined ones, claimed for the life of the process.
   for i in 0 ..< MaxFFIContexts:
     let ctx = pool.contexts[i].addr
     if not ctx.isInUse():
@@ -160,7 +160,7 @@ proc parkIdleSlots[T](pool: var FFIContextPool[T]) =
     ctx.releaseClaim()
 
 proc reapIfIdle[T](pool: var FFIContextPool[T]) =
-  ## The pool's exit policy: once no context is live, no thread of the library stays up for the C runtime to finalize under.
+  ## The exit policy: no context live, no thread of ours for the C runtime to finalize under.
   if onFFIThread or onEventThread:
     debug "skipping the idle reap: a destroy from inside the library's own " &
       "threads would join a thread to itself"
@@ -172,7 +172,7 @@ proc reapIfIdle[T](pool: var FFIContextPool[T]) =
 proc recycleFFIContext*[T](
     pool: var FFIContextPool[T], ctx: ptr FFIContext[T]
 ): Result[void, string] =
-  ## Normal teardown: drains in-flight handlers, frees the lib and returns the slot to the pool. Its threads stay up for the next owner, unless this was the last live context: see `reapIfIdle`. Synchronous.
+  ## Normal teardown: drains the handlers, frees the lib, returns the slot. Its threads stay up for the next owner unless this was the last live context. Synchronous.
 
   # `resolveCtx` answers nil for a stale token, and its result lands here.
   if ctx.isNil():
@@ -235,7 +235,7 @@ proc destroyStaticFFIContext*[T](pool: var FFIContextPool[T]): Result[void, stri
   ok()
 
 proc shutdownFFIContextPool*[T](pool: var FFIContextPool[T]): Result[void, string] =
-  ## Joins the threads of every slot, the `{.ffiStatic.}` one included, so the C runtime finalizes the library with nothing of ours running. A slot the host still owned is quarantined: its library never ran a teardown. Best-effort, so one slot that will not stop does not spare the rest.
+  ## Joins the threads of every slot, the static one included. A slot the host still owned is quarantined: its library never ran a teardown. Best-effort.
   var firstErr = ""
   pool.destroyStaticFFIContext().isOkOr:
     firstErr = error
@@ -248,7 +248,7 @@ proc shutdownFFIContextPool*[T](pool: var FFIContextPool[T]): Result[void, strin
       if firstErr.len == 0:
         firstErr = error
       continue
-    # Read the claim after the park: a create that raced this loop must not keep an Active context whose threads are gone.
+    # After the park: a create that raced the loop must not keep an Active context with dead threads.
     if ctx.isInUse():
       ctx.lifecycle.store(CtxLifecycle.RecycleFailed)
       error "a context was still claimed at shutdown; its slot is quarantined " &
