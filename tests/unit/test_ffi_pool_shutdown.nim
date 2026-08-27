@@ -1,12 +1,9 @@
-## Shutdown stops what destroy deliberately keeps: a recycled slot hands its
-## worker and event threads to the next owner, so only an explicit shutdown
-## takes them down before the host exits.
+## Where the worker and event threads of a slot go: a recycle hands them to the next owner, recycling the last live context parks them, and shutdown takes down what a host still holds.
 
-import std/[strutils]
+import std/[os, strutils]
 import unittest2
 import results
 import ffi
-import ./helpers
 
 type ShutdownLib = object
 
@@ -19,8 +16,7 @@ proc shutdownlib_ping*(lib: ShutdownLib): Future[Result[int, string]] {.ffi.} =
   return ok(1)
 
 proc liveThreads(): int =
-  ## Linux-only: the OS thread count is the property under test, and /proc is
-  ## the only portable-enough way to read it.
+  ## Linux-only: the OS thread count is the property under test, and /proc is the only portable-enough way to read it.
   when defined(linux):
     for line in readFile("/proc/self/status").splitLines():
       if line.startsWith("Threads:"):
@@ -29,33 +25,76 @@ proc liveThreads(): int =
   else:
     -1
 
-suite "pool shutdown":
-  test "recycled slots keep their threads until shutdown joins them":
-    # Baseline after a full cycle: the runtime brings up threads of its own on
-    # first use (a sanitizer's background thread), and those never go away.
+proc openFds(): int =
+  when defined(linux):
+    var count = 0
+    for _ in walkDir("/proc/self/fd"):
+      count.inc()
+    count
+  else:
+    -1
+
+template baselineThreads(): int =
+  ## After a full cycle: the runtime brings up threads of its own on first use (a sanitizer's background thread), and those never go away. A template so a failed step fails the test that asked, instead of killing the suite.
+  block:
     let warmup = ShutdownLibFFIPool.createFFIContext().get()
     check ShutdownLibFFIPool.recycleFFIContext(warmup).isOk()
-    waitSlotFree(warmup)
     check shutdownlib_shutdown() == 0
-    let baseline = liveThreads()
+    liveThreads()
 
-    let first = ShutdownLibFFIPool.createFFIContext().get()
-    let firstToken = first.ffiToken()
-    check ShutdownLibFFIPool.recycleFFIContext(first).isOk()
-    waitSlotFree(first)
+suite "pool shutdown":
+  test "recycling the last context reaps its threads":
+    let baseline = baselineThreads()
 
-    # The slot is free, but destroy left its threads running for the next owner.
+    let ctx = ShutdownLibFFIPool.createFFIContext().get()
+    let token = ctx.ffiToken()
     when defined(linux):
       check liveThreads() > baseline
 
+    check ShutdownLibFFIPool.recycleFFIContext(ctx).isOk()
+
+    check not ShutdownLibFFIPool.isValidCtx(token)
+    when defined(linux):
+      check liveThreads() == baseline
+
+  test "a recycled slot keeps its threads while another context is live":
+    let baseline = baselineThreads()
+
+    let first = ShutdownLibFFIPool.createFFIContext().get()
     let second = ShutdownLibFFIPool.createFFIContext().get()
-    let secondToken = second.ffiToken()
+    check ShutdownLibFFIPool.recycleFFIContext(second).isOk()
+
+    # `first` still owns a slot, so the pool holds the reap for the next owner.
+    when defined(linux):
+      check liveThreads() > baseline
+
+    check ShutdownLibFFIPool.recycleFFIContext(first).isOk()
+    when defined(linux):
+      check liveThreads() == baseline
+
+  test "a create/recycle cycle churns no fd":
+    # The reap stops the threads, but the signals stay open for the next owner: under refc closing them is not an option.
+    let warmup = ShutdownLibFFIPool.createFFIContext().get()
+    check ShutdownLibFFIPool.recycleFFIContext(warmup).isOk()
+    let baseline = openFds()
+
+    for _ in 0 ..< 50:
+      let ctx = ShutdownLibFFIPool.createFFIContext().get()
+      check ShutdownLibFFIPool.recycleFFIContext(ctx).isOk()
+
+    when defined(linux):
+      check openFds() == baseline
+
+  test "shutdown stops a context the host never destroyed":
+    let baseline = baselineThreads()
+    let quarantined = ShutdownLibFFIPool.quarantinedSlots()
+
+    let ctx = ShutdownLibFFIPool.createFFIContext().get()
 
     check shutdownlib_shutdown() == 0
 
-    check not ShutdownLibFFIPool.isValidCtx(firstToken)
-    check not ShutdownLibFFIPool.isValidCtx(secondToken)
-    check ShutdownLibFFIPool.quarantinedSlots() == 0
+    # The library was never torn down, so the slot must not serve a next owner.
+    check ShutdownLibFFIPool.quarantinedSlots() == quarantined + 1
     when defined(linux):
       check liveThreads() == baseline
 

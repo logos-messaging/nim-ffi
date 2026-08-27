@@ -832,9 +832,12 @@ uint64_t my_timer_add_event_listener(void* ctx, const char* event_name, FFICallb
 int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
 /**
  * Stop every context the library still holds and join their threads.
- * Call it once, from the host, before the process exits: a context released with
- * <lib>_ctx_destroy() keeps its worker threads for reuse, and letting the C
- * runtime finalize the library under them crashes the process.
+ * The pool joins a context's threads once no context is live, so a host that
+ * destroys what it created needs no call here. Call it before the process exits
+ * when a context is still alive, or when a static proc built the shared context:
+ * the C runtime finalizing the library under live threads crashes the process.
+ * A context you had not destroyed is stopped where it stands and its handle is
+ * retired, so a later call on it fails instead of queueing to a dead thread.
  * Returns 0 when every context stopped, 1 when one was left running.
  */
 int my_timer_shutdown(void);

@@ -29,22 +29,22 @@ type
     StaticCtxReady
 
   FFIContextPool*[T] = object
-    ## Fixed pool of FFI contexts, plus the one `{.ffiStatic.}` context. Each
-    ## slot's worker + event threads and signal fds are built once (on first
-    ## use) and reused across create/recycle cycles — recycle keeps them alive,
-    ## so repeated create/destroy does not churn fds. Bounds ThreadSignalPtr fds
-    ## at MaxFFIContexts * (signals per ctx).
+    ## Fixed pool of FFI contexts, plus the one `{.ffiStatic.}` context. A slot's resources are built on first use and live until the process ends, so a create/destroy cycle churns no fd. Its thread pair outlives a recycle for the next owner; `reapIfIdle` parks the pair once no context is live.
     contexts: array[MaxFFIContexts, FFIContext[T]]
     initialized: array[MaxFFIContexts, Atomic[bool]]
+    threadsUp: array[MaxFFIContexts, Atomic[bool]]
     staticCtx: Atomic[pointer]
     staticState: Atomic[StaticCtxState]
 
-proc releaseSlot[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]) =
-  ## Full-teardown release: the slot must be rebuilt before it serves again.
+func slotIndex[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]): int =
   for i in 0 ..< MaxFFIContexts:
     if pool.contexts[i].addr == ctx:
-      pool.initialized[i].store(false)
-      break
+      return i
+  -1
+
+proc releaseSlot[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]) =
+  ## Hands the slot back with its resources intact; only `destroyFFIContext` rebuilds one.
+
   # The join is the one exit from quarantine: the orphans died with the thread. Clear here so `quarantinedSlots` does not count a freed slot.
   ctx.lifecycle.store(CtxLifecycle.Active)
   ctx.recycleFailure.store(RecycleFailure.None)
@@ -69,13 +69,19 @@ proc createFFIContext*[T](
       continue
     ctx.token = makeToken(i, ctx.generation.load())
     if pool.initialized[i].load():
-      # Reused slot: a prior recycle drained and released it; worker still alive.
+      # Reused slot: a prior recycle drained and released it, keeping its resources.
       ctx.markAsActive()
+      if not pool.threadsUp[i].load():
+        ctx.startContextThreads().isOkOr:
+          ctx.releaseClaim()
+          return err("createFFIContext: startContextThreads failed: " & $error)
+        pool.threadsUp[i].store(true)
       return ok(ctx)
     initContextResources(ctx).isOkOr:
       ctx.releaseClaim()
       return err("createFFIContext: initContextResources failed: " & $error)
     pool.initialized[i].store(true)
+    pool.threadsUp[i].store(true)
     return ok(ctx)
   let quarantined = pool.quarantinedSlots()
   if quarantined > 0:
@@ -94,27 +100,10 @@ proc isStaticCtx[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]): bool =
   # pointer covers `Destroying` too.
   pool.staticCtx.load() == cast[pointer](ctx)
 
-proc recycleFFIContext*[T](
-    pool: var FFIContextPool[T], ctx: ptr FFIContext[T]
-): Result[void, string] =
-  ## Normal teardown: drains in-flight handlers, frees the lib and returns the
-  ## slot to the pool WITHOUT stopping its threads, so a later createFFIContext
-  ## reuses them. Synchronous (waits for the FFI thread to finish draining).
-  # `resolveCtx` answers nil for a stale token, and its result lands here.
-  if ctx.isNil():
-    return err("recycleFFIContext(pool): no context (nil)")
-  # Recycling it would release the slot while `staticState` still points at it.
-  if pool.isStaticCtx(ctx):
-    return err("recycleFFIContext(pool): the {.ffiStatic.} context outlives every ctx")
-  ctx.requestRecycle()
-
 proc destroyFFIContext*[T](
     pool: var FFIContextPool[T], ctx: ptr FFIContext[T]
 ): Result[void, string] =
-  ## Full teardown: stops/joins the threads and frees resources, marking the slot
-  ## uninitialised so a later createFFIContext rebuilds it; normal cleanup uses
-  ## recycleFFIContext. On thread-exit timeout the slot is leaked; closing
-  ## live-thread resources is unsafe.
+  ## Full teardown: joins the threads, frees the resources and marks the slot for a rebuild; normal cleanup uses recycleFFIContext. On thread-exit timeout the slot leaks, because a free under live threads is unsafe. Only the thread that owns the context's heaps may call it: the free reaches structures the FFI and event threads grew.
   if ctx.isNil():
     return err("destroyFFIContext(pool): no context (nil)")
   # Destroying it would release the slot while `staticState` still points at it.
@@ -124,10 +113,76 @@ proc destroyFFIContext*[T](
     error "context threads did not exit; the pool slot and its resources leak " &
       "(a free under live threads is unsafe)", reason = error
     return err("destroyFFIContext(pool): " & $error)
+  let slot = pool.slotIndex(ctx)
+  if slot >= 0:
+    pool.threadsUp[slot].store(false)
+    pool.initialized[slot].store(false)
   let deinitRes = ctx.deinitContextResources()
   pool.releaseSlot(ctx)
   deinitRes.isOkOr:
     return err("destroyFFIContext(pool): " & $error)
+  ok()
+
+proc parkSlotThreads[T](pool: var FFIContextPool[T], slot: int): Result[void, string] =
+  ## Joins the slot's thread pair and keeps its resources: those heaps belong to the threads that just exited, so a free here can land on an allocator that is gone.
+  if slot < 0 or slot >= MaxFFIContexts:
+    return err("parkSlotThreads: slot " & $slot & " is not a pool slot")
+  ?pool.contexts[slot].addr.stopAndJoinThreads()
+  pool.threadsUp[slot].store(false)
+  ok()
+
+proc hasLiveContext[T](pool: var FFIContextPool[T]): bool =
+  ## A slot a host still owns. Skips the `{.ffiStatic.}` slot and a quarantined one, which hold their claim for the life of the process.
+  for i in 0 ..< MaxFFIContexts:
+    let ctx = pool.contexts[i].addr
+    if not ctx.isInUse():
+      continue
+    if pool.isStaticCtx(ctx):
+      continue
+    if ctx.lifecycle.load() == CtxLifecycle.RecycleFailed:
+      continue
+    return true
+  false
+
+proc parkIdleSlots[T](pool: var FFIContextPool[T]) =
+  ## Stops and joins the threads of every free slot.
+  for i in 0 ..< MaxFFIContexts:
+    let ctx = pool.contexts[i].addr
+    if not pool.threadsUp[i].load():
+      continue
+    # The claim is the lock: a slot another thread just took is not idle.
+    if not ctx.tryClaim():
+      continue
+    pool.parkSlotThreads(i).isOkOr:
+      # Keep the claim: a slot whose threads did not exit must not serve again.
+      error "parking an idle context failed; its slot and threads leak", reason = error
+      continue
+    ctx.releaseClaim()
+
+proc reapIfIdle[T](pool: var FFIContextPool[T]) =
+  ## The pool's exit policy: once no context is live, no thread of the library stays up for the C runtime to finalize under.
+  if onFFIThread or onEventThread:
+    debug "skipping the idle reap: a destroy from inside the library's own " &
+      "threads would join a thread to itself"
+    return
+  if pool.hasLiveContext():
+    return
+  pool.parkIdleSlots()
+
+proc recycleFFIContext*[T](
+    pool: var FFIContextPool[T], ctx: ptr FFIContext[T]
+): Result[void, string] =
+  ## Normal teardown: drains in-flight handlers, frees the lib and returns the slot to the pool. Its threads stay up for the next owner, unless this was the last live context: see `reapIfIdle`. Synchronous.
+
+  # `resolveCtx` answers nil for a stale token, and its result lands here.
+  if ctx.isNil():
+    return err("recycleFFIContext(pool): no context (nil)")
+  # Recycling it would release the slot while `staticState` still points at it.
+  if pool.isStaticCtx(ctx):
+    return err("recycleFFIContext(pool): the {.ffiStatic.} context outlives every ctx")
+  ?ctx.requestRecycle()
+
+  pool.reapIfIdle()
   ok()
 
 proc staticFFIContext*[T](
@@ -164,34 +219,41 @@ proc destroyStaticFFIContext*[T](pool: var FFIContextPool[T]): Result[void, stri
   if not pool.staticState.compareExchange(expected, StaticCtxDestroying):
     return ok()
   let ctx = cast[ptr FFIContext[T]](pool.staticCtx.load())
-  ctx.stopAndJoinThreads().isOkOr:
-    # Threads are still live: leak the slot rather than free resources under them.
+  let slot = pool.slotIndex(ctx)
+  if slot < 0:
+    pool.staticState.store(StaticCtxReady)
+    return err("destroyStaticFFIContext: the static context is not a pool slot")
+  pool.parkSlotThreads(slot).isOkOr:
+    # Threads are still live: leak the slot rather than hand it back under them.
     pool.staticState.store(StaticCtxReady)
     error "the {.ffiStatic.} context's threads did not exit; its slot and " &
       "resources leak", reason = error
     return err("destroyStaticFFIContext: " & $error)
-  let deinitRes = ctx.deinitContextResources()
   pool.releaseSlot(ctx)
   pool.staticCtx.store(nil)
   pool.staticState.store(StaticCtxNone)
-  deinitRes.isOkOr:
-    return err("destroyStaticFFIContext: " & $error)
   ok()
 
 proc shutdownFFIContextPool*[T](pool: var FFIContextPool[T]): Result[void, string] =
-  ## Stops and joins every live slot, the `{.ffiStatic.}` one included, so a host
-  ## can exit without the C runtime finalizing the library under threads that are
-  ## still running. Best-effort: a slot whose threads do not exit keeps its
-  ## resources and is reported, the rest are still torn down.
+  ## Joins the threads of every slot, the `{.ffiStatic.}` one included, so the C runtime finalizes the library with nothing of ours running. A slot the host still owned is quarantined: its library never ran a teardown. Best-effort, so one slot that will not stop does not spare the rest.
   var firstErr = ""
   pool.destroyStaticFFIContext().isOkOr:
     firstErr = error
+
   for i in 0 ..< MaxFFIContexts:
-    if not pool.initialized[i].load():
+    if not pool.threadsUp[i].load():
       continue
-    pool.destroyFFIContext(pool.contexts[i].addr).isOkOr:
+    let ctx = pool.contexts[i].addr
+    pool.parkSlotThreads(i).isOkOr:
       if firstErr.len == 0:
         firstErr = error
+      continue
+    # Read the claim after the park: a create that raced this loop must not keep an Active context whose threads are gone.
+    if ctx.isInUse():
+      ctx.lifecycle.store(CtxLifecycle.RecycleFailed)
+      error "a context was still claimed at shutdown; its slot is quarantined " &
+        "and its calls now fail instead of queueing to a dead thread"
+
   if firstErr.len > 0:
     return err("shutdownFFIContextPool: " & firstErr)
   ok()
