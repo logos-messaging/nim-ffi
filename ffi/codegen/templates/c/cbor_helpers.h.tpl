@@ -27,10 +27,7 @@ typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_dat
  * milliseconds as decimal text), then still ends with a terminal RET_OK/RET_ERR.
  * A caller that only wants the final answer must ignore it, not treat it as an
  * error. */
-#define NIMFFI_RET_OK 0
-#define NIMFFI_RET_ERROR 1
-#define NIMFFI_RET_MISSING_CALLBACK 2
-#define NIMFFI_RET_STALE_WARN 3
+{{RET_CODES}}
 
 /* ── leaf encoders ─────────────────────────────────────────────────────── */
 static inline CborError nimffi_enc_bool(CborEncoder* e, const bool* v) {

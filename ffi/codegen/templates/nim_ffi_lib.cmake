@@ -11,7 +11,7 @@ get_filename_component(NIM_SRC
 
 # A parent project must set these with `set(... CACHE ... FORCE)`: under CMP0126 OLD a non-FORCE `set(... CACHE)` deletes the parent's normal variable, and the dylib builds with the defaults.
 set(NIM_FFI_MM "orc" CACHE STRING "Nim memory-management mode for the dylib: orc, arc, refc, none")
-set(NIM_FFI_EXTRA_ARGS "" CACHE STRING "Extra nim c args, e.g. -d:useMalloc --passC:-fsanitize=address -d:ffiEchoAbiC")
+set(NIM_FFI_EXTRA_ARGS "" CACHE STRING "Extra nim c args, e.g. -d:useMalloc --passC:-fsanitize=address")
 
 # The dylib path does not encode the mm or the sanitizer, so a rebuild under
 # different settings would reuse the previous binary. Depend on a stamp holding

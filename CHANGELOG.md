@@ -54,6 +54,15 @@ All notable changes to this project are documented in this file.
   router would silently give it the ctor ABI instead.
 
 ### Changed
+- **The generated `NIMFFI_RET_*` codes come from the Nim constants.** The four
+  codes were typed by hand in the C template, the C++ template and the Rust
+  generator, and they had already drifted: the C header defined
+  `NIMFFI_RET_ERROR` where every other copy defined `NIMFFI_RET_ERR`. All three
+  generators now render their block from `ffi/ret_codes.nim`, so the C header
+  spells the failure code `NIMFFI_RET_ERR` and the Rust crate gains the
+  `NIMFFI_RET_ERR` constant it lacked. A C host that used the old name must
+  rename it.
+
 - **The event-queue defines are `ffi`-prefixed.** `-d:EventQueueCapacity`,
   `-d:MaxEventPayloadBytes` and `-d:MaxEventNameBytes` are now
   `-d:ffiEventQueueCapacity`, `-d:ffiMaxEventPayloadBytes` and
@@ -81,6 +90,12 @@ All notable changes to this project are documented in this file.
   `*_c_abi_*` tasks, tests and CI jobs, along with the `bench_codec` benchmark
   that compared the two wires. A 0.3.x library that declared `abi = c` moves to
   CBOR by dropping the argument and regenerating its bindings.
+- **`ffi/logging.nim`**, 98 vendored lines that every FFI thread called on
+  start. Each call re-installed the process-global chronicles writer, so up to
+  32 threads raced on it, and the module reconfigured the log level of the host
+  that loads the library. The repo compiles with a single chronicles sink, so
+  the writer install was a no-op anyway and only the level change survived.
+  A host configures chronicles itself.
 - `declareLibrary`'s `headerBanner` argument, which nothing passed.
 - `SharedSeq` / `allocSharedSeq` / `deallocSharedSeq` / `toSeq` from
   `ffi/alloc.nim`, `cborFreeShared`, `eventQueueLen`, and the `git_version`

@@ -1,18 +1,14 @@
 import std/tables
 import chronos
+import ./ret_codes
+
+export ret_codes
 
 type FFICallBack* = proc(
   callerRet: cint, msg: ptr cchar, len: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].}
   ## Result-delivery callback. `RET_OK`/`RET_ERR` fire once and end the request;
   ## `RET_STALE_WARN` may fire repeatedly before them.
-
-const RET_OK*: cint = 0
-const RET_ERR*: cint = 1
-const RET_MISSING_CALLBACK*: cint = 2
-const RET_STALE_WARN*: cint = 3
-  ## Non-terminal: request still in flight, fires every `StaleWarnInterval` with
-  ## `msg` = elapsed ms as decimal ASCII, always followed by a terminal code.
 
 type FFIRequestProc* = proc(
   request: pointer, reqHandler: pointer
@@ -30,3 +26,6 @@ template foreignThreadGc*(body: untyped) =
 
 ## Compile-time-populated table: request type name (cstring) -> async handler.
 var registeredRequests*: Table[cstring, FFIRequestProc]
+
+let registeredRequestsPtr* = addr registeredRequests
+  ## Read path of every FFI thread; the pointer keeps a `{.gcsafe.}` handler off the GC'ed global, which nothing writes after init.

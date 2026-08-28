@@ -103,10 +103,10 @@ proc processRequest[T](
   let reqIdCs = reqId.cstring # keeps reqId alive
 
   let retFut =
-    if not ctx[].registeredRequests[].contains(reqIdCs):
+    if not registeredRequestsPtr[].contains(reqIdCs):
       nilProcess(request[].reqId)
     else:
-      ctx[].registeredRequests[][reqIdCs](cast[pointer](request), ctx)
+      registeredRequestsPtr[][reqIdCs](cast[pointer](request), ctx)
 
   # One try over warn-loop + handler so a shutdown-drain cancel still reaches the response-and-free below.
   let res =
@@ -286,8 +286,6 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ffiEventQueueSignalPtr = ctx.eventQueueSignal
   ffiCurrentNotifyEventEnqueued = ffiNotifyEventEnqueuedHook
   onFFIThread = true
-
-  logging.setupLog(logging.LogLevel.DEBUG, logging.LogFormat.TEXT)
 
   defer:
     onFFIThread = false
