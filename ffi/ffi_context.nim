@@ -339,22 +339,27 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     )
 
   if not ctx.awaitClaimReleased():
-    warn "the recycled slot did not come free; the pool treats it as still owned"
+    # An ok here would let the pool read the slot as live and skip the idle reap, with nothing left to trigger one later.
+    error "the recycled slot did not come free; the pool treats it as still owned"
+    return err("requestRecycle: the slot did not come free")
   ok()
 
-## Per-thread exit wait before stopAndJoinThreads leaks ctx rather than hanging. Kept
-## short so a wedged worker fails fast; raise it past `ffiTeardownTimeoutMs` for a slow
-## `{.ffiDtor.}`. Override `-d:ffiThreadExitTimeoutMs=<ms>`.
+## Per-thread exit wait before stopAndJoinThreads leaks ctx rather than hanging. Short, so a wedged worker fails fast; raise it past `ffiTeardownTimeoutMs` for a slow `{.ffiDtor.}`. Override `-d:ffiThreadExitTimeoutMs=<ms>`.
 const ThreadExitTimeoutMs* {.intdefine: "ffiThreadExitTimeoutMs".} = 1500
 const ThreadExitTimeout* = ThreadExitTimeoutMs.milliseconds
 
-proc stopAndJoinThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
+const OwnedExitTimeout* = ThreadExitTimeout + TeardownTimeout
+  ## Exit wait at shutdown, the one path with no retry: a slot the host still owns runs its `{.ffiDtor.}` teardown on the way out, under a `TeardownTimeout` of its own.
+
+proc stopAndJoinThreads*[T](
+    ctx: ptr FFIContext[T], timeout = ThreadExitTimeout
+): Result[void, string] =
   ## On timeout, returns err and skips remaining joins (leaves threads live); caller cleans up.
   ctx.signalStop().isOkOr:
     return err("signalStop failed: " & $error)
 
-  ?ctx.threadExitSignal.waitExitOrErr("FFI thread", ThreadExitTimeout)
+  ?ctx.threadExitSignal.waitExitOrErr("FFI thread", timeout)
   joinThread(ctx.ffiThread)
-  ?ctx.eventThreadExitSignal.waitExitOrErr("event thread", ThreadExitTimeout)
+  ?ctx.eventThreadExitSignal.waitExitOrErr("event thread", timeout)
   joinThread(ctx.eventThread)
   ok()

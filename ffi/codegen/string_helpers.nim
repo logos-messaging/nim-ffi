@@ -56,7 +56,8 @@ A host that destroys what it created needs no call here: the pool joins a
 context's threads once no context is live. Call it before the process exits
 when a context is still alive, or when a static proc built the shared context.
 A context you had not destroyed is stopped where it stands and its handle
-retired, so a later call on it fails instead of queueing to a dead thread.
+retired, so a later call on it fails instead of queueing to a dead thread. Its
+library teardown still runs, so do not repeat that cleanup yourself.
 Returns 0 when every context stopped, 1 when one was left running."""
 
 const RemoveListenerBoxDoc* =

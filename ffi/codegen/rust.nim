@@ -240,6 +240,8 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
     "    pub fn $1_remove_event_listener(ctx: *mut c_void, listener_id: u64) -> c_int;" %
       [linkLibName]
   )
+  lines.add(renderMemberDocComment(ShutdownDoc))
+  lines.add("    pub fn $1_shutdown() -> c_int;" % [linkLibName])
 
   lines.add("}")
   return lines.join("\n") & "\n"
@@ -795,6 +797,14 @@ proc generateApiRs*(
     lines.add("        decode_cbor::<$1>(&raw_bytes)" % [retTypeForApi])
     lines.add("    }")
     lines.add("")
+
+  # An associated fn, not a method: a host calls it with no context left to call it on.
+  lines.add(renderMemberDocComment(ShutdownDoc))
+  lines.add("    /// This wrapper reports that as true.")
+  lines.add("    pub fn shutdown() -> bool {")
+  lines.add("        unsafe { ffi::$1_shutdown() == 0 }" % [libName])
+  lines.add("    }")
+  lines.add("")
 
   lines.add("}")
   return lines.join("\n") & "\n"

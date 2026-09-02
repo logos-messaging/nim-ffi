@@ -23,4 +23,13 @@ extern "C" {
     pub fn my_timer_destroy(ctx: *mut c_void) -> c_int;
     pub fn my_timer_add_event_listener(ctx: *mut c_void, event_name: *const c_char, callback: FFICallback, user_data: *mut c_void) -> u64;
     pub fn my_timer_remove_event_listener(ctx: *mut c_void, listener_id: u64) -> c_int;
+    /// Stop every context the library still holds and join their threads.
+    /// A host that destroys what it created needs no call here: the pool joins a
+    /// context's threads once no context is live. Call it before the process exits
+    /// when a context is still alive, or when a static proc built the shared context.
+    /// A context you had not destroyed is stopped where it stands and its handle
+    /// retired, so a later call on it fails instead of queueing to a dead thread. Its
+    /// library teardown still runs, so do not repeat that cleanup yourself.
+    /// Returns 0 when every context stopped, 1 when one was left running.
+    pub fn my_timer_shutdown() -> c_int;
 }

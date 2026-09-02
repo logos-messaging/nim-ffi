@@ -241,8 +241,10 @@ Two cases keep a pair alive anyway: a host that exits still owning a context, an
 a `{.ffiStatic.}` call, whose shared context holds its slot for the life of the
 process. `<lib>_shutdown()` stops both, from `atexit` or the last line of `main`.
 It returns 0 when every context stopped, 1 when one was left running. A context
-you had not destroyed never ran its `{.ffiDtor.}`, so its slot is quarantined:
-later calls on that handle fail, and the slot is gone from the pool's 32.
+you had not destroyed still runs its `{.ffiDtor.}` on the way out, so do not
+repeat that cleanup yourself. Its slot is quarantined all the same, because
+nothing freed the library object: later calls on that handle fail, and the slot
+is gone from the pool's 32.
 
 ### The result callback contract
 

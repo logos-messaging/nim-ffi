@@ -123,11 +123,13 @@ proc destroyFFIContext*[T](
     return err("destroyFFIContext(pool): " & $error)
   ok()
 
-proc parkSlotThreads[T](pool: var FFIContextPool[T], slot: int): Result[void, string] =
+proc parkSlotThreads[T](
+    pool: var FFIContextPool[T], slot: int, timeout = ThreadExitTimeout
+): Result[void, string] =
   ## Joins the slot's thread pair, keeping its resources: those heaps belong to the threads that just exited.
   if slot < 0 or slot >= MaxFFIContexts:
     return err("parkSlotThreads: slot " & $slot & " is not a pool slot")
-  ?pool.contexts[slot].addr.stopAndJoinThreads()
+  ?pool.contexts[slot].addr.stopAndJoinThreads(timeout)
   pool.threadsUp[slot].store(false)
   ok()
 
@@ -235,7 +237,7 @@ proc destroyStaticFFIContext*[T](pool: var FFIContextPool[T]): Result[void, stri
   ok()
 
 proc shutdownFFIContextPool*[T](pool: var FFIContextPool[T]): Result[void, string] =
-  ## Joins the threads of every slot, the static one included. A slot the host still owned is quarantined: its library never ran a teardown. Best-effort.
+  ## Joins the threads of every slot, the static one included. A slot the host still owned runs its `{.ffiDtor.}` teardown on the way out, and is quarantined all the same: nothing freed its library. Best-effort.
   var firstErr = ""
   pool.destroyStaticFFIContext().isOkOr:
     firstErr = error
@@ -244,7 +246,10 @@ proc shutdownFFIContextPool*[T](pool: var FFIContextPool[T]): Result[void, strin
     if not pool.threadsUp[i].load():
       continue
     let ctx = pool.contexts[i].addr
-    pool.parkSlotThreads(i).isOkOr:
+    # Retire the claim before the stop: a submit that passes the lifecycle check after the worker's last drain is never answered.
+    if ctx.isInUse():
+      ctx.lifecycle.store(CtxLifecycle.RecycleFailed)
+    pool.parkSlotThreads(i, OwnedExitTimeout).isOkOr:
       if firstErr.len == 0:
         firstErr = error
       continue

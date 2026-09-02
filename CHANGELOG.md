@@ -6,10 +6,11 @@ All notable changes to this project are documented in this file.
 
 ### Added
 - `declareLibrary` exports `<lib>_shutdown()`, declared in the generated C and
-  C++ headers. It stops every context the pool still holds, the `{.ffiStatic.}`
-  one included, and returns 0 when they all stopped. A context the host still
-  owned is quarantined, so a later call on it fails instead of queueing to a
-  thread that is gone.
+  C++ headers and wrapped by the Rust crate as `<Lib>Ctx::shutdown()`. It stops
+  every context the pool still holds, the `{.ffiStatic.}` one included, and
+  returns 0 when they all stopped. A context the host still owned runs its
+  `{.ffiDtor.}` on the way out and is then quarantined, so a later call on it
+  fails instead of queueing to a thread that is gone.
 - Each `{.ffi.}` proc's `##` doc comment reaches the generated C header as a
   `/** ... */` block above the declaration and its wrapper.
 - `genBindings()` fails compilation when a library declares an `{.ffiCtor.}` but

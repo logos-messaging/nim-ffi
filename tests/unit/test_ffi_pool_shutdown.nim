@@ -98,6 +98,29 @@ suite "pool shutdown":
     when defined(linux):
       check liveThreads() == baseline
 
+  test "shutdown stops the {.ffiStatic.} context, and a static call rebuilds it":
+    let baseline = baselineThreads()
+    let quarantined = ShutdownLibFFIPool.quarantinedSlots()
+
+    # What a `{.ffiStatic.}` entry point calls: the shared context holds its slot until a shutdown.
+    check ShutdownLibFFIPool.staticFFIContext().isOk()
+    when defined(linux):
+      check liveThreads() > baseline
+
+    check shutdownlib_shutdown() == 0
+
+    # It owns no library, so its slot comes back rather than being quarantined.
+    check ShutdownLibFFIPool.quarantinedSlots() == quarantined
+    when defined(linux):
+      check liveThreads() == baseline
+
+    check ShutdownLibFFIPool.staticFFIContext().isOk()
+    when defined(linux):
+      check liveThreads() > baseline
+    check shutdownlib_shutdown() == 0
+    when defined(linux):
+      check liveThreads() == baseline
+
   test "the pool still serves after a shutdown":
     let ctx = ShutdownLibFFIPool.createFFIContext().get()
     check ShutdownLibFFIPool.isValidCtx(ctx.ffiToken())
