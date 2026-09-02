@@ -2,7 +2,7 @@
 ## each distinct `seq[T]`/`Option[T]` is monomorphised per type.
 
 import std/[os, strutils, tables, sets, options]
-import ./meta, ./string_helpers, ./c_cpp_common, ./types_ir, ./consts
+import ./meta, ./string_helpers, ./c_cpp_common, ./types_ir, ./consts, ../ret_codes
 
 ## Fixed 64-bit wire type for any Nim `ptr T`/`pointer` (mirrors CppPtrType).
 const CPtrType* = "uint64_t"
@@ -847,8 +847,8 @@ func generateCPreludeHeader*(): string =
   return HeaderPreludeTpl & "\n"
 
 func generateCCborHeader*(): string =
-  ## The library-agnostic `nim_ffi_cbor.h`, emitted verbatim.
-  return CborHelpersTpl & "\n"
+  ## The library-agnostic `nim_ffi_cbor.h`.
+  return CborHelpersTpl.replace("{{RET_CODES}}", cRetCodeDefines()) & "\n"
 
 proc generateCLibHeader*(
     procs: seq[FFIProcMeta],

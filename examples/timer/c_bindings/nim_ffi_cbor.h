@@ -28,7 +28,7 @@ typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_dat
  * A caller that only wants the final answer must ignore it, not treat it as an
  * error. */
 #define NIMFFI_RET_OK 0
-#define NIMFFI_RET_ERROR 1
+#define NIMFFI_RET_ERR 1
 #define NIMFFI_RET_MISSING_CALLBACK 2
 #define NIMFFI_RET_STALE_WARN 3
 

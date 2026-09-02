@@ -1,7 +1,7 @@
 ## C++ binding generator: header-only binding + CMakeLists, CBOR over the wire.
 
 import std/[os, strutils]
-import ./meta, ./string_helpers, ./c_cpp_common, ./types_ir, ./consts
+import ./meta, ./string_helpers, ./c_cpp_common, ./types_ir, ./consts, ../ret_codes
 
 ## Fixed 64-bit wire type for any Nim `ptr T` / `pointer`.
 const CppPtrType* = "uint64_t"
@@ -227,7 +227,7 @@ proc generateCppHeader*(
 ): string =
   var lines: seq[string] = @[]
 
-  lines.add(HeaderPreludeTpl)
+  lines.add(HeaderPreludeTpl.replace("{{RET_CODES}}", cRetCodeDefines()))
   if events.len > 0:
     lines.add("#include <unordered_map>")
 
