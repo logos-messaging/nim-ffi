@@ -32,94 +32,27 @@ jobs:
       - id: load
         run: cat versions.env >> "$GITHUB_OUTPUT"
 
-  ffi-context:
-    name: FFI Context
-    needs: versions
-    uses: ./.github/workflows/test.yml
-    with:
-      test: test_ffi_context
-      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
-      nimble-version: ${{ needs.versions.outputs.nimble }}
-
-  gc-compat:
-    name: GC Compatibility
-    needs: versions
-    uses: ./.github/workflows/test.yml
-    with:
-      test: test_gc_compat
-      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
-      nimble-version: ${{ needs.versions.outputs.nimble }}
-
-  serial:
-    name: Serial
-    needs: versions
-    uses: ./.github/workflows/test.yml
-    with:
-      test: test_serial
-      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
-      nimble-version: ${{ needs.versions.outputs.nimble }}
-
-  ctx-validation:
-    name: Context Validation
-    needs: versions
-    uses: ./.github/workflows/test.yml
-    with:
-      test: test_ctx_validation
-      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
-      nimble-version: ${{ needs.versions.outputs.nimble }}
-
-  foreign-thread:
-    # Runs cross-OS to also guard declareLibrary's --app:lib linker-flag check:
-    # the fixture compiles FFI code as a plain executable, which would fail to
-    # link on macOS if the soname/install_name flags leaked into a non-lib build.
-    name: Foreign Thread
-    needs: versions
-    uses: ./.github/workflows/test.yml
-    with:
-      test: test_foreign_thread
-      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
-      nimble-version: ${{ needs.versions.outputs.nimble }}
-
-  listener-reentrancy:
-    # The dispatch barrier is a pthread condvar; cover the OSes whose mutex and
-    # condvar behaviour differ, not only the Linux sanitizer jobs.
-    name: Listener Reentrancy
-    needs: versions
-    uses: ./.github/workflows/test.yml
-    with:
-      test: test_event_listener_reentrancy
-      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
-      nimble-version: ${{ needs.versions.outputs.nimble }}
-
-  recycle-teardown:
-    # One job for the whole family: these tests run in seconds while a job's
-    # setup takes minutes, so six files share one setup instead of paying it six
-    # times. Stable Nim only — thread reuse, thread exit and chronos dispatcher
-    # behaviour are what differ here, and they differ per OS, not per compiler
-    # version. No ubuntu either: `unit-tests-all` already runs every file on
-    # Linux under both Nim versions and both mms.
-    name: Recycle & Teardown
+  cross-os:
+    # One job: these files probe per-OS behaviour (condvars, thread reuse, --app:lib linker flags), not per-compiler, and `unit-tests-all` already runs every file on Linux under both Nim versions and both mms.
+    name: Cross-OS
     needs: versions
     uses: ./.github/workflows/test.yml
     with:
       test: >-
-        test_ffi_teardown test_ffi_recycle_reset test_ffi_claim_generation
-        test_ffi_ingress_limits test_ctx_after_failed_ctor test_event_thread
+        test_ffi_context test_gc_compat test_serial test_ctx_validation
+        test_foreign_thread test_event_listener_reentrancy test_ffi_teardown
+        test_ffi_recycle_reset test_ffi_claim_generation test_ffi_ingress_limits
+        test_ctx_after_failed_ctor test_event_thread
       oses: '["macos-15","windows-latest"]'
       nim-versions: '["stable"]'
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
   cpp-e2e:
-    # Codegen output doesn't vary with mm, so we matrix over OS and Nim only.
-    # Windows runs MSVC by default and may surface codegen tweaks needed in
-    # the generated CMake (e.g. /EHsc, dllexport) — track follow-ups as bugs
-    # if they appear. `fail-fast: false` keeps Linux/macOS results visible.
+    # OS matrix only: this proves the generated code builds and runs per platform, while `check-bindings` diffs the codegen output under every Nim version.
     needs: versions
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-15, windows-latest]
-        nim-version: ${{ fromJSON(needs.versions.outputs.nim-versions) }}
         include:
           - os: ubuntu-22.04
             label: Linux
@@ -129,7 +62,7 @@ jobs:
             label: Windows
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
-    name: C++ E2E · ${{ matrix.label }} · Nim ${{ matrix.nim-version }}
+    name: C++ E2E · ${{ matrix.label }}
     env:
       NIMBLE_VERSION: ${{ needs.versions.outputs.nimble }}
     steps:
@@ -138,7 +71,7 @@ jobs:
       - name: Setup Nim
         uses: jiro4989/setup-nim-action@v2
         with:
-          nim-version: ${{ matrix.nim-version }}
+          nim-version: stable
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Nimble ${{ env.NIMBLE_VERSION }}
@@ -157,9 +90,9 @@ jobs:
           path: |
             nimbledeps/
             nimble.paths
-          key: ${{ runner.os }}-nimbledeps-${{ matrix.nim-version }}-${{ hashFiles('*.nimble') }}
+          key: ${{ runner.os }}-nimbledeps-stable-${{ hashFiles('*.nimble') }}
           restore-keys: |
-            ${{ runner.os }}-nimbledeps-${{ matrix.nim-version }}-
+            ${{ runner.os }}-nimbledeps-stable-
             ${{ runner.os }}-nimbledeps-
 
       - name: Install nimble deps

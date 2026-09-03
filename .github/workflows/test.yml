@@ -71,7 +71,9 @@ jobs:
         run: |
           nimble setup --localdeps -y
 
+      # `buildffi` hardcodes --mm:orc, so the refc leg would rebuild the same lib.
       - name: Build
+        if: matrix.mm == 'orc'
         shell: bash
         run: |
           if [ "$RUNNER_OS" == "Windows" ]; then
