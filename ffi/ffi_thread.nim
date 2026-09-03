@@ -2,6 +2,14 @@
 ## Dispatches `FFIThreadRequest`s from `reqQueueBank` and advances
 ## `ctx.ffiHeartbeat` so the event thread can spot a wedged FFI thread.
 
+## Compile-time-populated table: request type name (cstring) -> async handler.
+## Public because `{.ffi.}`/`registerReqFFI` expand a write to it in the caller's
+## module; every write lands during module init, before any FFI thread exists.
+var registeredRequests*: Table[cstring, FFIRequestProc]
+
+let registeredRequestsPtr = addr registeredRequests
+  ## Read path of every FFI thread; the pointer keeps a `{.gcsafe.}` handler off the GC'ed global, which nothing writes after init.
+
 proc sendRequestToFFIThread*(
     ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, generation: uint
 ): Result[void, string] =

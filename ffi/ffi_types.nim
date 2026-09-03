@@ -1,4 +1,3 @@
-import std/tables
 import chronos
 import ./ret_codes
 
@@ -23,9 +22,3 @@ template foreignThreadGc*(body: untyped) =
 
   when declared(tearDownForeignThreadGc):
     tearDownForeignThreadGc()
-
-## Compile-time-populated table: request type name (cstring) -> async handler.
-var registeredRequests*: Table[cstring, FFIRequestProc]
-
-let registeredRequestsPtr* = addr registeredRequests
-  ## Read path of every FFI thread; the pointer keeps a `{.gcsafe.}` handler off the GC'ed global, which nothing writes after init.
