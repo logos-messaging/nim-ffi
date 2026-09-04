@@ -922,6 +922,8 @@ proc generateCLibHeader*(
   lines.add(
     "int " & libName & "_remove_event_listener(void* ctx, uint64_t listener_id);"
   )
+  lines.add(renderBlockDocComment(ShutdownDoc))
+  lines.add("int " & libName & "_shutdown(void);")
   lines.add("")
   lines.add("#ifdef __cplusplus")
   lines.add("} /* extern \"C\" */")

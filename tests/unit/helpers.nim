@@ -25,10 +25,7 @@ proc waitFlag*(flag: var Atomic[bool], timeoutMs = 5000): bool =
   true
 
 proc waitSlotFree*[T](ctx: ptr FFIContext[T]) =
-  ## `requestRecycle` returns once the recycle fired its done signal, which is
-  ## one step before the FFI thread releases the claim (the fire has to come
-  ## first, or a thread claiming the slot would take it as its own answer). Wait
-  ## that step out before a check that depends on the slot being free.
+  ## Waits out the claim of a recycle driven elsewhere; `recycleFFIContext` returns with it free.
   let deadline = Moment.now() + 5.seconds
   while ctx.isInUse() and Moment.now() < deadline:
     os.sleep(1)

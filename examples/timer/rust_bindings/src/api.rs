@@ -362,4 +362,13 @@ impl MyTimerCtx {
         decode_cbor::<String>(&raw_bytes)
     }
 
+    /// Stop every context the library still holds and join their threads.
+    /// Call it before the process exits when a context is still alive, or when a
+    /// static proc built the shared context.
+    /// Returns 0 when every context stopped, 1 when one was left running.
+    /// This wrapper reports that as true.
+    pub fn shutdown() -> bool {
+        unsafe { ffi::my_timer_shutdown() == 0 }
+    }
+
 }

@@ -230,6 +230,22 @@ overruns its teardown will exhaust the pool. `FFIContextPool.quarantinedSlots()`
 reports the count from Nim, every quarantine is logged at `error`, and so is the
 pool-exhausted error once any slot has been quarantined.
 
+### Process exit
+
+`<lib>_ctx_destroy` recycles: the slot's FFI and event thread pair stays up for
+the next owner. Once no context is live the pool joins that pair, so a host that
+destroys what it created leaves no thread of the library running. A finalize
+under a live thread crashes the process, which is what this avoids.
+
+Two cases keep a pair alive anyway: a host that exits still owning a context, and
+a `{.ffiStatic.}` call, whose shared context holds its slot for the life of the
+process. `<lib>_shutdown()` stops both, from `atexit` or the last line of `main`.
+It returns 0 when every context stopped, 1 when one was left running. A context
+you had not destroyed still runs its `{.ffiDtor.}` on the way out, so do not
+repeat that cleanup yourself. Its slot is quarantined all the same, because
+nothing freed the library object: later calls on that handle fail, and the slot
+is gone from the pool's 32.
+
 ### The result callback contract
 
 Each request carries a result callback. It receives one of these status codes

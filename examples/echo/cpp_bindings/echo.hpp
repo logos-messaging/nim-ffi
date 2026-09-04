@@ -493,6 +493,13 @@ uint64_t echo_add_event_listener(void* ctx, const char* event_name, FFICallback 
  * data of that listener alive until the dispatch ends.
  */
 int echo_remove_event_listener(void* ctx, uint64_t listener_id);
+/**
+ * Stop every context the library still holds and join their threads.
+ * Call it before the process exits when a context is still alive, or when a
+ * static proc built the shared context.
+ * Returns 0 when every context stopped, 1 when one was left running.
+ */
+int echo_shutdown(void);
 } // extern "C"
 
 // ============================================================

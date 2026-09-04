@@ -2,8 +2,12 @@
 
 {.passc: "-fPIC".}
 
-import std/[atomics, locks, options, sequtils, tables]
+import std/[atomics, locks, options, os, sequtils, sysatomics, tables]
 import chronicles, chronos, chronos/threadsync, results
+when defined(windows):
+  import chronos/osdefs
+else:
+  import chronos/selectors2
 import
   ./ffi_types,
   ./ffi_events,
@@ -95,6 +99,7 @@ type FFIContext*[T] = object
   staleWarnInterval*: Duration
 
 var onFFIThread* {.threadvar.}: bool
+var onEventThread* {.threadvar.}: bool
 
 const RecycleTimeoutMs* {.intdefine: "ffiRecycleTimeoutMs".} = 1500
   ## Bounds one drain round of the recycle handler. The handler runs at most two
@@ -128,46 +133,76 @@ proc ffiTeardownHook*[T](): var FFITeardownProc[T] =
   var hook {.global.}: FFITeardownProc[T]
   hook
 
+proc closeThreadDispatcher() =
+  ## chronos leaks a thread's dispatcher; free it last, once nothing polls (nim-chronos#614).
+  when defined(windows):
+    if closeHandle(getThreadDispatcher().getIoHandler()) == 0:
+      error "failed to close the thread's IOCP port; the handle leaks"
+  else:
+    getThreadDispatcher().getIoHandler().close2().isOkOr:
+      error "failed to close the thread's poller; the fd leaks", err = error
+
 include ./event_thread
 include ./ffi_thread
 
-template closeAndNil(field: untyped) =
-  if not field.isNil():
-    ?field.close()
-    field = nil
-
 proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## Mirror of `initContextResources`. Threads MUST be joined first; fields nil'd after close.
+  ## Mirror of `initContextResources`. Threads MUST be joined, and only their owner may call it.
   deinitRequestQueue(ctx[].reqQueueBank)
   deinitEventRegistry(ctx[].eventRegistry)
   deinitHandleRegistry(ctx[].handles)
   deinitEventQueue(ctx[].eventQueue)
-  when defined(gcRefc):
-    # ThreadSignalPtr.close() under refc hangs via signal-handler re-entry; the
-    # recycle pool makes full destroy rare, so the leaked fd stays bounded.
-    discard
-  else:
-    closeAndNil(ctx.reqSignal)
-    closeAndNil(ctx.stopSignal)
-    closeAndNil(ctx.threadExitSignal)
-    closeAndNil(ctx.eventQueueSignal)
-    closeAndNil(ctx.eventThreadExitSignal)
-    closeAndNil(ctx.recycleDoneSignal)
   ok()
 
+proc drainSignal(sig: ThreadSignalPtr) =
+  ## A reused slot inherits the fires of its last cycle; they wake the new threads for nothing.
+  const MaxDrain = RequestQueueDepth
+    ## One fire per request the last cycle could have left queued: every fire a stop strands.
+  for _ in 0 ..< MaxDrain:
+    let fired = sig.waitSync(ZeroDuration).valueOr:
+      error "failed to drain a signal before restarting a context's threads",
+        err = error
+      return
+    if not fired:
+      return
+
 template newSignalOrErr(field: untyped, name: string) =
-  field = ThreadSignalPtr.new().valueOr:
-    return err("couldn't create ThreadSignalPtr: " & name & ": " & $error)
+  # A slot keeps its signals for the life of the process, so a rebuild reuses them.
+  if field.isNil():
+    field = ThreadSignalPtr.new().valueOr:
+      return err("couldn't create ThreadSignalPtr: " & name & ": " & $error)
+
+proc startContextThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
+  ## Brings up the FFI and event thread pair of a slot whose resources are live.
+  drainSignal(ctx.reqSignal)
+  drainSignal(ctx.stopSignal)
+  drainSignal(ctx.eventQueueSignal)
+  drainSignal(ctx.threadExitSignal)
+  drainSignal(ctx.eventThreadExitSignal)
+
+  ctx.ffiThreadExited.store(false)
+  ctx.running.store(true)
+
+  try:
+    createThread(ctx.ffiThread, ffiThreadBody[T], ctx)
+  except ValueError, ResourceExhaustedError:
+    return err("failed to create the FFI thread: " & getCurrentExceptionMsg())
+
+  try:
+    createThread(ctx.eventThread, eventThreadBody[T], ctx)
+  except ValueError, ResourceExhaustedError:
+    # Join ffiThread before the caller cleans up state it is waiting on.
+    ctx.running.store(false)
+    let fireRes = ctx.reqSignal.fireSync()
+    if fireRes.isErr():
+      error "failed to signal ffiThread during event-thread cleanup",
+        error = fireRes.error
+    joinThread(ctx.ffiThread)
+    return err("failed to create the event thread: " & getCurrentExceptionMsg())
+
+  ok()
 
 proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## On failure, deferred cleanup closes partial state; caller releases the slot.
-  # Nil first so deferred cleanup can't double-close a reused pool slot.
-  ctx.reqSignal = nil
-  ctx.stopSignal = nil
-  ctx.threadExitSignal = nil
-  ctx.eventQueueSignal = nil
-  ctx.eventThreadExitSignal = nil
-  ctx.recycleDoneSignal = nil
   ctx.myLibOwned = false
   ctx.myLibRefd = false
   ctx.lifecycle.store(CtxLifecycle.Active)
@@ -198,24 +233,7 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   newSignalOrErr(ctx.eventThreadExitSignal, "eventThreadExitSignal")
   newSignalOrErr(ctx.recycleDoneSignal, "recycleDoneSignal")
 
-  ctx.running.store(true)
-
-  try:
-    createThread(ctx.ffiThread, ffiThreadBody[T], ctx)
-  except ValueError, ResourceExhaustedError:
-    return err("failed to create the FFI thread: " & getCurrentExceptionMsg())
-
-  try:
-    createThread(ctx.eventThread, eventThreadBody[T], ctx)
-  except ValueError, ResourceExhaustedError:
-    # Join ffiThread before deferred cleanup closes signals it's waiting on.
-    ctx.running.store(false)
-    let fireRes = ctx.reqSignal.fireSync()
-    if fireRes.isErr():
-      error "failed to signal ffiThread during event-thread cleanup",
-        error = fireRes.error
-    joinThread(ctx.ffiThread)
-    return err("failed to create the event thread: " & getCurrentExceptionMsg())
+  ?ctx.startContextThreads()
 
   success = true
   ok()
@@ -273,11 +291,24 @@ proc markAsActive*[T](ctx: ptr FFIContext[T]) =
   ## Reused context: its worker threads are still alive; re-arm for requests.
   ctx.lifecycle.store(CtxLifecycle.Active)
 
+proc awaitClaimReleased[T](ctx: ptr FFIContext[T]): bool =
+  ## `finishRecycle` releases the claim one step after it fires the done signal. False on timeout.
+  const
+    SpinRounds = 1000
+    SleepRounds = 1000
+      ## then 1ms apiece: a spin alone starves the releasing thread on one core.
+  for _ in 0 ..< SpinRounds:
+    if not ctx.isInUse():
+      return true
+    cpuRelax()
+  for _ in 0 ..< SleepRounds:
+    if not ctx.isInUse():
+      return true
+    os.sleep(1)
+  false
+
 proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## Ask the FFI thread to drain, free the lib and release the slot, WITHOUT
-  ## stopping its worker/event threads, so the next createFFIContext reuses them.
-  ## Synchronous: waits on recycleDoneSignal. No fd churn -> no select() limit.
-  ## On err the slot is quarantined and its callbacks can still fire: keep the userData of every in-flight request alive.
+  ## Frees the lib and releases the slot, keeping its threads for the next createFFIContext.
   var expected = CtxLifecycle.Active
   if not ctx.lifecycle.compareExchange(expected, CtxLifecycle.RecyclePending):
     return err("requestRecycle: context is not Active (already recycling)")
@@ -306,21 +337,29 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
       "requestRecycle: " & ctx.recycleFailure.load().reason() &
         "; the library and the pool slot leak, and callbacks can still fire"
     )
+
+  if not ctx.awaitClaimReleased():
+    # An ok here reads as a live slot, so the idle reap is skipped and nothing triggers a later one.
+    error "the recycled slot did not come free; the pool treats it as still owned"
+    return err("requestRecycle: the slot did not come free")
   ok()
 
-## Per-thread exit wait before stopAndJoinThreads leaks ctx rather than hanging. Kept
-## short so a wedged worker fails fast; raise it past `ffiTeardownTimeoutMs` for a slow
-## `{.ffiDtor.}`. Override `-d:ffiThreadExitTimeoutMs=<ms>`.
 const ThreadExitTimeoutMs* {.intdefine: "ffiThreadExitTimeoutMs".} = 1500
+  ## Per-thread exit wait; past it stopAndJoinThreads leaks the ctx rather than hangs.
 const ThreadExitTimeout* = ThreadExitTimeoutMs.milliseconds
 
-proc stopAndJoinThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
+const OwnedExitTimeout* = ThreadExitTimeout + TeardownTimeout
+  ## Exit wait at shutdown: an owned slot runs its `{.ffiDtor.}` on the way out, with no retry.
+
+proc stopAndJoinThreads*[T](
+    ctx: ptr FFIContext[T], timeout = ThreadExitTimeout
+): Result[void, string] =
   ## On timeout, returns err and skips remaining joins (leaves threads live); caller cleans up.
   ctx.signalStop().isOkOr:
     return err("signalStop failed: " & $error)
 
-  ?ctx.threadExitSignal.waitExitOrErr("FFI thread", ThreadExitTimeout)
+  ?ctx.threadExitSignal.waitExitOrErr("FFI thread", timeout)
   joinThread(ctx.ffiThread)
-  ?ctx.eventThreadExitSignal.waitExitOrErr("event thread", ThreadExitTimeout)
+  ?ctx.eventThreadExitSignal.waitExitOrErr("event thread", timeout)
   joinThread(ctx.eventThread)
   ok()
