@@ -29,7 +29,7 @@ type
     StaticCtxReady
 
   FFIContextPool*[T] = object
-    ## Fixed pool of FFI contexts, plus the one `{.ffiStatic.}` context. A slot's resources are built once and live until the process ends, so a cycle churns no fd. `reapIfIdle` parks its thread pair once no context is live.
+    ## Fixed pool, plus the one `{.ffiStatic.}` context. A slot's resources outlive its cycles.
     contexts: array[MaxFFIContexts, FFIContext[T]]
     initialized: array[MaxFFIContexts, Atomic[bool]]
     threadsUp: array[MaxFFIContexts, Atomic[bool]]
@@ -103,7 +103,7 @@ proc isStaticCtx[T](pool: var FFIContextPool[T], ctx: ptr FFIContext[T]): bool =
 proc destroyFFIContext*[T](
     pool: var FFIContextPool[T], ctx: ptr FFIContext[T]
 ): Result[void, string] =
-  ## Full teardown: joins the threads, frees the resources, marks the slot for a rebuild. Normal cleanup uses recycleFFIContext. The slot leaks on a thread-exit timeout, and only the thread owning the context's heaps may call it.
+  ## Full teardown, for a slot rebuilt from scratch; normal cleanup uses recycleFFIContext.
   if ctx.isNil():
     return err("destroyFFIContext(pool): no context (nil)")
   # Destroying it would release the slot while `staticState` still points at it.
@@ -126,7 +126,7 @@ proc destroyFFIContext*[T](
 proc parkSlotThreads[T](
     pool: var FFIContextPool[T], slot: int, timeout = ThreadExitTimeout
 ): Result[void, string] =
-  ## Joins the slot's thread pair, keeping its resources: those heaps belong to the threads that just exited.
+  ## Joins the slot's thread pair, keeping its resources: those heaps belong to the exiting threads.
   if slot < 0 or slot >= MaxFFIContexts:
     return err("parkSlotThreads: slot " & $slot & " is not a pool slot")
   ?pool.contexts[slot].addr.stopAndJoinThreads(timeout)
@@ -134,7 +134,7 @@ proc parkSlotThreads[T](
   ok()
 
 proc hasLiveContext[T](pool: var FFIContextPool[T]): bool =
-  ## A slot a host still owns. Skips the static and quarantined ones, claimed for the life of the process.
+  ## A slot a host still owns. Skips the static and quarantined ones: those never come free.
   for i in 0 ..< MaxFFIContexts:
     let ctx = pool.contexts[i].addr
     if not ctx.isInUse():
@@ -174,7 +174,7 @@ proc reapIfIdle[T](pool: var FFIContextPool[T]) =
 proc recycleFFIContext*[T](
     pool: var FFIContextPool[T], ctx: ptr FFIContext[T]
 ): Result[void, string] =
-  ## Normal teardown: drains the handlers, frees the lib, returns the slot. Its threads stay up for the next owner unless this was the last live context. Synchronous.
+  ## Normal teardown. The slot's threads stay up unless this was the last live context.
 
   # `resolveCtx` answers nil for a stale token, and its result lands here.
   if ctx.isNil():
@@ -237,7 +237,7 @@ proc destroyStaticFFIContext*[T](pool: var FFIContextPool[T]): Result[void, stri
   ok()
 
 proc shutdownFFIContextPool*[T](pool: var FFIContextPool[T]): Result[void, string] =
-  ## Joins the threads of every slot, the static one included. A slot the host still owned runs its `{.ffiDtor.}` teardown on the way out, and is quarantined all the same: nothing freed its library. Best-effort.
+  ## Joins every slot's threads. An owned slot runs its `{.ffiDtor.}`, then is quarantined.
   var firstErr = ""
   pool.destroyStaticFFIContext().isOkOr:
     firstErr = error
@@ -246,14 +246,14 @@ proc shutdownFFIContextPool*[T](pool: var FFIContextPool[T]): Result[void, strin
     if not pool.threadsUp[i].load():
       continue
     let ctx = pool.contexts[i].addr
-    # Retire the claim before the stop: a submit that passes the lifecycle check after the worker's last drain is never answered.
+    # Retire the claim first: a submit that lands after the worker's last drain is never answered.
     if ctx.isInUse():
       ctx.lifecycle.store(CtxLifecycle.RecycleFailed)
     pool.parkSlotThreads(i, OwnedExitTimeout).isOkOr:
       if firstErr.len == 0:
         firstErr = error
       continue
-    # After the park: a create that raced the loop must not keep an Active context with dead threads.
+    # A create that raced the park must not keep an Active context with dead threads.
     if ctx.isInUse():
       ctx.lifecycle.store(CtxLifecycle.RecycleFailed)
       error "a context was still claimed at shutdown; its slot is quarantined " &

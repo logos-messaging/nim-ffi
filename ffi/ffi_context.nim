@@ -134,7 +134,7 @@ proc ffiTeardownHook*[T](): var FFITeardownProc[T] =
   hook
 
 proc closeThreadDispatcher() =
-  ## chronos never frees a thread's dispatcher, so a parked slot leaks a poller per cycle. Call it last, once nothing polls.
+  ## chronos leaks a thread's dispatcher; free it last, once nothing polls (nim-chronos#614).
   when defined(windows):
     if closeHandle(getThreadDispatcher().getIoHandler()) == 0:
       error "failed to close the thread's IOCP port; the handle leaks"
@@ -146,7 +146,7 @@ include ./event_thread
 include ./ffi_thread
 
 proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## Mirror of `initContextResources`, for a slot rebuilt from scratch. Threads MUST be joined first, and only the thread owning these heaps may call it. The signals outlive it.
+  ## Mirror of `initContextResources`. Threads MUST be joined, and only their owner may call it.
   deinitRequestQueue(ctx[].reqQueueBank)
   deinitEventRegistry(ctx[].eventRegistry)
   deinitHandleRegistry(ctx[].handles)
@@ -154,9 +154,9 @@ proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ok()
 
 proc drainSignal(sig: ThreadSignalPtr) =
-  ## A reused slot inherits the fires its last cycle never consumed; they would wake the new threads for nothing.
+  ## A reused slot inherits the fires of its last cycle; they wake the new threads for nothing.
   const MaxDrain = RequestQueueDepth
-    ## One fire per request the last cycle could have left queued, which is every fire a stop can strand.
+    ## One fire per request the last cycle could have left queued: every fire a stop strands.
   for _ in 0 ..< MaxDrain:
     let fired = sig.waitSync(ZeroDuration).valueOr:
       error "failed to drain a signal before restarting a context's threads",
@@ -292,7 +292,7 @@ proc markAsActive*[T](ctx: ptr FFIContext[T]) =
   ctx.lifecycle.store(CtxLifecycle.Active)
 
 proc awaitClaimReleased[T](ctx: ptr FFIContext[T]): bool =
-  ## `finishRecycle` fires the done signal one step before it releases the claim. False when the claim outlasts the wait.
+  ## `finishRecycle` releases the claim one step after it fires the done signal. False on timeout.
   const
     SpinRounds = 1000
     SleepRounds = 1000
@@ -308,7 +308,7 @@ proc awaitClaimReleased[T](ctx: ptr FFIContext[T]): bool =
   false
 
 proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## Ask the FFI thread to drain, free the lib and release the slot, WITHOUT stopping its threads, so the next createFFIContext reuses them. Synchronous: on ok the slot is free. On err it is quarantined and its callbacks can still fire, so keep every in-flight `userData` alive.
+  ## Frees the lib and releases the slot, keeping its threads for the next createFFIContext.
   var expected = CtxLifecycle.Active
   if not ctx.lifecycle.compareExchange(expected, CtxLifecycle.RecyclePending):
     return err("requestRecycle: context is not Active (already recycling)")
@@ -339,17 +339,17 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     )
 
   if not ctx.awaitClaimReleased():
-    # An ok here would let the pool read the slot as live and skip the idle reap, with nothing left to trigger one later.
+    # An ok here reads as a live slot, so the idle reap is skipped and nothing triggers a later one.
     error "the recycled slot did not come free; the pool treats it as still owned"
     return err("requestRecycle: the slot did not come free")
   ok()
 
-## Per-thread exit wait before stopAndJoinThreads leaks ctx rather than hanging. Short, so a wedged worker fails fast; raise it past `ffiTeardownTimeoutMs` for a slow `{.ffiDtor.}`. Override `-d:ffiThreadExitTimeoutMs=<ms>`.
 const ThreadExitTimeoutMs* {.intdefine: "ffiThreadExitTimeoutMs".} = 1500
+  ## Per-thread exit wait; past it stopAndJoinThreads leaks the ctx rather than hangs.
 const ThreadExitTimeout* = ThreadExitTimeoutMs.milliseconds
 
 const OwnedExitTimeout* = ThreadExitTimeout + TeardownTimeout
-  ## Exit wait at shutdown, the one path with no retry: a slot the host still owns runs its `{.ffiDtor.}` teardown on the way out, under a `TeardownTimeout` of its own.
+  ## Exit wait at shutdown: an owned slot runs its `{.ffiDtor.}` on the way out, with no retry.
 
 proc stopAndJoinThreads*[T](
     ctx: ptr FFIContext[T], timeout = ThreadExitTimeout

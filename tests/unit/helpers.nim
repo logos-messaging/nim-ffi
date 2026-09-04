@@ -25,7 +25,7 @@ proc waitFlag*(flag: var Atomic[bool], timeoutMs = 5000): bool =
   true
 
 proc waitSlotFree*[T](ctx: ptr FFIContext[T]) =
-  ## Waits out the claim for a recycle driven by some path other than `recycleFFIContext`, which returns with the slot free.
+  ## Waits out the claim of a recycle driven elsewhere; `recycleFFIContext` returns with it free.
   let deadline = Moment.now() + 5.seconds
   while ctx.isInUse() and Moment.now() < deadline:
     os.sleep(1)

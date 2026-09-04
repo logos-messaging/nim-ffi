@@ -1,4 +1,4 @@
-## Where a slot's threads go: a recycle hands them on, the last recycle parks them, shutdown takes down what the host still holds.
+## Where a slot's threads go: a recycle hands them on, the last one parks them, shutdown ends them.
 
 import std/[os, strutils]
 import unittest2
@@ -16,7 +16,7 @@ proc shutdownlib_ping*(lib: ShutdownLib): Future[Result[int, string]] {.ffi.} =
   return ok(1)
 
 proc liveThreads(): int =
-  ## Linux-only: the OS thread count is the property under test, and /proc is the only portable-enough way to read it.
+  ## Linux-only: /proc is the only portable-enough way to read the OS thread count.
   when defined(linux):
     for line in readFile("/proc/self/status").splitLines():
       if line.startsWith("Threads:"):
@@ -35,7 +35,7 @@ proc openFds(): int =
     -1
 
 template baselineThreads(): int =
-  ## Measured after a full cycle: the runtime starts threads of its own (a sanitizer's) that never go away. A template so `check` fails the calling test.
+  ## Measured after a full cycle: a sanitizer starts threads of its own that never go away.
   block:
     let warmup = ShutdownLibFFIPool.createFFIContext().get()
     check ShutdownLibFFIPool.recycleFFIContext(warmup).isOk()
@@ -73,7 +73,7 @@ suite "pool shutdown":
       check liveThreads() == baseline
 
   test "a create/recycle cycle churns no fd":
-    # The reap stops the threads, but the signals stay open for the next owner: under refc closing them is not an option.
+    # The reap stops the threads, but the signals stay open: under refc a close is not an option.
     let warmup = ShutdownLibFFIPool.createFFIContext().get()
     check ShutdownLibFFIPool.recycleFFIContext(warmup).isOk()
     let baseline = openFds()

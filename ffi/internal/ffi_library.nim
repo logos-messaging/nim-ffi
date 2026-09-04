@@ -222,6 +222,7 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
   # {libraryName}_shutdown
   let shutdownName = libraryName & "_shutdown"
   let shutdownBody = quote:
+    # A host can call shutdown first of all; the Nim runtime must be up before the pool is read.
     when declared(initializeLibrary):
       initializeLibrary()
     var ret: cint = 0
