@@ -24,6 +24,6 @@ endif()
 string(FIND "${_syms}" "${SAN_CHECK_SYMBOL}" _found)
 if(_found EQUAL -1)
     message(FATAL_ERROR
-        "${SAN_CHECK_FILE} references no ${SAN_CHECK_SYMBOL}* symbol: "
-        "it was built without the sanitizer")
+        "SANITIZER_NOT_LINKED: ${SAN_CHECK_FILE} references no "
+        "${SAN_CHECK_SYMBOL}* symbol: it was built without the sanitizer")
 endif()

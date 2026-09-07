@@ -77,10 +77,9 @@ proc sanFlags(san: string): string =
   else:
     raise newException(ValueError, "unknown NIM_FFI_SAN: " & san)
 
-proc assertSanitizerLinked(flags, san: string) =
-  ## Fails the task when a probe built with sanFlags(san) carries no sanitizer runtime.
-  let extra = sanFlags(san)
-  if extra.len == 0:
+proc assertSanitizerLinked(bin, san: string) =
+  ## Fails the task when the already-built `bin` carries no sanitizer runtime.
+  if sanFlags(san).len == 0:
     return
 
   when defined(windows):
@@ -92,18 +91,14 @@ proc assertSanitizerLinked(flags, san: string) =
     return
 
   let sym = if san == "tsan": "__tsan_" else: "__asan_"
-  let bin = "tests/build/sanitizer_probe"
-  mkDir "tests/build"
-  runOrQuit "nim c " & flags & extra & " -o:" & bin & " tests/sanitizer_probe.nim"
-
   let scan =
     "\"" & nm & "\" -D \"" & bin & "\" 2>/dev/null | grep -q " & sym & " || \"" & nm &
     "\" \"" & bin & "\" 2>/dev/null | grep -q " & sym
   try:
     exec scan
   except OSError:
-    echo bin & " references no " & sym & "* symbol: sanFlags(" & san &
-      ") no longer links the sanitizer"
+    echo "SANITIZER_NOT_LINKED: " & bin & " references no " & sym & "* symbol: sanFlags(" &
+      san & ") no longer links the sanitizer"
     quit(QuitFailure)
 
 proc mmModes(): seq[string] =
@@ -224,9 +219,9 @@ task test_sanitized,
   if san == "tsan":
     applyTsanSuppressions()
   for flags in mmModes():
-    assertSanitizerLinked(flags, san)
     for t in unitTests:
       runOrQuit "nim c -r " & flags & extra & " tests/unit/" & t & ".nim"
+      assertSanitizerLinked("tests/unit/" & t, san)
 
 task test_cpp_e2e_sanitized,
   "Build and run the C++ e2e tests with a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
