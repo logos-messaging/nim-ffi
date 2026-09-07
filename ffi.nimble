@@ -77,6 +77,30 @@ proc sanFlags(san: string): string =
   else:
     raise newException(ValueError, "unknown NIM_FFI_SAN: " & san)
 
+proc assertSanitizerLinked(bin, san: string) =
+  ## Fails the task when the already-built `bin` carries no sanitizer runtime.
+  if sanFlags(san).len == 0:
+    return
+
+  when defined(windows):
+    return
+
+  let nm = findExe("nm")
+  if nm.len == 0:
+    echo "nm not found: skipping the sanitizer link check"
+    return
+
+  let sym = if san == "tsan": "__tsan_" else: "__asan_"
+  let scan =
+    "\"" & nm & "\" -D \"" & bin & "\" 2>/dev/null | grep -q " & sym & " || \"" & nm &
+    "\" \"" & bin & "\" 2>/dev/null | grep -q " & sym
+  try:
+    exec scan
+  except OSError:
+    echo "SANITIZER_NOT_LINKED: " & bin & " references no " & sym & "* symbol: sanFlags(" &
+      san & ") no longer links the sanitizer"
+    quit(QuitFailure)
+
 proc mmModes(): seq[string] =
   ## Memory-management modes to build under, selected by NIM_FFI_MM (empty = both).
   case getEnv("NIM_FFI_MM", "")
@@ -197,6 +221,7 @@ task test_sanitized,
   for flags in mmModes():
     for t in unitTests:
       runOrQuit "nim c -r " & flags & extra & " tests/unit/" & t & ".nim"
+      assertSanitizerLinked("tests/unit/" & t, san)
 
 task test_cpp_e2e_sanitized,
   "Build and run the C++ e2e tests with a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
