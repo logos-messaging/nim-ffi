@@ -81,3 +81,9 @@ if(_san_test_env)
     set_tests_properties(timer_e2e_c echo_e2e_c
         PROPERTIES ENVIRONMENT "${_san_test_env}")
 endif()
+
+# The dylibs too: an instrumented exe against a plain dylib still looks green.
+sanitizer_symbol_check(timer_e2e_c "$<TARGET_FILE:timer_e2e_c>")
+sanitizer_symbol_check(echo_e2e_c "$<TARGET_FILE:echo_e2e_c>")
+sanitizer_symbol_check(my_timer_lib "${my_timer_RUNTIME_LIB}")
+sanitizer_symbol_check(echo_lib "${echo_RUNTIME_LIB}")

@@ -77,6 +77,35 @@ proc sanFlags(san: string): string =
   else:
     raise newException(ValueError, "unknown NIM_FFI_SAN: " & san)
 
+proc assertSanitizerLinked(flags, san: string) =
+  ## Fails the task when a probe built with sanFlags(san) carries no sanitizer runtime.
+  let extra = sanFlags(san)
+  if extra.len == 0:
+    return
+
+  when defined(windows):
+    return
+
+  let nm = findExe("nm")
+  if nm.len == 0:
+    echo "nm not found: skipping the sanitizer link check"
+    return
+
+  let sym = if san == "tsan": "__tsan_" else: "__asan_"
+  let bin = "tests/build/sanitizer_probe"
+  mkDir "tests/build"
+  runOrQuit "nim c " & flags & extra & " -o:" & bin & " tests/sanitizer_probe.nim"
+
+  let scan =
+    "\"" & nm & "\" -D \"" & bin & "\" 2>/dev/null | grep -q " & sym & " || \"" & nm &
+    "\" \"" & bin & "\" 2>/dev/null | grep -q " & sym
+  try:
+    exec scan
+  except OSError:
+    echo bin & " references no " & sym & "* symbol: sanFlags(" & san &
+      ") no longer links the sanitizer"
+    quit(QuitFailure)
+
 proc mmModes(): seq[string] =
   ## Memory-management modes to build under, selected by NIM_FFI_MM (empty = both).
   case getEnv("NIM_FFI_MM", "")
@@ -195,6 +224,7 @@ task test_sanitized,
   if san == "tsan":
     applyTsanSuppressions()
   for flags in mmModes():
+    assertSanitizerLinked(flags, san)
     for t in unitTests:
       runOrQuit "nim c -r " & flags & extra & " tests/unit/" & t & ".nim"
 

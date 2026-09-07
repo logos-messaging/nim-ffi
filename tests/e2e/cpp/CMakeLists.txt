@@ -87,3 +87,8 @@ else()
         DISCOVERY_MODE PRE_TEST
         DISCOVERY_TIMEOUT 120)
 endif()
+
+# The dylibs too: an instrumented exe against a plain dylib still looks green.
+sanitizer_symbol_check(timer_e2e_tests "$<TARGET_FILE:timer_e2e_tests>")
+sanitizer_symbol_check(my_timer_lib "${my_timer_RUNTIME_LIB}")
+sanitizer_symbol_check(echo_lib "${echo_RUNTIME_LIB}")
