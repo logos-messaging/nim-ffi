@@ -308,13 +308,19 @@ proc onHostTick(tickNo: int) {.ffiReverseEvent.} =
 ```
 
 An `{.ffi.}` handler calls `fetchHostClock(...)` like any async proc. Under the
-hood the call parks on a chronos future keyed by a fresh call id, rides the
-event ring, and the host's registered implementation is invoked **on the event
-dispatch thread** with `(call_id, args_cbor, len, user_data)`. The FFI
-processing thread stays free the whole time. The host answers from **any**
-thread via `<lib>_reverse_reply` (the reply crosses threads as a libc-malloc'd
-CBOR buffer and is decoded on the FFI thread's own heap, so the same code is
-correct under `refc` and `orc`).
+hood the call parks on a chronos future keyed by a fresh call id and queues an
+invocation for the context's **reverse worker threads**, which invoke the host's
+registered implementation with `(call_id, args_cbor, len, user_data)`. The impl
+**may block**: it occupies one worker, never the FFI processing thread or the
+event dispatch thread, and N workers run N impls concurrently. The host answers
+from **any** thread via `<lib>_reverse_reply` (the reply crosses threads as a
+libc-malloc'd CBOR buffer and is decoded on the FFI thread's own heap, so the
+same code is correct under `refc` and `orc`).
+
+Workers are per context, started lazily by the first `set_impl` (or ahead of
+time via `<lib>_start_reverse_workers(ctx, n)`), sized by
+`-d:ffiReverseWorkers` (default 2), stopped and joined at context destroy. A
+library without any `{.ffiReverse.}` never links the worker harness.
 
 Generated C surface per library (CBOR ABI only):
 
@@ -351,8 +357,10 @@ ctx.emit_on_host_tick(7);            // reverse event, fire-and-forget
 
 The impl box lifetime is owned by the ctx wrapper in both languages; replace or
 clear is safe mid-flight because the dylib's `set_impl` waits an in-flight
-invocation of the old impl out before returning. CDDL schemas carry the reverse
-args/reply/event payload types through the ordinary type registry.
+invocation of the old impl out before returning. `startReverseWorkers(n)` /
+`start_reverse_workers(n)` warm the pool ahead of the first registration. CDDL
+schemas carry the reverse args/reply/event payload types through the ordinary
+type registry.
 
 Semantics worth knowing:
 
@@ -360,10 +368,13 @@ Semantics worth knowing:
 | --- | --- | --- |
 | No impl registered at call time | The call fails immediately (`no host implementation registered for <wire>`). | Fail fast beats waiting out a deadline. |
 | Impl never replies | The call fails after its deadline — `ReverseCallTimeoutMs` (10 s, `-d:ffiReverseCallTimeoutMs=<ms>`), or per proc `{.ffiReverse("wire", timeout = ms).}`. | A handler parked forever would block context teardown. |
-| Late/duplicate/bogus `reverse_reply` | Accepted and silently dropped (call ids are monotonic and never reused within a slot claim). | The reply races the timeout by design; dropping is the safe outcome. |
+| Deadline or `cancelSoon()` while the call is **still queued** | The invocation is skipped at dequeue — the impl never runs. | A burst of timeouts behind one slow plugin must not turn into a burst of wasted (and late) work. |
+| Deadline or cancel while the impl is **running** | The future fails now; the impl keeps its worker until it returns; its late `reverse_reply` is dropped by id. | Host code cannot be interrupted; dropping is the safe outcome. |
+| Late/duplicate/bogus `reverse_reply` | Accepted and silently dropped (call ids are monotonic and never reused within a slot claim). | Same reason. |
 | `set_impl` during an in-flight invocation | Replaces for new calls; returns only after the old impl's invocation finished, so its `user_data` may be freed right after. | Mirrors `remove_event_listener`'s wait-out contract. |
-| Context recycle/shutdown with calls in flight | Pending reverse calls fail with a recycle/shutdown error *before* the drain. | Otherwise the drain would wait out the reverse deadline and risk quarantining the slot. |
-| A slow impl | Blocks **event delivery** (same thread), never request processing. | That containment is the point of delivering on the event dispatch thread. |
+| A worker stuck inside one impl | Reported once via the `reverse_worker_blocked {worker, callId}` liveness event after `ReverseWorkerStallMs` (default = the call timeout), `reverse_worker_recovered` when it returns; the pull model never feeds a busy worker. | Noticed and not fed, per the requirement; the other workers keep serving. |
+| Context recycle with calls in flight | Pending calls fail *before* the drain; the old owner's impls are cleared and waited out with a `RecycleTimeout` bound — a worker still inside an impl quarantines the slot (`RecycleFailure.ReverseImplBlocked`). | Otherwise the drain would wait out the reverse deadline, and a wedged plugin would hang the recycle. |
+| Context destroy with a worker stuck | Workers are stopped and joined within `ReverseWorkerJoinTimeoutMs` (1.5 s); a wedged one is leaked with the slot and reported. | Freeing resources under a live thread is unsafe. |
 | `{.ffiReverseEvent.}` emit | Fire-and-forget: the return code reports the enqueue only; the handler runs on the FFI processing thread via the normal request queue. | It is sugar over the one-way request path. |
 
 Current limits: CBOR ABI only (`abi = c` libraries with reverse declarations

@@ -1903,6 +1903,9 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
   assertFFIPath(prc, fpEvent)
   return buildFFIEventProc(prc, args[0 ..^ 2])
 
+var reverseStartEmittedFor {.compileTime.}: seq[string]
+  # Libraries whose `<lib>_start_reverse_workers` export was already emitted.
+
 proc hasRealBody(prc: NimNode): bool {.compileTime.} =
   ## A leading `##` doc comment alone does not count as a body.
   if prc.body.kind == nnkEmpty:
@@ -2073,14 +2076,27 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
   let setImplName = currentLibName & "_set_" & wireName & "_impl"
   let poolIdent = ident(currentLibType & "FFIPool")
   let ctxIdent = ident("ctx")
+  # Registering starts the context's reverse workers lazily (idempotent), so
+  # the harness only ever runs in a context whose host fulfils an interface.
   let setBody = quote:
     when declared(initializeLibrary):
       initializeLibrary()
     let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
     if `ctxIdent`.isNil():
       return REVERSE_INVALID_CTX
+    if not impl.isNil() and not startReverseWorkers(`ctxIdent`[].reverse):
+      return REVERSE_WORKERS_FAILED
     setImpl(`ctxIdent`[].reverse, `wireNameLit`, impl, userData)
     return REVERSE_ACCEPTED
+
+  let cdeclExportPragma = proc(name: string): NimNode =
+    newTree(
+      nnkPragma,
+      ident("dynlib"),
+      newTree(nnkExprColonExpr, ident("exportc"), newStrLitNode(name)),
+      ident("cdecl"),
+      newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
+    )
 
   resultStmts.add(
     newProc(
@@ -2092,15 +2108,36 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
         newIdentDefs(ident("userData"), ident("pointer")),
       ],
       body = setBody,
-      pragmas = newTree(
-        nnkPragma,
-        ident("dynlib"),
-        newTree(nnkExprColonExpr, ident("exportc"), newStrLitNode(setImplName)),
-        ident("cdecl"),
-        newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
-      ),
+      pragmas = cdeclExportPragma(setImplName),
     )
   )
+
+  # Once per library: `<lib>_start_reverse_workers(ctxToken, n)` for hosts that
+  # want the workers warm before the first registration (n <= 0 → default).
+  if currentLibName notin reverseStartEmittedFor:
+    reverseStartEmittedFor.add(currentLibName)
+    let startName = currentLibName & "_start_reverse_workers"
+    let startBody = quote:
+      when declared(initializeLibrary):
+        initializeLibrary()
+      let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
+      if `ctxIdent`.isNil():
+        return REVERSE_INVALID_CTX
+      if not startReverseWorkers(`ctxIdent`[].reverse, int(n)):
+        return REVERSE_WORKERS_FAILED
+      return REVERSE_ACCEPTED
+    resultStmts.add(
+      newProc(
+        name = postfix(ident(startName), "*"),
+        params = @[
+          ident("cint"),
+          newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
+          newIdentDefs(ident("n"), ident("cint")),
+        ],
+        body = startBody,
+        pragmas = cdeclExportPragma(startName),
+      )
+    )
 
   ffiReverseRegistry.add(
     FFIReverseMeta(

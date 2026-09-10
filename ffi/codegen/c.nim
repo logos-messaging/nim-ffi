@@ -693,6 +693,12 @@ proc emitReverseMachinery(
   lines.add("/* Reverse FFI helpers (typed sugar over the raw exports above) */")
   if reverse.len > 0:
     lines.add(
+      "static inline int " & libName & "_ctx_start_reverse_workers(const " & ctxType &
+        "* ctx, int n) {"
+    )
+    lines.add("    return " & libName & "_start_reverse_workers(ctx->ptr, n);")
+    lines.add("}")
+    lines.add(
       "static inline int " & libName & "_ctx_reverse_reply_err(const " & ctxType &
         "* ctx, uint64_t call_id, const char* msg) {"
     )
@@ -1094,6 +1100,13 @@ proc generateCLibHeader*(
       "int " & libName & "_reverse_reply(void* ctx, uint64_t call_id, int ret_code, " &
         "const uint8_t* reply_cbor, size_t reply_len);"
     )
+    lines.add(
+      "/* Starts the context's reverse worker threads ahead of the first set_impl"
+    )
+    lines.add(
+      "   (which starts them lazily otherwise); n <= 0 picks the library default. */"
+    )
+    lines.add("int " & libName & "_start_reverse_workers(void* ctx, int n);")
   for rev in reverseEvents:
     lines.add(renderBlockDocComment(rev.doc))
     lines.add(

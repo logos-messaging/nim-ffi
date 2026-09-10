@@ -38,6 +38,8 @@ type RecycleFailure* {.pure.} = enum
   TeardownTimeout ## TeardownTimeout cancelled the `{.ffiDtor.}` body
   TeardownRaised ## the `{.ffiDtor.}` body raised
   CallerAbandoned ## the caller's own wait expired before the recycle finished
+  ReverseImplBlocked
+    ## a reverse worker was still inside a host impl after the drain round
 
 func reason*(failure: RecycleFailure): string =
   ## The `requestRecycle` error text for a quarantine.
@@ -52,6 +54,8 @@ func reason*(failure: RecycleFailure): string =
     "the {.ffiDtor.} teardown raised"
   of RecycleFailure.CallerAbandoned:
     "the teardown outlasted the caller's wait"
+  of RecycleFailure.ReverseImplBlocked:
+    "a host reverse implementation did not return"
 
 type FFIContext*[T] = object
   myLib*: ptr T # main library object (Waku, LibP2P, SDS, …)
@@ -134,6 +138,14 @@ proc ffiTeardownHook*[T](): var FFITeardownProc[T] =
   var hook {.global.}: FFITeardownProc[T]
   hook
 
+proc reverseWakeHook[T](ud: pointer) {.nimcall, gcsafe, raises: [].} =
+  ## Installed into the reverse state so a reply pushed from any thread wakes
+  ## the FFI thread. A failed wake is non-fatal: the loop polls every 100ms.
+  discard cast[ptr FFIContext[T]](ud).reqSignal.fireSync()
+
+proc reverseGenerationHook[T](ud: pointer): uint {.nimcall, gcsafe, raises: [].} =
+  cast[ptr FFIContext[T]](ud).generation.load()
+
 include ./event_thread
 include ./ffi_thread
 
@@ -183,6 +195,7 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   initRequestQueue(ctx[].reqQueueBank)
   initEventRegistry(ctx[].eventRegistry)
   initReverseState(ctx[].reverse)
+  ctx[].reverse.installContextHooks(reverseWakeHook[T], reverseGenerationHook[T], ctx)
   initHandleRegistry(ctx[].handles)
   initEventQueue(ctx[].eventQueue)
   ctx.ffiHeartbeat.store(0)
@@ -328,13 +341,8 @@ proc submitReverseReply*[T](
     return REVERSE_NOT_ACTIVE
   if dataLen > MaxRequestPayloadBytes:
     return REVERSE_PAYLOAD_TOO_LARGE
-  let status = ctx[].reverse.pushReply(callId, retCode, data, dataLen)
-  if status != REVERSE_ACCEPTED:
-    return status
-  # A failed wake is non-fatal: the FFI thread's 100ms poll drains the mailbox.
-  ctx.reqSignal.fireSync().isOkOr:
-    error "failed to wake FFI thread for a reverse reply", error = error
-  REVERSE_ACCEPTED
+  # pushReply wakes the FFI thread itself, once per empty→non-empty transition.
+  ctx[].reverse.pushReply(callId, retCode, data, dataLen)
 
 ## Per-thread exit wait before stopAndJoinThreads leaks ctx rather than hanging. Kept
 ## short so a wedged worker fails fast; raise it past `ffiTeardownTimeoutMs` for a slow
@@ -351,4 +359,14 @@ proc stopAndJoinThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   joinThread(ctx.ffiThread)
   ?ctx.eventThreadExitSignal.waitExitOrErr("event thread", ThreadExitTimeout)
   joinThread(ctx.eventThread)
+  # Reverse workers exist only once a `{.ffiReverse.}` impl was registered; the
+  # stop hook is nil otherwise. A worker still inside a host impl is leaked with
+  # the slot, like any other thread that does not exit in time.
+  if not ctx[].reverse.stopFn.isNil():
+    let (_, leaked) = ctx[].reverse.stopFn(ctx[].reverse)
+    if leaked > 0:
+      return err(
+        "did not exit in time: " & $leaked &
+          " reverse worker(s) still inside a host impl (leaking ctx to avoid hang)"
+      )
   ok()

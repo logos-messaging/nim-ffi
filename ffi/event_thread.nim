@@ -52,45 +52,37 @@ proc onResponding*(ctx: ptr FFIContext) =
   ## Fired once when the heartbeat resumes after a NotRespondingEvent.
   emitLivenessEvent(ctx, RespondingEventName, RespondingEvent())
 
-proc wakeFFIThreadForReverseReply[T](ctx: ptr FFIContext[T]) =
-  ## Non-fatal on failure: the FFI thread's 100ms poll drains the mailbox anyway.
-  ctx.reqSignal.fireSync().isOkOr:
-    error "failed to wake FFI thread for a reverse reply", err = error
+type
+  ReverseWorkerBlockedEvent* = object
+    worker*: int
+    callId*: uint64
 
-proc dispatchReverseInvocation[T](ctx: ptr FFIContext[T], qe: QueuedEvent) =
-  ## Invokes the host impl of a `{.ffiReverse.}` proc with the reverse lock
-  ## released, so the impl may call set_impl/reverse_reply. An impl unregistered
-  ## between call and dispatch answers with an error reply now, instead of
-  ## leaving the parked future to its timeout.
-  if qe.dataLen < ReverseCallIdPrefixLen or qe.data.isNil():
-    error "reverse invocation record without a call-id prefix; dropping",
-      event = $qe.name, dataLen = qe.dataLen
-    return
-  var callId: uint64
-  copyMem(addr callId, qe.data, ReverseCallIdPrefixLen)
-  let args = cast[ptr UncheckedArray[byte]](addr qe.data[ReverseCallIdPrefixLen])
-  let argsLen = qe.dataLen - ReverseCallIdPrefixLen
-  let name = $qe.name
-  let (entry, found) = ctx[].reverse.beginReverseDispatch(name)
-  if not found:
-    let msg = "host implementation for " & name & " was unregistered before dispatch"
-    discard ctx[].reverse.pushReply(
-      callId, RET_ERR, cast[pointer](unsafeAddr msg[0]), msg.len
-    )
-    ctx.wakeFFIThreadForReverseReply()
-    return
-  defer:
-    ctx[].reverse.endReverseDispatch()
-  foreignThreadGc:
-    entry.fn(callId, args, csize_t(argsLen), entry.userData)
+  ReverseWorkerRecoveredEvent* = object
+    worker*: int
+
+const
+  ReverseWorkerBlockedEventName* = "reverse_worker_blocked"
+  ReverseWorkerRecoveredEventName* = "reverse_worker_recovered"
+
+proc checkReverseWorkers[T](ctx: ptr FFIContext[T]) =
+  ## Reports a reverse worker stuck inside one host impl past
+  ## `ReverseWorkerStallMs`, and its recovery; the pull model never feeds a busy
+  ## worker, so this is a notice, not a repair. No-op while no worker exists.
+  for t in ctx[].reverse.scanReverseWorkers(int64(ReverseWorkerStallMs) * 1_000_000'i64):
+    if t.blocked:
+      emitLivenessEvent(
+        ctx,
+        ReverseWorkerBlockedEventName,
+        ReverseWorkerBlockedEvent(worker: t.idx, callId: t.callId),
+      )
+    else:
+      emitLivenessEvent(
+        ctx, ReverseWorkerRecoveredEventName, ReverseWorkerRecoveredEvent(worker: t.idx)
+      )
 
 proc dispatchQueuedEvent[T](ctx: ptr FFIContext[T], qe: QueuedEvent) =
   ## Reads the borrowed slab payload; `commitDequeue` frees any heap fallback.
-  case qe.kind
-  of ekListener:
-    ctx.dispatchToListeners($qe.name, qe.data, qe.dataLen)
-  of ekReverse:
-    ctx.dispatchReverseInvocation(qe)
+  ctx.dispatchToListeners($qe.name, qe.data, qe.dataLen)
 
 proc drainOneEvent[T](ctx: ptr FFIContext[T]): bool =
   ## Peek → dispatch → commit; slot stays pinned across dispatch, `defer` commits
@@ -157,6 +149,7 @@ proc eventRun[T](ctx: ptr FFIContext[T]) {.async.} =
       # not a fault, and clearListeners drops the onResponding that would follow.
       if ctx.lifecycle.load() == CtxLifecycle.Active:
         hb.check(ctx)
+        ctx.checkReverseWorkers()
 
   # Catch anything enqueued between the last drain and the FFI thread's exit.
   ctx.drainEventQueue()

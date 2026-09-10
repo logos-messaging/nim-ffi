@@ -274,3 +274,157 @@ behavior.
 - Reverse calls from `{.ffiStatic.}` contexts, streaming/multi-shot replies,
   host-side cancellation of a parked reverse call (timeout only), and re-entrant
   reverse calls issued from inside a host impl on the event thread.
+
+---
+
+# Phase 3: per-context reverse worker pool (delivery off the event thread)
+
+Phases 1–2 (branch `experimental_reverse_ffi_for_plugins`, PR #154) invoke the
+host impl inline on the event dispatch thread. That violates two requirements
+added after review: the wrapper must not assume the impl is non-blocking, and
+reverse calls must not serialize behind one another. Phase 3 replaces the ring
+hop with library-owned, per-context worker threads and adds cancel/skip
+semantics plus explicit worker management.
+
+## 3.1 Requirements (agreed)
+
+| # | Requirement | Mechanism in this phase |
+|---|---|---|
+| R1 | Impl may block; wrappers stay unchanged; implicitly async in every language incl. C | host closure runs on a **reverse worker thread**, never on the event or FFI thread |
+| R2 | Reverse calls don't serialize; hot-path safe | N workers per context pull from one queue; each parked call is independent |
+| R3 | Timeout / explicit cancel; in-flight reply handled; **queued-but-expired skipped** | per-record `state` atomic (`Pending→Running` by worker, `Pending→Cancelled` by FFI thread) + deadline check at dequeue; late replies dropped by id as today |
+| R4 | Workers managed: explicit stop at teardown; blocked worker noticed and not fed | stop flag + cond broadcast + bounded join; per-worker `busySince` watched by the existing event-thread heartbeat pass; pull model never feeds a busy worker |
+| R5 | Harness compiled only when `{.ffiReverse.}` is used; lazy start; explicit start possible | worker procs are generic over the lib type and reached only through a per-library hook slot the macro installs (same pattern as `ffiTeardownHook[T]`, ffi/ffi_context.nim:129); started on first `set_impl`, or via `<lib>_start_reverse_workers` |
+
+## 3.2 Design
+
+**Per-context pool** (decided over per-library: isolation between plugins,
+teardown ownership rides the context's existing lifecycle, liveness rides the
+context's heartbeat; cost is `N` threads per *live* context, `N` default 2 via
+`-d:ffiReverseWorkers`, threads created only once reverse FFI is actually used).
+
+**Invocation record** (c_malloc, owned by the queue/worker, freed by whoever
+dequeues it — the FFI thread never frees):
+
+```
+ReverseInvocation = object
+  callId*: uint64
+  generation*: uint          # ctx claim it was issued under; mismatch → drop at dequeue
+  deadlineNs*: int64         # monotonic; expired → drop at dequeue (R3)
+  state*: Atomic[ReverseCallState]   # Pending | Running | Cancelled
+  name*: cstring             # c_malloc copy
+  args*: ptr UncheckedArray[byte]; argsLen*: int
+  next*: ptr ReverseInvocation
+```
+
+State machine:
+
+| Transition | Actor | Effect |
+|---|---|---|
+| `Pending → Running` (CAS) | worker, after the generation + deadline checks | worker owns the call, invokes the impl |
+| `Pending → Cancelled` (CAS) | FFI thread on deadline or `cancel` | never invoked — no wasted host work; worker frees it at dequeue |
+| deadline/cancel while `Running` | FFI thread | future fails now; slot stays `Running`; the later `reverse_reply` finds no pending id and is dropped (today's path) |
+
+**Queue**: one intrusive FIFO per context guarded by a `Lock` + `Cond`
+(single producer = FFI thread, N consumers). No ring, no `ekReverse`: the event
+ring goes back to events only (`QueuedEvent` returns to its pre-#153 layout —
+also good for the Windows stack budget).
+
+**Worker loop** (generic `reverseWorkerBody[T](ctx, idx)`):
+
+1. wait on cond until a record or `stop`;
+2. drop + free when `generation != ctx.currentGeneration()` (same rule as
+   `rejectQueuedRequests`) or `now > deadlineNs` or CAS `Pending→Running` fails;
+3. `busySince.store(now)`, `currentCall.store(callId)`;
+4. `beginReverseDispatch(name)` → not found: `pushReply(RET_ERR, …)` + wake;
+   found: `foreignThreadGc: entry.fn(...)`, `endReverseDispatch`;
+5. `busySince.store(0)`, free record.
+
+**FFI-thread side** (`ffiReverseCall`, ffi/ffi_reverse.nim): allocate the record,
+`pendingReverse[callId] = (fut, rec)`, push + signal cond; `await fut.withTimeout`
+inside `try/except CancelledError` so both the deadline and an explicit
+`cancelSoon()` on the returned future do: CAS `Pending→Cancelled`, delete the
+pending entry, fail/re-raise. `pushReply` fires `reqSignal` only on the
+mailbox's empty→non-empty transition (wake coalescing).
+
+**Lazy / explicit start**: `startReverseWorkers[T](ctx, n)` is idempotent under
+the reverse lock (`started` flag). Called by the generated `<lib>_set_<wire>_impl`
+export (macro knows `LibType`) and by a new export
+`int <lib>_start_reverse_workers(void* ctx, int n)` (n ≤ 0 → default); Nim side
+`startReverseWorkers(ctx)` for libraries that want workers warm before the first
+registration. `declareLibrary` does **not** reference any of it: the `ffiReverse`
+macro installs `ffiReverseHook[LibType]() = (stop: stopReverseWorkers[LibType],
+liveness: checkReverseWorkers[LibType])` once per library (compile-time guard),
+so a library without `{.ffiReverse.}` never instantiates the harness (R5); the
+FFI/event threads only nil-check the hook.
+
+**Liveness**: `FFIReverseWorker = {thread, busySince: Atomic[int64],
+currentCall: Atomic[uint64], stalled: bool}`. The event thread's existing
+heartbeat pass (`eventRun`, ffi/event_thread.nim) calls the hook: busy longer
+than `ReverseWorkerStallMs` (default = `ReverseCallTimeoutMs`) → emit
+`reverse_worker_blocked {worker, callId}` once; recovery → `reverse_worker_recovered`.
+"Not fed" is inherent to pull. No automatic replacement workers (knob for later).
+
+**Teardown**:
+
+- full destroy (`stopAndJoinThreads` → after FFI/event join): hook `stop`: set
+  stop flag, cancel + free every queued record, broadcast, join each worker with
+  `ThreadExitTimeout`; an unjoinable worker is leaked and logged, the context
+  reports it like other quarantine reasons;
+- recycle: workers survive (like FFI/event threads); `resetForNextOwner` purges
+  the queue and `clearImpls` waits `dispatching` out **with a bound** — a worker
+  still inside a host impl after `RecycleTimeout` quarantines the slot with a new
+  `RecycleFailure.ReverseImplBlocked` instead of hanging the recycle.
+
+**Bindings**: C/C++/Rust closures unchanged (they now run on a worker). New raw
+export `<lib>_start_reverse_workers`; typed helpers `<lib>_ctx_start_reverse_workers`,
+`startReverseWorkers(n)` / `start_reverse_workers(n)`. No `is_live` query (hosts
+that offload again on their side can be served later if needed).
+
+**Memory model**: records/args/replies stay libc-malloc'd; workers are Nim
+threads running host code under `foreignThreadGc` exactly as the dispatch
+thread does today; no Nim ref crosses threads; identical under refc and orc.
+Windows: `createThread`/`joinThread` + `Lock`/`Cond` only, no new signal fds.
+
+## 3.3 Steps (all done on the branch; deviations from 3.2 noted)
+
+- Records carry a two-owner refcount (queue/worker + pending entry): a deadline
+  racing a worker that has just finished the impl could otherwise free the
+  record under the FFI thread. Last release frees.
+- The worker harness is non-generic; it stays out of libraries without
+  `{.ffiReverse.}` through dead-code elimination: the only references to
+  `startReverseWorkers` are the generated `set_impl` / `start_reverse_workers`
+  exports and the call stub, and stop/liveness go through hook pointers
+  (`stopFn`, `wakeFn`, `generationFn`) that stay nil until a start.
+- `clearImpls` no longer waits; the recycle path polls `inFlight()` with
+  `RecycleTimeout` from the async loop (no blocking on the dispatcher).
+- Tests that leak or quarantine a slot use a module-level pool: a quarantined
+  slot keeps its threads, so the pool must outlive the test.
+
+1. `ffi/ffi_reverse.nim`: `ReverseInvocation`, state enum, queue (push/pop/purge),
+   worker descriptor, `startReverseWorkers[T]`/`stopReverseWorkers[T]`/
+   `checkReverseWorkers[T]`, hook slot; rewrite `ffiReverseCall` (cancel path,
+   record lifetime); wake coalescing in `pushReply`
+   → verify: `test_ffi_reverse_state.nim` reworked for the queue + state machine
+   (cancel-before-dequeue skipped, expired skipped, running→late reply dropped,
+   explicit `cancelSoon`).
+2. Revert `ekReverse`/`callId` from `ffi/ffi_events.nim` and the dispatch branch
+   from `ffi/event_thread.nim`; add the liveness hook call in `eventRun`
+   → verify: `test_event_dispatch`, `test_event_thread` unchanged and green.
+3. `ffi/ffi_thread.nim` + `ffi/ffi_context.nim`: hook nil-checks at recycle
+   (bounded `clearImpls`, new failure reason) and destroy (stop + join)
+   → verify: `test_ffi_reverse.nim` + `test_ffi_teardown.nim` new cases
+   (destroy with a blocked impl leaks-and-reports within `ThreadExitTimeout`;
+   recycle with a blocked impl quarantines).
+4. `ffi_macro.nim`: `ffiReverse` installs the hook once per library, `set_impl`
+   starts workers lazily, new `<lib>_start_reverse_workers` export; C/C++/Rust
+   generators emit the start helper
+   → verify: `test_ffi_reverse_macro.nim` (lazy start on `set_impl`, explicit
+   start), codegen goldens.
+5. Concurrency proof: two 100 ms impls awaited by two concurrent requests finish
+   in ≈100 ms with `N=2`; C++ e2e adds the same test with `std::this_thread::sleep_for`
+   inside the closure (R1/R2 end-to-end)
+   → verify: `test_ffi_reverse.nim`, `nimble test_cpp_e2e`, `test_c_e2e`, rust client.
+6. Sanitizers: ASAN/TSAN × orc/refc on the reverse test files; `check_bindings`;
+   nph; README/CHANGELOG (semantics table: cancel, skip, blocked-worker event,
+   worker knobs).

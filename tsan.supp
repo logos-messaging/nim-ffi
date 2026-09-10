@@ -16,3 +16,10 @@ thread:*initContextResources*
 # and the next test's reuse of the same stack region. Reported as a
 # data race; root cause is the documented leak above.
 race:*threadProcWrapper*
+
+# Reverse worker threads (ffi/ffi_reverse.nim) are joined by `stopReverseWorkers`
+# within `ReverseWorkerJoinTimeoutMs`; a worker still inside a wedged host impl
+# is deliberately leaked with the slot (the tests "leaked at stop" and
+# "quarantines the slot" exercise exactly that). TSan reports the unjoined
+# thread as a leak.
+thread:*startReverseWorkers*

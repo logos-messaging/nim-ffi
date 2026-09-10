@@ -1012,6 +1012,9 @@ int my_timer_set_fetch_host_clock_impl(void* ctx, FFIReverseImpl impl, void* use
    Returns 0 accepted, 1 invalid ctx, 2 ctx not active, 3 payload too
    large, 4 mailbox full. */
 int my_timer_reverse_reply(void* ctx, uint64_t call_id, int ret_code, const uint8_t* reply_cbor, size_t reply_len);
+/* Starts the context's reverse worker threads ahead of the first set_impl
+   (which starts them lazily otherwise); n <= 0 picks the library default. */
+int my_timer_start_reverse_workers(void* ctx, int n);
 /**
  * Emitted by the host via `my_timer_emit_on_host_tick` (typed helper:
  * `my_timer_ctx_emit_on_host_tick`); fire-and-forget for the host.
@@ -1244,6 +1247,9 @@ static inline bool my_timer_ctx_remove_event_listener(MyTimerCtx* ctx, uint64_t 
 }
 
 /* Reverse FFI helpers (typed sugar over the raw exports above) */
+static inline int my_timer_ctx_start_reverse_workers(const MyTimerCtx* ctx, int n) {
+    return my_timer_start_reverse_workers(ctx->ptr, n);
+}
 static inline int my_timer_ctx_reverse_reply_err(const MyTimerCtx* ctx, uint64_t call_id, const char* msg) {
     return my_timer_reverse_reply(ctx->ptr, call_id, 1, (const uint8_t*)msg, msg ? strlen(msg) : 0);
 }

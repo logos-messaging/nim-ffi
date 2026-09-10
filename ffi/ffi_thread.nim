@@ -207,9 +207,10 @@ proc drainOngoing(ongoing: ptr seq[Future[void]]): Future[bool] {.async.} =
 proc resetForNextOwner[T](ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]) =
   freeLib(ctx)
   clearListeners(ctx[].eventRegistry)
-  # Old owner's impls must not answer the next owner's calls; waits an in-flight
-  # invocation out like clearListeners. Straggler replies free with the mailbox.
-  ctx[].reverse.clearImpls()
+  # Impls were cleared and waited out (bounded) by recycleContext; queued
+  # invocations of the old owner die on their generation stamp at dequeue, and
+  # straggler replies free with the mailbox.
+  ctx[].reverse.purgeQueue()
   ctx[].reverse.freeAllReplies()
   # A reused slot skips initContextResources, so the handle ids of the old owner
   # would otherwise resolve for the next one.
@@ -271,6 +272,20 @@ proc recycleContext[T](
   of TeardownOutcome.Raised:
     failure = RecycleFailure.TeardownRaised
     return
+
+  # The old owner's impls must not answer the next owner. Clearing does not wait;
+  # a worker still inside a host impl is polled out with a bound instead of
+  # blocking this dispatcher on foreign code, and quarantines the slot if it
+  # never returns (its worker stays leaked with the slot).
+  if ctx[].reverse.clearImpls() > 0:
+    let deadline = Moment.now() + RecycleTimeout
+    while ctx[].reverse.inFlight() > 0 and Moment.now() < deadline:
+      await sleepAsync(chronos.milliseconds(1))
+    if ctx[].reverse.inFlight() > 0:
+      error "recycle: a host reverse implementation did not return",
+        timeoutMs = RecycleTimeoutMs
+      failure = RecycleFailure.ReverseImplBlocked
+      return
 
   # Reset only now: the previous owner is provably done with this thread.
   resetForNextOwner(ctx, ongoing)

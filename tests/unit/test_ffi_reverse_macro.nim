@@ -231,6 +231,22 @@ suite "{.ffiReverse.} through the generated exports":
       check revmacro_reverse_reply(FFICtxToken(nil), 1'u64, RET_OK, nil, 0) ==
         REVERSE_INVALID_CTX
 
+suite "reverse worker start":
+  test "set_impl starts the workers lazily; a fresh context has none":
+    withLibCtx(ctx, token):
+      check not ctx[].reverse.workersStarted()
+      check revmacro_set_host_note_impl(token, silentImpl, nil) == REVERSE_ACCEPTED
+      check ctx[].reverse.workersStarted()
+      check ctx[].reverse.workerCount == ReverseWorkersDefault
+
+  test "the explicit start export sizes the pool and rejects a stale token":
+    withLibCtx(ctx, token):
+      check revmacro_start_reverse_workers(token, 3) == REVERSE_ACCEPTED
+      check ctx[].reverse.workerCount == 3
+      check revmacro_start_reverse_workers(token, 9) == REVERSE_ACCEPTED # idempotent
+      check ctx[].reverse.workerCount == 3
+      check revmacro_start_reverse_workers(FFICtxToken(nil), 1) == REVERSE_INVALID_CTX
+
 suite "{.ffiReverseEvent.} through the generated emit export":
   test "host-encoded Req runs the handler on the FFI thread":
     withLibCtx(ctx, token):

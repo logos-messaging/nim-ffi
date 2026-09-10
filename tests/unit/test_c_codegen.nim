@@ -545,6 +545,11 @@ suite "generateCLibHeader: reverse FFI":
     check "int timer_emit_on_host_ping(void* ctx, const uint8_t* payload_cbor, size_t payload_len);" in
       header
 
+  test "the worker start export and its ctx helper are declared":
+    check "int timer_start_reverse_workers(void* ctx, int n);" in header
+    check "static inline int timer_ctx_start_reverse_workers(const TimerCtx* ctx, int n)" in
+      header
+
   test "typed helpers ride the ctx wrapper":
     check "static inline int timer_ctx_set_fetch_config_impl(const TimerCtx* ctx, FFIReverseImpl impl, void* user_data)" in
       header

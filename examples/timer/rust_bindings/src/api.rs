@@ -299,6 +299,13 @@ impl MyTimerCtx {
         rc == 0
     }
 
+    /// Starts the context's reverse worker threads ahead of the first
+    /// `set_*_impl` (which starts them lazily otherwise); `n <= 0` picks
+    /// the library default. Impls run on those workers and may block.
+    pub fn start_reverse_workers(&self, n: i32) -> bool {
+        unsafe { ffi::my_timer_start_reverse_workers(self.ptr, n as c_int) == 0 }
+    }
+
     pub fn set_fetch_host_clock_impl<F>(&self, f: F) -> bool
     where F: Fn(FetchHostClockCall, String) + Send + Sync + 'static,
     {

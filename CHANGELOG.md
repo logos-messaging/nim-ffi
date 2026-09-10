@@ -17,6 +17,20 @@ All notable changes to this project are documented in this file.
   export. Both ride CBOR; the C binding gains the raw declarations plus typed
   helpers (`_ctx_set_*_impl`, `_decode_*_args`, `_ctx_reverse_reply_*`,
   `_ctx_emit_*`). CBOR ABI only for now.
+- Reverse FFI runs host implementations on **per-context worker threads**
+  instead of the event dispatch thread: an impl may block without stalling
+  event delivery, and `-d:ffiReverseWorkers` (default 2) impls run
+  concurrently. Workers start lazily on the first `set_impl` or explicitly via
+  `<lib>_start_reverse_workers(ctx, n)` (typed: `_ctx_start_reverse_workers`,
+  `startReverseWorkers(n)`, `start_reverse_workers(n)`), are stopped and joined
+  at destroy (a wedged one is leaked with the slot and reported), and a worker
+  stuck inside one impl past `ReverseWorkerStallMs` raises the
+  `reverse_worker_blocked` / `reverse_worker_recovered` liveness events. A call
+  that times out or is cancelled (`cancelSoon` on the returned future) while
+  still queued is skipped at dequeue — the impl never runs; a running one keeps
+  its worker and its late reply is dropped. A recycle now bounds the wait for a
+  running impl and quarantines the slot with `RecycleFailure.ReverseImplBlocked`.
+  Libraries without `{.ffiReverse.}` never link the worker harness.
 - Reverse FFI in the C++ and Rust bindings: `set<X>Impl`/`set_<x>_impl` register
   a `std::function` / `Fn` closure as the host implementation (invoked on the
   event dispatch thread with decoded typed args), a copyable call token carries

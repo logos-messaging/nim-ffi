@@ -29,6 +29,7 @@ extern "C" {
     pub fn my_timer_remove_event_listener(ctx: *mut c_void, listener_id: u64) -> c_int;
     pub fn my_timer_set_fetch_host_clock_impl(ctx: *mut c_void, imp: Option<FFIReverseImpl>, user_data: *mut c_void) -> c_int;
     pub fn my_timer_reverse_reply(ctx: *mut c_void, call_id: u64, ret_code: c_int, reply_cbor: *const u8, reply_len: usize) -> c_int;
+    pub fn my_timer_start_reverse_workers(ctx: *mut c_void, n: c_int) -> c_int;
     pub fn my_timer_emit_on_host_tick(ctx: *mut c_void, payload_cbor: *const u8, payload_len: usize) -> c_int;
 }
 

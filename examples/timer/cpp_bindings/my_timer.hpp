@@ -911,6 +911,7 @@ int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
 typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, size_t args_len, void* user_data);
 int my_timer_set_fetch_host_clock_impl(void* ctx, FFIReverseImpl impl, void* user_data);
 int my_timer_reverse_reply(void* ctx, uint64_t call_id, int ret_code, const uint8_t* reply_cbor, size_t reply_len);
+int my_timer_start_reverse_workers(void* ctx, int n);
 int my_timer_emit_on_host_tick(void* ctx, const uint8_t* payload_cbor, size_t payload_len);
 } // extern "C"
 
@@ -1075,6 +1076,13 @@ public:
     }
 
     // ── Reverse FFI: host-implemented interfaces ────────────
+    // Impls run on the context's reverse worker threads (started lazily
+    // by the first set…Impl); start them ahead of time with n workers,
+    // n <= 0 for the library default.
+    bool startReverseWorkers(int n = 0) const {
+        return my_timer_start_reverse_workers(ptr_, n) == 0;
+    }
+
     // Copyable answer token for one `fetch_host_clock` invocation; reply once,
     // inline or later from any thread.
     struct FetchHostClockCall {

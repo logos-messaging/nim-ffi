@@ -254,6 +254,17 @@ proc emitReverseApi(
     lines.add(
       "    // ── Reverse FFI: host-implemented interfaces ────────────"
     )
+    lines.add(
+      "    // Impls run on the context's reverse worker threads (started lazily"
+    )
+    lines.add(
+      "    // by the first set…Impl); start them ahead of time with n workers,"
+    )
+    lines.add("    // n <= 0 for the library default.")
+    lines.add("    bool startReverseWorkers(int n = 0) const {")
+    lines.add("        return $1_start_reverse_workers(ptr_, n) == 0;" % [libName])
+    lines.add("    }")
+    lines.add("")
     for r in reverse:
       let callStruct = reverseCallStruct(r)
       lines.add(
@@ -534,6 +545,7 @@ proc generateCppHeader*(
       "int $1_reverse_reply(void* ctx, uint64_t call_id, int ret_code, const uint8_t* reply_cbor, size_t reply_len);" %
         [libName]
     )
+    lines.add("int $1_start_reverse_workers(void* ctx, int n);" % [libName])
   for rev in reverseEvents:
     lines.add(
       "int $1_emit_$2(void* ctx, const uint8_t* payload_cbor, size_t payload_len);" %

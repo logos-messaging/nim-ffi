@@ -280,6 +280,10 @@ proc generateFFIRs*(
       "    pub fn $1_reverse_reply(ctx: *mut c_void, call_id: u64, ret_code: c_int, reply_cbor: *const u8, reply_len: usize) -> c_int;" %
         [linkLibName]
     )
+    lines.add(
+      "    pub fn $1_start_reverse_workers(ctx: *mut c_void, n: c_int) -> c_int;" %
+        [linkLibName]
+    )
   for rev in reverseEvents:
     lines.add(
       "    pub fn $1_emit_$2(ctx: *mut c_void, payload_cbor: *const u8, payload_len: usize) -> c_int;" %
@@ -869,6 +873,19 @@ proc generateApiRs*(
   # Reverse FFI: registration (replace semantics — the dylib waits an in-flight
   # invocation of the old impl out before set returns, so swapping the box here
   # cannot free it under a running trampoline) and fire-and-forget emits.
+  if reverse.len > 0:
+    lines.add("    /// Starts the context's reverse worker threads ahead of the first")
+    lines.add(
+      "    /// `set_*_impl` (which starts them lazily otherwise); `n <= 0` picks"
+    )
+    lines.add("    /// the library default. Impls run on those workers and may block.")
+    lines.add("    pub fn start_reverse_workers(&self, n: i32) -> bool {")
+    lines.add(
+      "        unsafe { ffi::$1_start_reverse_workers(self.ptr, n as c_int) == 0 }" %
+        [libName]
+    )
+    lines.add("    }")
+    lines.add("")
   for r in reverse:
     let snake = reverseSnake(r)
     let boxStruct = reverseBoxStruct(r)

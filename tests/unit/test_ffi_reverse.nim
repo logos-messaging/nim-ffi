@@ -3,7 +3,7 @@
 ## answer through `submitReverseReply` — inline, from a foreign thread, late, or
 ## never (timeout / recycle).
 
-import std/[locks, os, strutils]
+import std/[locks, monotimes, os, strutils, times]
 import unittest2
 import results
 import ffi
@@ -58,13 +58,16 @@ proc callbackMsg(d: var CallbackData): string =
   if d.msgLen > 0:
     copyMem(addr result[0], addr d.msg[0], d.msgLen)
 
+# Module-level, as declareLibrary emits it: a quarantined or leaked slot keeps
+# its threads alive, so the pool must outlive every test that claims from it.
+var gPool: FFIContextPool[TestRevLib]
+
 template withPool(ctxIdent: untyped, body: untyped) =
-  var pool: FFIContextPool[TestRevLib]
-  let ctxIdent = pool.createFFIContext().valueOr:
+  let ctxIdent = gPool.createFFIContext().valueOr:
     check false
     return
   defer:
-    discard pool.destroyFFIContext(ctxIdent)
+    discard gPool.destroyFFIContext(ctxIdent)
   body
 
 ## Handlers: each drives one scenario; the reverse name and deadline are fixed.
@@ -104,6 +107,20 @@ registerReqFFI(CallSilentRequest, lib: ptr TestRevLib):
 registerReqFFI(CallAbandonedRequest, lib: ptr TestRevLib):
   proc(): Future[Result[string, string]] {.async.} =
     let r = await ffiReverseCall("abandoned", @[], 30000)
+    if r.isErr():
+      return err(r.error)
+    return ok("unexpected success")
+
+registerReqFFI(CallSleepyRequest, lib: ptr TestRevLib):
+  proc(): Future[Result[string, string]] {.async.} =
+    let r = await ffiReverseCall("sleepy", @[], 5000)
+    if r.isErr():
+      return err(r.error)
+    return ok("slept")
+
+registerReqFFI(CallGateRequest, lib: ptr TestRevLib):
+  proc(): Future[Result[string, string]] {.async.} =
+    let r = await ffiReverseCall("gate", @[], 30000)
     if r.isErr():
       return err(r.error)
     return ok("unexpected success")
@@ -169,6 +186,54 @@ proc waitParked(box: var ParkBox): uint64 =
     wait(box.cond, box.lock)
   result = box.callId
   release(box.lock)
+
+type SleepyBox = object
+  ctx: ptr FFIContext[TestRevLib]
+  ms: int
+
+proc sleepyImpl(
+    callId: uint64,
+    argsCbor: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
+) {.cdecl, gcsafe, raises: [].} =
+  ## A blocking host impl: sleeps on its worker, then answers inline.
+  let box = cast[ptr SleepyBox](userData)
+  os.sleep(box[].ms)
+  discard submitReverseReply(box[].ctx, callId, RET_OK, nil, 0)
+
+type GateBox = object
+  lock: Lock
+  cond: Cond
+  entered: int
+  release: bool
+
+proc gateImpl(
+    callId: uint64,
+    argsCbor: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
+) {.cdecl, gcsafe, raises: [].} =
+  ## Parks the worker until the test releases it: a wedged plugin.
+  let g = cast[ptr GateBox](userData)
+  acquire(g[].lock)
+  g[].entered.inc()
+  broadcast(g[].cond)
+  while not g[].release:
+    wait(g[].cond, g[].lock)
+  release(g[].lock)
+
+proc waitEntered(g: var GateBox, n: int) =
+  acquire(g.lock)
+  while g.entered < n:
+    wait(g.cond, g.lock)
+  release(g.lock)
+
+proc open(g: var GateBox) =
+  acquire(g.lock)
+  g.release = true
+  broadcast(g.cond)
+  release(g.lock)
 
 suite "reverse call roundtrip":
   test "impl replying inline on the event thread completes the handler":
@@ -264,8 +329,7 @@ suite "teardown with a reverse call in flight":
     ## The handler's deadline (30 s) is far beyond RecycleWaitTimeout: destroy
     ## succeeding in time proves failPendingReverse unparked the handler.
     setupCallbackData(rsp)
-    var pool: FFIContextPool[TestRevLib]
-    let ctx = pool.createFFIContext().valueOr:
+    let ctx = gPool.createFFIContext().valueOr:
       check false
       return
 
@@ -283,7 +347,83 @@ suite "teardown with a reverse call in flight":
       .isOk()
     discard waitParked(box)
 
-    check pool.destroyFFIContext(ctx).isOk()
+    check gPool.destroyFFIContext(ctx).isOk()
     waitCallback(rsp)
     check rsp.retCode == RET_ERR
     check "abandoned" in callbackMsg(rsp)
+
+  test "destroy with a worker wedged in a host impl leaks it and reports":
+    ## The wedged worker cannot be joined: stopAndJoinThreads returns err after
+    ## ReverseWorkerJoinTimeoutMs and the pool leaks the slot instead of freeing
+    ## resources under a live thread.
+    setupCallbackData(rsp)
+    let ctx = gPool.createFFIContext().valueOr:
+      check false
+      return
+    var g: GateBox
+    g.lock.initLock()
+    g.cond.initCond()
+
+    ctx[].reverse.setImpl("gate", gateImpl, addr g)
+    check sendRequestToFFIThread(ctx, CallGateRequest.ffiNewReq(captureCb, addr rsp))
+      .isOk()
+    g.waitEntered(1)
+
+    let res = gPool.destroyFFIContext(ctx)
+    check res.isErr()
+    check "reverse worker" in res.error
+    check ctx[].reverse.leakedWorkers == 1
+    waitCallback(rsp) # the parked handler was failed at shutdown
+    check rsp.retCode == RET_ERR
+    g.open() # let the leaked worker finish so the process can exit
+    os.sleep(20)
+
+  test "recycle with a worker wedged in a host impl quarantines the slot":
+    setupCallbackData(rsp)
+    let ctx = gPool.createFFIContext().valueOr:
+      check false
+      return
+    var g: GateBox
+    g.lock.initLock()
+    g.cond.initCond()
+
+    ctx[].reverse.setImpl("gate", gateImpl, addr g)
+    check sendRequestToFFIThread(ctx, CallGateRequest.ffiNewReq(captureCb, addr rsp))
+      .isOk()
+    g.waitEntered(1)
+
+    let res = gPool.recycleFFIContext(ctx)
+    check res.isErr()
+    check "did not return" in res.error
+    check ctx.lifecycle.load() == CtxLifecycle.RecycleFailed
+    check ctx.recycleFailure.load() == RecycleFailure.ReverseImplBlocked
+    waitCallback(rsp)
+    check rsp.retCode == RET_ERR
+    g.open()
+    os.sleep(20)
+
+suite "reverse calls run concurrently":
+  test "two blocking impls awaited by two requests overlap on two workers":
+    ## Each impl sleeps 150 ms on its worker. Serialized they would take
+    ## ≥300 ms; two workers finish both in well under that.
+    setupCallbackData(rspA)
+    setupCallbackData(rspB)
+    withPool(ctx):
+      var box = SleepyBox(ctx: ctx, ms: 150)
+      check ctx[].reverse.startReverseWorkers(2)
+      ctx[].reverse.setImpl("sleepy", sleepyImpl, addr box)
+      let t0 = getMonoTime()
+      check sendRequestToFFIThread(
+        ctx, CallSleepyRequest.ffiNewReq(captureCb, addr rspA)
+      )
+        .isOk()
+      check sendRequestToFFIThread(
+        ctx, CallSleepyRequest.ffiNewReq(captureCb, addr rspB)
+      )
+        .isOk()
+      waitCallback(rspA)
+      waitCallback(rspB)
+      let elapsedMs = (getMonoTime() - t0).inMilliseconds
+      check rspA.retCode == RET_OK
+      check rspB.retCode == RET_OK
+      check elapsedMs < 280
