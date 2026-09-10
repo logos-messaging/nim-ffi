@@ -43,20 +43,6 @@ suite "constants in the C header":
     let bare = generateCLibHeader(@[ctor], @[], "constlib")
     check "Generated constants" notin bare
 
-suite "constants in the abi = c header":
-  test "the CBOR-free header carries the same declarations":
-    let cabiCtor = FFIProcMeta(
-      procName: "constlib_create",
-      libName: "constlib",
-      kind: FFIKind.CTOR,
-      libTypeName: "ConstLib",
-      returnTypeName: "ConstLib",
-      abiFormat: ABIFormat.C,
-    )
-    let header = generateCAbiLibHeader(@[cabiCtor], @[], "constlib", @[], consts)
-    check "static const int64_t MAX_PEERS = 42;" in header
-    check "static const char* const GREETING = \"he\\\"llo\\n\";" in header
-
 suite "constants in the C++ header":
   setup:
     let header = generateCppHeader(@[ctor], @[], "constlib", @[], consts)

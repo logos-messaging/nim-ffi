@@ -5,6 +5,7 @@ import std/[atomics, os]
 import unittest2
 import results
 import ffi
+import ./helpers
 
 type RouterLib = ref object
   marker: int
@@ -82,12 +83,6 @@ proc recordingCallback(
     copyMem(addr s[].msg[0], msg, int(len))
   s[].retCode.store(int(retCode))
   s[].called.store(true)
-
-proc encodedPtr(bytes: var seq[byte]): ptr byte =
-  if bytes.len == 0:
-    nil
-  else:
-    cast[ptr byte](addr bytes[0])
 
 proc waitCalled(s: var CallbackState): bool =
   var tries = 0

@@ -1,0 +1,14 @@
+/Users/schwarzy/dev/status/nim-ffi/examples/timer/rust_client/target/debug/deps/serde-87b45853e6fab0af.d: /Users/schwarzy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/schwarzy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/schwarzy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/schwarzy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/schwarzy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/schwarzy/dev/status/nim-ffi/examples/timer/rust_client/target/debug/build/serde-599715c3ec6f6640/out/private.rs
+
+/Users/schwarzy/dev/status/nim-ffi/examples/timer/rust_client/target/debug/deps/libserde-87b45853e6fab0af.rlib: /Users/schwarzy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/schwarzy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/schwarzy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/schwarzy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/schwarzy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/schwarzy/dev/status/nim-ffi/examples/timer/rust_client/target/debug/build/serde-599715c3ec6f6640/out/private.rs
+
+/Users/schwarzy/dev/status/nim-ffi/examples/timer/rust_client/target/debug/deps/libserde-87b45853e6fab0af.rmeta: /Users/schwarzy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/schwarzy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/schwarzy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/schwarzy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/schwarzy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/schwarzy/dev/status/nim-ffi/examples/timer/rust_client/target/debug/build/serde-599715c3ec6f6640/out/private.rs
+
+/Users/schwarzy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/Users/schwarzy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/Users/schwarzy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/Users/schwarzy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/Users/schwarzy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/Users/schwarzy/dev/status/nim-ffi/examples/timer/rust_client/target/debug/build/serde-599715c3ec6f6640/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/schwarzy/dev/status/nim-ffi/examples/timer/rust_client/target/debug/build/serde-599715c3ec6f6640/out

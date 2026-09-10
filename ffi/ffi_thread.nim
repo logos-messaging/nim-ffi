@@ -2,6 +2,14 @@
 ## Dispatches `FFIThreadRequest`s from `reqQueueBank` and advances
 ## `ctx.ffiHeartbeat` so the event thread can spot a wedged FFI thread.
 
+## Compile-time-populated table: request type name (cstring) -> async handler.
+## Public because `{.ffi.}`/`registerReqFFI` expand a write to it in the caller's
+## module; every write lands during module init, before any FFI thread exists.
+var registeredRequests*: Table[cstring, FFIRequestProc]
+
+let registeredRequestsPtr = addr registeredRequests
+  ## Read path of every FFI thread; the pointer keeps a `{.gcsafe.}` handler off the GC'ed global, which nothing writes after init.
+
 proc sendRequestToFFIThread*(
     ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, generation: uint
 ): Result[void, string] =
@@ -103,10 +111,10 @@ proc processRequest[T](
   let reqIdCs = reqId.cstring # keeps reqId alive
 
   let retFut =
-    if not ctx[].registeredRequests[].contains(reqIdCs):
+    if not registeredRequestsPtr[].contains(reqIdCs):
       nilProcess(request[].reqId)
     else:
-      ctx[].registeredRequests[][reqIdCs](cast[pointer](request), ctx)
+      registeredRequestsPtr[][reqIdCs](cast[pointer](request), ctx)
 
   # One try over warn-loop + handler so a shutdown-drain cancel still reaches the response-and-free below.
   let res =
@@ -312,8 +320,6 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ffiCurrentNotifyEventEnqueued = ffiNotifyEventEnqueuedHook
   onFFIThread = true
 
-  logging.setupLog(logging.LogLevel.DEBUG, logging.LogFormat.TEXT)
-
   defer:
     onFFIThread = false
     # Free handle refs on the thread that allocated them (refc heap is thread-local).
@@ -326,6 +332,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
     let fireRes = ctx.threadExitSignal.fireSync()
     if fireRes.isErr():
       error "failed to fire threadExitSignal on FFI thread exit", err = fireRes.error
+    closeThreadDispatcher()
 
   let ffiRun = proc(ctx: ptr FFIContext[T]) {.async.} =
     var ffiReqHandler: T # main library object (Waku, LibP2P, SDS, …)

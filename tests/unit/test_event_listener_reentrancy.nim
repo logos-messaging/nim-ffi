@@ -6,6 +6,7 @@ import std/[atomics, os]
 import unittest2
 import results
 import ffi
+import ./helpers
 
 type ReentrantLib = object
 
@@ -58,14 +59,6 @@ proc blockCb(
 proc removerBody(listenerId: uint64) {.thread.} =
   discard removeEventListener(gReg[], listenerId)
   gRemoveReturned.store(true)
-
-proc waitFlag(flag: var Atomic[bool]): bool =
-  let deadline = Moment.now() + 5.seconds
-  while not flag.load():
-    if Moment.now() >= deadline:
-      return false
-    os.sleep(5)
-  return true
 
 template withPool(ctxIdent: untyped, body: untyped) =
   var pool: FFIContextPool[ReentrantLib]

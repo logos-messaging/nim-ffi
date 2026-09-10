@@ -144,7 +144,9 @@ inline CborError encode_cbor(CborEncoder& e, const std::vector<T>& v) {
 // template in overload resolution, so std::vector<std::uint8_t> fields use it
 // automatically.
 inline CborError encode_cbor(CborEncoder& e, const std::vector<std::uint8_t>& v) {
-    return cbor_encode_byte_string(&e, v.data(), v.size());
+    // An empty vector's data() is null, and a null src is UB in memcpy even for size 0.
+    static const std::uint8_t empty = 0;
+    return cbor_encode_byte_string(&e, v.empty() ? &empty : v.data(), v.size());
 }
 
 template<typename T>
@@ -491,6 +493,13 @@ uint64_t echo_add_event_listener(void* ctx, const char* event_name, FFICallback 
  * data of that listener alive until the dispatch ends.
  */
 int echo_remove_event_listener(void* ctx, uint64_t listener_id);
+/**
+ * Stop every context the library still holds and join their threads.
+ * Call it before the process exits when a context is still alive, or when a
+ * static proc built the shared context.
+ * Returns 0 when every context stopped, 1 when one was left running.
+ */
+int echo_shutdown(void);
 } // extern "C"
 
 // ============================================================

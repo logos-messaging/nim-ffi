@@ -1,0 +1,13 @@
+# ── Locate the repository root (contains ffi.nimble) ─────────────────────────
+set(_search_dir "${CMAKE_CURRENT_SOURCE_DIR}")
+set(REPO_ROOT "")
+foreach(_i RANGE 10)
+    if(EXISTS "${_search_dir}/ffi.nimble")
+        set(REPO_ROOT "${_search_dir}")
+        break()
+    endif()
+    get_filename_component(_search_dir "${_search_dir}" DIRECTORY)
+endforeach()
+if("${REPO_ROOT}" STREQUAL "")
+    message(FATAL_ERROR "Cannot find repo root (no ffi.nimble in any ancestor)")
+endif()

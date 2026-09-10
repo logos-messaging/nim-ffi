@@ -10,10 +10,9 @@ This folder contains **auto-generated C++ bindings** for the `my_timer` Nim libr
 
 ## How It's Generated
 
-Generate or regenerate these bindings by running from the parent directory:
+Generate or regenerate these bindings by running from the repository root:
 
 ```sh
-cd examples/timer
 nimble genbindings_cpp
 ```
 

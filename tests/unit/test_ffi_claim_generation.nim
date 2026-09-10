@@ -5,6 +5,7 @@ import std/[atomics, os]
 import unittest2
 import results
 import ffi
+import helpers
 
 type ClaimLib = object
 
@@ -63,6 +64,7 @@ suite "claim and generation are one atomic":
       return
     let token = ctx.ffiToken()
     check gPool.recycleFFIContext(ctx).isOk()
+    waitSlotFree(ctx)
     check not ctx.isInUse()
     check (ctx.currentGeneration() and 1) == 0
     check not gPool.isValidCtx(token)

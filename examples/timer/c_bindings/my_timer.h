@@ -1020,6 +1020,13 @@ int my_timer_start_reverse_workers(void* ctx, int n);
  * `my_timer_ctx_emit_on_host_tick`); fire-and-forget for the host.
  */
 int my_timer_emit_on_host_tick(void* ctx, const uint8_t* payload_cbor, size_t payload_len);
+/**
+ * Stop every context the library still holds and join their threads.
+ * Call it before the process exits when a context is still alive, or when a
+ * static proc built the shared context.
+ * Returns 0 when every context stopped, 1 when one was left running.
+ */
+int my_timer_shutdown(void);
 
 #ifdef __cplusplus
 } /* extern "C" */

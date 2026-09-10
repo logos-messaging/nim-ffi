@@ -6,13 +6,8 @@ import ffi, chronos, strutils
 type Echo = object
   prefix: string
 
-# `-d:ffiEchoAbiC` builds the `abi = c` variant; default is the CBOR ABI.
-when defined(ffiEchoAbiC):
-  declareLibrary("echo", Echo, defaultABIFormat = "c")
-else:
-  declareLibrary("echo", Echo)
+declareLibrary("echo", Echo)
 
-# Constants never cross the wire, so {.ffiConst.} lands in the abi = c header too.
 const MaxShoutLen* {.ffiConst.} = 512
 
 type EchoConfig {.ffi.} = object

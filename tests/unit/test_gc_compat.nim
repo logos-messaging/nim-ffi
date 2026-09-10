@@ -1,69 +1,11 @@
 ## foreignThreadGc + string-lifetime guarantees under both orc and refc.
 
-import std/locks
 import unittest2
 import results
 import ffi
+import ./helpers
 
 type GcTestLib = object
-
-type CallbackData = object
-  lock: Lock
-  cond: Cond
-  called: bool
-  retCode: cint
-  msg: array[1024, char]
-  msgLen: int
-
-proc initCallbackData(d: var CallbackData) =
-  d.lock.initLock()
-  d.cond.initCond()
-
-proc deinitCallbackData(d: var CallbackData) =
-  d.cond.deinitCond()
-  d.lock.deinitLock()
-
-proc testCallback(
-    retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
-) {.cdecl, gcsafe, raises: [].} =
-  let d = cast[ptr CallbackData](userData)
-  acquire(d[].lock)
-  d[].retCode = retCode
-  let n = min(int(len), d[].msg.high)
-  if n > 0 and not msg.isNil:
-    copyMem(addr d[].msg[0], msg, n)
-  d[].msg[n] = '\0'
-  d[].msgLen = n
-  d[].called = true
-  signal(d[].cond)
-  release(d[].lock)
-
-proc waitCallback(d: var CallbackData) =
-  acquire(d.lock)
-  while not d.called:
-    wait(d.cond, d.lock)
-  release(d.lock)
-
-proc callbackMsg(d: var CallbackData): string =
-  var msg = newString(d.msgLen)
-  if d.msgLen > 0:
-    copyMem(addr msg[0], addr d.msg[0], d.msgLen)
-  return msg
-
-proc callbackBytes(d: var CallbackData): seq[byte] =
-  var bytes = newSeq[byte](d.msgLen)
-  if d.msgLen > 0:
-    copyMem(addr bytes[0], addr d.msg[0], d.msgLen)
-  return bytes
-
-proc callbackOkString(d: var CallbackData): string =
-  ## Decodes the CBOR success payload as a string, asserting the request succeeded.
-  doAssert d.retCode == RET_OK,
-    "callbackOkString called on non-OK retCode " & $d.retCode & " (msg=" & callbackMsg(
-      d
-    ) & ")"
-  cborDecode(callbackBytes(d), string).valueOr:
-    return ""
 
 # Non-literal result exercises the resStr lifetime binding in handleRes.
 registerReqFFI(StringLifetimeRequest, lib: ptr GcTestLib):
@@ -117,7 +59,7 @@ suite "GC safety - string lifetime across thread boundary":
       .isOk()
     waitCallback(d)
     check d.retCode == RET_OK
-    check callbackOkString(d) == "lifetime:hello"
+    check okString(d) == "lifetime:hello"
 
   test "error string lifetime across thread boundary":
     var d: CallbackData
@@ -138,7 +80,7 @@ suite "GC safety - string lifetime across thread boundary":
       .isOk()
     waitCallback(d)
     check d.retCode == RET_ERR
-    check callbackMsg(d) == "gc-err:test"
+    check rawText(d) == "gc-err:test"
 
   test "large string result is delivered without corruption":
     var expected = newString(512)
@@ -163,7 +105,7 @@ suite "GC safety - string lifetime across thread boundary":
       .isOk()
     waitCallback(d)
     check d.retCode == RET_OK
-    check callbackOkString(d) == expected
+    check okString(d) == expected
 
 suite "GC stability - repeated requests":
   test "20 sequential requests without GC corruption":
@@ -184,5 +126,5 @@ suite "GC stability - repeated requests":
         .isOk()
       waitCallback(d)
       check d.retCode == RET_OK
-      check callbackOkString(d) == "lifetime:" & input
+      check okString(d) == "lifetime:" & input
       deinitCallbackData(d)

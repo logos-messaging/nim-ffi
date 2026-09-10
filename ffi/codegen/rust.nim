@@ -1,7 +1,7 @@
 ## Rust binding generator: emits a complete Rust crate using CBOR (ciborium).
 
 import std/[os, strutils]
-import ./meta, ./string_helpers, ./types_ir, ./consts
+import ./meta, ./string_helpers, ./types_ir, ./consts, ../ret_codes
 
 ## Wire-format Rust type for any Nim `ptr T`/`pointer`; fixed 64-bit for a
 ## host-independent CBOR payload size (mirrors CppPtrType).
@@ -268,6 +268,8 @@ proc generateFFIRs*(
     "    pub fn $1_remove_event_listener(ctx: *mut c_void, listener_id: u64) -> c_int;" %
       [linkLibName]
   )
+  lines.add(renderMemberDocComment(ShutdownDoc))
+  lines.add("    pub fn $1_shutdown() -> c_int;" % [linkLibName])
 
   # Reverse FFI: host-implemented interfaces + host-emitted events.
   if reverse.len > 0:
@@ -463,10 +465,8 @@ proc generateApiRs*(
   lines.add("    else        { Err(String::from_utf8_lossy(&bytes).into_owned()) }")
   lines.add("}")
   lines.add("")
-  lines.add("// nim-ffi result-callback status codes (mirror ffi/ffi_types.nim).")
-  lines.add("const NIMFFI_RET_OK: c_int = 0;")
-  lines.add("const NIMFFI_RET_MISSING_CALLBACK: c_int = 2;")
-  lines.add("const NIMFFI_RET_STALE_WARN: c_int = 3;")
+  lines.add("// nim-ffi result-callback status codes, emitted from ffi/ret_codes.nim.")
+  lines.add(rustRetCodeConsts())
   lines.add("")
   lines.add("unsafe extern \"C\" fn on_result(")
   lines.add("    ret: c_int,")
@@ -498,9 +498,7 @@ proc generateApiRs*(
   lines.add(
     "    // lost the race, or the future was dropped before being awaited. This cannot"
   )
-  lines.add(
-    "    // happen with the current rust_client demo but may occur in arbitrary"
-  )
+  lines.add("    // happen with the crate's own examples but may occur in arbitrary")
   lines.add("    // downstream consumers, so we discard the Err safely.")
   lines.add(
     "    // Given that this is invoked from a Nim thread, we can't propagate the error by panicking or"
@@ -1036,6 +1034,14 @@ proc generateApiRs*(
     lines.add("        decode_cbor::<$1>(&raw_bytes)" % [retTypeForApi])
     lines.add("    }")
     lines.add("")
+
+  # An associated fn, not a method: a host calls it with no context left to call it on.
+  lines.add(renderMemberDocComment(ShutdownDoc))
+  lines.add("    /// This wrapper reports that as true.")
+  lines.add("    pub fn shutdown() -> bool {")
+  lines.add("        unsafe { ffi::$1_shutdown() == 0 }" % [libName])
+  lines.add("    }")
+  lines.add("")
 
   lines.add("}")
   return lines.join("\n") & "\n"

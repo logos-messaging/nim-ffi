@@ -6,8 +6,7 @@ type Maybe[T] = Option[T]
 type MyTimer = object
   name: string # set at creation time, read back in each response
 
-# `defaultABIFormat` is the wire format every annotation inherits (override per-annotation with "abi = ...").
-declareLibrary("my_timer", MyTimer, defaultABIFormat = "cbor")
+declareLibrary("my_timer", MyTimer)
 
 # {.ffiConst.}: re-emitted as a native constant in every binding.
 const

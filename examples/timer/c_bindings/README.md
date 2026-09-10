@@ -16,10 +16,9 @@ backends) using the TinyCBOR copy vendored at
 
 ## How It's Generated
 
-Regenerate these bindings by running from the parent directory:
+Regenerate these bindings by running from the repository root:
 
 ```sh
-cd examples/timer
 nimble genbindings_c
 ```
 

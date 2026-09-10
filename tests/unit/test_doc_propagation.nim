@@ -9,7 +9,6 @@ const
   MethodDoc = "Echoes `req` back.\nSecond line."
   DtorDoc = "Releases the widget."
   EventDoc = "Fires once the echo lands."
-  ScalarDoc = "Adds two numbers, no CBOR in sight."
 
 let types = @[
   FFITypeMeta(
@@ -104,41 +103,6 @@ suite "doc comments reach the C header":
 
   test "an undocumented registry leaks no doc text":
     checkNoDocText(generateCLibHeader(undocumented, types, "widget"))
-
-suite "doc comments reach the abi = c header":
-  setup:
-    var abiProcs = procs
-    abiProcs.add(
-      FFIProcMeta(
-        procName: "widget_add",
-        libName: "widget",
-        kind: FFIKind.FFI,
-        libTypeName: "Widget",
-        extraParams: @[
-          FFIParamMeta(name: "a", typeName: "int"),
-          FFIParamMeta(name: "b", typeName: "int"),
-        ],
-        returnTypeName: "int",
-        scalarFastPath: true,
-        doc: ScalarDoc,
-      )
-    )
-    for p in abiProcs.mitems:
-      p.abiFormat = ABIFormat.C
-    var abiTypes = types
-    for t in abiTypes.mitems:
-      t.abiFormat = ABIFormat.C
-    let header = generateCAbiLibHeader(abiProcs, abiTypes, "widget")
-
-  test "the exported symbol carries the doc":
-    check "/** " & CtorDoc & " */\nvoid* widget_create(" in header
-
-  test "the high-level wrapper carries the doc":
-    check "/** " & CtorDoc & " */\nstatic inline int widget_ctx_create(" in header
-    check "/** " & DtorDoc & " */\nstatic inline int widget_ctx_destroy(" in header
-
-  test "the scalar fast path carries the doc":
-    check "/** " & ScalarDoc & " */\nstatic inline int widget_ctx_add(" in header
 
 suite "doc comments reach the C++ header":
   setup:

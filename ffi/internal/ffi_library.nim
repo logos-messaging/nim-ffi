@@ -102,15 +102,6 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
   )
   res.add(varStmt)
 
-  # Android chronicles redirection
-  let chroniclesBlock = quote:
-    when defined(android) and compiles(defaultChroniclesStream.outputs[0].writer):
-      defaultChroniclesStream.outputs[0].writer = proc(
-          logLevel: LogLevel, msg: LogOutputStr
-      ) {.raises: [].} =
-        echo logLevel, msg
-      result.add(chroniclesBlock)
-
   let procName = ident("initializeLibrary")
   let nimMainName = ident("lib" & libraryName & "NimMain")
 
@@ -137,14 +128,9 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
 
   return res
 
-proc declareLibraryImpl(
-    libraryName: string, libType: NimNode, abiFmt: ABIFormat, headerBanner: string
-): NimNode {.compileTime.} =
-  ## Shared body behind both `declareLibrary` overloads: records the library-wide
-  ## defaults and emits the C-exported event ABI on its `FFIContext`.
+macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
+  ## Declares a library and emits its `FFIContext` listener ABI (add/remove).
   currentLibType = $libType # so handle-receiver `.ffi.` procs can resolve the pool
-  currentDefaultABIFormat = abiFmt
-  currentHeaderBanner = headerBanner
   libraryDeclared = true
 
   var stmts = newStmtList()
@@ -260,32 +246,24 @@ proc declareLibraryImpl(
     )
   )
 
-  return stmts
+  # {libraryName}_shutdown
+  let shutdownName = libraryName & "_shutdown"
+  let shutdownBody = quote:
+    # A host can call shutdown first of all; the Nim runtime must be up before the pool is read.
+    when declared(initializeLibrary):
+      initializeLibrary()
+    var ret: cint = 0
+    if `poolIdent`.shutdownFFIContextPool().isErr():
+      ret = 1
+    return ret
 
-macro declareLibrary*(
-    libraryName: static[string],
-    libType: untyped,
-    defaultABIFormat: static[string] = "cbor",
-    headerBanner: static[string] = "",
-): untyped =
-  ## Declares a library and emits the C-exported event ABI (`_add_event_listener` /
-  ## `_remove_event_listener`) on its `FFIContext`. `defaultABIFormat` (`"cbor"`/`"c"`)
-  ## is inherited unless an annotation overrides via `"abi = ..."`. `headerBanner`,
-  ## when set, is stamped as a comment at the top of every generated header.
-  let (abiOk, abiFmt) = parseABIFormatName(defaultABIFormat)
-  if not abiOk:
-    error(
-      "declareLibrary: unknown defaultABIFormat '" & defaultABIFormat &
-        "'; valid values are \"c\" and \"cbor\""
+  stmts.add(
+    newProc(
+      name = ident(shutdownName),
+      params = @[ident("cint")],
+      body = shutdownBody,
+      pragmas = cdeclExportPragma,
     )
-  return declareLibraryImpl(libraryName, libType, abiFmt, headerBanner)
+  )
 
-macro declareLibrary*(
-    libraryName: static[string],
-    libType: untyped,
-    defaultABIFormat: static[ABIFormat],
-    headerBanner: static[string] = "",
-): untyped =
-  ## `ABIFormat` enum overload of `declareLibrary`, so a caller can pass
-  ## `defaultABIFormat = ABIFormat.C` instead of the `"c"` string.
-  return declareLibraryImpl(libraryName, libType, defaultABIFormat, headerBanner)
+  return stmts

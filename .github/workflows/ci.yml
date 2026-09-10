@@ -3,8 +3,11 @@ name: CI
 on:
   push:
     branches: [master, main]
+  # Unfiltered, like linters.yml: a PR stacked on a feature branch is a PR, and
+  # a base filter here means it merges with no test job ever having run.
   pull_request:
-    branches: [master, main]
+  # Without this a merge queue runs linters.yml only and merges untested code.
+  merge_group:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -20,6 +23,7 @@ jobs:
   # `env` is not allowed there, which rules out plain workflow-level env vars.
   versions:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       nim-versions: ${{ steps.load.outputs.NIM_VERSIONS }}
       nimble:       ${{ steps.load.outputs.NIMBLE_VERSION }}
@@ -28,124 +32,27 @@ jobs:
       - id: load
         run: cat versions.env >> "$GITHUB_OUTPUT"
 
-  alloc:
-    name: Alloc
-    needs: versions
-    uses: ./.github/workflows/test.yml
-    with:
-      test: test_alloc
-      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
-      nimble-version: ${{ needs.versions.outputs.nimble }}
-
-  ffi-context:
-    name: FFI Context
-    needs: versions
-    uses: ./.github/workflows/test.yml
-    with:
-      test: test_ffi_context
-      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
-      nimble-version: ${{ needs.versions.outputs.nimble }}
-
-  gc-compat:
-    name: GC Compatibility
-    needs: versions
-    uses: ./.github/workflows/test.yml
-    with:
-      test: test_gc_compat
-      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
-      nimble-version: ${{ needs.versions.outputs.nimble }}
-
-  serial:
-    name: Serial
-    needs: versions
-    uses: ./.github/workflows/test.yml
-    with:
-      test: test_serial
-      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
-      nimble-version: ${{ needs.versions.outputs.nimble }}
-
-  ctx-validation:
-    name: Context Validation
-    needs: versions
-    uses: ./.github/workflows/test.yml
-    with:
-      test: test_ctx_validation
-      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
-      nimble-version: ${{ needs.versions.outputs.nimble }}
-
-  abi-format:
-    # Runs cross-OS to also guard declareLibrary's --app:lib linker-flag check:
-    # this test compiles FFI code as a plain executable, which would fail to
-    # link on macOS if the soname/install_name flags leaked into a non-lib build.
-    name: ABI Format
-    needs: versions
-    uses: ./.github/workflows/test.yml
-    with:
-      test: test_abi_format
-      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
-      nimble-version: ${{ needs.versions.outputs.nimble }}
-
-  foreign-thread-c-abi:
-    name: Foreign Thread (abi = c)
-    needs: versions
-    uses: ./.github/workflows/test.yml
-    with:
-      test: test_foreign_thread_c_abi
-      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
-      nimble-version: ${{ needs.versions.outputs.nimble }}
-
-  listener-reentrancy:
-    # The dispatch barrier is a pthread condvar; cover the OSes whose mutex and
-    # condvar behaviour differ, not only the Linux sanitizer jobs.
-    name: Listener Reentrancy
-    needs: versions
-    uses: ./.github/workflows/test.yml
-    with:
-      test: test_event_listener_reentrancy
-      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
-      nimble-version: ${{ needs.versions.outputs.nimble }}
-
-  c-wire:
-    # The `c`-ABI cwire codec is layout-/allocator-sensitive (malloc/free, flat
-    # struct packing, allocShared for seq/Option), so cover it across the full
-    # OS matrix, not just Linux.
-    name: C Wire Codec
-    needs: versions
-    uses: ./.github/workflows/test.yml
-    with:
-      test: test_c_wire
-      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
-      nimble-version: ${{ needs.versions.outputs.nimble }}
-
-  recycle-teardown:
-    # One job for the whole family: these tests run in seconds while a job's
-    # setup takes minutes, so six files share one setup instead of paying it six
-    # times. Stable Nim only — thread reuse, thread exit and chronos dispatcher
-    # behaviour are what differ here, and they differ per OS, not per compiler
-    # version. No ubuntu either: `unit-tests-all` already runs every file on
-    # Linux under both Nim versions and both mms.
-    name: Recycle & Teardown
+  cross-os:
+    # One job: these files probe per-OS behaviour (condvars, thread reuse, --app:lib linker flags), not per-compiler, and `unit-tests-all` already runs every file on Linux under both Nim versions and both mms.
+    name: Cross-OS
     needs: versions
     uses: ./.github/workflows/test.yml
     with:
       test: >-
-        test_ffi_teardown test_ffi_recycle_reset test_ffi_claim_generation
-        test_ffi_ingress_limits test_ctx_after_failed_ctor test_event_thread
+        test_ffi_context test_gc_compat test_serial test_ctx_validation
+        test_foreign_thread test_event_listener_reentrancy test_ffi_teardown
+        test_ffi_recycle_reset test_ffi_claim_generation test_ffi_ingress_limits
+        test_ctx_after_failed_ctor test_event_thread
       oses: '["macos-15","windows-latest"]'
       nim-versions: '["stable"]'
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
   cpp-e2e:
-    # Codegen output doesn't vary with mm, so we matrix over OS and Nim only.
-    # Windows runs MSVC by default and may surface codegen tweaks needed in
-    # the generated CMake (e.g. /EHsc, dllexport) — track follow-ups as bugs
-    # if they appear. `fail-fast: false` keeps Linux/macOS results visible.
+    # OS matrix only: this proves the generated code builds and runs per platform, while `check-bindings` diffs the codegen output under every Nim version.
     needs: versions
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-15, windows-latest]
-        nim-version: ${{ fromJSON(needs.versions.outputs.nim-versions) }}
         include:
           - os: ubuntu-22.04
             label: Linux
@@ -154,7 +61,8 @@ jobs:
           - os: windows-latest
             label: Windows
     runs-on: ${{ matrix.os }}
-    name: C++ E2E · ${{ matrix.label }} · Nim ${{ matrix.nim-version }}
+    timeout-minutes: 60
+    name: C++ E2E · ${{ matrix.label }}
     env:
       NIMBLE_VERSION: ${{ needs.versions.outputs.nimble }}
     steps:
@@ -163,7 +71,7 @@ jobs:
       - name: Setup Nim
         uses: jiro4989/setup-nim-action@v2
         with:
-          nim-version: ${{ matrix.nim-version }}
+          nim-version: stable
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Nimble ${{ env.NIMBLE_VERSION }}
@@ -182,9 +90,9 @@ jobs:
           path: |
             nimbledeps/
             nimble.paths
-          key: ${{ runner.os }}-nimbledeps-${{ matrix.nim-version }}-${{ hashFiles('*.nimble') }}
+          key: ${{ runner.os }}-nimbledeps-stable-${{ hashFiles('*.nimble') }}
           restore-keys: |
-            ${{ runner.os }}-nimbledeps-${{ matrix.nim-version }}-
+            ${{ runner.os }}-nimbledeps-stable-
             ${{ runner.os }}-nimbledeps-
 
       - name: Install nimble deps
@@ -211,13 +119,13 @@ jobs:
           fi
           nimble test_cpp_e2e -y
 
-      # The CBOR-free abi=c C binding (issue #105). Linux-only: the generated
-      # header is platform-checked by the check-bindings job, and the runtime
-      # path only needs one OS to exercise the abi=c struct dispatch.
-      - name: Run abi=c C e2e test
-        if: matrix.label == 'Linux'
+      - name: Run C e2e tests
         shell: bash
-        run: nimble test_c_abi_e2e -y
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+          fi
+          nimble test_c_e2e -y
 
   check-bindings:
     # Single OS is enough — codegen output is platform-independent; the Nim
@@ -227,6 +135,16 @@ jobs:
     uses: ./.github/workflows/nimble-job.yml
     with:
       run: nimble check_bindings -y
+      nim-versions:   ${{ needs.versions.outputs.nim-versions }}
+      nimble-version: ${{ needs.versions.outputs.nimble }}
+
+  rust-bindings:
+    # `--examples` reaches api.rs, which no other target uses; build.rs shells out to `nim c`, hence the nimble job.
+    name: Build generated Rust bindings
+    needs: versions
+    uses: ./.github/workflows/nimble-job.yml
+    with:
+      run: cargo build --locked --manifest-path examples/timer/rust_bindings/Cargo.toml --examples
       nim-versions:   ${{ needs.versions.outputs.nim-versions }}
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
@@ -259,12 +177,7 @@ jobs:
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
   submit-scaling-gate:
-    # Forcing function, red by design: asserts sendRequestToFFIThread submit
-    # throughput scales with producer-thread count. The per-request global lock
-    # serialises every submit, so this stays red until the lock is replaced with
-    # MPSC ingress — a standing reminder, not a transient failure. Pinned to orc +
-    # unsanitized because the gate is timing-based and the contention it measures
-    # is mm-independent. Full rationale and baseline numbers: tests/bench/README.md.
+    # Asserts sendRequestToFFIThread submit throughput scales with producer-thread count. It passes at ~11x on the sharded ingress (ffi/ffi_request_queue.nim), so a red run is a regression. Pinned to orc + unsanitized: the gate is timing-based and the contention it measures is mm-independent. Baselines: tests/bench/README.md.
     name: Submit Scaling Gate
     needs: versions
     uses: ./.github/workflows/nimble-job.yml
@@ -277,6 +190,7 @@ jobs:
     name: Auto-assign PR author
     if: github.event_name == 'pull_request' && github.event.action == 'opened'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       pull-requests: write
     steps:

@@ -194,8 +194,10 @@ suite "worker pool lifecycle":
     var g: GateBox
     g.lock.initLock()
     g.cond.initCond()
-    st.setImpl("gate", gateImpl, addr g)
+    # Size the pool first: `setImpl` starts the default count otherwise, and
+    # this test needs exactly one worker so the blocked one is the only one.
     check st.startReverseWorkers(1)
+    st.setImpl("gate", gateImpl, addr g)
     ffiCurrentReverseState = addr st
     defer:
       ffiCurrentReverseState = nil

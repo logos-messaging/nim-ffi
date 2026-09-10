@@ -145,7 +145,9 @@ inline CborError encode_cbor(CborEncoder& e, const std::vector<T>& v) {
 // template in overload resolution, so std::vector<std::uint8_t> fields use it
 // automatically.
 inline CborError encode_cbor(CborEncoder& e, const std::vector<std::uint8_t>& v) {
-    return cbor_encode_byte_string(&e, v.data(), v.size());
+    // An empty vector's data() is null, and a null src is UB in memcpy even for size 0.
+    static const std::uint8_t empty = 0;
+    return cbor_encode_byte_string(&e, v.empty() ? &empty : v.data(), v.size());
 }
 
 template<typename T>
@@ -913,6 +915,13 @@ int my_timer_set_fetch_host_clock_impl(void* ctx, FFIReverseImpl impl, void* use
 int my_timer_reverse_reply(void* ctx, uint64_t call_id, int ret_code, const uint8_t* reply_cbor, size_t reply_len);
 int my_timer_start_reverse_workers(void* ctx, int n);
 int my_timer_emit_on_host_tick(void* ctx, const uint8_t* payload_cbor, size_t payload_len);
+/**
+ * Stop every context the library still holds and join their threads.
+ * Call it before the process exits when a context is still alive, or when a
+ * static proc built the shared context.
+ * Returns 0 when every context stopped, 1 when one was left running.
+ */
+int my_timer_shutdown(void);
 } // extern "C"
 
 // ============================================================

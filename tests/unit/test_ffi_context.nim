@@ -2,61 +2,9 @@ import std/[locks, options, strutils, os, atomics]
 import unittest2
 import results
 import ffi
+import ./helpers
 
 type TestLib = object
-
-type CallbackData = object
-  lock: Lock
-  cond: Cond
-  called: bool
-  callCount: int
-  retCode: cint
-  msg: array[1024, byte]
-  msgLen: int
-
-proc initCallbackData(d: var CallbackData) =
-  d.lock.initLock()
-  d.cond.initCond()
-
-proc deinitCallbackData(d: var CallbackData) =
-  d.cond.deinitCond()
-  d.lock.deinitLock()
-
-proc testCallback(
-    retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
-) {.cdecl, gcsafe, raises: [].} =
-  # A progress ping is not a terminal answer; skip it here.
-  if retCode == RET_STALE_WARN:
-    return
-  let d = cast[ptr CallbackData](userData)
-  acquire(d[].lock)
-  d[].retCode = retCode
-  let n = min(int(len), d[].msg.len)
-  if n > 0 and not msg.isNil:
-    copyMem(addr d[].msg[0], msg, n)
-  d[].msgLen = n
-  d[].called = true
-  inc d[].callCount
-  signal(d[].cond)
-  release(d[].lock)
-
-proc waitCallback(d: var CallbackData) =
-  acquire(d.lock)
-  while not d.called:
-    wait(d.cond, d.lock)
-  release(d.lock)
-
-proc callbackBytes(d: var CallbackData): seq[byte] =
-  var bytes = newSeq[byte](d.msgLen)
-  if d.msgLen > 0:
-    copyMem(addr bytes[0], addr d.msg[0], d.msgLen)
-  return bytes
-
-proc callbackErr(d: var CallbackData): string =
-  var msg = newString(d.msgLen)
-  if d.msgLen > 0:
-    copyMem(addr msg[0], addr d.msg[0], d.msgLen)
-  return msg
 
 registerReqFFI(PingRequest, lib: ptr TestLib):
   proc(message: cstring): Future[Result[string, string]] {.async.} =
@@ -205,7 +153,7 @@ suite "FFIContextPool":
       .isOk()
     waitCallback(d)
     check d.retCode == RET_OK
-    check cborDecode(callbackBytes(d), string).value == "pong:pool"
+    check cborDecode(payload(d), string).value == "pong:pool"
 
 suite "createFFIContext / destroyFFIContext":
   test "create and destroy succeeds":
@@ -308,7 +256,7 @@ suite "sendRequestToFFIThread":
       .isOk()
     waitCallback(d)
     check d.retCode == RET_OK
-    check cborDecode(callbackBytes(d), string).value == "pong:hello"
+    check cborDecode(payload(d), string).value == "pong:hello"
 
   test "failing request triggers RET_ERR callback":
     var d: CallbackData
@@ -326,7 +274,7 @@ suite "sendRequestToFFIThread":
     check sendRequestToFFIThread(ctx, FailRequest.ffiNewReq(testCallback, addr d)).isOk()
     waitCallback(d)
     check d.retCode == RET_ERR
-    check callbackErr(d) == "intentional failure"
+    check rawText(d) == "intentional failure"
 
   test "seq[byte] result rides as a CBOR byte string, not raw bytes":
     # A `seq[byte]` return must be CBOR, the same as every other reply. The C,
@@ -348,7 +296,7 @@ suite "sendRequestToFFIThread":
       .isOk()
     waitCallback(d)
     check d.retCode == RET_OK
-    let reply = callbackBytes(d)
+    let reply = payload(d)
     # The wire contract is a CBOR byte-string header (major type 2, 0x40..0x5b),
     # and then the 4 payload bytes.
     check reply.len == 5
@@ -374,7 +322,7 @@ suite "sendRequestToFFIThread":
       .isOk()
     waitCallback(d)
     check d.retCode == RET_OK
-    let reply = callbackBytes(d)
+    let reply = payload(d)
     check reply == @[0x40'u8] # byte string, length 0
     check cborDecode(reply, seq[byte]).value.len == 0
 
@@ -395,7 +343,7 @@ suite "sendRequestToFFIThread":
       .isOk()
     waitCallback(d)
     check d.retCode == RET_OK
-    check cborDecode(callbackBytes(d), string).value == ""
+    check cborDecode(payload(d), string).value == ""
 
   test "sequential requests are all processed":
     var pool: FFIContextPool[TestLib]
@@ -416,7 +364,7 @@ suite "sendRequestToFFIThread":
       waitCallback(d)
       deinitCallbackData(d)
       check d.retCode == RET_OK
-      check cborDecode(callbackBytes(d), string).value == "pong:" & msg
+      check cborDecode(payload(d), string).value == "pong:" & msg
 
 type SimpleLib = object
   value: int
@@ -433,12 +381,6 @@ proc testlib_create*(
     config: SimpleConfig
 ): Future[Result[SimpleLib, string]] {.ffiCtor.} =
   return ok(SimpleLib(value: config.initialValue))
-
-proc encodedPtr(bytes: var seq[byte]): ptr byte =
-  if bytes.len == 0:
-    nil
-  else:
-    cast[ptr byte](addr bytes[0])
 
 proc ctorAddrFromCbor(bytes: seq[byte]): uint =
   let addrStr = cborDecode(bytes, string).valueOr:
@@ -460,7 +402,7 @@ suite "ffiCtor macro":
     waitCallback(d)
     check d.retCode == RET_OK
 
-    let ctxAddr = ctorAddrFromCbor(callbackBytes(d))
+    let ctxAddr = ctorAddrFromCbor(payload(d))
     check ctxAddr != 0
     let ctx = SimpleLibFFIPool.resolveCtx(cast[FFICtxToken](ctxAddr))
 
@@ -492,7 +434,7 @@ suite "simplified .ffi. macro":
     waitCallback(ctorD)
     check ctorD.retCode == RET_OK
 
-    let ctxAddr = ctorAddrFromCbor(callbackBytes(ctorD))
+    let ctxAddr = ctorAddrFromCbor(payload(ctorD))
     check ctxAddr != 0
     let ctx = SimpleLibFFIPool.resolveCtx(cast[FFICtxToken](ctxAddr))
     defer:
@@ -512,7 +454,7 @@ suite "simplified .ffi. macro":
     waitCallback(d)
     check d.retCode == RET_OK
 
-    check cborDecode(callbackBytes(d), string).value == "echo:hello:7"
+    check cborDecode(payload(d), string).value == "echo:hello:7"
 
 proc testlib_version*(lib: SimpleLib): Future[Result[string, string]] {.ffi.} =
   return ok("v" & $lib.value)
@@ -533,7 +475,7 @@ suite "sync-body .ffi. is dispatched on FFI thread":
     waitCallback(ctorD)
     check ctorD.retCode == RET_OK
 
-    let ctxAddr = ctorAddrFromCbor(callbackBytes(ctorD))
+    let ctxAddr = ctorAddrFromCbor(payload(ctorD))
     check ctxAddr != 0
     let ctx = SimpleLibFFIPool.resolveCtx(cast[FFICtxToken](ctxAddr))
     defer:
@@ -555,7 +497,7 @@ suite "sync-body .ffi. is dispatched on FFI thread":
     check ret == RET_OK
     waitCallback(d2)
     check d2.retCode == RET_OK
-    check cborDecode(callbackBytes(d2), string).value == "v3"
+    check cborDecode(payload(d2), string).value == "v3"
 
 suite "Nim-native .ffi. / .ffiCtor. API":
   test "user proc names retain their declared Future[Result[T,string]] shape":
@@ -598,7 +540,7 @@ suite "sync-body .ffi. runs on FFI thread (PR #23 regression)":
     check not ctorRet.isNil()
     waitCallback(ctorD)
     check ctorD.retCode == RET_OK
-    let ctxAddr = ctorAddrFromCbor(callbackBytes(ctorD))
+    let ctxAddr = ctorAddrFromCbor(payload(ctorD))
     check ctxAddr != 0
     let ctx = SimpleLibFFIPool.resolveCtx(cast[FFICtxToken](ctxAddr))
     defer:
@@ -623,7 +565,7 @@ suite "sync-body .ffi. runs on FFI thread (PR #23 regression)":
     let handlerTid = gRecordedHandlerTid.load()
     check handlerTid != 0
     check handlerTid != callerTid
-    check cborDecode(callbackBytes(d), int).value == handlerTid
+    check cborDecode(payload(d), int).value == handlerTid
 
 # Reentrancy guard: a handler re-dispatching gets an Err, not a deadlock.
 var gReentrantNestedRes: Channel[string]
@@ -673,7 +615,7 @@ suite "reentrancy guard (PR #23 review, item 6)":
 
     waitCallback(d)
     check d.retCode == RET_OK
-    check cborDecode(callbackBytes(d), string).value == "guard-fired"
+    check cborDecode(payload(d), string).value == "guard-fired"
 
     let nestedMsg = gReentrantNestedRes.recv()
     check nestedMsg.startsWith("err:")
@@ -702,7 +644,7 @@ proc createSimpleCtx(): ptr FFIContext[SimpleLib] =
   waitCallback(ctorD)
   if ctorD.retCode != RET_OK:
     return nil
-  let ctxAddr = ctorAddrFromCbor(callbackBytes(ctorD))
+  let ctxAddr = ctorAddrFromCbor(payload(ctorD))
   if ctxAddr == 0:
     return nil
   SimpleLibFFIPool.resolveCtx(cast[FFICtxToken](ctxAddr))

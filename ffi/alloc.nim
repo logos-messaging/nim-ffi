@@ -4,8 +4,6 @@
 
 import system/ansi_c
 
-type SharedSeq*[T] = tuple[data: ptr UncheckedArray[T], len: int]
-
 proc alloc*(str: cstring): cstring =
   ## Fresh null-terminated `c_malloc` copy of `str`; free with `dealloc(cstring)`.
   ## Nil when the allocation fails.
@@ -45,25 +43,3 @@ proc allocBox*(size: int): pointer =
 proc freeBox*(p: pointer) =
   if not p.isNil():
     c_free(p)
-
-proc allocSharedSeq*[T](s: seq[T]): SharedSeq[T] =
-  ## `(nil, 0)` for an empty seq and for a failed allocation.
-  if s.len == 0:
-    return (cast[ptr UncheckedArray[T]](nil), 0)
-
-  let data = c_malloc(csize_t(sizeof(T) * s.len))
-  if data.isNil():
-    return (cast[ptr UncheckedArray[T]](nil), 0)
-  copyMem(data, unsafeAddr s[0], sizeof(T) * s.len)
-  return (cast[ptr UncheckedArray[T]](data), s.len)
-
-proc deallocSharedSeq*[T](s: var SharedSeq[T]) =
-  if not s.data.isNil():
-    c_free(s.data)
-  s.len = 0
-
-proc toSeq*[T](s: SharedSeq[T]): seq[T] =
-  var ret = newSeq[T]()
-  for i in 0 ..< s.len:
-    ret.add(s.data[i])
-  return ret

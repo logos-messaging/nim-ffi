@@ -4,70 +4,12 @@ import std/[atomics, locks, os, strutils]
 import unittest2
 import results
 import ffi
+import ./helpers
 
 type TestEvtLib = object
 
 type LatchPayload* {.ffi.} = object
   iter*: int
-
-type CallbackData = object
-  lock: Lock
-  cond: Cond
-  called: bool
-  retCode: cint
-  msg: array[1024, byte]
-  msgLen: int
-
-proc initCallbackData(d: var CallbackData) =
-  d.lock.initLock()
-  d.cond.initCond()
-
-proc deinitCallbackData(d: var CallbackData) =
-  d.cond.deinitCond()
-  d.lock.deinitLock()
-
-template setupCallbackData(name: untyped) =
-  var name: CallbackData
-  initCallbackData(name)
-  defer:
-    deinitCallbackData(name)
-
-proc captureCb(
-    retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
-) {.cdecl, gcsafe, raises: [].} =
-  let d = cast[ptr CallbackData](userData)
-  acquire(d[].lock)
-  d[].retCode = retCode
-  let n = min(int(len), d[].msg.len)
-  if n > 0 and not msg.isNil():
-    copyMem(addr d[].msg[0], msg, n)
-  d[].msgLen = n
-  d[].called = true
-  signal(d[].cond)
-  release(d[].lock)
-
-proc waitCallback(d: var CallbackData) =
-  acquire(d.lock)
-  while not d.called:
-    wait(d.cond, d.lock)
-  release(d.lock)
-
-proc resetCalled(d: var CallbackData) =
-  acquire(d.lock)
-  d.called = false
-  release(d.lock)
-
-proc waitCallbackTimeout(d: var CallbackData, timeoutMs: int): bool =
-  let deadline = Moment.now() + timeoutMs.milliseconds
-  while true:
-    acquire(d.lock)
-    let done = d.called
-    release(d.lock)
-    if done:
-      return true
-    if Moment.now() >= deadline:
-      return false
-    os.sleep(10)
 
 template withPool(ctxIdent: untyped, body: untyped) =
   var pool: FFIContextPool[TestEvtLib]
@@ -128,14 +70,14 @@ suite "event delivery is asynchronous":
         addEventListener(ctx[].eventRegistry, "latch", captureThreadIdCb, addr evt)
 
       check sendRequestToFFIThread(
-        ctx, CaptureFfiTidRequest.ffiNewReq(captureCb, addr rsp)
+        ctx, CaptureFfiTidRequest.ffiNewReq(testCallback, addr rsp)
       )
         .isOk()
       waitCallback(rsp)
 
       resetCalled(rsp)
       check sendRequestToFFIThread(
-        ctx, EmitLatchEvent.ffiNewReq(captureCb, addr rsp, 0)
+        ctx, EmitLatchEvent.ffiNewReq(testCallback, addr rsp, 0)
       )
         .isOk()
       waitCallback(rsp)
@@ -160,14 +102,15 @@ suite "FFI thread independence":
       discard addEventListener(ctx[].eventRegistry, "latch", slowSleepCb, nil)
 
       check sendRequestToFFIThread(
-        ctx, EmitLatchEvent.ffiNewReq(captureCb, addr rsp, 0)
+        ctx, EmitLatchEvent.ffiNewReq(testCallback, addr rsp, 0)
       )
         .isOk()
       waitCallback(rsp)
       resetCalled(rsp)
 
       let started = Moment.now()
-      check sendRequestToFFIThread(ctx, PingEvent.ffiNewReq(captureCb, addr rsp)).isOk()
+      check sendRequestToFFIThread(ctx, PingEvent.ffiNewReq(testCallback, addr rsp))
+        .isOk()
       waitCallback(rsp)
       let elapsed = Moment.now() - started
 
@@ -190,7 +133,7 @@ when not defined(gcRefc):
         discard pool.destroyFFIContext(ctx)
 
       discard addEventListener(
-        ctx[].eventRegistry, NotRespondingEventName, captureCb, addr notif
+        ctx[].eventRegistry, NotRespondingEventName, testCallback, addr notif
       )
 
       # Wait out the start-delay so the heartbeat check is armed.
@@ -201,7 +144,7 @@ when not defined(gcRefc):
         # long enough to cross a tick boundary
         (EventThreadTickInterval + FFIHeartbeatStaleThreshold).milliseconds.int + 1500
       check sendRequestToFFIThread(
-        ctx, BlockingRequest.ffiNewReq(captureCb, addr rsp, wedgeMs)
+        ctx, BlockingRequest.ffiNewReq(testCallback, addr rsp, wedgeMs)
       )
         .isOk()
       waitCallback(rsp)
@@ -264,12 +207,12 @@ suite "queue overflow":
     withPool(ctx):
       discard addEventListener(ctx[].eventRegistry, "latch", backpressureCb, addr bp)
       discard addEventListener(
-        ctx[].eventRegistry, NotRespondingEventName, captureCb, addr notif
+        ctx[].eventRegistry, NotRespondingEventName, testCallback, addr notif
       )
 
       # Listener blocks the drain so later enqueues pile up undrained.
       check sendRequestToFFIThread(
-        ctx, EmitLatchEvent.ffiNewReq(captureCb, addr rsp, -1)
+        ctx, EmitLatchEvent.ffiNewReq(testCallback, addr rsp, -1)
       )
         .isOk()
       waitCallback(rsp)
@@ -281,7 +224,7 @@ suite "queue overflow":
 
       resetCalled(rsp)
       check sendRequestToFFIThread(
-        ctx, BurstEmit.ffiNewReq(captureCb, addr rsp, EventQueueCapacity + 8)
+        ctx, BurstEmit.ffiNewReq(testCallback, addr rsp, EventQueueCapacity + 8)
       )
         .isOk()
       waitCallback(rsp)
@@ -289,7 +232,7 @@ suite "queue overflow":
       check ctx.eventQueueStuck.load()
 
       let res =
-        sendRequestToFFIThread(ctx, PingEvent.ffiNewReq(captureCb, addr rejected))
+        sendRequestToFFIThread(ctx, PingEvent.ffiNewReq(testCallback, addr rejected))
       check res.isErr()
       check res.error.contains("stuck")
 

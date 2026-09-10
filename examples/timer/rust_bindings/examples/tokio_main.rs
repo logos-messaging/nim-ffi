@@ -1,4 +1,4 @@
-//! Tokio (async) example: same shape as `main.rs` but exercises the async `_async` API
+//! Tokio (async) example: same shape as `sync_main.rs` but exercises the async `_async` API
 //! and bridges library events into a tokio mpsc for async consumption.
 //!
 //! Run with: `cargo run --example tokio_main`

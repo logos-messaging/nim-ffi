@@ -6,7 +6,7 @@ on:
       test:
         required: true
         type: string
-        description: Space-separated tests/unit base names, e.g. 'test_alloc' or 'test_a test_b'. Every one runs; the step fails at the end if any did.
+        description: Space-separated tests/unit base names, e.g. 'test_serial' or 'test_a test_b'. Every one runs; the step fails at the end if any did.
       nim-versions:
         required: true
         type: string
@@ -30,6 +30,7 @@ jobs:
         mm: [orc, refc]
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     # Mapped inline rather than through `include`: an include entry whose `os` is
     # not in the matrix would add a combination of its own instead of a label.
     name: ${{ matrix.os == 'ubuntu-22.04' && 'Linux' || matrix.os == 'macos-15' && 'macOS' || 'Windows' }} · Nim ${{ matrix.nim-version }} · ${{ matrix.mm }}
@@ -70,7 +71,9 @@ jobs:
         run: |
           nimble setup --localdeps -y
 
+      # `buildffi` hardcodes --mm:orc, so the refc leg would rebuild the same lib.
       - name: Build
+        if: matrix.mm == 'orc'
         shell: bash
         run: |
           if [ "$RUNNER_OS" == "Windows" ]; then

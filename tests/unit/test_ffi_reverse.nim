@@ -118,6 +118,13 @@ registerReqFFI(CallSleepyRequest, lib: ptr TestRevLib):
       return err(r.error)
     return ok("slept")
 
+registerReqFFI(CallProbeRequest, lib: ptr TestRevLib):
+  proc(): Future[Result[string, string]] {.async.} =
+    let r = await ffiReverseCall("probe", @[], 5000)
+    if r.isErr():
+      return err(r.error)
+    return ok("probed")
+
 registerReqFFI(CallGateRequest, lib: ptr TestRevLib):
   proc(): Future[Result[string, string]] {.async.} =
     let r = await ffiReverseCall("gate", @[], 30000)
@@ -179,6 +186,21 @@ proc slowImpl(
   box[].entered.store(true)
   os.sleep(60)
   box[].exited.store(true)
+
+type WorkerProbe = object
+  ctx: ptr FFIContext[TestRevLib]
+  sawFlag: ptr Atomic[bool]
+
+proc probeImpl(
+    callId: uint64,
+    argsCbor: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
+) {.cdecl, gcsafe, raises: [].} =
+  ## Reports the thread marker the pool's idle reap reads.
+  let p = cast[ptr WorkerProbe](userData)
+  p[].sawFlag[].store(onReverseWorker)
+  discard submitReverseReply(p[].ctx, callId, RET_OK, nil, 0)
 
 proc waitParked(box: var ParkBox): uint64 =
   acquire(box.lock)

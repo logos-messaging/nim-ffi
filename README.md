@@ -22,10 +22,8 @@ requires "https://github.com/logos-messaging/nim-ffi >= 0.3.0"
   `{.ffiDtor.}`, `{.ffiStatic.}`, `{.ffiEvent.}`).
 - You **call `genBindings()` last**, which emits the foreign bindings.
 
-By default, every request/response crosses the boundary as a single CBOR blob
-(the wire format is configurable per library or per annotation — see
-[ABI format](#abi-format)); the ctx handle returned by the constructor is the
-only pointer that crosses. Each `{.ffi.}` proc runs on the library's own chronos
+Every request/response crosses the boundary as a single CBOR blob; the ctx
+handle returned by the constructor is the only pointer that crosses. Each `{.ffi.}` proc runs on the library's own chronos
 event loop, so bodies can `await` freely.
 
 ## Minimal example
@@ -40,8 +38,7 @@ type Counter = object
 declareLibrary("counter", Counter)
 
 # 2. Request/response shapes. Any {.ffi.} object or enum type becomes a
-#    first-class struct/class in the generated bindings and rides the wire in
-#    the library's ABI format (CBOR by default).
+#    first-class struct/class in the generated bindings and rides the CBOR wire.
 type BumpRequest {.ffi.} = object
   by: int
 
@@ -75,8 +72,8 @@ The generated C export names are the snake_case form of the proc names, e.g.
 
 | Pragma | Applies to | Purpose |
 | --- | --- | --- |
-| `declareLibrary(name, LibType[, defaultABIFormat])` | call | Registers the library, its state type, and the default wire format. Must run before any annotation. |
-| `{.ffi.}` on a `type` | `object`, `enum` | Registers the type for binding generation; it serializes via the library's ABI format (CBOR by default). Enums are CBOR-only — see below. |
+| `declareLibrary(name, LibType)` | call | Registers the library and its state type. Must run before any annotation. |
+| `{.ffi.}` on a `type` | `object`, `enum` | Registers the type for binding generation; it serializes as CBOR. |
 | `{.ffi.}` on a `proc` | proc | Exposes a method. First param is the library value, then typed params; returns `Future[Result[T, string]]`. |
 | `{.ffiStatic.}` | proc | Exposes a context-independent proc: no library param, and its wrapper takes no ctx — see below. |
 | `{.ffiCtor.}` | proc | The constructor. Returns `Future[Result[LibType, string]]`; creates the FFI context. |
@@ -112,10 +109,6 @@ reordering or renumbering values doesn't break an already-deployed peer.
 Explicit ordinals are carried into the foreign enum so the two sides agree if
 you ever cast.
 
-Enums are supported on the CBOR wire only. Reaching one from an `abi = c` type
-or proc is a compile error naming the type — the `abi = c` `_CWire` structs have
-no enum form yet.
-
 ### Constants
 
 `{.ffiConst.}` copies a Nim `const` into the generated bindings, so callers
@@ -147,7 +140,7 @@ compile error. The value is whatever the const evaluates to, so computed
 expressions arrive folded. Names are re-cased to `UPPER_SNAKE`, preserving
 acronyms (`httpTTL` → `HTTP_TTL`). A constant is a compile-time value in each
 language, not a symbol exported by the shared library — it never crosses the
-wire, so `{.ffiConst.}` is ABI-agnostic.
+wire.
 
 ### Doc comments
 
@@ -211,10 +204,7 @@ stops the thread pair and frees the slot; it is only sound once nothing will cal
 a `{.ffiStatic.}` proc again, so it is meant for process shutdown and tests.
 
 The macro rejects an `{.ffiHandle.}` parameter or return: a handle is registered
-in the context that created it, which a static proc cannot reach. Under
-`abi = c` a static replies with a `string` or an `{.ffi.}` object type — a scalar
-return is wired only for an all-scalar `{.ffi.}` method, which rides the
-[CBOR-free fast path](#abi-format) through the ctx a static doesn't have.
+in the context that created it, which a static proc cannot reach.
 
 ### The teardown contract
 
@@ -241,6 +231,22 @@ Quarantine costs one of the 32 slots permanently, so a library that habitually
 overruns its teardown will exhaust the pool. `FFIContextPool.quarantinedSlots()`
 reports the count from Nim, every quarantine is logged at `error`, and so is the
 pool-exhausted error once any slot has been quarantined.
+
+### Process exit
+
+`<lib>_ctx_destroy` recycles: the slot's FFI and event thread pair stays up for
+the next owner. Once no context is live the pool joins that pair, so a host that
+destroys what it created leaves no thread of the library running. A finalize
+under a live thread crashes the process, which is what this avoids.
+
+Two cases keep a pair alive anyway: a host that exits still owning a context, and
+a `{.ffiStatic.}` call, whose shared context holds its slot for the life of the
+process. `<lib>_shutdown()` stops both, from `atexit` or the last line of `main`.
+It returns 0 when every context stopped, 1 when one was left running. A context
+you had not destroyed still runs its `{.ffiDtor.}` on the way out, so do not
+repeat that cleanup yourself. Its slot is quarantined all the same, because
+nothing freed the library object: later calls on that handle fail, and the slot
+is gone from the pool's 32.
 
 ### The result callback contract
 
@@ -319,8 +325,10 @@ same code is correct under `refc` and `orc`).
 
 Workers are per context, started lazily by the first `set_impl` (or ahead of
 time via `<lib>_start_reverse_workers(ctx, n)`), sized by
-`-d:ffiReverseWorkers` (default 2), stopped and joined at context destroy. A
-library without any `{.ffiReverse.}` never links the worker harness.
+`-d:ffiReverseWorkers` (default 2). They follow the slot's other threads: a
+recycle that parks an idle slot stops them too, the next `set_impl` on that slot
+starts them again, and `<lib>_shutdown` ends them with the rest. A library
+without any `{.ffiReverse.}` never links the worker harness.
 
 Generated C surface per library (CBOR ABI only):
 
@@ -374,46 +382,13 @@ Semantics worth knowing:
 | `set_impl` during an in-flight invocation | Replaces for new calls; returns only after the old impl's invocation finished, so its `user_data` may be freed right after. | Mirrors `remove_event_listener`'s wait-out contract. |
 | A worker stuck inside one impl | Reported once via the `reverse_worker_blocked {worker, callId}` liveness event after `ReverseWorkerStallMs` (default = the call timeout), `reverse_worker_recovered` when it returns; the pull model never feeds a busy worker. | Noticed and not fed, per the requirement; the other workers keep serving. |
 | Context recycle with calls in flight | Pending calls fail *before* the drain; the old owner's impls are cleared and waited out with a `RecycleTimeout` bound — a worker still inside an impl quarantines the slot (`RecycleFailure.ReverseImplBlocked`). | Otherwise the drain would wait out the reverse deadline, and a wedged plugin would hang the recycle. |
-| Context destroy with a worker stuck | Workers are stopped and joined within `ReverseWorkerJoinTimeoutMs` (1.5 s); a wedged one is leaked with the slot and reported. | Freeing resources under a live thread is unsafe. |
+| Context destroy, park or `<lib>_shutdown` with a worker stuck | Workers are stopped and joined within the caller's bound; a wedged one is leaked with the slot and reported. | Freeing resources under a live thread is unsafe. |
+| A host impl calls a teardown export from inside the impl | The idle reap skips a call made on one of the library's own threads, and the worker stop skips the worker it runs on (leaking that one) — the call returns instead of joining a thread to itself. | Host code can call any export, including the one that stops the thread running it. |
 | `{.ffiReverseEvent.}` emit | Fire-and-forget: the return code reports the enqueue only; the handler runs on the FFI processing thread via the normal request queue. | It is sugar over the one-way request path. |
 
-Current limits: CBOR ABI only (`abi = c` libraries with reverse declarations
-fail C binding generation), `{.ffiHandle.}` params are rejected in reverse
-calls, and reverse calls must be awaited on the FFI processing thread (i.e. from
-inside `{.ffi.}` handlers).
-
-### ABI format
-
-The wire format is chosen **in code**, never by a compile flag. Override the
-library default with `declareLibrary("lib", Lib, defaultABIFormat = "c")`, or
-per annotation with an `"abi = ..."` spec, e.g. `{.ffi: "abi = c".}`. The
-`-d:targetLang` flag (below) picks which *language* the bindings are emitted
-for; it does not change the wire.
-
-`cbor` is the default and fully-supported format: every proc, ctor, dtor and
-event serializes through the generic CBOR path, and all binding generators emit
-working callers for it.
-
-`abi = c` is a newer, native C-struct wire (no CBOR round-trip). The single `c`
-generator (`-d:targetLang=c`) emits its callers, choosing the `abi = c` or CBOR
-header shape from the library's ABI format. It carries two honest limits today:
-
-- **Events are CBOR-only.** Applying `abi = c` to an `{.ffiEvent.}` proc is a
-  hard compile error; declare events with `abi = cbor` (they ride CBOR
-  internally regardless of the library default).
-- **Enums are CBOR-only.** A `{.ffi.}` enum in an `abi = c` library, or reached
-  from an `abi = c` type or proc, is a hard compile error naming the type.
-- **All-scalar `abi = c` procs bind only in the `abi = c` C header.** A
-  `{.ffi: "abi = c".}` method whose params and return are all scalars — ints,
-  floats, bools; a `string` return is fine, a `string` param is not — takes a
-  CBOR-free fast path, and its C wrapper passes the args inline instead of
-  packing a request struct. Only the `abi = c` C header emits that shape. The
-  CBOR C header and the `cpp`, `rust` and `cddl` targets have no scalar codegen
-  and would silently omit the proc, so `genBindings()` fails and names it. Fix
-  it by generating C bindings from an `abi = c` library, switching the proc to
-  `abi = cbor`, giving it a non-scalar param, or passing
-  `-d:ffiAllowScalarSkip` to accept the omission — the proc still works over the
-  fast path, it's just absent from the bindings.
+Current limits: `{.ffiHandle.}` params are rejected in reverse calls, and
+reverse calls must be awaited on the FFI processing thread (i.e. from inside
+`{.ffi.}` handlers).
 
 ## Placement of `genBindings()`
 
@@ -451,9 +426,7 @@ nim c -d:ffiGenBindings -d:targetLang=rust,cpp,c --compileOnly mylib.nim
 
 - `-d:targetLang` — which generator(s) run; pass a comma-separated list to emit
   several from one compile:
-  - **Language bindings:** `rust` (default), `cpp`, `c`. The `c` target follows
-    the library's ABI format — an `abi = c` C-struct header for `abi = c`, a CBOR
-    header otherwise; `rust`/`cpp` speak CBOR.
+  - **Language bindings:** `rust` (default), `cpp`, `c`. All three speak CBOR.
   - **`cddl`** — a CDDL schema of the CBOR wire, not a language binding at all.
 - `-d:ffiOutputDir` — override where the generated files land. Defaults to
   `<lang>_bindings/` next to the compiled source.

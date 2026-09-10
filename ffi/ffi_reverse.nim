@@ -109,9 +109,9 @@ type
 
   ReverseWakeFn* = proc(ud: pointer) {.nimcall, gcsafe, raises: [].}
   ReverseGenerationFn* = proc(ud: pointer): uint {.nimcall, gcsafe, raises: [].}
-  ReverseStopFn* = proc(st: var FFIReverseState): tuple[stopped, leaked: int] {.
-    nimcall, gcsafe, raises: []
-  .}
+  ReverseStopFn* = proc(
+    st: var FFIReverseState, timeoutMs: int
+  ): tuple[stopped, leaked: int] {.nimcall, gcsafe, raises: [].}
 
   FFIReverseState* = object
     lock*: Lock
@@ -135,6 +135,15 @@ type
     workerCount*: int
     leakedWorkers*: int # workers that never exited at stop; their memory stays
     stopFn*: ReverseStopFn # installed by startReverseWorkers, nil otherwise
+
+var onReverseWorker* {.threadvar.}: bool
+  ## True on a reverse worker thread. The pool's idle reap reads it: a host impl
+  ## may call any export, including one that tears the library down, and joining
+  ## the worker it runs on would join a thread to itself.
+
+var myWorkerIdx {.threadvar.}: int
+  # 1-based index of this thread in its pool (0 = not a reverse worker), so a
+  # stop reached from inside an impl can skip the one worker it cannot join.
 
 var reverseInDispatch {.threadvar.}: int
   # Dispatch depth of this thread, so an impl unregistering itself never waits
@@ -237,7 +246,7 @@ proc deinitReverseState*(st: var FFIReverseState) =
   ## Workers must have been stopped (`stopReverseWorkers`); a stop that leaked a
   ## worker keeps the locks and the worker array alive for it.
   if not st.stopFn.isNil() and st.workerCount > 0:
-    discard st.stopFn(st)
+    discard st.stopFn(st, ReverseWorkerJoinTimeoutMs)
   st.purgeQueue()
   st.freeAllReplies()
   st.impls = default(Table[string, FFIReverseImplEntry])
@@ -257,13 +266,25 @@ proc awaitReverseDispatch(st: var FFIReverseState) {.raises: [].} =
   while st.dispatching > 0 and reverseInDispatch == 0:
     wait(st.dispatchDone, st.lock)
 
+proc startReverseWorkers*(
+  st: var FFIReverseState, n: int = 0
+): bool {.raises: [], gcsafe.}
+
 proc setImpl*(
     st: var FFIReverseState, name: string, fn: FFIReverseImpl, userData: pointer
-) {.raises: [], gcsafe.} =
+): bool {.discardable, raises: [], gcsafe.} =
   ## Registers (or with `fn == nil` unregisters) the host implementation of
   ## `name`, replacing any previous one. Waits an in-flight invocation of the
   ## OLD impl out before returning, so the host may free the old userData as
   ## soon as this returns. A blocking old impl blocks this call for as long.
+  ##
+  ## Registering starts the context's reverse workers if they are not up yet —
+  ## the single lazy-start point, so every registration path (the generated
+  ## export, a Nim caller, a test) behaves the same. False only when the worker
+  ## threads could not be created; the impl is registered either way.
+  result = true
+  if not fn.isNil():
+    result = st.startReverseWorkers()
   withLock st.lock:
     if fn.isNil():
       st.impls.del(name)
@@ -454,7 +475,11 @@ proc runInvocation(
 proc reverseWorkerBody(arg: tuple[st: ptr FFIReverseState, idx: int]) {.thread.} =
   let st = arg.st
   let me = addr st[].workers[arg.idx]
+  onReverseWorker = true
+  myWorkerIdx = arg.idx + 1
   defer:
+    onReverseWorker = false
+    myWorkerIdx = 0
     me[].exited.store(true)
   while true:
     let rec = st[].popInvocation()
@@ -466,12 +491,13 @@ proc reverseWorkerBody(arg: tuple[st: ptr FFIReverseState, idx: int]) {.thread.}
       discard # the impl is cdecl raises: []; nothing else here can raise
 
 proc stopReverseWorkers*(
-    st: var FFIReverseState
+    st: var FFIReverseState, timeoutMs: int = ReverseWorkerJoinTimeoutMs
 ): tuple[stopped, leaked: int] {.nimcall, gcsafe, raises: [].} =
   ## Explicit stop: purges the queue, wakes every worker, and joins each within
-  ## `ReverseWorkerJoinTimeoutMs`. A worker still inside a host impl after that
-  ## is leaked (its thread, the worker array and the locks stay alive) and
-  ## counted in `leaked` / `st.leakedWorkers`. Idempotent.
+  ## `timeoutMs` (the caller's bound — a pool park passes its own). A worker
+  ## still inside a host impl after that is leaked (its thread, the worker array
+  ## and the locks stay alive) and counted in `leaked` / `st.leakedWorkers`.
+  ## Idempotent.
   var count = 0
   withLock st.qLock:
     count = st.workerCount
@@ -484,7 +510,13 @@ proc stopReverseWorkers*(
   var leaked = 0
   for i in 0 ..< count:
     let w = addr st.workers[i]
-    let deadline = nowNs() + int64(ReverseWorkerJoinTimeoutMs) * 1_000_000'i64
+    if onReverseWorker and myWorkerIdx == i + 1:
+      # A host impl called a teardown export from inside this very worker.
+      # `reapIfIdle` guards that path, `<lib>_shutdown` does not; either way a
+      # self-join would hang, so leak this one and stop the rest.
+      leaked.inc()
+      continue
+    let deadline = nowNs() + int64(max(timeoutMs, 0)) * 1_000_000'i64
     while not w[].exited.load() and nowNs() < deadline:
       sleep(1)
     if w[].exited.load():
@@ -500,7 +532,9 @@ proc stopReverseWorkers*(
     st.workers = nil
   (stopped, leaked)
 
-proc startReverseWorkers*(st: var FFIReverseState, n: int = 0): bool {.raises: [].} =
+proc startReverseWorkers*(
+    st: var FFIReverseState, n: int = 0
+): bool {.raises: [], gcsafe.} =
   ## Starts `n` workers (≤ 0 → `ReverseWorkersDefault`); idempotent — a running
   ## pool keeps its size. False only when thread creation failed. Safe from any
   ## thread; the generated `set_impl` export calls it before registering.

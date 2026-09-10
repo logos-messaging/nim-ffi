@@ -1,7 +1,7 @@
 ## C++ binding generator: header-only binding + CMakeLists, CBOR over the wire.
 
 import std/[os, strutils]
-import ./meta, ./string_helpers, ./c_cpp_common, ./types_ir, ./consts
+import ./meta, ./string_helpers, ./c_cpp_common, ./types_ir, ./consts, ../ret_codes
 
 ## Fixed 64-bit wire type for any Nim `ptr T` / `pointer`.
 const CppPtrType* = "uint64_t"
@@ -16,6 +16,7 @@ const
   SyncCallHelperTpl = staticRead("templates/cpp/sync_call_helper.hpp.tpl")
   ContextRuleOf5Tpl = staticRead("templates/cpp/context_rule_of_5.hpp.tpl")
   CMakeListsTpl = staticRead("templates/cpp/CMakeLists.txt.tpl")
+  FindRepoRootTpl = staticRead("templates/find_repo_root.cmake.part")
 
 func cppScalar(s: ScalarKind): string =
   case s
@@ -411,7 +412,7 @@ proc generateCppHeader*(
 ): string =
   var lines: seq[string] = @[]
 
-  lines.add(HeaderPreludeTpl)
+  lines.add(HeaderPreludeTpl.replace("{{RET_CODES}}", cRetCodeDefines()))
   if events.len > 0:
     lines.add("#include <unordered_map>")
 
@@ -551,6 +552,8 @@ proc generateCppHeader*(
       "int $1_emit_$2(void* ctx, const uint8_t* payload_cbor, size_t payload_len);" %
         [libName, rev.wireName]
     )
+  lines.add(renderBlockDocComment(ShutdownDoc))
+  lines.add("int $1_shutdown(void);" % [libName])
   lines.add("} // extern \"C\"")
   lines.add("")
 
@@ -770,7 +773,11 @@ proc generateCppHeader*(
 
 proc generateCppCMakeLists*(libName: string, nimSrcRelPath: string): string =
   let src = nimSrcRelPath.replace("\\", "/")
-  return CMakeListsTpl.multiReplace(("{{LIB}}", libName), ("{{SRC}}", src))
+  return CMakeListsTpl.multiReplace(
+    ("{{LIB}}", libName),
+    ("{{SRC}}", src),
+    ("{{FIND_REPO_ROOT}}", FindRepoRootTpl.strip(leading = false)),
+  )
 
 proc generateCppBindings*(
     procs: seq[FFIProcMeta],

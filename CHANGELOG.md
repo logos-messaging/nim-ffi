@@ -8,15 +8,15 @@ All notable changes to this project are documented in this file.
 - **Experimental reverse FFI** (#153): `{.ffiReverse.}` declares a
   host-implemented interface (plugin direction) — the library awaits it from an
   `{.ffi.}` handler, the host registers an implementation at runtime via the
-  generated `<lib>_set_<wire>_impl` export (invoked on the event dispatch
-  thread) and answers from any thread through `<lib>_reverse_reply`, with a
+  generated `<lib>_set_<wire>_impl` export and answers from any thread through
+  `<lib>_reverse_reply`, with a
   mandatory per-call deadline (`ReverseCallTimeoutMs` /
   `{.ffiReverse("wire", timeout = ms).}`). `{.ffiReverseEvent.}` declares a
   host-emitted event: the proc body is the handler, run on the FFI processing
   thread when the host calls the generated fire-and-forget `<lib>_emit_<wire>`
   export. Both ride CBOR; the C binding gains the raw declarations plus typed
   helpers (`_ctx_set_*_impl`, `_decode_*_args`, `_ctx_reverse_reply_*`,
-  `_ctx_emit_*`). CBOR ABI only for now.
+  `_ctx_emit_*`).
 - Reverse FFI runs host implementations on **per-context worker threads**
   instead of the event dispatch thread: an impl may block without stalling
   event delivery, and `-d:ffiReverseWorkers` (default 2) impls run
@@ -30,30 +30,21 @@ All notable changes to this project are documented in this file.
   still queued is skipped at dequeue — the impl never runs; a running one keeps
   its worker and its late reply is dropped. A recycle now bounds the wait for a
   running impl and quarantines the slot with `RecycleFailure.ReverseImplBlocked`.
-  Libraries without `{.ffiReverse.}` never link the worker harness.
+  Workers follow the slot's other threads: parking an idle slot stops them, the
+  next registration starts them again, and `<lib>_shutdown` ends them too. A
+  teardown export called from inside a host impl neither reaps nor joins the
+  worker it runs on. Libraries without `{.ffiReverse.}` never link the harness.
 - Reverse FFI in the C++ and Rust bindings: `set<X>Impl`/`set_<x>_impl` register
-  a `std::function` / `Fn` closure as the host implementation (invoked on the
-  event dispatch thread with decoded typed args), a copyable call token carries
+  a `std::function` / `Fn` closure as the host implementation (invoked on a
+  reverse worker thread with decoded typed args), a copyable call token carries
   typed `reply`/`fail` usable inline or from any host thread, `clear…` restores
   fail-fast, and `emit<X>`/`emit_<x>` fire `{.ffiReverseEvent.}`s with flattened
   typed parameters. Impl box lifetimes are owned by the ctx wrapper; replacement
   is safe mid-flight because `set_impl` waits the old impl's in-flight
   invocation out. CDDL schemas pick the reverse payload types up through the
   ordinary type registry.
-- The `abi = c` C header now declares the event-listener ABI that
-  `declareLibrary` always exports (`<lib>_add_event_listener` /
-  `<lib>_remove_event_listener`) and the `FFICallBack` typedef they take, so a
-  consumer needs no hand-written header. The typed listener machinery for
-  `{.ffiEvent.}` is still unsupported under `abi = c`.
-- The `abi = c` C header is self-contained: it emits the `<stdint.h>` /
-  `<stddef.h>` includes, the `NIMFFI_RET_*` status codes, and short
-  `#ifndef`-guarded `RET_*` aliases for consumers that use the unprefixed names.
 - Each `{.ffi.}` proc's `##` doc comment reaches the generated C header as a
   `/** ... */` block above the declaration and its wrapper.
-- `declareLibrary` accepts the `ABIFormat` enum for `defaultABIFormat`, so
-  `defaultABIFormat = ABIFormat.C` compiles alongside the `"c"` string.
-- `declareLibrary` takes an optional `headerBanner` argument, stamped as a
-  `//`-comment block at the top of every generated C header.
 - `genBindings()` fails compilation when a library declares an `{.ffiCtor.}` but
   no `{.ffiDtor.}`, so the context a constructor builds always has a way to be
   released.
@@ -101,6 +92,26 @@ All notable changes to this project are documented in this file.
   router would silently give it the ctor ABI instead.
 
 ### Changed
+- **The generated `NIMFFI_RET_*` codes come from the Nim constants.** The four
+  codes were typed by hand in the C template, the C++ template and the Rust
+  generator, and they had already drifted: the C header defined
+  `NIMFFI_RET_ERROR` where every other copy defined `NIMFFI_RET_ERR`. All three
+  generators now render their block from `ffi/ret_codes.nim`, so the C header
+  spells the failure code `NIMFFI_RET_ERR` and the Rust crate gains the
+  `NIMFFI_RET_ERR` constant it lacked. A C host that used the old name must
+  rename it.
+- **`<lib>_ctx_destroy` now takes the library's threads down with the last
+  context.** A destroy still recycles, handing the slot's thread pair to the next
+  owner; once no context is live the pool joins that pair, and the next create
+  restarts it. Before, those threads outlived every destroy, so the C runtime
+  finalized the library under them and the process crashed at exit. A cycle still
+  costs no fd: the slot keeps its `ThreadSignalPtr`s, and each thread closes its
+  chronos dispatcher on the way out.
+- **The event-queue defines are `ffi`-prefixed.** `-d:EventQueueCapacity`,
+  `-d:MaxEventPayloadBytes` and `-d:MaxEventNameBytes` are now
+  `-d:ffiEventQueueCapacity`, `-d:ffiMaxEventPayloadBytes` and
+  `-d:ffiMaxEventNameBytes`, so they cannot collide with another package's
+  defines. The Nim constant names are unchanged.
 - **A submit now has two limits, and fails instead of accepting without bound.**
   The ingress queue took every request a producer offered, so a producer faster
   than the FFI thread — or any producer once that thread is wedged — grew memory
@@ -108,12 +119,35 @@ All notable changes to this project are documented in this file.
   its ingress queue holds `-d:ffiRequestQueueDepth` (1024) requests, or once its
   payload passes `-d:ffiMaxRequestPayloadBytes` (8 MiB). Ingress is sharded over
   16 queues, so a context holds at most 16384 requests. The payload cap measures
-  the buffer the request owns: on the `abi = c` path that is the packed wire
-  struct, and the buffers its fields point at stay uncounted, because that path
-  trusts its caller. Both limits come back as the error the submit already
-  returns, which the generated entry points report as `RET_ERR` through the
+  the CBOR buffer the request owns. Both limits come back as the error the
+  submit already returns, which the generated entry points report as `RET_ERR` through the
   callback, so a host that stays under the limits sees no change. Raise either
   define if your host needs more.
+
+### Removed
+- **The `abi = c` wire is gone; CBOR is the only wire.** `declareLibrary` takes
+  the library name and its type alone, and no annotation accepts an
+  `"abi = ..."` argument. With it go the `_CWire` companions and their codec
+  (`c_macro_helpers.nim`, `c_wire.nim`), the CBOR-free scalar fast path
+  (`ffi_scalar.nim`, `-d:ffiAllowScalarSkip`), the second C header shape
+  (`generateCAbiLibHeader`), `examples/echo/c_abi_bindings/`, and the
+  `*_c_abi_*` tasks, tests and CI jobs, along with the `bench_codec` benchmark
+  that compared the two wires. A 0.3.x library that declared `abi = c` moves to
+  CBOR by dropping the argument and regenerating its bindings.
+- **`ffi/logging.nim`**, 98 vendored lines that every FFI thread called on
+  start. Each call re-installed the process-global chronicles writer, so up to
+  32 threads raced on it, and the module reconfigured the log level of the host
+  that loads the library. The repo compiles with a single chronicles sink, so
+  the writer install was a no-op anyway and only the level change survived.
+  A host configures chronicles itself.
+- `declareLibrary`'s `headerBanner` argument, which nothing passed.
+- `SharedSeq` / `allocSharedSeq` / `deallocSharedSeq` / `toSeq` from
+  `ffi/alloc.nim`, `cborFreeShared`, `eventQueueLen`, and the `git_version`
+  define: no call sites outside their own tests.
+- Nimble tasks `genbindings_example`, `test_alloc`, `test_ffi`, `test_serial`
+  and `bench_codec`, plus the unused `taskpools` dependency in `ffi.nimble` and
+  both example `.nimble` files. The example `.nimble` files keep `build` only:
+  their `genbindings_*` copies duplicated the root tasks.
 
 ### Fixed
 - **A context whose teardown did not finish is quarantined, not recycled.**

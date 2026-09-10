@@ -35,9 +35,14 @@ unsafe fn ffi_payload(ret: c_int, msg: *const c_char, len: usize) -> FFIResult {
     else        { Err(String::from_utf8_lossy(&bytes).into_owned()) }
 }
 
-// nim-ffi result-callback status codes (mirror ffi/ffi_types.nim).
+// nim-ffi result-callback status codes, emitted from ffi/ret_codes.nim.
+#[allow(dead_code)]
 const NIMFFI_RET_OK: c_int = 0;
+#[allow(dead_code)]
+const NIMFFI_RET_ERR: c_int = 1;
+#[allow(dead_code)]
 const NIMFFI_RET_MISSING_CALLBACK: c_int = 2;
+#[allow(dead_code)]
 const NIMFFI_RET_STALE_WARN: c_int = 3;
 
 unsafe extern "C" fn on_result(
@@ -58,7 +63,7 @@ unsafe extern "C" fn on_result(
     // `tx.send` returns Err only if the awaiting future was dropped (and with it
     // the Receiver): e.g. tokio::time::timeout elapsed, a tokio::select! branch
     // lost the race, or the future was dropped before being awaited. This cannot
-    // happen with the current rust_client demo but may occur in arbitrary
+    // happen with the crate's own examples but may occur in arbitrary
     // downstream consumers, so we discard the Err safely.
     // Given that this is invoked from a Nim thread, we can't propagate the error by panicking or
     // returning a Result. Furthermore, an API dev may intentionally set a timeout in the await,
@@ -478,6 +483,15 @@ impl MyTimerCtx {
             ffi::my_timer_lib_version(cb, ud, req_bytes.as_ptr(), req_bytes.len())
         }).await?;
         decode_cbor::<String>(&raw_bytes)
+    }
+
+    /// Stop every context the library still holds and join their threads.
+    /// Call it before the process exits when a context is still alive, or when a
+    /// static proc built the shared context.
+    /// Returns 0 when every context stopped, 1 when one was left running.
+    /// This wrapper reports that as true.
+    pub fn shutdown() -> bool {
+        unsafe { ffi::my_timer_shutdown() == 0 }
     }
 
 }
