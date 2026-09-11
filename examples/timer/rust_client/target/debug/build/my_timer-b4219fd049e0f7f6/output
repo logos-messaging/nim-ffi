@@ -1,3 +1,0 @@
-cargo:rustc-link-search=/Users/schwarzy/dev/status/nim-ffi
-cargo:rustc-link-lib=my_timer
-cargo:rerun-if-changed=/Users/schwarzy/dev/status/nim-ffi/examples/timer/timer.nim
