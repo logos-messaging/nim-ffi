@@ -1,7 +1,4 @@
-## End-to-end reverse-FFI tests via a real FFIContext: handlers on the FFI
-## thread call `ffiReverseCall`, host impls run on the event dispatch thread and
-## answer through `submitReverseReply` — inline, from a foreign thread, late, or
-## never (timeout / recycle).
+## End-to-end reverse FFI through a real FFIContext and its reverse workers.
 
 import std/[locks, monotimes, os, strutils, times]
 import unittest2
@@ -54,12 +51,12 @@ proc waitCallback(d: var CallbackData) =
   release(d.lock)
 
 proc callbackMsg(d: var CallbackData): string =
-  result = newString(d.msgLen)
+  var msg = newString(d.msgLen)
   if d.msgLen > 0:
-    copyMem(addr result[0], addr d.msg[0], d.msgLen)
+    copyMem(addr msg[0], addr d.msg[0], d.msgLen)
+  return msg
 
-# Module-level, as declareLibrary emits it: a quarantined or leaked slot keeps
-# its threads alive, so the pool must outlive every test that claims from it.
+# Module-level: a leaked slot keeps its threads, so the pool outlives every test.
 var gPool: FFIContextPool[TestRevLib]
 
 template withPool(ctxIdent: untyped, body: untyped) =
@@ -206,8 +203,9 @@ proc waitParked(box: var ParkBox): uint64 =
   acquire(box.lock)
   while not box.got:
     wait(box.cond, box.lock)
-  result = box.callId
+  let callId = box.callId
   release(box.lock)
+  return callId
 
 type SleepyBox = object
   ctx: ptr FFIContext[TestRevLib]
@@ -348,8 +346,7 @@ suite "registration semantics":
 
 suite "teardown with a reverse call in flight":
   test "recycle fails the parked call instead of waiting out its deadline":
-    ## The handler's deadline (30 s) is far beyond RecycleWaitTimeout: destroy
-    ## succeeding in time proves failPendingReverse unparked the handler.
+    ## A 30 s deadline outlasts RecycleWaitTimeout, so a timely destroy proves the unpark.
     setupCallbackData(rsp)
     let ctx = gPool.createFFIContext().valueOr:
       check false
@@ -375,9 +372,6 @@ suite "teardown with a reverse call in flight":
     check "abandoned" in callbackMsg(rsp)
 
   test "destroy with a worker wedged in a host impl leaks it and reports":
-    ## The wedged worker cannot be joined: stopAndJoinThreads returns err after
-    ## ReverseWorkerJoinTimeoutMs and the pool leaks the slot instead of freeing
-    ## resources under a live thread.
     setupCallbackData(rsp)
     let ctx = gPool.createFFIContext().valueOr:
       check false
@@ -426,8 +420,7 @@ suite "teardown with a reverse call in flight":
 
 suite "reverse calls run concurrently":
   test "two blocking impls awaited by two requests overlap on two workers":
-    ## Each impl sleeps 150 ms on its worker. Serialized they would take
-    ## ≥300 ms; two workers finish both in well under that.
+    ## Two 150 ms impls: in series they take 300 ms or more.
     setupCallbackData(rspA)
     setupCallbackData(rspB)
     withPool(ctx):

@@ -65,9 +65,6 @@ const
   ReverseWorkerRecoveredEventName* = "reverse_worker_recovered"
 
 proc checkReverseWorkers[T](ctx: ptr FFIContext[T]) =
-  ## Reports a reverse worker stuck inside one host impl past
-  ## `ReverseWorkerStallMs`, and its recovery; the pull model never feeds a busy
-  ## worker, so this is a notice, not a repair. No-op while no worker exists.
   for t in ctx[].reverse.scanReverseWorkers(int64(ReverseWorkerStallMs) * 1_000_000'i64):
     if t.blocked:
       emitLivenessEvent(

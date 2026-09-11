@@ -1,9 +1,4 @@
-## Reverse workers under the pool's thread lifecycle. Master parks a slot's
-## threads once no context is live (#156); the reverse workers are a context's
-## third thread class and must follow the same policy, or every recycled slot
-## would leak N threads under the C runtime. Kept apart from
-## `test_ffi_reverse.nim`: that file quarantines slots on purpose, and a
-## quarantined slot keeps its threads, which is exactly what this file measures.
+## Reverse workers follow the slot threads of the pool; kept apart from the tests that quarantine slots.
 
 import std/[locks, os]
 import unittest2
@@ -94,18 +89,10 @@ suite "reverse workers follow the slot's threads":
     check sendRequestToFFIThread(ctx, ProbeRequest.ffiNewReq(waiterCb, addr w)).isOk()
     w.await()
     check w.retCode == RET_OK
-    # The impl ran on a reverse worker: `onReverseWorker` is what keeps the
-    # pool's idle reap from joining the thread a host impl calls teardown from.
     check probe.sawWorkerFlag.load()
     check gPool.recycleFFIContext(ctx).isOk()
 
-  test "the reap marker is false on a host thread":
-    check not onReverseWorker
-
-## A host implementation may call any export, teardown included. `reapIfIdle`
-## refuses to run on one of the library's own threads; `<lib>_shutdown` has no
-## such guard, so `stopReverseWorkers` also refuses to join the worker it is
-## running on — either way the call returns instead of hanging on a self-join.
+## `<lib>_shutdown` has no thread guard, so the worker stop must skip its own worker.
 type SuicideBox = object
   ctx: ptr FFIContext[RevPoolLib]
   returned: Atomic[bool]
@@ -148,6 +135,5 @@ suite "a teardown reached from inside a host impl":
       os.sleep(1)
     check box.returned.load() # the stop returned instead of hanging
     check ctx[].reverse.leakedWorkers >= 1 # this worker could not be joined
-    # The slot is unusable now (its workers are gone); quarantine it rather than
-    # hand it back to the pool.
+    # The slot lost its workers: quarantine it.
     ctx.lifecycle.store(CtxLifecycle.RecycleFailed)

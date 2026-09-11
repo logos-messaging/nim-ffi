@@ -222,9 +222,7 @@ static void test_event(MyTimerCtx* ctx) {
     assert(my_timer_ctx_remove_event_listener(ctx, handle) == true);
 }
 
-/* Reverse FFI: the library calls INTO the host. The impl runs on the event
- * dispatch thread, decodes the typed args, and answers inline through the
- * typed reply helper (the reply may equally come later from any thread). */
+/* Runs on a reverse worker: decodes the typed args and answers inline. */
 static void host_clock_impl(uint64_t call_id, const uint8_t* args, size_t len,
                             void* ud) {
     MyTimerCtx* ctx = (MyTimerCtx*)ud;
@@ -280,8 +278,7 @@ static void test_reverse_event(MyTimerCtx* ctx) {
     OnHostTickReq tick = {42};
     assert(my_timer_ctx_emit_on_host_tick(ctx, &tick) == 0);
 
-    /* Fire-and-forget: the handler runs on the FFI thread, so poll its effect
-     * through the last_host_tick method. */
+    /* Fire-and-forget: poll the effect of the handler. */
     long long seen = 0;
     for (int i = 0; i < 100 && seen != 42; i++) {
         ReplyWaiter w;

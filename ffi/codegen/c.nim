@@ -681,13 +681,10 @@ proc emitListenerApi(
 proc emitReverseMachinery(
     lines: var seq[string],
     reg: var CTypeReg,
-    ctxType, libType, libName: string,
+    ctxType, libName: string,
     reverse: seq[FFIReverseMeta],
     reverseEvents: seq[FFIReverseEventMeta],
 ) =
-  ## Typed sugar over the raw reverse exports: registration, args decode, reply
-  ## encode, and reverse-event emit. All stateless — the impl box lifetime stays
-  ## with the host (`user_data` is passed through verbatim).
   if reverse.len == 0 and reverseEvents.len == 0:
     return
   lines.add("/* Reverse FFI helpers (typed sugar over the raw exports above) */")
@@ -989,8 +986,7 @@ proc generateCLibHeader*(
   let (reqTypes, respTypes) =
     monomorphiseAll(reg, types, procs, classified.replyProcs(), events)
 
-  # Reverse direction: the host DECODES invocation args and ENCODES replies and
-  # reverse-event payloads, so those types need the opposite buffer adapters.
+  # The host decodes reverse args and encodes replies, so these need the opposite adapters.
   var revDecTypes: seq[string] = @[]
   var revEncTypes: seq[string] = @[]
   for r in reverse:
@@ -1062,9 +1058,8 @@ proc generateCLibHeader*(
   if reverse.len > 0:
     lines.add("#ifndef NIM_FFI_REVERSE_IMPL_DEFINED")
     lines.add("#define NIM_FFI_REVERSE_IMPL_DEFINED")
-    lines.add("/* Invoked on the library's event dispatch thread; return promptly and")
     lines.add(
-      "   answer (inline or later, from any thread) via <lib>_reverse_reply. */"
+      "/* Runs on a reverse worker thread and may block; answer via <lib>_reverse_reply. */"
     )
     lines.add(
       "typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, " &
@@ -1147,7 +1142,7 @@ proc generateCLibHeader*(
   emitConstructors(lines, reg, ctxType, libType, libName, ctors)
   emitDestructor(lines, ctxType, libName, classified.dtor, events)
   emitListenerApi(lines, ctxType, libType, libName, events)
-  emitReverseMachinery(lines, reg, ctxType, libType, libName, reverse, reverseEvents)
+  emitReverseMachinery(lines, reg, ctxType, libName, reverse, reverseEvents)
   for m in classified.replyProcs():
     emitProcWrapper(lines, reg, ctxType, libType, libName, m)
 

@@ -1738,14 +1738,26 @@ proc hasRealBody(prc: NimNode): bool {.compileTime.} =
       if child.kind != nnkCommentStmt:
         return true
     return false
-  true
+  return true
+
+type ReverseSpecs = object
+  wireName: string
+  timeoutNode: NimNode
+  timeoutMs: int
+
+proc cdeclExportPragma(name: string): NimNode {.compileTime.} =
+  return newTree(
+    nnkPragma,
+    ident("dynlib"),
+    newTree(nnkExprColonExpr, ident("exportc"), newStrLitNode(name)),
+    ident("cdecl"),
+    newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
+  )
 
 proc resolveReverseSpecs(
     leading: seq[NimNode], userProcName: NimNode
-): tuple[wireName: string, timeoutNode: NimNode, timeoutMs: int] {.compileTime.} =
-  ## Optional leading wire-name string literal, then an optional `timeout = <ms>`
-  ## int literal. `timeoutNode` is what the generated stub passes to
-  ## `ffiReverseCall`; without an override it names the library-default const.
+): ReverseSpecs {.compileTime.} =
+  ## Parses the optional wire-name literal and `timeout = <ms>`.
   var wireName = camelToSnakeCase($userProcName)
   var timeoutNode: NimNode = ident("ReverseCallTimeoutMs")
   var timeoutMs = 0
@@ -1761,20 +1773,19 @@ proc resolveReverseSpecs(
         "`.ffiReverse.`: unsupported argument " & arg.repr &
           "; expected an optional wire-name string literal and/or `timeout = <ms>`"
       )
-  (wireName, timeoutNode, timeoutMs)
+  return
+    ReverseSpecs(wireName: wireName, timeoutNode: timeoutNode, timeoutMs: timeoutMs)
 
 proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compileTime.} =
-  ## Host-implemented interface (reverse FFI). Emits the async caller stub —
-  ## encode args, `ffiReverseCall` over the event ring, decode the reply — and
-  ## the `<lib>_set_<wireName>_impl` C export that registers the host impl.
-  ## One parameter rides the wire directly; two or more are bundled into a
-  ## synthesised, registered `<WireNamePascalCase>Args` object, mirroring events.
+  ## Emits the async caller stub and the `<lib>_set_<wire>_impl` export.
   let procName = prc[0]
   var userProcName = procName
   if procName.kind == nnkPostfix:
     userProcName = procName[1]
 
-  let (wireName, timeoutNode, timeoutMs) = resolveReverseSpecs(leading, userProcName)
+  let specs = resolveReverseSpecs(leading, userProcName)
+  let wireName = specs.wireName
+  let timeoutNode = specs.timeoutNode
 
   if hasRealBody(prc):
     error(
@@ -1893,14 +1904,9 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
     )
   )
 
-  # `<lib>_set_<wireName>_impl(ctxToken, impl, userData)`: registers (or, with a
-  # nil impl, unregisters) the host implementation; replace semantics, waits an
-  # in-flight invocation of the old impl out before returning.
   let setImplName = currentLibName & "_set_" & wireName & "_impl"
   let poolIdent = ident(currentLibType & "FFIPool")
   let ctxIdent = ident("ctx")
-  # Registering starts the context's reverse workers lazily (idempotent), so
-  # the harness only ever runs in a context whose host fulfils an interface.
   let setBody = quote:
     when declared(initializeLibrary):
       initializeLibrary()
@@ -1910,15 +1916,6 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
     if not setImpl(`ctxIdent`[].reverse, `wireNameLit`, impl, userData):
       return REVERSE_WORKERS_FAILED
     return REVERSE_ACCEPTED
-
-  let cdeclExportPragma = proc(name: string): NimNode =
-    newTree(
-      nnkPragma,
-      ident("dynlib"),
-      newTree(nnkExprColonExpr, ident("exportc"), newStrLitNode(name)),
-      ident("cdecl"),
-      newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
-    )
 
   resultStmts.add(
     newProc(
@@ -1934,8 +1931,6 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
     )
   )
 
-  # Once per library: `<lib>_start_reverse_workers(ctxToken, n)` for hosts that
-  # want the workers warm before the first registration (n <= 0 → default).
   if currentLibName notin reverseStartEmittedFor:
     reverseStartEmittedFor.add(currentLibName)
     let startName = currentLibName & "_start_reverse_workers"
@@ -1973,7 +1968,7 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
           ""
         else:
           nimTypeNameRepr(replyType),
-      timeoutMs: timeoutMs,
+      timeoutMs: specs.timeoutMs,
       doc: extractDocComment(prc),
     )
   )
@@ -1983,12 +1978,7 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
   return resultStmts
 
 macro ffiReverse*(args: varargs[untyped]): untyped =
-  ## Declares a host-implemented interface (reverse FFI): the library calls the
-  ## bodyless proc, the host fulfils it at runtime via the generated
-  ## `<lib>_set_<wireName>_impl` export and answers through `<lib>_reverse_reply`.
-  ## FFI-thread only; the call parks on a chronos future under a deadline
-  ## (`timeout = <ms>` overrides `ReverseCallTimeoutMs`) while the thread keeps
-  ## processing requests. Explicit-only: `{.ffi.}` never routes here.
+  ## Declares a bodyless proc that the host implements at runtime.
   requireBeforeGenBindings("`.ffiReverse.`")
   requireLibraryDeclared("`.ffiReverse.`")
   if args.len < 1:
@@ -2001,9 +1991,7 @@ macro ffiReverse*(args: varargs[untyped]): untyped =
 proc buildFFIReverseEventProc(
     prc: NimNode, leading: seq[NimNode]
 ): NimNode {.compileTime.} =
-  ## Host-emitted event: sugar over the one-way request path. Emits the user's
-  ## proc untouched, a registerReqFFI handler that calls it on the FFI processing
-  ## thread, and the fire-and-forget `<lib>_emit_<wireName>` C export.
+  ## Emits the user proc, its request handler and the `<lib>_emit_<wire>` export.
   let procName = prc[0]
   var userProcName = procName
   if procName.kind == nnkPostfix:
@@ -2088,8 +2076,7 @@ proc buildFFIReverseEventProc(
     registerReqFFI(`reqType`, `ctxHandlerName`: `ptrFFICtx`):
       `lambdaNode`
 
-  # `<lib>_emit_<wireName>(ctxToken, payloadCbor, payloadLen)`: fire-and-forget —
-  # the return code only reports the enqueue (RET_OK / RET_ERR), never the handler.
+  # The return code reports the enqueue, never the handler.
   let emitName = currentLibName & "_emit_" & wireName
   let poolIdent = ident(currentLibType & "FFIPool")
   let ctxIdent = ident("ctx")
@@ -2110,8 +2097,8 @@ proc buildFFIReverseEventProc(
     let `sendResIdent` =
       try:
         ffi_context.sendRequestToFFIThread(`ctxIdent`, `reqPtrIdent`, `ctxGenIdent`)
-      except Exception as exc:
-        Result[void, string].err("sendRequestToFFIThread exception: " & exc.msg)
+      except Exception as e:
+        Result[void, string].err("sendRequestToFFIThread exception: " & e.msg)
     if `sendResIdent`.isErr():
       return RET_ERR
     return RET_OK
@@ -2126,13 +2113,7 @@ proc buildFFIReverseEventProc(
         newIdentDefs(ident("payloadLen"), ident("csize_t")),
       ],
       body = emitBody,
-      pragmas = newTree(
-        nnkPragma,
-        ident("dynlib"),
-        newTree(nnkExprColonExpr, ident("exportc"), newStrLitNode(emitName)),
-        ident("cdecl"),
-        newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
-      ),
+      pragmas = cdeclExportPragma(emitName),
     )
   )
 
@@ -2152,10 +2133,7 @@ proc buildFFIReverseEventProc(
   return resultStmts
 
 macro ffiReverseEvent*(args: varargs[untyped]): untyped =
-  ## Declares a host-emitted event: the proc body is the handler, run on the FFI
-  ## processing thread when the host calls the generated `<lib>_emit_<wireName>`
-  ## export with the CBOR-encoded `<WireNamePascalCase>Req` payload.
-  ## Explicit-only: `{.ffi.}`/`{.ffiEvent.}` never route here.
+  ## Declares a host-emitted event whose body runs on the FFI processing thread.
   requireBeforeGenBindings("`.ffiReverseEvent.`")
   requireLibraryDeclared("`.ffiReverseEvent.`")
   if args.len < 1:

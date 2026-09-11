@@ -60,9 +60,7 @@ type
     payloadTypeName*: string
     doc*: string
 
-  FFIReverseMeta* = object
-    ## Host-implemented interface from `{.ffiReverse.}`. `wireName` names both
-    ## the generated `<lib>_set_<wireName>_impl` export and the ring record.
+  FFIReverseMeta* = object ## Host-implemented interface from `{.ffiReverse.}`.
     wireName*: string
     nimProcName*: string
     libName*: string
@@ -72,10 +70,7 @@ type
     timeoutMs*: int ## 0 = library default (ReverseCallTimeoutMs)
     doc*: string
 
-  FFIReverseEventMeta* = object
-    ## Host-emitted event from `{.ffiReverseEvent.}`: the host calls the
-    ## generated `<lib>_emit_<wireName>` export, the Nim proc body handles it on
-    ## the FFI processing thread.
+  FFIReverseEventMeta* = object ## Host-emitted event from `{.ffiReverseEvent.}`.
     wireName*: string
     nimProcName*: string
     libName*: string

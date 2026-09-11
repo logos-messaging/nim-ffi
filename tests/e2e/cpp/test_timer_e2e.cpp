@@ -524,8 +524,7 @@ TEST(ReverseFFI, ClearImplRestoresFailFast) {
 }
 
 TEST(ReverseFFI, BlockingImplsRunConcurrentlyOnWorkers) {
-    // The impl may block: it runs on a reverse worker, not on a library thread.
-    // Two 150 ms impls awaited by two concurrent requests overlap on two workers.
+    // Two blocking 150 ms impls overlap on two reverse workers.
     auto ctx = makeCtx("rev-concurrent");
     ASSERT_TRUE(ctx->startReverseWorkers(2));
     ASSERT_TRUE(ctx->setFetchHostClockImpl(

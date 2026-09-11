@@ -79,8 +79,8 @@ The generated C export names are the snake_case form of the proc names, e.g.
 | `{.ffiCtor.}` | proc | The constructor. Returns `Future[Result[LibType, string]]`; creates the FFI context. |
 | `{.ffiDtor.}` | proc | The destructor. Exactly one param `(x: LibType)`; tears the context down. Must cancel and await everything it spawned — see [the teardown contract](#the-teardown-contract). |
 | `{.ffiEvent[: "wire_name"].}` | proc (empty body) | A library-initiated callback. Call the proc from any `{.ffi.}` handler to fire it. The wire name is optional — see below. |
-| `{.ffiReverse[("wire_name", timeout = ms)].}` | proc (no body) | **Experimental.** A host-implemented interface (plugin direction): the library calls it, the host fulfils it at runtime — see below. |
-| `{.ffiReverseEvent[: "wire_name"].}` | proc (with body) | **Experimental.** A host-emitted event: the body is the handler, run on the FFI processing thread — see below. |
+| `{.ffiReverse[("wire_name", timeout = ms)].}` | proc (no body) | **Experimental.** An interface that the library calls and the host implements at runtime. See below. |
+| `{.ffiReverseEvent[: "wire_name"].}` | proc (with body) | **Experimental.** A host-emitted event. The body is the handler and runs on the FFI processing thread. See below. |
 | `{.ffiHandle.}` | `ref object` | Marks a type as an opaque handle: it stays server-side and crosses the wire as a `uint64` id. |
 | `{.ffiConst.}` | `const` | Re-emits the value as a native constant in every generated binding — see below. |
 | `genBindings()` | call | Emits the bindings. Must be the **last** FFI call in the compilation root. |
@@ -300,52 +300,39 @@ you need a name that differs from the proc.
 
 ### Reverse FFI (experimental)
 
-Reverse FFI turns the direction around: the **library** declares an interface,
-the **host** fulfils it at runtime — the plugin pattern. Two pragmas, both
-CBOR-marshalled:
+Reverse FFI lets the library declare an interface that the host implements at
+runtime. Both pragmas use CBOR.
 
 ```nim
-# Host-implemented interface: bodyless, returns Future[Result[T, string]].
+# Host-implemented interface: no body, returns Future[Result[T, string]].
 proc fetchHostClock(precision: string): Future[Result[HostClock, string]] {.ffiReverse.}
 
-# Host-emitted event: the body is the handler, run on the FFI processing thread.
+# Host-emitted event: the body runs on the FFI processing thread.
 proc onHostTick(tickNo: int) {.ffiReverseEvent.} =
   lastHostTick = tickNo
 ```
 
-An `{.ffi.}` handler calls `fetchHostClock(...)` like any async proc. Under the
-hood the call parks on a chronos future keyed by a fresh call id and queues an
-invocation for the context's **reverse worker threads**, which invoke the host's
-registered implementation with `(call_id, args_cbor, len, user_data)`. The impl
-**may block**: it occupies one worker, never the FFI processing thread or the
-event dispatch thread, and N workers run N impls concurrently. The host answers
-from **any** thread via `<lib>_reverse_reply` (the reply crosses threads as a
-libc-malloc'd CBOR buffer and is decoded on the FFI thread's own heap, so the
-same code is correct under `refc` and `orc`).
-
-Workers are per context, started lazily by the first `set_impl` (or ahead of
-time via `<lib>_start_reverse_workers(ctx, n)`), sized by
-`-d:ffiReverseWorkers` (default 2). They follow the slot's other threads: a
-recycle that parks an idle slot stops them too, the next `set_impl` on that slot
-starts them again, and `<lib>_shutdown` ends them with the rest. A library
-without any `{.ffiReverse.}` never links the worker harness.
-
-Generated C surface per library (CBOR ABI only):
+An `{.ffi.}` handler awaits `fetchHostClock(...)` like any async proc. The call
+goes to the per-context reverse worker threads, which call the host
+implementation with `(call_id, args_cbor, len, user_data)`. The implementation
+may block one worker. The host answers from any thread through
+`<lib>_reverse_reply`. Workers start on the first `set_impl` or on
+`<lib>_start_reverse_workers(ctx, n)`; `-d:ffiReverseWorkers` sets the count
+(default 2).
 
 ```c
 int <lib>_set_<wire>_impl(void* ctx, FFIReverseImpl impl, void* user_data); /* NULL unregisters */
 int <lib>_reverse_reply(void* ctx, uint64_t call_id, int ret_code,
                         const uint8_t* reply_cbor, size_t reply_len);
 int <lib>_emit_<wire>(void* ctx, const uint8_t* payload_cbor, size_t payload_len);
+int <lib>_start_reverse_workers(void* ctx, int n);
 ```
 
-plus typed sugar on the ctx wrapper: `<lib>_ctx_set_<wire>_impl`,
-`<lib>_decode_<wire>_args`, `<lib>_ctx_reverse_reply_<wire>` (payload-less for a
-`void` reply), `<lib>_ctx_reverse_reply_err`, and `<lib>_ctx_emit_<wire>`.
-
-The C++ and Rust bindings expose the same surface natively. Both hand the impl a
-copyable **call token** whose `reply`/`fail` may be used inline or from any host
-thread after the impl returned:
+The C header adds typed helpers: `<lib>_ctx_set_<wire>_impl`,
+`<lib>_decode_<wire>_args`, `<lib>_ctx_reverse_reply_<wire>`,
+`<lib>_ctx_reverse_reply_err` and `<lib>_ctx_emit_<wire>`. The C++ and Rust
+bindings give the implementation a copyable call token with `reply` and `fail`,
+usable from any thread:
 
 ```cpp
 ctx->setFetchHostClockImpl([](MyTimerCtx::FetchHostClockCall call, const std::string& precision) {
@@ -363,32 +350,21 @@ let r = ctx.host_clock()?;           // Nim awaits the Rust impl
 ctx.emit_on_host_tick(7);            // reverse event, fire-and-forget
 ```
 
-The impl box lifetime is owned by the ctx wrapper in both languages; replace or
-clear is safe mid-flight because the dylib's `set_impl` waits an in-flight
-invocation of the old impl out before returning. `startReverseWorkers(n)` /
-`start_reverse_workers(n)` warm the pool ahead of the first registration. CDDL
-schemas carry the reverse args/reply/event payload types through the ordinary
-type registry.
+| Situation | Behavior |
+| --- | --- |
+| No implementation registered | The call fails at once. |
+| No reply before the deadline | The call fails after `ReverseCallTimeoutMs` (10 s) or the `timeout = ms` of the proc. |
+| Deadline or `cancelSoon()` while the call is queued | The worker skips the call, and the implementation never runs. |
+| Deadline or cancel while the implementation runs | The call fails at once, and the late reply is dropped by call id. |
+| `set_impl` while invocations run | Returns after every in-flight invocation finishes. |
+| A worker inside one implementation past `ReverseWorkerStallMs` | `reverse_worker_blocked` fires, then `reverse_worker_recovered` when it returns. |
+| Recycle while an implementation runs | Waits `RecycleTimeout`, then quarantines the slot with `RecycleFailure.ReverseImplBlocked`. |
+| Destroy, park or `<lib>_shutdown` with a stuck worker | The stuck worker leaks with the slot. |
+| A host implementation calls a teardown export | The call returns; the worker that runs it leaks and is not joined. |
+| `{.ffiReverseEvent.}` emit | The return code reports the enqueue only. |
 
-Semantics worth knowing:
-
-| Situation | Behavior | Why |
-| --- | --- | --- |
-| No impl registered at call time | The call fails immediately (`no host implementation registered for <wire>`). | Fail fast beats waiting out a deadline. |
-| Impl never replies | The call fails after its deadline — `ReverseCallTimeoutMs` (10 s, `-d:ffiReverseCallTimeoutMs=<ms>`), or per proc `{.ffiReverse("wire", timeout = ms).}`. | A handler parked forever would block context teardown. |
-| Deadline or `cancelSoon()` while the call is **still queued** | The invocation is skipped at dequeue — the impl never runs. | A burst of timeouts behind one slow plugin must not turn into a burst of wasted (and late) work. |
-| Deadline or cancel while the impl is **running** | The future fails now; the impl keeps its worker until it returns; its late `reverse_reply` is dropped by id. | Host code cannot be interrupted; dropping is the safe outcome. |
-| Late/duplicate/bogus `reverse_reply` | Accepted and silently dropped (call ids are monotonic and never reused within a slot claim). | Same reason. |
-| `set_impl` during an in-flight invocation | Replaces for new calls; returns only after the old impl's invocation finished, so its `user_data` may be freed right after. | Mirrors `remove_event_listener`'s wait-out contract. |
-| A worker stuck inside one impl | Reported once via the `reverse_worker_blocked {worker, callId}` liveness event after `ReverseWorkerStallMs` (default = the call timeout), `reverse_worker_recovered` when it returns; the pull model never feeds a busy worker. | Noticed and not fed, per the requirement; the other workers keep serving. |
-| Context recycle with calls in flight | Pending calls fail *before* the drain; the old owner's impls are cleared and waited out with a `RecycleTimeout` bound — a worker still inside an impl quarantines the slot (`RecycleFailure.ReverseImplBlocked`). | Otherwise the drain would wait out the reverse deadline, and a wedged plugin would hang the recycle. |
-| Context destroy, park or `<lib>_shutdown` with a worker stuck | Workers are stopped and joined within the caller's bound; a wedged one is leaked with the slot and reported. | Freeing resources under a live thread is unsafe. |
-| A host impl calls a teardown export from inside the impl | The idle reap skips a call made on one of the library's own threads, and the worker stop skips the worker it runs on (leaking that one) — the call returns instead of joining a thread to itself. | Host code can call any export, including the one that stops the thread running it. |
-| `{.ffiReverseEvent.}` emit | Fire-and-forget: the return code reports the enqueue only; the handler runs on the FFI processing thread via the normal request queue. | It is sugar over the one-way request path. |
-
-Current limits: `{.ffiHandle.}` params are rejected in reverse calls, and
-reverse calls must be awaited on the FFI processing thread (i.e. from inside
-`{.ffi.}` handlers).
+A reverse call takes no `{.ffiHandle.}` parameter, and only an `{.ffi.}` handler
+on the FFI processing thread can await it.
 
 ## Placement of `genBindings()`
 

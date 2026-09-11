@@ -140,12 +140,11 @@ proc ffiTeardownHook*[T](): var FFITeardownProc[T] =
   hook
 
 proc reverseWakeHook[T](ud: pointer) {.nimcall, gcsafe, raises: [].} =
-  ## Installed into the reverse state so a reply pushed from any thread wakes
-  ## the FFI thread. A failed wake is non-fatal: the loop polls every 100ms.
+  ## A failed wake is harmless: the FFI loop polls every 100ms.
   discard cast[ptr FFIContext[T]](ud).reqSignal.fireSync()
 
 proc reverseGenerationHook[T](ud: pointer): uint {.nimcall, gcsafe, raises: [].} =
-  cast[ptr FFIContext[T]](ud).generation.load()
+  return cast[ptr FFIContext[T]](ud).generation.load()
 
 proc closeThreadDispatcher() =
   ## chronos leaks a thread's dispatcher; free it last, once nothing polls (nim-chronos#614).
@@ -364,15 +363,13 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
 proc submitReverseReply*[T](
     ctx: ptr FFIContext[T], callId: uint64, retCode: cint, data: pointer, dataLen: int
 ): cint =
-  ## Parks a `{.ffiReverse.}` reply for the FFI thread and wakes it. Callable
-  ## from ANY host thread (the generated `<lib>_reverse_reply` resolves the
-  ## token and calls this). Returns a REVERSE_* status.
+  ## Any host thread. Returns a REVERSE_* status.
   if ctx.lifecycle.load() != CtxLifecycle.Active:
     return REVERSE_NOT_ACTIVE
   if dataLen > MaxRequestPayloadBytes:
     return REVERSE_PAYLOAD_TOO_LARGE
-  # pushReply wakes the FFI thread itself, once per empty→non-empty transition.
-  ctx[].reverse.pushReply(callId, retCode, data, dataLen)
+
+  return ctx[].reverse.pushReply(callId, retCode, data, dataLen)
 
 const ThreadExitTimeoutMs* {.intdefine: "ffiThreadExitTimeoutMs".} = 1500
   ## Per-thread exit wait; past it stopAndJoinThreads leaks the ctx rather than hangs.
@@ -392,14 +389,11 @@ proc stopAndJoinThreads*[T](
   joinThread(ctx.ffiThread)
   ?ctx.eventThreadExitSignal.waitExitOrErr("event thread", timeout)
   joinThread(ctx.eventThread)
-  # Reverse workers exist only once a `{.ffiReverse.}` impl was registered; the
-  # stop hook is nil otherwise. A worker still inside a host impl is leaked with
-  # the slot, like any other thread that does not exit in time.
   if not ctx[].reverse.stopFn.isNil():
-    let (_, leaked) = ctx[].reverse.stopFn(ctx[].reverse, timeout.milliseconds.int)
-    if leaked > 0:
+    let stop = ctx[].reverse.stopFn(ctx[].reverse, timeout.milliseconds.int)
+    if stop.leaked > 0:
       return err(
-        "did not exit in time: " & $leaked &
+        "did not exit in time: " & $stop.leaked &
           " reverse worker(s) still inside a host impl (leaking ctx to avoid hang)"
       )
   ok()

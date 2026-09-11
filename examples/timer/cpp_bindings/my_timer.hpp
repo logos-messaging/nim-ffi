@@ -1085,15 +1085,12 @@ public:
     }
 
     // ── Reverse FFI: host-implemented interfaces ────────────
-    // Impls run on the context's reverse worker threads (started lazily
-    // by the first set…Impl); start them ahead of time with n workers,
-    // n <= 0 for the library default.
+    // n <= 0 starts the library default number of reverse workers.
     bool startReverseWorkers(int n = 0) const {
         return my_timer_start_reverse_workers(ptr_, n) == 0;
     }
 
-    // Copyable answer token for one `fetch_host_clock` invocation; reply once,
-    // inline or later from any thread.
+    // Answer token for one `fetch_host_clock` call: reply once, from any thread.
     struct FetchHostClockCall {
         void* ctx = nullptr;
         std::uint64_t id = 0;
@@ -1123,8 +1120,7 @@ public:
     }
 
     // ── Reverse FFI: host-emitted events (fire-and-forget) ──
-    /// Emitted by the host via `my_timer_emit_on_host_tick` (typed helper:
-    /// `my_timer_ctx_emit_on_host_tick`); fire-and-forget for the host.
+    /// Records the tick number that the host emits.
     bool emitOnHostTick(const int64_t& tickNo) const {
         const auto payload_ = OnHostTickReq{tickNo};
         auto enc = encodeCborFFI(payload_);

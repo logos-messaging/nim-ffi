@@ -163,8 +163,7 @@ proc parkIdleSlots[T](pool: var FFIContextPool[T]) =
 
 proc reapIfIdle[T](pool: var FFIContextPool[T]) =
   ## The exit policy: no context live, no thread of ours for the C runtime to finalize under.
-  # A `{.ffiReverse.}` implementation runs on a reverse worker and may call any
-  # export, teardown included, so that thread counts as one of ours too.
+  # A host impl on a reverse worker may call a teardown export too.
   if onFFIThread or onEventThread or onReverseWorker:
     debug "skipping the idle reap: a destroy from inside the library's own " &
       "threads would join a thread to itself"

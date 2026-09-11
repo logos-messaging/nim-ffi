@@ -249,19 +249,11 @@ proc emitReverseApi(
     reverse: seq[FFIReverseMeta],
     reverseEvents: seq[FFIReverseEventMeta],
 ) =
-  ## Public reverse surface: per-interface call tokens with typed reply/fail,
-  ## set/clear registration, and flattened emit methods for reverse events.
   if reverse.len > 0:
     lines.add(
       "    // ── Reverse FFI: host-implemented interfaces ────────────"
     )
-    lines.add(
-      "    // Impls run on the context's reverse worker threads (started lazily"
-    )
-    lines.add(
-      "    // by the first set…Impl); start them ahead of time with n workers,"
-    )
-    lines.add("    // n <= 0 for the library default.")
+    lines.add("    // n <= 0 starts the library default number of reverse workers.")
     lines.add("    bool startReverseWorkers(int n = 0) const {")
     lines.add("        return $1_start_reverse_workers(ptr_, n) == 0;" % [libName])
     lines.add("    }")
@@ -269,10 +261,9 @@ proc emitReverseApi(
     for r in reverse:
       let callStruct = reverseCallStruct(r)
       lines.add(
-        "    // Copyable answer token for one `$1` invocation; reply once," %
+        "    // Answer token for one `$1` call: reply once, from any thread." %
           [r.wireName]
       )
-      lines.add("    // inline or later from any thread.")
       lines.add("    struct $1 {" % [callStruct])
       lines.add("        void* ctx = nullptr;")
       lines.add("        std::uint64_t id = 0;")
@@ -316,8 +307,6 @@ proc emitReverseApi(
         "        if ($1_set_$2_impl(ptr_, &$3::$4ImplTrampoline, raw) != 0) return false;" %
           [libName, r.wireName, ctxTypeName, r.nimProcName]
       )
-      # set_impl waits an in-flight invocation of the OLD impl out, so replacing
-      # the box here cannot free it under a running trampoline.
       lines.add("        $1 = std::move(owned);" % [reverseBoxMember(r)])
       lines.add("        return true;")
       lines.add("    }")
@@ -358,9 +347,6 @@ proc emitReverseApi(
 proc emitReverseMachinery(
     lines: var seq[string], ctxTypeName: string, reverse: seq[FFIReverseMeta]
 ) =
-  ## Private reverse machinery: per-interface impl boxes and cdecl trampolines
-  ## (invoked on the library's event dispatch thread) that decode the CBOR args
-  ## and hand the host callable a typed call token.
   if reverse.len == 0:
     return
   lines.add("    template <class T>")

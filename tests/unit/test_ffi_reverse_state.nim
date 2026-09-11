@@ -1,7 +1,4 @@
-## Unit tests for ffi/ffi_reverse.nim: registry, call ids, reply mailbox, the
-## invocation queue with its Pending/Running/Cancelled state machine, and the
-## FFI-thread call/drain helpers. Driven with hand-installed threadvars and a
-## real (small) worker pool on a bare FFIReverseState — no FFI context.
+## Unit tests for ffi/ffi_reverse.nim on a bare FFIReverseState, with no FFI context.
 
 import std/[atomics, locks, os, strutils]
 import unittest2
@@ -86,14 +83,13 @@ suite "FFIReverseState registry":
     var marker = 0
     st.setImpl("fetch", nopImpl, addr marker) # replace keeps the name registered
     check st.hasImpl("fetch")
-    let (entry, found) = st.beginReverseDispatch("fetch")
-    check found
-    check entry.userData == addr marker
+    let dispatch = st.beginReverseDispatch("fetch")
+    check dispatch.found
+    check dispatch.entry.userData == addr marker
     st.endReverseDispatch()
     st.setImpl("fetch", nil, nil) # nil fn unregisters
     check not st.hasImpl("fetch")
-    let (_, foundAfter) = st.beginReverseDispatch("fetch")
-    check not foundAfter
+    check not st.beginReverseDispatch("fetch").found
 
   test "call ids start at 1 and are monotonic":
     var st: FFIReverseState
@@ -180,11 +176,10 @@ suite "worker pool lifecycle":
     check st.workerCount == 3
     check st.startReverseWorkers(7) # already running: keeps its size
     check st.workerCount == 3
-    let (stopped, leaked) = stopReverseWorkers(st)
-    check stopped == 3
-    check leaked == 0
+    let stop = stopReverseWorkers(st)
+    check stop.stopped == 3
+    check stop.leaked == 0
     check not st.workersStarted()
-    # Restart after a clean stop works.
     check st.startReverseWorkers(1)
     check st.workerCount == 1
 
@@ -194,8 +189,7 @@ suite "worker pool lifecycle":
     var g: GateBox
     g.lock.initLock()
     g.cond.initCond()
-    # Size the pool first: `setImpl` starts the default count otherwise, and
-    # this test needs exactly one worker so the blocked one is the only one.
+    # Exactly one worker, or `setImpl` starts the default count.
     check st.startReverseWorkers(1)
     st.setImpl("gate", gateImpl, addr g)
     ffiCurrentReverseState = addr st
@@ -204,18 +198,15 @@ suite "worker pool lifecycle":
 
     let callFut = ffiReverseCall("gate", @[], 60_000)
     g.waitEntered(1)
-    let (stopped, leaked) = stopReverseWorkers(st)
-    check stopped == 0
-    check leaked == 1
+    let stop = stopReverseWorkers(st)
+    check stop.stopped == 0
+    check stop.leaked == 1
     check st.leakedWorkers == 1
-    # Release the worker so the process can exit; the state stays leaked on
-    # purpose (deinit skips the locks a live thread may still touch).
+    # Release the worker so the process can exit; the state stays leaked on purpose.
     g.open()
     failPendingReverse("stopped")
     check (waitFor callFut).isErr()
     os.sleep(20)
-
-## ── ffiReverseCall + drainReverseReplies against a real worker pool ─────────
 
 template withReverseHarness(stIdent: untyped, workers: int, body: untyped) =
   var stIdent: FFIReverseState
@@ -243,8 +234,7 @@ suite "ffiReverseCall":
       st.setImpl("echo", echoImpl, addr box)
       let args = @[byte 1, 2, 3]
       var res = Result[seq[byte], string].err("not yet")
-      # The reply lands in the mailbox from the worker; poll the drain the way
-      # the FFI loop does.
+      # Poll the drain the way the FFI loop does.
       let callFut = ffiReverseCall("echo", args, 2000)
       while not callFut.finished():
         drainReverseReplies()
@@ -286,9 +276,6 @@ suite "ffiReverseCall":
       check st.mailboxLen() == 0
 
   test "queued calls behind a blocked worker are skipped once expired":
-    ## One worker, blocked. Two more calls queue behind it with short deadlines:
-    ## they time out on the FFI thread and, when the worker is released, are
-    ## dropped at dequeue without ever invoking the impl.
     withReverseHarness(st, 1):
       var g: GateBox
       g.lock.initLock()

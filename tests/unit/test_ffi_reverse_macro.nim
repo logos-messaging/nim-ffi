@@ -1,6 +1,4 @@
-## End-to-end tests for the `{.ffiReverse.}` / `{.ffiReverseEvent.}` macros
-## through a declared library: the generated `<lib>_set_*_impl`,
-## `<lib>_reverse_reply` and `<lib>_emit_*` C exports drive the real context.
+## The `{.ffiReverse.}` and `{.ffiReverseEvent.}` exports of a declared library, end to end.
 
 import std/[locks, os, strutils]
 import unittest2
@@ -43,8 +41,6 @@ static:
   doAssert ffiReverseEventRegistry.len == 1
   doAssert ffiReverseEventRegistry[0].wireName == "on_host_ping"
   doAssert ffiReverseEventRegistry[0].reqTypeName == "OnHostPingReq"
-
-## Driver requests: run the reverse stubs on the FFI thread and report back.
 
 registerReqFFI(DriveFetchRequest, h: ptr FFIContext[RevMacroLib]):
   proc(): Future[Result[string, string]] {.async.} =
@@ -104,13 +100,13 @@ proc waitCallback(d: var CallbackData) =
   release(d.lock)
 
 proc callbackMsg(d: var CallbackData): string =
-  result = newString(d.msgLen)
+  var msg = newString(d.msgLen)
   if d.msgLen > 0:
-    copyMem(addr result[0], addr d.msg[0], d.msgLen)
+    copyMem(addr msg[0], addr d.msg[0], d.msgLen)
+  return msg
 
 template withLibCtx(ctxIdent, tokenIdent: untyped, body: untyped) =
-  ## Contexts come from the pool declareLibrary declared, so the generated
-  ## exports' resolveCtx sees them.
+  ## The declareLibrary pool, so that the generated exports resolve the context.
   let ctxIdent = RevMacroLibFFIPool.createFFIContext().valueOr:
     check false
     return
@@ -122,17 +118,13 @@ template withLibCtx(ctxIdent, tokenIdent: untyped, body: untyped) =
 type TokenBox = object
   token: FFICtxToken
 
-## Host implementations: decode the generated args shape, answer through the
-## generated `revmacro_reverse_reply` export (the full C-visible path).
-
 proc fetchConfigImpl(
     callId: uint64,
     argsCbor: ptr UncheckedArray[byte],
     argsLen: csize_t,
     userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
-  # A C host calls the export from arbitrary threads; Nim's gcsafe analysis
-  # only trips here because this test impl is Nim code touching the pool global.
+  # Nim code that touches the pool global is not gcsafe; a C host has no such check.
   {.cast(gcsafe).}:
     let box = cast[ptr TokenBox](userData)
     let decoded = cborDecodePtr(argsCbor, int(argsLen), FetchConfigArgs).valueOr:

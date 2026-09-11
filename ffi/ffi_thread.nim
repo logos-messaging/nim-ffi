@@ -215,9 +215,6 @@ proc drainOngoing(ongoing: ptr seq[Future[void]]): Future[bool] {.async.} =
 proc resetForNextOwner[T](ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]) =
   freeLib(ctx)
   clearListeners(ctx[].eventRegistry)
-  # Impls were cleared and waited out (bounded) by recycleContext; queued
-  # invocations of the old owner die on their generation stamp at dequeue, and
-  # straggler replies free with the mailbox.
   ctx[].reverse.purgeQueue()
   ctx[].reverse.freeAllReplies()
   # A reused slot skips initContextResources, so the handle ids of the old owner
@@ -257,9 +254,7 @@ proc recycleContext[T](
   defer:
     ctx.finishRecycle(failure)
 
-  # Before the drain, not after: awaitWithStaleWarnings converts the drain's
-  # cancel into noCancel, so a handler parked on a reverse call would hold
-  # drainOngoing until the reverse timeout and risk a DrainTimeout quarantine.
+  # Before the drain: a handler parked on a reverse call holds the drain until its deadline.
   failPendingReverse("FFI context is recycling; the reverse call was abandoned")
 
   if not await drainOngoing(ongoing):
@@ -281,10 +276,7 @@ proc recycleContext[T](
     failure = RecycleFailure.TeardownRaised
     return
 
-  # The old owner's impls must not answer the next owner. Clearing does not wait;
-  # a worker still inside a host impl is polled out with a bound instead of
-  # blocking this dispatcher on foreign code, and quarantines the slot if it
-  # never returns (its worker stays leaked with the slot).
+  # Poll with a deadline: a wedged host impl must not block this dispatcher.
   if ctx[].reverse.clearImpls() > 0:
     let deadline = Moment.now() + RecycleTimeout
     while ctx[].reverse.inFlight() > 0 and Moment.now() < deadline:
@@ -397,8 +389,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
     # Drain once more for requests enqueued just before `running` flipped.
     processQueue()
     drainReverseReplies()
-    # A handler parked on a reverse call would hold the wait below until the
-    # reverse timeout; the host is shutting down, so it will not answer.
+    # The host is shutting down and will not answer a parked reverse call.
     failPendingReverse("FFI context is shutting down; the reverse call was abandoned")
     cleanFinishedRequests()
     if pending.len > 0:

@@ -5,44 +5,22 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
-- **Experimental reverse FFI** (#153): `{.ffiReverse.}` declares a
-  host-implemented interface (plugin direction) — the library awaits it from an
-  `{.ffi.}` handler, the host registers an implementation at runtime via the
-  generated `<lib>_set_<wire>_impl` export and answers from any thread through
-  `<lib>_reverse_reply`, with a
-  mandatory per-call deadline (`ReverseCallTimeoutMs` /
-  `{.ffiReverse("wire", timeout = ms).}`). `{.ffiReverseEvent.}` declares a
-  host-emitted event: the proc body is the handler, run on the FFI processing
-  thread when the host calls the generated fire-and-forget `<lib>_emit_<wire>`
-  export. Both ride CBOR; the C binding gains the raw declarations plus typed
-  helpers (`_ctx_set_*_impl`, `_decode_*_args`, `_ctx_reverse_reply_*`,
-  `_ctx_emit_*`).
-- Reverse FFI runs host implementations on **per-context worker threads**
-  instead of the event dispatch thread: an impl may block without stalling
-  event delivery, and `-d:ffiReverseWorkers` (default 2) impls run
-  concurrently. Workers start lazily on the first `set_impl` or explicitly via
-  `<lib>_start_reverse_workers(ctx, n)` (typed: `_ctx_start_reverse_workers`,
-  `startReverseWorkers(n)`, `start_reverse_workers(n)`), are stopped and joined
-  at destroy (a wedged one is leaked with the slot and reported), and a worker
-  stuck inside one impl past `ReverseWorkerStallMs` raises the
-  `reverse_worker_blocked` / `reverse_worker_recovered` liveness events. A call
-  that times out or is cancelled (`cancelSoon` on the returned future) while
-  still queued is skipped at dequeue — the impl never runs; a running one keeps
-  its worker and its late reply is dropped. A recycle now bounds the wait for a
-  running impl and quarantines the slot with `RecycleFailure.ReverseImplBlocked`.
-  Workers follow the slot's other threads: parking an idle slot stops them, the
-  next registration starts them again, and `<lib>_shutdown` ends them too. A
-  teardown export called from inside a host impl neither reaps nor joins the
-  worker it runs on. Libraries without `{.ffiReverse.}` never link the harness.
-- Reverse FFI in the C++ and Rust bindings: `set<X>Impl`/`set_<x>_impl` register
-  a `std::function` / `Fn` closure as the host implementation (invoked on a
-  reverse worker thread with decoded typed args), a copyable call token carries
-  typed `reply`/`fail` usable inline or from any host thread, `clear…` restores
-  fail-fast, and `emit<X>`/`emit_<x>` fire `{.ffiReverseEvent.}`s with flattened
-  typed parameters. Impl box lifetimes are owned by the ctx wrapper; replacement
-  is safe mid-flight because `set_impl` waits the old impl's in-flight
-  invocation out. CDDL schemas pick the reverse payload types up through the
-  ordinary type registry.
+- `declareLibrary` exports `<lib>_shutdown()`, declared in the generated C and
+  C++ headers and wrapped by the Rust crate as `<Lib>Ctx::shutdown()`. It stops
+  every context the pool still holds, the `{.ffiStatic.}` one included, and
+  returns 0 when they all stopped. A context the host still owned runs its
+  `{.ffiDtor.}` on the way out and is then quarantined, so a later call on it
+  fails instead of queueing to a thread that is gone.
+- Experimental reverse FFI (#153). `{.ffiReverse.}` declares a bodyless proc
+  that the host implements at runtime through `<lib>_set_<wire>_impl` and
+  answers through `<lib>_reverse_reply`, under a per-call deadline.
+  `{.ffiReverseEvent.}` declares a handler that runs when the host calls
+  `<lib>_emit_<wire>`. The C, C++ and Rust bindings get typed helpers.
+- Host implementations run on per-context reverse worker threads
+  (`-d:ffiReverseWorkers`, default 2) and may block. A worker stuck past
+  `ReverseWorkerStallMs` emits `reverse_worker_blocked`, and a recycle that
+  outlasts a running implementation quarantines the slot with
+  `RecycleFailure.ReverseImplBlocked`.
 - Each `{.ffi.}` proc's `##` doc comment reaches the generated C header as a
   `/** ... */` block above the declaration and its wrapper.
 - `genBindings()` fails compilation when a library declares an `{.ffiCtor.}` but

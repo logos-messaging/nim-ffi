@@ -1002,8 +1002,7 @@ int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
 /* Reverse FFI: host-implemented interfaces + host-emitted events */
 #ifndef NIM_FFI_REVERSE_IMPL_DEFINED
 #define NIM_FFI_REVERSE_IMPL_DEFINED
-/* Invoked on the library's event dispatch thread; return promptly and
-   answer (inline or later, from any thread) via <lib>_reverse_reply. */
+/* Runs on a reverse worker thread and may block; answer via <lib>_reverse_reply. */
 typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, size_t args_len, void* user_data);
 #endif
 int my_timer_set_fetch_host_clock_impl(void* ctx, FFIReverseImpl impl, void* user_data);
@@ -1015,10 +1014,7 @@ int my_timer_reverse_reply(void* ctx, uint64_t call_id, int ret_code, const uint
 /* Starts the context's reverse worker threads ahead of the first set_impl
    (which starts them lazily otherwise); n <= 0 picks the library default. */
 int my_timer_start_reverse_workers(void* ctx, int n);
-/**
- * Emitted by the host via `my_timer_emit_on_host_tick` (typed helper:
- * `my_timer_ctx_emit_on_host_tick`); fire-and-forget for the host.
- */
+/** Records the tick number that the host emits. */
 int my_timer_emit_on_host_tick(void* ctx, const uint8_t* payload_cbor, size_t payload_len);
 /**
  * Stop every context the library still holds and join their threads.
@@ -1282,10 +1278,7 @@ static inline int my_timer_ctx_reverse_reply_fetch_host_clock(const MyTimerCtx* 
     return rc;
 }
 
-/**
- * Emitted by the host via `my_timer_emit_on_host_tick` (typed helper:
- * `my_timer_ctx_emit_on_host_tick`); fire-and-forget for the host.
- */
+/** Records the tick number that the host emits. */
 static inline int my_timer_ctx_emit_on_host_tick(const MyTimerCtx* ctx, const OnHostTickReq* payload) {
     uint8_t* buf = NULL;
     size_t len = 0;

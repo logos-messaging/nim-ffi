@@ -219,8 +219,7 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
     )
   )
 
-  # {libraryName}_reverse_reply — answers a {.ffiReverse.} call. Callable from
-  # ANY host thread; returns a REVERSE_* status (see ffi/ffi_reverse.nim).
+  # {libraryName}_reverse_reply: answers a {.ffiReverse.} call from any host thread.
   let replyName = libraryName & "_reverse_reply"
   let replyBody = quote:
     when declared(initializeLibrary):

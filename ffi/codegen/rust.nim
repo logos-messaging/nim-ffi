@@ -194,7 +194,7 @@ func reverseArgsRust(r: FFIReverseMeta): string =
     nimTypeToRust(r.argsTypeName)
 
 func reverseImplBound(r: FFIReverseMeta): string =
-  ## The host-side callable bound: `Fn(Call, Args)` (args by value), or `Fn(Call)`.
+  ## The `Fn` trait of the host callable: `Fn(Call, Args)`, or `Fn(Call)` with no args.
   let argsRust = reverseArgsRust(r)
   if argsRust.len == 0:
     "Fn($1) + Send + Sync" % [reverseCallStruct(r)]
@@ -297,12 +297,8 @@ proc generateFFIRs*(
   if reverse.len > 0:
     lines.add("")
     lines.add(
-      "/// A host implementation of a `{.ffiReverse.}` interface. Invoked on the"
+      "/// Runs on a reverse worker thread and may block; answer via `<lib>_reverse_reply`."
     )
-    lines.add(
-      "/// library's event dispatch thread; return promptly and answer (inline or"
-    )
-    lines.add("/// later, from any thread) via `<lib>_reverse_reply`.")
     lines.add("pub type FFIReverseImpl = unsafe extern \"C\" fn(")
     lines.add("    call_id: u64,")
     lines.add("    args_cbor: *const u8,")
@@ -593,18 +589,15 @@ proc generateApiRs*(
     lines.add("pub struct ListenerHandle { pub id: u64 }")
     lines.add("")
 
-  # Reverse FFI: per-interface call tokens, impl boxes and cdecl trampolines.
-  # The token carries the ctx as usize (Copy + Send) so a host thread can hold
-  # it past the trampoline's return and answer later.
+  # The token holds the ctx as usize, so that a host thread can answer later.
   for r in reverse:
     let callStruct = reverseCallStruct(r)
     let boxStruct = reverseBoxStruct(r)
     let tramp = reverseSnake(r) & "_impl_trampoline"
     let argsRust = reverseArgsRust(r)
     lines.add(
-      "/// Answer token for one `$1` invocation; reply once, inline or" % [r.wireName]
+      "/// Answer token for one `$1` call: reply once, from any thread." % [r.wireName]
     )
-    lines.add("/// later from any thread.")
     lines.add("#[derive(Debug, Clone, Copy)]")
     lines.add("pub struct $1 { ctx: usize, id: u64 }" % [callStruct])
     lines.add("")
@@ -868,15 +861,8 @@ proc generateApiRs*(
     lines.add("    }")
     lines.add("")
 
-  # Reverse FFI: registration (replace semantics — the dylib waits an in-flight
-  # invocation of the old impl out before set returns, so swapping the box here
-  # cannot free it under a running trampoline) and fire-and-forget emits.
   if reverse.len > 0:
-    lines.add("    /// Starts the context's reverse worker threads ahead of the first")
-    lines.add(
-      "    /// `set_*_impl` (which starts them lazily otherwise); `n <= 0` picks"
-    )
-    lines.add("    /// the library default. Impls run on those workers and may block.")
+    lines.add("    /// `n <= 0` starts the library default number of reverse workers.")
     lines.add("    pub fn start_reverse_workers(&self, n: i32) -> bool {")
     lines.add(
       "        unsafe { ffi::$1_start_reverse_workers(self.ptr, n as c_int) == 0 }" %

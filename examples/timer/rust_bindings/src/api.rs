@@ -154,8 +154,7 @@ unsafe extern "C" fn on_job_scheduled_trampoline(
 #[derive(Debug, Clone, Copy)]
 pub struct ListenerHandle { pub id: u64 }
 
-/// Answer token for one `fetch_host_clock` invocation; reply once, inline or
-/// later from any thread.
+/// Answer token for one `fetch_host_clock` call: reply once, from any thread.
 #[derive(Debug, Clone, Copy)]
 pub struct FetchHostClockCall { ctx: usize, id: u64 }
 
@@ -304,9 +303,7 @@ impl MyTimerCtx {
         rc == 0
     }
 
-    /// Starts the context's reverse worker threads ahead of the first
-    /// `set_*_impl` (which starts them lazily otherwise); `n <= 0` picks
-    /// the library default. Impls run on those workers and may block.
+    /// `n <= 0` starts the library default number of reverse workers.
     pub fn start_reverse_workers(&self, n: i32) -> bool {
         unsafe { ffi::my_timer_start_reverse_workers(self.ptr, n as c_int) == 0 }
     }
@@ -333,8 +330,7 @@ impl MyTimerCtx {
         true
     }
 
-    /// Emitted by the host via `my_timer_emit_on_host_tick` (typed helper:
-    /// `my_timer_ctx_emit_on_host_tick`); fire-and-forget for the host.
+    /// Records the tick number that the host emits.
     pub fn emit_on_host_tick(&self, tick_no: i64) -> bool {
         let payload = OnHostTickReq { tick_no };
         match encode_cbor(&payload) {

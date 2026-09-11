@@ -85,9 +85,7 @@ fn main() {
         .unwrap_or(false));
     println!("[6] host_clock before set_impl -> {unfulfilled:?}");
 
-    // Register a Rust closure as the `fetch_host_clock` implementation. It is
-    // invoked on the library's event dispatch thread; the call token is Copy +
-    // Send, so this impl hands it to a host thread and replies later.
+    // The call token is Copy + Send: this impl replies later from a host thread.
     assert!(ctx.set_fetch_host_clock_impl(|call, precision: String| {
         assert_eq!(precision, "ms");
         std::thread::spawn(move || {

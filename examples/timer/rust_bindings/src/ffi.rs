@@ -38,9 +38,7 @@ extern "C" {
     pub fn my_timer_emit_on_host_tick(ctx: *mut c_void, payload_cbor: *const u8, payload_len: usize) -> c_int;
 }
 
-/// A host implementation of a `{.ffiReverse.}` interface. Invoked on the
-/// library's event dispatch thread; return promptly and answer (inline or
-/// later, from any thread) via `<lib>_reverse_reply`.
+/// Runs on a reverse worker thread and may block; answer via `<lib>_reverse_reply`.
 pub type FFIReverseImpl = unsafe extern "C" fn(
     call_id: u64,
     args_cbor: *const u8,

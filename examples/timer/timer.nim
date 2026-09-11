@@ -156,9 +156,7 @@ type HostClock {.ffi.} = object
   zone: string
 
 proc fetchHostClock(precision: string): Future[Result[HostClock, string]] {.ffiReverse.}
-  ## Asks the host for its wall clock. The host registers an implementation via
-  ## `my_timer_set_fetch_host_clock_impl` and answers (from any thread) through
-  ## `my_timer_reverse_reply`; an unfulfilled or silent host fails this call.
+  ## Asks the host for its wall clock; fails when no host implementation answers.
 
 proc myTimerHostClock*(timer: MyTimer): Future[Result[string, string]] {.ffi.} =
   ## Calls the host-implemented `fetch_host_clock` interface and formats it.
@@ -170,8 +168,7 @@ proc myTimerHostClock*(timer: MyTimer): Future[Result[string, string]] {.ffi.} =
 var lastHostTick = 0 # FFI-thread-only: written by the handler, read by methods
 
 proc onHostTick(tickNo: int) {.ffiReverseEvent.} =
-  ## Emitted by the host via `my_timer_emit_on_host_tick` (typed helper:
-  ## `my_timer_ctx_emit_on_host_tick`); fire-and-forget for the host.
+  ## Records the tick number that the host emits.
   lastHostTick = tickNo
 
 proc myTimerLastHostTick*(timer: MyTimer): Future[Result[int, string]] {.ffi.} =
