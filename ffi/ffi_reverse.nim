@@ -6,18 +6,25 @@ import chronos, results
 import ./ffi_types
 
 const ReverseMailboxDepth* {.intdefine: "ffiReverseMailboxDepth".} = 1024
-  ## Replies parked between two FFI-thread drains; a full mailbox rejects the reply.
+  ## Replies parked between two FFI-thread drains; a full mailbox rejects the reply,
+  ## so the caller's future then times out. Override `-d:ffiReverseMailboxDepth=<n>`.
 
 const ReverseCallTimeoutMs* {.intdefine: "ffiReverseCallTimeoutMs".} = 10000
   ## Default deadline of one `{.ffiReverse.}` call; `timeout = N` overrides it per proc.
+  ## Override the default with `-d:ffiReverseCallTimeoutMs=<ms>`.
 
 const ReverseWorkersDefault* {.intdefine: "ffiReverseWorkers".} = 2
+  ## Workers a context starts on the first `setImpl`; this many impls run at once.
+  ## Override `-d:ffiReverseWorkers=<n>`.
 
 const ReverseWorkerStallMs* {.intdefine: "ffiReverseWorkerStallMs".} =
   ReverseCallTimeoutMs
   ## A worker inside one impl for longer emits `reverse_worker_blocked`.
+  ## Override `-d:ffiReverseWorkerStallMs=<ms>`.
 
 const ReverseWorkerJoinTimeoutMs* {.intdefine: "ffiReverseWorkerJoinTimeoutMs".} = 1500
+  ## Per-worker join wait at stop; past it the worker is leaked, not waited on.
+  ## Override `-d:ffiReverseWorkerJoinTimeoutMs=<ms>`.
 
 const
   REVERSE_ACCEPTED*: cint = 0
@@ -53,9 +60,9 @@ type
     next*: ptr ReverseReply
 
   ReverseCallState* {.pure.} = enum
-    Pending
-    Running
-    Cancelled
+    Pending ## queued; a worker may still claim it, the FFI thread may still cancel it
+    Running ## a worker claimed it; the reply, if any, is dropped by id once abandoned
+    Cancelled ## deadline or explicit cancel won the race; skipped at dequeue
 
   ReverseInvocation* = object
     ## Two owners, the queue side and the FFI thread's pending entry; the last release frees.
