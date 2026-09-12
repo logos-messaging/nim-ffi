@@ -218,12 +218,183 @@ proc emitEventTrampoline(lines: var seq[string], events: seq[FFIEventMeta]) =
   lines.add("    }")
   lines.add("")
 
+func reverseCallStruct(r: FFIReverseMeta): string =
+  ## Nested per-interface call token, e.g. `FetchHostClockCall`.
+  capitalizeFirstLetter(r.nimProcName) & "Call"
+
+func reverseBoxStruct(r: FFIReverseMeta): string =
+  capitalizeFirstLetter(r.nimProcName) & "ImplBox"
+
+func reverseBoxMember(r: FFIReverseMeta): string =
+  r.nimProcName & "ImplBox_"
+
+func reverseArgsCpp(r: FFIReverseMeta): string =
+  ## "" when the interface takes no arguments.
+  if r.argsTypeName.len == 0:
+    ""
+  else:
+    nimTypeToCpp(r.argsTypeName)
+
+func reverseImplFnType(r: FFIReverseMeta): string =
+  ## The host-side callable: `(Call, const Args&)`, or `(Call)` with no args.
+  let argsCpp = reverseArgsCpp(r)
+  if argsCpp.len == 0:
+    "std::function<void($1)>" % [reverseCallStruct(r)]
+  else:
+    "std::function<void($1, const $2&)>" % [reverseCallStruct(r), argsCpp]
+
+proc emitReverseApi(
+    lines: var seq[string],
+    ctxTypeName, libName: string,
+    reverse: seq[FFIReverseMeta],
+    reverseEvents: seq[FFIReverseEventMeta],
+) =
+  if reverse.len > 0:
+    lines.add(
+      "    // ── Reverse FFI: host-implemented interfaces ────────────"
+    )
+    lines.add("    // n <= 0 starts the library default number of reverse workers.")
+    lines.add("    bool startReverseWorkers(int n = 0) const {")
+    lines.add("        return $1_start_reverse_workers(ptr_, n) == 0;" % [libName])
+    lines.add("    }")
+    lines.add("")
+    for r in reverse:
+      let callStruct = reverseCallStruct(r)
+      lines.add(
+        "    // Answer token for one `$1` call: reply once, from any thread." %
+          [r.wireName]
+      )
+      lines.add("    struct $1 {" % [callStruct])
+      lines.add("        void* ctx = nullptr;")
+      lines.add("        std::uint64_t id = 0;")
+      if r.replyTypeName.len > 0:
+        let replyCpp = nimTypeToCpp(r.replyTypeName)
+        lines.add("        bool reply(const $1& r) const {" % [replyCpp])
+        lines.add("            auto enc = encodeCborFFI(r);")
+        lines.add("            if (enc.isErr()) return fail(enc.error());")
+        lines.add("            const auto& b = enc.value();")
+        lines.add(
+          "            return $1_reverse_reply(ctx, id, 0, b.data(), b.size()) == 0;" %
+            [libName]
+        )
+        lines.add("        }")
+      else:
+        lines.add("        bool reply() const {")
+        lines.add(
+          "            return $1_reverse_reply(ctx, id, 0, nullptr, 0) == 0;" % [
+            libName
+          ]
+        )
+        lines.add("        }")
+      lines.add("        bool fail(const std::string& msg) const {")
+      lines.add(
+        "            return $1_reverse_reply(ctx, id, 1, reinterpret_cast<const std::uint8_t*>(msg.data()), msg.size()) == 0;" %
+          [libName]
+      )
+      lines.add("        }")
+      lines.add("    };")
+      lines.add("")
+    for r in reverse:
+      let pascal = capitalizeFirstLetter(r.nimProcName)
+      lines.add(renderMemberDocComment(r.doc))
+      lines.add("    bool set$1Impl($2 fn) {" % [pascal, reverseImplFnType(r)])
+      lines.add(
+        "        auto owned = std::make_unique<$1>($1{ptr_, std::move(fn)});" %
+          [reverseBoxStruct(r)]
+      )
+      lines.add("        auto* raw = owned.get();")
+      lines.add(
+        "        if ($1_set_$2_impl(ptr_, &$3::$4ImplTrampoline, raw) != 0) return false;" %
+          [libName, r.wireName, ctxTypeName, r.nimProcName]
+      )
+      lines.add("        $1 = std::move(owned);" % [reverseBoxMember(r)])
+      lines.add("        return true;")
+      lines.add("    }")
+      lines.add("")
+      lines.add("    bool clear$1Impl() {" % [pascal])
+      lines.add(
+        "        if ($1_set_$2_impl(ptr_, nullptr, nullptr) != 0) return false;" %
+          [libName, r.wireName]
+      )
+      lines.add("        $1.reset();" % [reverseBoxMember(r)])
+      lines.add("        return true;")
+      lines.add("    }")
+      lines.add("")
+  if reverseEvents.len > 0:
+    lines.add("    // ── Reverse FFI: host-emitted events (fire-and-forget) ──")
+    for rev in reverseEvents:
+      let pascal = capitalizeFirstLetter(rev.nimProcName)
+      var params: seq[string] = @[]
+      var names: seq[string] = @[]
+      for p in rev.params:
+        params.add("const $1& $2" % [nimTypeToCpp(p.typeName), p.name])
+        names.add(p.name)
+      lines.add(renderMemberDocComment(rev.doc))
+      lines.add("    bool emit$1($2) const {" % [pascal, params.join(", ")])
+      lines.add(
+        "        const auto payload_ = $1;" % [cppBracedInit(rev.reqTypeName, names)]
+      )
+      lines.add("        auto enc = encodeCborFFI(payload_);")
+      lines.add("        if (enc.isErr()) return false;")
+      lines.add("        const auto& b = enc.value();")
+      lines.add(
+        "        return $1_emit_$2(ptr_, b.data(), b.size()) == 0;" %
+          [libName, rev.wireName]
+      )
+      lines.add("    }")
+      lines.add("")
+
+proc emitReverseMachinery(
+    lines: var seq[string], ctxTypeName: string, reverse: seq[FFIReverseMeta]
+) =
+  if reverse.len == 0:
+    return
+  lines.add("    template <class T>")
+  lines.add(
+    "    static CborError decodeReverseArgs_(const std::uint8_t* data, std::size_t len, T& out) {"
+  )
+  lines.add("        CborParser parser; CborValue it;")
+  lines.add("        CborError err = cbor_parser_init(data, len, 0, &parser, &it);")
+  lines.add("        if (err) return err;")
+  lines.add("        return decode_cbor(it, out);")
+  lines.add("    }")
+  lines.add("")
+  for r in reverse:
+    let box = reverseBoxStruct(r)
+    let callStruct = reverseCallStruct(r)
+    let argsCpp = reverseArgsCpp(r)
+    lines.add("    struct $1 {" % [box])
+    lines.add("        void* ctx = nullptr;")
+    lines.add("        $1 fn;" % [reverseImplFnType(r)])
+    lines.add("    };")
+    lines.add(
+      "    static void $1ImplTrampoline(std::uint64_t call_id, const std::uint8_t* args, std::size_t len, void* ud) {" %
+        [r.nimProcName]
+    )
+    lines.add("        auto* box = static_cast<$1*>(ud);" % [box])
+    lines.add("        $1 call{box->ctx, call_id};" % [callStruct])
+    lines.add("        if (!box->fn) { call.fail(\"no C++ impl callable\"); return; }")
+    if argsCpp.len == 0:
+      lines.add("        (void)args; (void)len;")
+      lines.add("        box->fn(call);")
+    else:
+      lines.add("        $1 a{};" % [argsCpp])
+      lines.add("        if (decodeReverseArgs_(args, len, a) != CborNoError) {")
+      lines.add("            call.fail(\"reverse args decode failed\");")
+      lines.add("            return;")
+      lines.add("        }")
+      lines.add("        box->fn(call, a);")
+    lines.add("    }")
+    lines.add("")
+
 proc generateCppHeader*(
     procs: seq[FFIProcMeta],
     types: seq[FFITypeMeta],
     libName: string,
     events: seq[FFIEventMeta] = @[],
     consts: seq[FFIConstMeta] = @[],
+    reverse: seq[FFIReverseMeta] = @[],
+    reverseEvents: seq[FFIReverseEventMeta] = @[],
 ): string =
   var lines: seq[string] = @[]
 
@@ -345,6 +516,28 @@ proc generateCppHeader*(
   lines.add(
     "int $1_remove_event_listener(void* ctx, uint64_t listener_id);" % [libName]
   )
+  if reverse.len > 0 or reverseEvents.len > 0:
+    lines.add("")
+    lines.add("// Reverse FFI: host-implemented interfaces + host-emitted events")
+  if reverse.len > 0:
+    lines.add(
+      "typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, size_t args_len, void* user_data);"
+    )
+    for r in reverse:
+      lines.add(
+        "int $1_set_$2_impl(void* ctx, FFIReverseImpl impl, void* user_data);" %
+          [libName, r.wireName]
+      )
+    lines.add(
+      "int $1_reverse_reply(void* ctx, uint64_t call_id, int ret_code, const uint8_t* reply_cbor, size_t reply_len);" %
+        [libName]
+    )
+    lines.add("int $1_start_reverse_workers(void* ctx, int n);" % [libName])
+  for rev in reverseEvents:
+    lines.add(
+      "int $1_emit_$2(void* ctx, const uint8_t* payload_cbor, size_t payload_len);" %
+        [libName, rev.wireName]
+    )
   lines.add(renderBlockDocComment(ShutdownDoc))
   lines.add("int $1_shutdown(void);" % [libName])
   lines.add("} // extern \"C\"")
@@ -454,6 +647,7 @@ proc generateCppHeader*(
   )
 
   emitEventDispatcher(lines, ctxTypeName, libName, events)
+  emitReverseApi(lines, ctxTypeName, libName, reverse, reverseEvents)
 
   # A static has no ctx to inherit `timeout_` from, so it takes its own `timeout`.
   for m in classified.replyProcs():
@@ -543,11 +737,16 @@ proc generateCppHeader*(
   lines.add("private:")
   # Listener machinery must precede the `listeners_` member (its value type must be complete at declaration).
   emitEventTrampoline(lines, events)
+  emitReverseMachinery(lines, ctxTypeName, reverse)
   lines.add("    void* ptr_;")
   lines.add("    std::chrono::milliseconds timeout_;")
   if events.len > 0:
     lines.add(
       "    std::unordered_map<std::uint64_t, std::unique_ptr<ListenerBase>> listeners_;"
+    )
+  for r in reverse:
+    lines.add(
+      "    std::unique_ptr<$1> $2;" % [reverseBoxStruct(r), reverseBoxMember(r)]
     )
   lines.add(
     "    explicit $1(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}" %
@@ -574,10 +773,12 @@ proc generateCppBindings*(
     nimSrcRelPath: string,
     events: seq[FFIEventMeta] = @[],
     consts: seq[FFIConstMeta] = @[],
+    reverse: seq[FFIReverseMeta] = @[],
+    reverseEvents: seq[FFIReverseEventMeta] = @[],
 ) =
   createDir(outputDir)
   writeFile(
     outputDir / (libName & ".hpp"),
-    generateCppHeader(procs, types, libName, events, consts),
+    generateCppHeader(procs, types, libName, events, consts, reverse, reverseEvents),
   )
   writeFile(outputDir / "CMakeLists.txt", generateCppCMakeLists(libName, nimSrcRelPath))

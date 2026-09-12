@@ -52,6 +52,31 @@ proc onResponding*(ctx: ptr FFIContext) =
   ## Fired once when the heartbeat resumes after a NotRespondingEvent.
   emitLivenessEvent(ctx, RespondingEventName, RespondingEvent())
 
+type
+  ReverseWorkerBlockedEvent* = object
+    worker*: int
+    callId*: uint64
+
+  ReverseWorkerRecoveredEvent* = object
+    worker*: int
+
+const
+  ReverseWorkerBlockedEventName* = "reverse_worker_blocked"
+  ReverseWorkerRecoveredEventName* = "reverse_worker_recovered"
+
+proc checkReverseWorkers[T](ctx: ptr FFIContext[T]) =
+  for t in ctx[].reverse.scanReverseWorkers(int64(ReverseWorkerStallMs) * 1_000_000'i64):
+    if t.blocked:
+      emitLivenessEvent(
+        ctx,
+        ReverseWorkerBlockedEventName,
+        ReverseWorkerBlockedEvent(worker: t.idx, callId: t.callId),
+      )
+    else:
+      emitLivenessEvent(
+        ctx, ReverseWorkerRecoveredEventName, ReverseWorkerRecoveredEvent(worker: t.idx)
+      )
+
 proc dispatchQueuedEvent[T](ctx: ptr FFIContext[T], qe: QueuedEvent) =
   ## Reads the borrowed slab payload; `commitDequeue` frees any heap fallback.
   ctx.dispatchToListeners($qe.name, qe.data, qe.dataLen)
@@ -121,6 +146,7 @@ proc eventRun[T](ctx: ptr FFIContext[T]) {.async.} =
       # not a fault, and clearListeners drops the onResponding that would follow.
       if ctx.lifecycle.load() == CtxLifecycle.Active:
         hb.check(ctx)
+        ctx.checkReverseWorkers()
 
   # Catch anything enqueued between the last drain and the FFI thread's exit.
   ctx.drainEventQueue()

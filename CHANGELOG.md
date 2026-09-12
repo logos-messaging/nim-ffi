@@ -11,6 +11,16 @@ All notable changes to this project are documented in this file.
   returns 0 when they all stopped. A context the host still owned runs its
   `{.ffiDtor.}` on the way out and is then quarantined, so a later call on it
   fails instead of queueing to a thread that is gone.
+- Experimental reverse FFI (#153). `{.ffiReverse.}` declares a bodyless proc
+  that the host implements at runtime through `<lib>_set_<wire>_impl` and
+  answers through `<lib>_reverse_reply`, under a per-call deadline.
+  `{.ffiReverseEvent.}` declares a handler that runs when the host calls
+  `<lib>_emit_<wire>`. The C, C++ and Rust bindings get typed helpers.
+- Host implementations run on per-context reverse worker threads
+  (`-d:ffiReverseWorkers`, default 2) and may block. A worker stuck past
+  `ReverseWorkerStallMs` emits `reverse_worker_blocked`, and a recycle that
+  outlasts a running implementation quarantines the slot with
+  `RecycleFailure.ReverseImplBlocked`.
 - Each `{.ffi.}` proc's `##` doc comment reaches the generated C header as a
   `/** ... */` block above the declaration and its wrapper.
 - `genBindings()` fails compilation when a library declares an `{.ffiCtor.}` but

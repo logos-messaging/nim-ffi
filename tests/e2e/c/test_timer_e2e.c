@@ -9,6 +9,7 @@
  * data or error strings, which is the whole point. */
 #include "my_timer.h"
 #include "waiter.h"
+#include <stdlib.h>
 
 static int g_event_count = 0;
 static char g_event_message[256];
@@ -221,6 +222,78 @@ static void test_event(MyTimerCtx* ctx) {
     assert(my_timer_ctx_remove_event_listener(ctx, handle) == true);
 }
 
+/* Runs on a reverse worker: decodes the typed args and answers inline. */
+static void host_clock_impl(uint64_t call_id, const uint8_t* args, size_t len,
+                            void* ud) {
+    MyTimerCtx* ctx = (MyTimerCtx*)ud;
+    NimFfiStr precision;
+    char* err = NULL;
+    if (my_timer_decode_fetch_host_clock_args(args, len, &precision, &err) != 0) {
+        my_timer_ctx_reverse_reply_err(ctx, call_id, err ? err : "args decode failed");
+        free(err);
+        return;
+    }
+    assert(precision.data && strcmp(precision.data, "ms") == 0);
+    nimffi_free_str(&precision);
+    HostClock clock = {1700000123456LL, nimffi_str("UTC")};
+    assert(my_timer_ctx_reverse_reply_fetch_host_clock(ctx, call_id, &clock) == 0);
+}
+
+static void test_reverse_missing_impl(MyTimerCtx* ctx) {
+    ReplyWaiter w;
+    memset(&w, 0, sizeof(w));
+    my_timer_ctx_host_clock(ctx, on_str, &w);
+    wait_done(&w.done);
+    assert(w.err_code != 0);
+    assert(strstr(w.err, "no host implementation") != NULL);
+}
+
+static void test_reverse_host_clock(MyTimerCtx* ctx) {
+    assert(my_timer_ctx_set_fetch_host_clock_impl(ctx, host_clock_impl, ctx) == 0);
+
+    ReplyWaiter w;
+    memset(&w, 0, sizeof(w));
+    my_timer_ctx_host_clock(ctx, on_str, &w);
+    wait_done(&w.done);
+    assert(w.err_code == 0);
+    assert(strcmp(w.text_a, "UTC@1700000123456") == 0);
+
+    /* Unregister (NULL impl): the next call fails fast again. */
+    assert(my_timer_ctx_set_fetch_host_clock_impl(ctx, NULL, NULL) == 0);
+    memset(&w, 0, sizeof(w));
+    my_timer_ctx_host_clock(ctx, on_str, &w);
+    wait_done(&w.done);
+    assert(w.err_code != 0);
+    assert(strstr(w.err, "no host implementation") != NULL);
+}
+
+static void on_last_tick(int ec, const int64_t* reply, const char* em, void* ud) {
+    ReplyWaiter* w = (ReplyWaiter*)ud;
+    w->err_code = ec;
+    if (reply) w->num_a = (long long)*reply;
+    waiter_settle(&w->done, w->err, sizeof(w->err), em);
+}
+
+static void test_reverse_event(MyTimerCtx* ctx) {
+    OnHostTickReq tick = {42};
+    assert(my_timer_ctx_emit_on_host_tick(ctx, &tick) == 0);
+
+    /* Fire-and-forget: poll the effect of the handler. */
+    long long seen = 0;
+    for (int i = 0; i < 100 && seen != 42; i++) {
+        ReplyWaiter w;
+        memset(&w, 0, sizeof(w));
+        my_timer_ctx_last_host_tick(ctx, on_last_tick, &w);
+        wait_done(&w.done);
+        assert(w.err_code == 0);
+        seen = w.num_a;
+        if (seen != 42) {
+            sleep_ms(10);
+        }
+    }
+    assert(seen == 42);
+}
+
 int main(void) {
     MyTimerCtx* ctx = make_ctx();
     test_version(ctx);
@@ -230,6 +303,9 @@ int main(void) {
     test_schedule_error(ctx);
     test_delay_limit(ctx);
     test_event(ctx);
+    test_reverse_missing_impl(ctx);
+    test_reverse_host_clock(ctx);
+    test_reverse_event(ctx);
     assert(my_timer_ctx_destroy(ctx) == NIMFFI_RET_OK);
     printf("all C e2e checks passed\n");
     return 0;

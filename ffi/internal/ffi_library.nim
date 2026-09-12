@@ -219,6 +219,32 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
     )
   )
 
+  # {libraryName}_reverse_reply: answers a {.ffiReverse.} call from any host thread.
+  let replyName = libraryName & "_reverse_reply"
+  let replyBody = quote:
+    when declared(initializeLibrary):
+      initializeLibrary()
+    let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
+    if `ctxIdent`.isNil():
+      return REVERSE_INVALID_CTX
+    return submitReverseReply(`ctxIdent`, callId, retCode, replyCbor, int(replyLen))
+
+  stmts.add(
+    newProc(
+      name = ident(replyName),
+      params = @[
+        ident("cint"),
+        newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
+        newIdentDefs(ident("callId"), ident("uint64")),
+        newIdentDefs(ident("retCode"), ident("cint")),
+        newIdentDefs(ident("replyCbor"), nnkPtrTy.newTree(ident("byte"))),
+        newIdentDefs(ident("replyLen"), ident("csize_t")),
+      ],
+      body = replyBody,
+      pragmas = cdeclExportPragma,
+    )
+  )
+
   # {libraryName}_shutdown
   let shutdownName = libraryName & "_shutdown"
   let shutdownBody = quote:

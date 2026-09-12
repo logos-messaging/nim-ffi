@@ -16,3 +16,6 @@ thread:*initContextResources*
 # and the next test's reuse of the same stack region. Reported as a
 # data race; root cause is the documented leak above.
 race:*threadProcWrapper*
+
+# A reverse worker wedged in a host impl is leaked on purpose at stop.
+thread:*startReverseWorkers*

@@ -675,6 +675,54 @@ inline CborError decode_cbor(CborValue& it, ScheduleResult& v) {
     return cbor_value_advance(&it);
 }
 
+struct HostClock {
+    int64_t unixMs;
+    std::string zone;
+};
+inline CborError encode_cbor(CborEncoder& e, const HostClock& v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(&e, &m, 2);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "unixMs"); if (err) return err;
+    err = encode_cbor(m, v.unixMs);              if (err) return err;
+    err = cbor_encode_text_stringz(&m, "zone"); if (err) return err;
+    err = encode_cbor(m, v.zone);              if (err) return err;
+    return cbor_encoder_close_container(&e, &m);
+}
+inline CborError decode_cbor(CborValue& it, HostClock& v) {
+    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(&it, "unixMs", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.unixMs); if (err) return err;
+    err = cbor_value_map_find_value(&it, "zone", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.zone); if (err) return err;
+    return cbor_value_advance(&it);
+}
+
+struct OnHostTickReq {
+    int64_t tickNo;
+};
+inline CborError encode_cbor(CborEncoder& e, const OnHostTickReq& v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(&e, &m, 1);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "tickNo"); if (err) return err;
+    err = encode_cbor(m, v.tickNo);              if (err) return err;
+    return cbor_encoder_close_container(&e, &m);
+}
+inline CborError decode_cbor(CborValue& it, OnHostTickReq& v) {
+    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(&it, "tickNo", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.tickNo); if (err) return err;
+    return cbor_value_advance(&it);
+}
+
 // ============================================================
 // Per-proc request envelopes (CBOR encoded on the wire)
 // ============================================================
@@ -801,6 +849,32 @@ inline CborError decode_cbor(CborValue& it, MyTimerScheduleReq& v) {
     return cbor_value_advance(&it);
 }
 
+struct MyTimerHostClockReq {
+};
+inline CborError encode_cbor(CborEncoder& e, const MyTimerHostClockReq&) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(&e, &m, 0);
+    if (err) return err;
+    return cbor_encoder_close_container(&e, &m);
+}
+inline CborError decode_cbor(CborValue& it, MyTimerHostClockReq&) {
+    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
+    return cbor_value_advance(&it);
+}
+
+struct MyTimerLastHostTickReq {
+};
+inline CborError encode_cbor(CborEncoder& e, const MyTimerLastHostTickReq&) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(&e, &m, 0);
+    if (err) return err;
+    return cbor_encoder_close_container(&e, &m);
+}
+inline CborError decode_cbor(CborValue& it, MyTimerLastHostTickReq&) {
+    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
+    return cbor_value_advance(&it);
+}
+
 // ============================================================
 // C FFI declarations
 // ============================================================
@@ -818,6 +892,10 @@ int my_timer_lib_version(FFICallback callback, void* user_data, const uint8_t* r
 int my_timer_complex(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 /** Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope. */
 int my_timer_schedule(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+/** Calls the host-implemented `fetch_host_clock` interface and formats it. */
+int my_timer_host_clock(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+/** Reads the last tick number the `on_host_tick` reverse event recorded. */
+int my_timer_last_host_tick(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 /** Tears down the FFI context; blocks until FFI + watchdog threads join. */
 int my_timer_destroy(void* ctx);
 uint64_t my_timer_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
@@ -830,6 +908,13 @@ uint64_t my_timer_add_event_listener(void* ctx, const char* event_name, FFICallb
  * data of that listener alive until the dispatch ends.
  */
 int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
+
+// Reverse FFI: host-implemented interfaces + host-emitted events
+typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, size_t args_len, void* user_data);
+int my_timer_set_fetch_host_clock_impl(void* ctx, FFIReverseImpl impl, void* user_data);
+int my_timer_reverse_reply(void* ctx, uint64_t call_id, int ret_code, const uint8_t* reply_cbor, size_t reply_len);
+int my_timer_start_reverse_workers(void* ctx, int n);
+int my_timer_emit_on_host_tick(void* ctx, const uint8_t* payload_cbor, size_t payload_len);
 /**
  * Stop every context the library still holds and join their threads.
  * Call it before the process exits when a context is still alive, or when a
@@ -999,6 +1084,51 @@ public:
         return rc == 0;
     }
 
+    // ── Reverse FFI: host-implemented interfaces ────────────
+    // n <= 0 starts the library default number of reverse workers.
+    bool startReverseWorkers(int n = 0) const {
+        return my_timer_start_reverse_workers(ptr_, n) == 0;
+    }
+
+    // Answer token for one `fetch_host_clock` call: reply once, from any thread.
+    struct FetchHostClockCall {
+        void* ctx = nullptr;
+        std::uint64_t id = 0;
+        bool reply(const HostClock& r) const {
+            auto enc = encodeCborFFI(r);
+            if (enc.isErr()) return fail(enc.error());
+            const auto& b = enc.value();
+            return my_timer_reverse_reply(ctx, id, 0, b.data(), b.size()) == 0;
+        }
+        bool fail(const std::string& msg) const {
+            return my_timer_reverse_reply(ctx, id, 1, reinterpret_cast<const std::uint8_t*>(msg.data()), msg.size()) == 0;
+        }
+    };
+
+    bool setFetchHostClockImpl(std::function<void(FetchHostClockCall, const std::string&)> fn) {
+        auto owned = std::make_unique<FetchHostClockImplBox>(FetchHostClockImplBox{ptr_, std::move(fn)});
+        auto* raw = owned.get();
+        if (my_timer_set_fetch_host_clock_impl(ptr_, &MyTimerCtx::fetchHostClockImplTrampoline, raw) != 0) return false;
+        fetchHostClockImplBox_ = std::move(owned);
+        return true;
+    }
+
+    bool clearFetchHostClockImpl() {
+        if (my_timer_set_fetch_host_clock_impl(ptr_, nullptr, nullptr) != 0) return false;
+        fetchHostClockImplBox_.reset();
+        return true;
+    }
+
+    // ── Reverse FFI: host-emitted events (fire-and-forget) ──
+    /// Records the tick number that the host emits.
+    bool emitOnHostTick(const int64_t& tickNo) const {
+        const auto payload_ = OnHostTickReq{tickNo};
+        auto enc = encodeCborFFI(payload_);
+        if (enc.isErr()) return false;
+        const auto& b = enc.value();
+        return my_timer_emit_on_host_tick(ptr_, b.data(), b.size()) == 0;
+    }
+
     /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
     Result<EchoResponse> echo(const EchoRequest& req) const {
         const auto ffi_req_ = MyTimerEchoReq{req};
@@ -1069,6 +1199,42 @@ public:
         return std::async(std::launch::async, [this, job, retry, schedule]() { return this->schedule(job, retry, schedule); });
     }
 
+    /// Calls the host-implemented `fetch_host_clock` interface and formats it.
+    Result<std::string> host_clock() const {
+        const auto ffi_req_ = MyTimerHostClockReq{};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) return Result<std::string>::err(ffi_enc_.error());
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
+            return my_timer_host_clock(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        }, timeout_);
+        if (ffi_raw_.isErr()) return Result<std::string>::err(ffi_raw_.error());
+        return decodeCborFFI<std::string>(ffi_raw_.value());
+    }
+
+    /// Calls the host-implemented `fetch_host_clock` interface and formats it.
+    std::future<Result<std::string>> host_clockAsync() const {
+        return std::async(std::launch::async, [this]() { return this->host_clock(); });
+    }
+
+    /// Reads the last tick number the `on_host_tick` reverse event recorded.
+    Result<int64_t> last_host_tick() const {
+        const auto ffi_req_ = MyTimerLastHostTickReq{};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) return Result<int64_t>::err(ffi_enc_.error());
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
+            return my_timer_last_host_tick(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        }, timeout_);
+        if (ffi_raw_.isErr()) return Result<int64_t>::err(ffi_raw_.error());
+        return decodeCborFFI<int64_t>(ffi_raw_.value());
+    }
+
+    /// Reads the last tick number the `on_host_tick` reverse event recorded.
+    std::future<Result<int64_t>> last_host_tickAsync() const {
+        return std::async(std::launch::async, [this]() { return this->last_host_tick(); });
+    }
+
     static Result<std::string> lib_version(std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
         const auto ffi_req_ = MyTimerLibVersionReq{};
         auto ffi_enc_ = encodeCborFFI(ffi_req_);
@@ -1111,8 +1277,33 @@ private:
         listener->fn(payload);
     }
 
+    template <class T>
+    static CborError decodeReverseArgs_(const std::uint8_t* data, std::size_t len, T& out) {
+        CborParser parser; CborValue it;
+        CborError err = cbor_parser_init(data, len, 0, &parser, &it);
+        if (err) return err;
+        return decode_cbor(it, out);
+    }
+
+    struct FetchHostClockImplBox {
+        void* ctx = nullptr;
+        std::function<void(FetchHostClockCall, const std::string&)> fn;
+    };
+    static void fetchHostClockImplTrampoline(std::uint64_t call_id, const std::uint8_t* args, std::size_t len, void* ud) {
+        auto* box = static_cast<FetchHostClockImplBox*>(ud);
+        FetchHostClockCall call{box->ctx, call_id};
+        if (!box->fn) { call.fail("no C++ impl callable"); return; }
+        std::string a{};
+        if (decodeReverseArgs_(args, len, a) != CborNoError) {
+            call.fail("reverse args decode failed");
+            return;
+        }
+        box->fn(call, a);
+    }
+
     void* ptr_;
     std::chrono::milliseconds timeout_;
     std::unordered_map<std::uint64_t, std::unique_ptr<ListenerBase>> listeners_;
+    std::unique_ptr<FetchHostClockImplBox> fetchHostClockImplBox_;
     explicit MyTimerCtx(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}
 };

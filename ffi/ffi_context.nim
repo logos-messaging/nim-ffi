@@ -11,12 +11,13 @@ else:
 import
   ./ffi_types,
   ./ffi_events,
+  ./ffi_reverse,
   ./ffi_handles,
   ./ffi_thread_request,
   ./ffi_request_queue,
   ./cbor_serial
 
-export ffi_events, ffi_handles
+export ffi_events, ffi_reverse, ffi_handles
 export ffi_request_queue.RequestQueueDepth
 
 type FFICtxToken* = distinct pointer
@@ -40,6 +41,8 @@ type RecycleFailure* {.pure.} = enum
   TeardownTimeout ## TeardownTimeout cancelled the `{.ffiDtor.}` body
   TeardownRaised ## the `{.ffiDtor.}` body raised
   CallerAbandoned ## the caller's own wait expired before the recycle finished
+  ReverseImplBlocked
+    ## a reverse worker was still inside a host impl after the drain round
 
 func reason*(failure: RecycleFailure): string =
   ## The `requestRecycle` error text for a quarantine.
@@ -54,6 +57,8 @@ func reason*(failure: RecycleFailure): string =
     "the {.ffiDtor.} teardown raised"
   of RecycleFailure.CallerAbandoned:
     "the teardown outlasted the caller's wait"
+  of RecycleFailure.ReverseImplBlocked:
+    "a host reverse implementation did not return"
 
 type FFIContext*[T] = object
   myLib*: ptr T # main library object (Waku, LibP2P, SDS, …)
@@ -89,6 +94,7 @@ type FFIContext*[T] = object
   eventThreadExitSignal: ThreadSignalPtr
   userData*: pointer
   eventRegistry*: FFIEventRegistry
+  reverse*: FFIReverseState
   handles*: FFIHandleRegistry
   eventQueue*: EventQueue
   ffiHeartbeat*: Atomic[int64]
@@ -133,6 +139,13 @@ proc ffiTeardownHook*[T](): var FFITeardownProc[T] =
   var hook {.global.}: FFITeardownProc[T]
   hook
 
+proc reverseWakeHook[T](ud: pointer) {.nimcall, gcsafe, raises: [].} =
+  ## A failed wake is harmless: the FFI loop polls every 100ms.
+  discard cast[ptr FFIContext[T]](ud).reqSignal.fireSync()
+
+proc reverseGenerationHook[T](ud: pointer): uint {.nimcall, gcsafe, raises: [].} =
+  return cast[ptr FFIContext[T]](ud).generation.load()
+
 proc closeThreadDispatcher() =
   ## chronos leaks a thread's dispatcher; free it last, once nothing polls (nim-chronos#614).
   when defined(windows):
@@ -149,6 +162,7 @@ proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Mirror of `initContextResources`. Threads MUST be joined, and only their owner may call it.
   deinitRequestQueue(ctx[].reqQueueBank)
   deinitEventRegistry(ctx[].eventRegistry)
+  deinitReverseState(ctx[].reverse)
   deinitHandleRegistry(ctx[].handles)
   deinitEventQueue(ctx[].eventQueue)
   ok()
@@ -210,6 +224,8 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ctx.recycleAbandoned.store(false)
   initRequestQueue(ctx[].reqQueueBank)
   initEventRegistry(ctx[].eventRegistry)
+  initReverseState(ctx[].reverse)
+  ctx[].reverse.installContextHooks(reverseWakeHook[T], reverseGenerationHook[T], ctx)
   initHandleRegistry(ctx[].handles)
   initEventQueue(ctx[].eventQueue)
   ctx.ffiHeartbeat.store(0)
@@ -344,6 +360,17 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     return err("requestRecycle: the slot did not come free")
   ok()
 
+proc submitReverseReply*[T](
+    ctx: ptr FFIContext[T], callId: uint64, retCode: cint, data: pointer, dataLen: int
+): cint =
+  ## Any host thread. Returns a REVERSE_* status.
+  if ctx.lifecycle.load() != CtxLifecycle.Active:
+    return REVERSE_NOT_ACTIVE
+  if dataLen > MaxRequestPayloadBytes:
+    return REVERSE_PAYLOAD_TOO_LARGE
+
+  return ctx[].reverse.pushReply(callId, retCode, data, dataLen)
+
 const ThreadExitTimeoutMs* {.intdefine: "ffiThreadExitTimeoutMs".} = 1500
   ## Per-thread exit wait; past it stopAndJoinThreads leaks the ctx rather than hangs.
 const ThreadExitTimeout* = ThreadExitTimeoutMs.milliseconds
@@ -362,4 +389,11 @@ proc stopAndJoinThreads*[T](
   joinThread(ctx.ffiThread)
   ?ctx.eventThreadExitSignal.waitExitOrErr("event thread", timeout)
   joinThread(ctx.eventThread)
+  if not ctx[].reverse.stopFn.isNil():
+    let stop = ctx[].reverse.stopFn(ctx[].reverse, timeout.milliseconds.int)
+    if stop.leaked > 0:
+      return err(
+        "did not exit in time: " & $stop.leaked &
+          " reverse worker(s) still inside a host impl (leaking ctx to avoid hang)"
+      )
   ok()

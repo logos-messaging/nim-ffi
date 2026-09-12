@@ -105,6 +105,19 @@ pub struct ScheduleResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostClock {
+    #[serde(rename = "unixMs")]
+    pub unix_ms: i64,
+    pub zone: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnHostTickReq {
+    #[serde(rename = "tickNo")]
+    pub tick_no: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MyTimerCreateCtorReq {
     pub config: TimerConfig,
 }
@@ -131,3 +144,9 @@ pub struct MyTimerScheduleReq {
     pub retry: RetryPolicy,
     pub schedule: ScheduleConfig,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MyTimerHostClockReq {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MyTimerLastHostTickReq {}
