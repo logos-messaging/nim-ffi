@@ -20,5 +20,6 @@ template foreignThreadGc*(body: untyped) =
 
   body
 
-  when declared(tearDownForeignThreadGc):
+  # ARC/ORC: a no-op before Nim 2.2.12, then it frees the allocator of a live thread.
+  when declared(tearDownForeignThreadGc) and not defined(gcDestructors):
     tearDownForeignThreadGc()
