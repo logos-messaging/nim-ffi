@@ -288,7 +288,7 @@ proc proveAlive(ctx: ptr FFIContext) =
   ctx.ffiHeartbeat.atomicInc()
 
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
-  closeDispatcherOnExit()
+  registerCloseDispatcherHook()
   ffiCurrentEventRegistry = addr ctx[].eventRegistry
   ffiCurrentEventQueue = addr ctx[].eventQueue
   ffiCurrentEventQueueStuck = addr ctx[].eventQueueStuck

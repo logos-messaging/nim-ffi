@@ -127,7 +127,7 @@ proc eventRun[T](ctx: ptr FFIContext[T]) {.async.} =
 
 proc eventThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ## Drains the event queue and runs the FFI-thread heartbeat check.
-  closeDispatcherOnExit()
+  registerCloseDispatcherHook()
   onEventThread = true
 
   defer:

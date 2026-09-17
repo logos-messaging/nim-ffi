@@ -147,7 +147,7 @@ proc unregisterWaitedSignal(signal: ThreadSignalPtr) =
         error "failed to unregister a signal from its thread's dispatcher",
           err = osErrorMsg(error)
 
-proc closeDispatcherOnThreadExit() {.gcsafe, raises: [].} =
+proc closeDispatcherHook() {.gcsafe, raises: [].} =
   ## chronos never closes a thread's dispatcher, and a library's `onThreadDestruction`
   ## hook can still poll it after the thread body returns (nim-brokers does). Nim
   ## runs the hooks in reverse, so registering this one first makes it run last.
@@ -164,9 +164,9 @@ proc closeDispatcherOnThreadExit() {.gcsafe, raises: [].} =
     # orc never frees the hook list; this is the last hook, so nothing reads it after.
     reset(nimThreadDestructionHandlers)
 
-proc closeDispatcherOnExit() =
+proc registerCloseDispatcherHook() =
   ## Call first thing in a thread body, before any library can register its own hook.
-  onThreadDestruction(closeDispatcherOnThreadExit)
+  onThreadDestruction(closeDispatcherHook)
 
 include ./event_thread
 include ./ffi_thread
