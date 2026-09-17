@@ -15,7 +15,7 @@ declareLibrary("shutdownlib", ShutdownLib)
 proc shutdownlib_ping*(lib: ShutdownLib): Future[Result[int, string]] {.ffi.} =
   return ok(1)
 
-proc liveThreads(): int =
+proc threadCount(): int =
   ## Linux-only: /proc is the only portable-enough way to read the OS thread count.
   when defined(linux):
     for line in readFile("/proc/self/status").splitLines():
@@ -24,6 +24,18 @@ proc liveThreads(): int =
     -1
   else:
     -1
+
+proc liveThreads(): int =
+  ## The count once it settles: `joinThread` returns before the kernel drops the
+  ## joined thread from it.
+  var count = threadCount()
+  for _ in 0 ..< 100:
+    sleep(5)
+    let next = threadCount()
+    if next == count:
+      return count
+    count = next
+  count
 
 const fdDir =
   when defined(linux):
