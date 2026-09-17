@@ -159,7 +159,7 @@ proc closeDispatcherOnThreadExit() {.gcsafe, raises: [].} =
   except Defect as e:
     # chronos asserts nothing is still registered; leak the dispatcher rather than abort the host.
     error "a thread's chronos dispatcher still had work registered; it leaks",
-      err = e.msg
+      error = e.msg
   when defined(gcDestructors):
     # orc never frees the hook list; this is the last hook, so nothing reads it after.
     reset(nimThreadDestructionHandlers)
