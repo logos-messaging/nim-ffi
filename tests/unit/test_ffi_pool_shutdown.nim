@@ -25,10 +25,18 @@ proc liveThreads(): int =
   else:
     -1
 
-proc openFds(): int =
+const fdDir =
   when defined(linux):
+    "/proc/self/fd"
+  elif defined(macosx):
+    "/dev/fd"
+  else:
+    ""
+
+proc openFds(): int =
+  when fdDir.len > 0:
     var count = 0
-    for _ in walkDir("/proc/self/fd"):
+    for _ in walkDir(fdDir):
       count.inc()
     count
   else:
@@ -82,7 +90,7 @@ suite "pool shutdown":
       let ctx = ShutdownLibFFIPool.createFFIContext().get()
       check ShutdownLibFFIPool.recycleFFIContext(ctx).isOk()
 
-    when defined(linux):
+    when fdDir.len > 0:
       check openFds() == baseline
 
   test "shutdown stops a context the host never destroyed":

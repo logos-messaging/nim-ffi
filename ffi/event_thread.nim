@@ -127,11 +127,12 @@ proc eventRun[T](ctx: ptr FFIContext[T]) {.async.} =
 
 proc eventThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ## Drains the event queue and runs the FFI-thread heartbeat check.
-  ctx.eventPoller = currentThreadPoller()
+  closeDispatcherOnExit()
   onEventThread = true
 
   defer:
     onEventThread = false
+    unregisterWaitedSignal(ctx.eventQueueSignal)
     let fireRes = ctx.eventThreadExitSignal.fireSync()
     if fireRes.isErr():
       error "failed to fire eventThreadExitSignal", err = fireRes.error

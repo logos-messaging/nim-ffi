@@ -4,11 +4,6 @@
 
 import std/[atomics, locks, options, os, sequtils, sysatomics, tables]
 import chronicles, chronos, chronos/threadsync, results
-when defined(windows):
-  import chronos/osdefs
-else:
-  import chronos/selectors2
-  from std/posix import nil
 import
   ./ffi_types,
   ./ffi_events,
@@ -56,13 +51,6 @@ func reason*(failure: RecycleFailure): string =
   of RecycleFailure.CallerAbandoned:
     "the teardown outlasted the caller's wait"
 
-when defined(windows):
-  type ThreadPoller = HANDLE
-  const NoPoller = ThreadPoller(0)
-else:
-  type ThreadPoller = cint
-  const NoPoller = ThreadPoller(-1)
-
 type FFIContext*[T] = object
   myLib*: ptr T # main library object (Waku, LibP2P, SDS, …)
   myLibRefd*: bool
@@ -89,9 +77,6 @@ type FFIContext*[T] = object
     # is nil.
   ffiThread: Thread[(ptr FFIContext[T])]
   eventThread: Thread[(ptr FFIContext[T])]
-  ffiPoller: ThreadPoller
-  eventPoller: ThreadPoller
-    # Each thread's chronos poller: set when the thread starts, closed by whoever joins it.
   reqQueueBank: RequestQueueBank
   reqSignal: ThreadSignalPtr
   stopSignal: ThreadSignalPtr
@@ -144,27 +129,43 @@ proc ffiTeardownHook*[T](): var FFITeardownProc[T] =
   var hook {.global.}: FFITeardownProc[T]
   hook
 
-proc currentThreadPoller(): ThreadPoller =
-  ## The calling thread's chronos poller, which chronos never closes (nim-chronos#614).
-  when defined(windows):
-    getThreadDispatcher().getIoHandler()
-  else:
-    ThreadPoller(getThreadDispatcher().getIoHandler().getFd())
+proc unregisterWaitedSignal(signal: ThreadSignalPtr) =
+  ## `wait` leaves the signal's fd registered in this thread's dispatcher, and
+  ## `closeThreadDispatcher` refuses to close a dispatcher that still has one.
+  ## chronos keeps that fd private, so it is read from the signal's layout until
+  ## `ThreadSignalPtr.unregister` (nim-chronos#740) ships.
+  when not defined(windows):
+    # `ThreadSignal` is `efd` on Linux, `rfd, wfd` elsewhere; `wait` registers the first.
+    const fdFields = when defined(linux) and not defined(emscripten): 1 else: 2
+    static:
+      doAssert sizeof(ThreadSignal) == fdFields * sizeof(AsyncFD),
+        "chronos changed ThreadSignal's layout; revisit unregisterWaitedSignal"
+    let fd = cast[ptr AsyncFD](signal)[]
+    if getThreadDispatcher().contains(fd):
+      unregister2(fd).isOkOr:
+        error "failed to unregister a signal from its thread's dispatcher",
+          err = osErrorMsg(error)
 
-proc closeJoinedPoller(poller: var ThreadPoller) =
-  ## Closes a joined thread's poller. Only past the join does nothing poll it: a
-  ## library's `onThreadDestruction` hook runs after the thread body returns.
-  if poller == NoPoller:
-    return
-  when defined(windows):
-    if closeHandle(poller) == 0:
-      error "failed to close a joined thread's IOCP port; the handle leaks",
-        err = osErrorMsg(osLastError())
-  else:
-    if posix.close(poller) != 0:
-      error "failed to close a joined thread's poller; the fd leaks",
-        err = osErrorMsg(osLastError())
-  poller = NoPoller
+proc closeDispatcherOnThreadExit() {.gcsafe, raises: [].} =
+  ## chronos never closes a thread's dispatcher, and a library's `onThreadDestruction`
+  ## hook can still poll it after the thread body returns (nim-brokers does). Nim
+  ## runs the hooks in reverse, so registering this one first makes it run last.
+  try:
+    let diagnostic = closeThreadDispatcher()
+    if diagnostic.isSome():
+      error "a thread's chronos dispatcher did not close cleanly",
+        err = diagnostic.get()
+  except Defect as e:
+    # chronos asserts nothing is still registered; leak the dispatcher rather than abort the host.
+    error "a thread's chronos dispatcher still had work registered; it leaks",
+      err = e.msg
+  when defined(gcDestructors):
+    # orc never frees the hook list; this is the last hook, so nothing reads it after.
+    reset(nimThreadDestructionHandlers)
+
+proc closeDispatcherOnExit() =
+  ## Call first thing in a thread body, before any library can register its own hook.
+  onThreadDestruction(closeDispatcherOnThreadExit)
 
 include ./event_thread
 include ./ffi_thread
@@ -205,8 +206,6 @@ proc startContextThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
 
   ctx.ffiThreadExited.store(false)
   ctx.running.store(true)
-  ctx.ffiPoller = NoPoller
-  ctx.eventPoller = NoPoller
 
   try:
     createThread(ctx.ffiThread, ffiThreadBody[T], ctx)
@@ -223,7 +222,6 @@ proc startContextThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
       error "failed to signal ffiThread during event-thread cleanup",
         error = fireRes.error
     joinThread(ctx.ffiThread)
-    closeJoinedPoller(ctx.ffiPoller)
     return err("failed to create the event thread: " & getCurrentExceptionMsg())
 
   ok()
@@ -387,8 +385,6 @@ proc stopAndJoinThreads*[T](
 
   ?ctx.threadExitSignal.waitExitOrErr("FFI thread", timeout)
   joinThread(ctx.ffiThread)
-  closeJoinedPoller(ctx.ffiPoller)
   ?ctx.eventThreadExitSignal.waitExitOrErr("event thread", timeout)
   joinThread(ctx.eventThread)
-  closeJoinedPoller(ctx.eventPoller)
   ok()

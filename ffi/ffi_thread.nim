@@ -288,7 +288,7 @@ proc proveAlive(ctx: ptr FFIContext) =
   ctx.ffiHeartbeat.atomicInc()
 
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
-  ctx.ffiPoller = currentThreadPoller()
+  closeDispatcherOnExit()
   ffiCurrentEventRegistry = addr ctx[].eventRegistry
   ffiCurrentEventQueue = addr ctx[].eventQueue
   ffiCurrentEventQueueStuck = addr ctx[].eventQueueStuck
@@ -298,6 +298,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
   defer:
     onFFIThread = false
+    unregisterWaitedSignal(ctx.reqSignal)
     # Free handle refs on the thread that allocated them (refc heap is thread-local).
     ctx[].handles.releaseAll()
     # Let the event thread stop draining and exit; wake it so it notices now.
