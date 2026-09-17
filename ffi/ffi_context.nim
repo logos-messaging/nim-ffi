@@ -133,7 +133,8 @@ proc unregisterWaitedSignal(signal: ThreadSignalPtr) =
   ## `wait` leaves the signal's fd registered in this thread's dispatcher, and
   ## `closeThreadDispatcher` refuses to close a dispatcher that still has one.
   ## chronos keeps that fd private, so it is read from the signal's layout until
-  ## `ThreadSignalPtr.unregister` (nim-chronos#740) ships.
+  ## `ThreadSignalPtr.unregister` ships:
+  ## https://github.com/status-im/nim-chronos/pull/740
   when not defined(windows):
     # `ThreadSignal` is `efd` on Linux, `rfd, wfd` elsewhere; `wait` registers the first.
     const fdFields = when defined(linux) and not defined(emscripten): 1 else: 2
