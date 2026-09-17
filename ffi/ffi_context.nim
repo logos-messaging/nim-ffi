@@ -155,7 +155,7 @@ proc closeDispatcherOnThreadExit() {.gcsafe, raises: [].} =
     let diagnostic = closeThreadDispatcher()
     if diagnostic.isSome():
       error "a thread's chronos dispatcher did not close cleanly",
-        err = diagnostic.get()
+        error = diagnostic.get()
   except Defect as e:
     # chronos asserts nothing is still registered; leak the dispatcher rather than abort the host.
     error "a thread's chronos dispatcher still had work registered; it leaks",
