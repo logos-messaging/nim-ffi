@@ -126,14 +126,6 @@ All notable changes to this project are documented in this file.
   their `genbindings_*` copies duplicated the root tasks.
 
 ### Fixed
-- **Reaping the last context no longer closes a thread's dispatcher under a
-  library's exit hook.** The FFI and event threads closed their chronos poller
-  in the thread body's `defer`, but Nim runs `onThreadDestruction` hooks after
-  the body returns. A hook that drives the dispatcher — nim-brokers stops its
-  dispatch loop that way — then polled a closed handle and aborted the process with
-  `poll(): Unable to get OS events`. Each thread now closes its dispatcher with
-  chronos' `closeThreadDispatcher` in its last destruction hook, after every
-  library hook has run.
 - **A context whose teardown did not finish is quarantined, not recycled.**
   `recycleContext` gated the slot release on the request drain alone, and
   `runTeardown` returned nothing: a `{.ffiDtor.}` cut short by
