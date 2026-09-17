@@ -60,7 +60,7 @@ jobs:
           path: |
             nimbledeps/
             nimble.paths
-          key: ${{ runner.os }}-nimbledeps-${{ matrix.nim-version }}-${{ hashFiles('*.nimble') }}
+          key: ${{ runner.os }}-nimbledeps-${{ matrix.nim-version }}-${{ hashFiles('*.nimble', 'nimble.lock') }}
           restore-keys: |
             ${{ runner.os }}-nimbledeps-${{ matrix.nim-version }}-
             ${{ runner.os }}-nimbledeps-

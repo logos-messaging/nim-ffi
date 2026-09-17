@@ -90,7 +90,7 @@ jobs:
           path: |
             nimbledeps/
             nimble.paths
-          key: ${{ runner.os }}-nimbledeps-stable-${{ hashFiles('*.nimble') }}
+          key: ${{ runner.os }}-nimbledeps-stable-${{ hashFiles('*.nimble', 'nimble.lock') }}
           restore-keys: |
             ${{ runner.os }}-nimbledeps-stable-
             ${{ runner.os }}-nimbledeps-
