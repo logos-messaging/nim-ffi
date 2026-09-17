@@ -37,22 +37,20 @@ proc liveThreads(): int =
     count = next
   count
 
-const fdDir =
-  when defined(linux):
-    "/proc/self/fd"
-  elif defined(macosx):
-    "/dev/fd"
-  else:
-    ""
+when not defined(windows):
+  const fdDir = when defined(linux): "/proc/self/fd" else: "/dev/fd"
+    ## Both selectors are worth counting: chronos closes an epoll fd and an
+    ## eventfd on Linux, a kqueue fd and a pipe pair on macOS.
 
 proc openFds(): int =
-  when fdDir.len > 0:
+  ## Windows counts handles rather than fds, and exposes no such directory.
+  when defined(windows):
+    -1
+  else:
     var count = 0
     for _ in walkDir(fdDir):
       count.inc()
     count
-  else:
-    -1
 
 template baselineThreads(): int =
   ## Measured after a full cycle: a sanitizer starts threads of its own that never go away.
@@ -93,16 +91,18 @@ suite "pool shutdown":
       check liveThreads() == baseline
 
   test "a create/recycle cycle churns no fd":
-    # The reap stops the threads, but the signals stay open: under refc a close is not an option.
-    let warmup = ShutdownLibFFIPool.createFFIContext().get()
-    check ShutdownLibFFIPool.recycleFFIContext(warmup).isOk()
-    let baseline = openFds()
+    when defined(windows):
+      skip()
+    else:
+      # The reap stops the threads, but the signals stay open: under refc a close is not an option.
+      let warmup = ShutdownLibFFIPool.createFFIContext().get()
+      check ShutdownLibFFIPool.recycleFFIContext(warmup).isOk()
+      let baseline = openFds()
 
-    for _ in 0 ..< 50:
-      let ctx = ShutdownLibFFIPool.createFFIContext().get()
-      check ShutdownLibFFIPool.recycleFFIContext(ctx).isOk()
+      for _ in 0 ..< 50:
+        let ctx = ShutdownLibFFIPool.createFFIContext().get()
+        check ShutdownLibFFIPool.recycleFFIContext(ctx).isOk()
 
-    when fdDir.len > 0:
       check openFds() == baseline
 
   test "shutdown stops a context the host never destroyed":
