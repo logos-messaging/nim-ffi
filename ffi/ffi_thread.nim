@@ -288,6 +288,7 @@ proc proveAlive(ctx: ptr FFIContext) =
   ctx.ffiHeartbeat.atomicInc()
 
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
+  registerCloseDispatcherHook()
   ffiCurrentEventRegistry = addr ctx[].eventRegistry
   ffiCurrentEventQueue = addr ctx[].eventQueue
   ffiCurrentEventQueueStuck = addr ctx[].eventQueueStuck
@@ -297,6 +298,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
   defer:
     onFFIThread = false
+    unregisterWaitedSignal(ctx.reqSignal)
     # Free handle refs on the thread that allocated them (refc heap is thread-local).
     ctx[].handles.releaseAll()
     # Let the event thread stop draining and exit; wake it so it notices now.
@@ -307,7 +309,6 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
     let fireRes = ctx.threadExitSignal.fireSync()
     if fireRes.isErr():
       error "failed to fire threadExitSignal on FFI thread exit", err = fireRes.error
-    closeThreadDispatcher()
 
   let ffiRun = proc(ctx: ptr FFIContext[T]) {.async.} =
     var ffiReqHandler: T # main library object (Waku, LibP2P, SDS, …)
