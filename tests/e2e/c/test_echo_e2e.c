@@ -72,6 +72,22 @@ static void test_version(EchoCtx* ctx) {
     assert(strcmp(w.text_a, "nim-echo v0.1.0") == 0);
 }
 
+/* A host can hand back a nil or stale handle as its very first call, before
+   any ctx exists and so before the Nim runtime is up. The guard's error string
+   is a Nim allocation, so it must initialize the library first. */
+static void test_nil_ctx_first_call(void) {
+    EchoCtx nil_ctx;
+    memset(&nil_ctx, 0, sizeof(nil_ctx));
+
+    ReplyWaiter w;
+    memset(&w, 0, sizeof(w));
+    ShoutRequest req = {nimffi_str("hello")};
+    echo_ctx_shout(&nil_ctx, &req, on_shout, &w);
+    wait_done(&w.done);
+    assert(w.err_code != 0);
+    assert(strstr(w.err, "not a valid FFI context") != NULL);
+}
+
 /* {.ffiStatic.} procs take no context: they must work before any ctx exists. */
 static void test_statics(void) {
     ReplyWaiter w;
@@ -91,6 +107,8 @@ static void test_statics(void) {
 }
 
 int main(void) {
+    /* First: it is the only call that can catch an uninitialized runtime. */
+    test_nil_ctx_first_call();
     test_statics();
     EchoCtx* ctx = make_ctx();
     test_shout(ctx);
