@@ -325,7 +325,9 @@ suite "shared headers: prelude and cbor split":
     let prelude = generateCPreludeHeader()
     check "#include <tinycbor/cbor.h>" in prelude
     check "} NimFfiBytes;" in prelude
-    check "nimffi_free_cstr" in prelude
+    check "nimffi_free_bytes" in prelude
+    # Strings are a bare `const char*`: no leaf type and no free helper.
+    check "NimFfiStr" notin prelude
 
   test "the cbor header carries the leaf codecs and pulls in the prelude":
     let cbor = generateCCborHeader()

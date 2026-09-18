@@ -63,7 +63,7 @@ static inline CborError echo_dec_EchoConfig(
 }
 static inline void echo_free_EchoConfig(EchoConfig* v) {
     if (!v) return;
-    nimffi_free_cstr(&v->prefix);
+    free((void*)v->prefix);
 }
 static inline CborError echo_enc_ShoutRequest(
         CborEncoder* e, const ShoutRequest* v) {
@@ -90,7 +90,7 @@ static inline CborError echo_dec_ShoutRequest(
 }
 static inline void echo_free_ShoutRequest(ShoutRequest* v) {
     if (!v) return;
-    nimffi_free_cstr(&v->text);
+    free((void*)v->text);
 }
 static inline CborError echo_enc_ShoutResponse(
         CborEncoder* e, const ShoutResponse* v) {
@@ -126,8 +126,8 @@ static inline CborError echo_dec_ShoutResponse(
 }
 static inline void echo_free_ShoutResponse(ShoutResponse* v) {
     if (!v) return;
-    nimffi_free_cstr(&v->shouted);
-    nimffi_free_cstr(&v->prefix);
+    free((void*)v->shouted);
+    free((void*)v->prefix);
 }
 static inline CborError echo_enc_EchoCreateCtorReq(
         CborEncoder* e, const EchoCreateCtorReq* v) {
@@ -323,7 +323,7 @@ static void echo_create_trampoline(int ret, const char* msg, size_t len, void* u
     char* endp = NULL;
     unsigned long long a = addr ? strtoull(addr, &endp, 10) : 0;
     bool ok = addr && addr[0] != '\0' && endp && *endp == '\0';
-    nimffi_free_cstr(&addr);
+    free((void*)addr);
     if (!ok) {
         box->fn(-1, NULL, "FFI create returned non-numeric address", box->user_data);
         free(box);
@@ -462,12 +462,12 @@ static void echo_version_reply_trampoline(int ret, const char* msg, size_t len, 
     if (dec != 0) {
         box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
         free(err);
-        nimffi_free_cstr(&out);
+        free((void*)out);
         free(box);
         return;
     }
     box->fn(NIMFFI_RET_OK, &out, NULL, box->user_data);
-    nimffi_free_cstr(&out);
+    free((void*)out);
     free(box);
 }
 /** Returns the library's version string. */
@@ -524,12 +524,12 @@ static void echo_lib_version_reply_trampoline(int ret, const char* msg, size_t l
     if (dec != 0) {
         box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
         free(err);
-        nimffi_free_cstr(&out);
+        free((void*)out);
         free(box);
         return;
     }
     box->fn(NIMFFI_RET_OK, &out, NULL, box->user_data);
-    nimffi_free_cstr(&out);
+    free((void*)out);
     free(box);
 }
 static inline int echo_static_lib_version(EchoLibVersionReplyFn on_reply, void* user_data) {

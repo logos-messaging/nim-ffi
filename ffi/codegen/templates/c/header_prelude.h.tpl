@@ -40,24 +40,16 @@ extern "C" {
 
 /* Nim `string`/`cstring` crosses as a plain NUL-terminated C string. A request
  * field borrows the caller's storage, which must outlive the call that encodes
- * it; a decoded response string is heap-allocated and freed by
- * nimffi_free_cstr. Because the wire form is NUL-terminated here, a Nim string
- * carrying embedded NUL bytes is truncated at the first one — use `seq[byte]`
- * for binary payloads. */
+ * it; a decoded response string is heap-allocated, and the binding frees it
+ * once the result callback returns. Because the wire form is NUL-terminated
+ * here, a Nim string carrying embedded NUL bytes is truncated at the first
+ * one — use `seq[byte]` for binary payloads. */
 
 /* Owned, length-delimited byte buffer (Nim `seq[byte]`). */
 typedef struct {
     uint8_t* data;
     size_t len;
 } NimFfiBytes;
-
-static inline void nimffi_free_cstr(const char** v) {
-    if (!v || !*v) {
-        return;
-    }
-    free((void*)*v); /* decoded by nimffi_dec_str, which owns the allocation */
-    *v = NULL;
-}
 
 static inline void nimffi_free_bytes(NimFfiBytes* v) {
     if (!v || !v->data) {
