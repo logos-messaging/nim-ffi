@@ -90,12 +90,14 @@ func decFn(reg: CTypeReg, cType: string): string =
 
 func freeStmt(reg: CTypeReg, cType, lvalue: string): string =
   ## Statement reclaiming `lvalue`, or "" when `cType` owns no heap memory.
-  ## The string leaf frees in place: it is a bare pointer, so there is no
-  ## helper to reset, and the cast just drops the `const` it was decoded with.
+  ## The string leaf frees in place, nulling the pointer so freeing the owning
+  ## struct twice stays a no-op as it is for every other leaf; the cast drops
+  ## the `const` it was decoded with, and `do/while` keeps the pair a single
+  ## statement for the brace-less seq free loop.
   return
     case cType
     of CStrType:
-      "free((void*)" & lvalue & ");"
+      "do { free((void*)" & lvalue & "); " & lvalue & " = NULL; } while (0);"
     of "NimFfiBytes":
       "nimffi_free_bytes(&" & lvalue & ");"
     else:

@@ -63,7 +63,7 @@ static inline CborError echo_dec_EchoConfig(
 }
 static inline void echo_free_EchoConfig(EchoConfig* v) {
     if (!v) return;
-    free((void*)v->prefix);
+    do { free((void*)v->prefix); v->prefix = NULL; } while (0);
 }
 static inline CborError echo_enc_ShoutRequest(
         CborEncoder* e, const ShoutRequest* v) {
@@ -90,7 +90,7 @@ static inline CborError echo_dec_ShoutRequest(
 }
 static inline void echo_free_ShoutRequest(ShoutRequest* v) {
     if (!v) return;
-    free((void*)v->text);
+    do { free((void*)v->text); v->text = NULL; } while (0);
 }
 static inline CborError echo_enc_ShoutResponse(
         CborEncoder* e, const ShoutResponse* v) {
@@ -126,8 +126,8 @@ static inline CborError echo_dec_ShoutResponse(
 }
 static inline void echo_free_ShoutResponse(ShoutResponse* v) {
     if (!v) return;
-    free((void*)v->shouted);
-    free((void*)v->prefix);
+    do { free((void*)v->shouted); v->shouted = NULL; } while (0);
+    do { free((void*)v->prefix); v->prefix = NULL; } while (0);
 }
 static inline CborError echo_enc_EchoCreateCtorReq(
         CborEncoder* e, const EchoCreateCtorReq* v) {
@@ -462,12 +462,12 @@ static void echo_version_reply_trampoline(int ret, const char* msg, size_t len, 
     if (dec != 0) {
         box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
         free(err);
-        free((void*)out);
+        do { free((void*)out); out = NULL; } while (0);
         free(box);
         return;
     }
     box->fn(NIMFFI_RET_OK, &out, NULL, box->user_data);
-    free((void*)out);
+    do { free((void*)out); out = NULL; } while (0);
     free(box);
 }
 /** Returns the library's version string. */
@@ -524,12 +524,12 @@ static void echo_lib_version_reply_trampoline(int ret, const char* msg, size_t l
     if (dec != 0) {
         box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
         free(err);
-        free((void*)out);
+        do { free((void*)out); out = NULL; } while (0);
         free(box);
         return;
     }
     box->fn(NIMFFI_RET_OK, &out, NULL, box->user_data);
-    free((void*)out);
+    do { free((void*)out); out = NULL; } while (0);
     free(box);
 }
 static inline int echo_static_lib_version(EchoLibVersionReplyFn on_reply, void* user_data) {

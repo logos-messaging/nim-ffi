@@ -133,7 +133,7 @@ static inline CborError my_timer_dec_TimerConfig(
 }
 static inline void my_timer_free_TimerConfig(TimerConfig* v) {
     if (!v) return;
-    free((void*)v->name);
+    do { free((void*)v->name); v->name = NULL; } while (0);
 }
 static inline CborError my_timer_enc_EchoRequest(
         CborEncoder* e, const EchoRequest* v) {
@@ -169,7 +169,7 @@ static inline CborError my_timer_dec_EchoRequest(
 }
 static inline void my_timer_free_EchoRequest(EchoRequest* v) {
     if (!v) return;
-    free((void*)v->message);
+    do { free((void*)v->message); v->message = NULL; } while (0);
 }
 static inline CborError my_timer_enc_EchoResponse(
         CborEncoder* e, const EchoResponse* v) {
@@ -205,8 +205,8 @@ static inline CborError my_timer_dec_EchoResponse(
 }
 static inline void my_timer_free_EchoResponse(EchoResponse* v) {
     if (!v) return;
-    free((void*)v->echoed);
-    free((void*)v->timerName);
+    do { free((void*)v->echoed); v->echoed = NULL; } while (0);
+    do { free((void*)v->timerName); v->timerName = NULL; } while (0);
 }
 static inline CborError my_timer_enc_MyTimerSeq_EchoRequest(
         CborEncoder* e, const MyTimerSeq_EchoRequest* v) {
@@ -275,7 +275,7 @@ static inline CborError my_timer_dec_MyTimerSeq_Str(
 }
 static inline void my_timer_free_MyTimerSeq_Str(MyTimerSeq_Str* v) {
     if (!v || !v->data) return;
-    for (size_t i = 0; i < v->len; i++) free((void*)v->data[i]);
+    for (size_t i = 0; i < v->len; i++) do { free((void*)v->data[i]); v->data[i] = NULL; } while (0);
     free(v->data);
     v->data = NULL;
     v->len = 0;
@@ -297,7 +297,7 @@ static inline CborError my_timer_dec_MyTimerOpt_Str(
 }
 static inline void my_timer_free_MyTimerOpt_Str(MyTimerOpt_Str* v) {
     if (!v || !v->has_value) return;
-    free((void*)v->value);
+    do { free((void*)v->value); v->value = NULL; } while (0);
     v->has_value = false;
 }
 static inline CborError my_timer_enc_MyTimerOpt_I64(
@@ -414,7 +414,7 @@ static inline CborError my_timer_dec_ComplexResponse(
 }
 static inline void my_timer_free_ComplexResponse(ComplexResponse* v) {
     if (!v) return;
-    free((void*)v->summary);
+    do { free((void*)v->summary); v->summary = NULL; } while (0);
 }
 static inline CborError my_timer_enc_EchoEvent(
         CborEncoder* e, const EchoEvent* v) {
@@ -450,7 +450,7 @@ static inline CborError my_timer_dec_EchoEvent(
 }
 static inline void my_timer_free_EchoEvent(EchoEvent* v) {
     if (!v) return;
-    free((void*)v->message);
+    do { free((void*)v->message); v->message = NULL; } while (0);
 }
 static inline CborError my_timer_enc_OnJobScheduledPayload(
         CborEncoder* e, const OnJobScheduledPayload* v) {
@@ -486,7 +486,7 @@ static inline CborError my_timer_dec_OnJobScheduledPayload(
 }
 static inline void my_timer_free_OnJobScheduledPayload(OnJobScheduledPayload* v) {
     if (!v) return;
-    free((void*)v->jobId);
+    do { free((void*)v->jobId); v->jobId = NULL; } while (0);
 }
 static inline CborError my_timer_enc_JobPriority(
         CborEncoder* e, const JobPriority* v) {
@@ -557,7 +557,7 @@ static inline CborError my_timer_dec_JobSpec(
 }
 static inline void my_timer_free_JobSpec(JobSpec* v) {
     if (!v) return;
-    free((void*)v->name);
+    do { free((void*)v->name); v->name = NULL; } while (0);
     my_timer_free_MyTimerSeq_Str(&v->payload);
 }
 static inline CborError my_timer_enc_RetryPolicy(
@@ -707,7 +707,7 @@ static inline CborError my_timer_dec_ScheduleResult(
 }
 static inline void my_timer_free_ScheduleResult(ScheduleResult* v) {
     if (!v) return;
-    free((void*)v->jobId);
+    do { free((void*)v->jobId); v->jobId = NULL; } while (0);
 }
 static inline CborError my_timer_enc_MyTimerCreateCtorReq(
         CborEncoder* e, const MyTimerCreateCtorReq* v) {
@@ -1209,12 +1209,12 @@ static void my_timer_version_reply_trampoline(int ret, const char* msg, size_t l
     if (dec != 0) {
         box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
         free(err);
-        free((void*)out);
+        do { free((void*)out); out = NULL; } while (0);
         free(box);
         return;
     }
     box->fn(NIMFFI_RET_OK, &out, NULL, box->user_data);
-    free((void*)out);
+    do { free((void*)out); out = NULL; } while (0);
     free(box);
 }
 /** Returns the library's version string. */
@@ -1398,12 +1398,12 @@ static void my_timer_lib_version_reply_trampoline(int ret, const char* msg, size
     if (dec != 0) {
         box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
         free(err);
-        free((void*)out);
+        do { free((void*)out); out = NULL; } while (0);
         free(box);
         return;
     }
     box->fn(NIMFFI_RET_OK, &out, NULL, box->user_data);
-    free((void*)out);
+    do { free((void*)out); out = NULL; } while (0);
     free(box);
 }
 static inline int my_timer_static_lib_version(MyTimerLibVersionReplyFn on_reply, void* user_data) {
