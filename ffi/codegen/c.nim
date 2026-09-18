@@ -14,6 +14,10 @@ import
 ## Fixed 64-bit wire type for any Nim `ptr T`/`pointer` (mirrors CppPtrType).
 const CPtrType* = "uint64_t"
 
+## Nim `string`/`cstring` crosses as a plain NUL-terminated C string: borrowed
+## on the request side, binding-owned on the response side.
+const CStrType* = "const char*"
+
 const
   HeaderPreludeTpl = staticRead("templates/c/header_prelude.h.tpl")
   CborHelpersTpl = staticRead("templates/c/cbor_helpers.h.tpl")
@@ -45,9 +49,16 @@ func leafSuffix(cType: string): string =
       return scalarCInfoTable[s].suffix
   return
     case cType
-    of "NimFfiStr": "str"
+    of CStrType: "str"
     of "NimFfiBytes": "bytes"
     else: ""
+
+func byPtrConst(cType: string): string =
+  ## Read-only by-pointer spelling of `cType`; the string leaf already carries
+  ## its own `const`, so the pointer itself is what gains one.
+  if cType == CStrType:
+    return CStrType & " const*"
+  return "const " & cType & "*"
 
 func cToken(cType: string): string =
   ## PascalCase token for monomorphised names.
@@ -77,26 +88,30 @@ func decFn(reg: CTypeReg, cType: string): string =
     return "nimffi_dec_" & suffix
   return reg.libName & "_dec_" & cType
 
-func freeFn(reg: CTypeReg, cType: string): string =
-  ## Free-function name for `cType`, or "" when it owns no heap memory.
+func freeStmt(reg: CTypeReg, cType, lvalue: string): string =
+  ## Statement reclaiming `lvalue`, or "" when `cType` owns no heap memory.
+  ## The string leaf frees in place, nulling the pointer so freeing the owning
+  ## struct twice stays a no-op as it is for every other leaf; the cast drops
+  ## the `const` it was decoded with, and `do/while` keeps the pair a single
+  ## statement for the brace-less seq free loop.
   return
     case cType
-    of "NimFfiStr":
-      "nimffi_free_str"
+    of CStrType:
+      "do { free((void*)" & lvalue & "); " & lvalue & " = NULL; } while (0);"
     of "NimFfiBytes":
-      "nimffi_free_bytes"
+      "nimffi_free_bytes(&" & lvalue & ");"
     else:
       if leafSuffix(cType).len > 0:
         ""
       elif reg.owns.getOrDefault(cType, false):
-        reg.libName & "_free_" & cType
+        reg.libName & "_free_" & cType & "(&" & lvalue & ");"
       else:
         ""
 
 proc emitSeqType(reg: var CTypeReg, name, elemC: string) =
   let eEnc = encFn(reg, elemC)
   let eDec = decFn(reg, elemC)
-  let eFree = freeFn(reg, elemC)
+  let eFree = freeStmt(reg, elemC, "v->data[i]")
   reg.decls.add(
     "typedef struct {\n    " & elemC & "* data;\n    size_t len;\n} " & name & ";"
   )
@@ -137,7 +152,7 @@ proc emitSeqType(reg: var CTypeReg, name, elemC: string) =
   )
   body.add("    if (!v || !v->data) return;")
   if eFree.len > 0:
-    body.add("    for (size_t i = 0; i < v->len; i++) " & eFree & "(&v->data[i]);")
+    body.add("    for (size_t i = 0; i < v->len; i++) " & eFree)
   body.add("    free(v->data);")
   body.add("    v->data = NULL;")
   body.add("    v->len = 0;")
@@ -148,7 +163,7 @@ proc emitSeqType(reg: var CTypeReg, name, elemC: string) =
 proc emitOptType(reg: var CTypeReg, name, elemC: string, elemOwns: bool) =
   let eEnc = encFn(reg, elemC)
   let eDec = decFn(reg, elemC)
-  let eFree = freeFn(reg, elemC)
+  let eFree = freeStmt(reg, elemC, "v->value")
   reg.decls.add(
     "typedef struct {\n    bool has_value;\n    " & elemC & " value;\n} " & name & ";"
   )
@@ -173,7 +188,7 @@ proc emitOptType(reg: var CTypeReg, name, elemC: string, elemOwns: bool) =
       "static inline void " & reg.libName & "_free_" & name & "(" & name & "* v) {"
     )
     body.add("    if (!v || !v->has_value) return;")
-    body.add("    " & eFree & "(&v->value);")
+    body.add("    " & eFree)
     body.add("    v->has_value = false;")
     body.add("}")
   reg.codecs.add(body.join("\n"))
@@ -292,9 +307,9 @@ proc emitStructType(reg: var CTypeReg, t: FFITypeMeta) =
     )
     body.add("    if (!v) return;")
     for mem in members:
-      let ff = freeFn(reg, mem.cType)
+      let ff = freeStmt(reg, mem.cType, "v->" & mem.name)
       if mem.owns and ff.len > 0:
-        body.add("    " & ff & "(&v->" & mem.name & ");")
+        body.add("    " & ff)
     body.add("}")
   reg.codecs.add(body.join("\n"))
   reg.owns[t.name] = owns
@@ -308,7 +323,7 @@ proc ensureCType(reg: var CTypeReg, t: FFIType): tuple[cType: string, owns: bool
   of ftScalar:
     return (scalarCInfoTable[t.scalar].cType, false)
   of ftStr:
-    return ("NimFfiStr", true)
+    return (CStrType, true)
   of ftBytes:
     return ("NimFfiBytes", true)
   of ftSeq:
@@ -408,7 +423,7 @@ proc emitEventMachinery(
   for ev in events:
     let n = evNames(libType, libName, ev)
     let payC = ev.payloadTypeName
-    let payFree = freeFn(reg, payC)
+    let payFree = freeStmt(reg, payC, "payload")
     lines.add(
       "typedef void (*" & n.fnType & ")(const " & payC & "* evt, void* user_data);"
     )
@@ -438,7 +453,7 @@ proc emitEventMachinery(
     )
     lines.add("    box->fn(&payload, box->user_data);")
     if payFree.len > 0:
-      lines.add("    " & payFree & "(&payload);")
+      lines.add("    " & payFree)
     lines.add("}")
     lines.add("")
 
@@ -509,7 +524,7 @@ proc emitConstructors(
   emitCallBox(lines, fnType, boxType)
   emitReplyTrampolineHead(lines, tramp, boxType, "FFI create failed")
   lines.add("    char* err = NULL;")
-  lines.add("    NimFfiStr addr;")
+  lines.add("    " & CStrType & " addr;")
   lines.add("    memset(&addr, 0, sizeof(addr));")
   lines.add(
     "    if (nimffi_decode_from_buf(" & libName &
@@ -521,11 +536,9 @@ proc emitConstructors(
   lines.add("        return;")
   lines.add("    }")
   lines.add("    char* endp = NULL;")
-  lines.add(
-    "    unsigned long long a = addr.data ? strtoull(addr.data, &endp, 10) : 0;"
-  )
-  lines.add("    bool ok = addr.data && addr.len > 0 && endp && *endp == '\\0';")
-  lines.add("    nimffi_free_str(&addr);")
+  lines.add("    unsigned long long a = addr ? strtoull(addr, &endp, 10) : 0;")
+  lines.add("    bool ok = addr && addr[0] != '\\0' && endp && *endp == '\\0';")
+  lines.add("    free((void*)addr);")
   lines.add("    if (!ok) {")
   lines.add(
     "        box->fn(-1, NULL, \"FFI create returned non-numeric address\", box->user_data);"
@@ -697,7 +710,7 @@ proc emitProcWrapper(
   let stripped = stripLibPrefix(m.procName, libName)
   let reqName = reqStructName(m)
   let retC = cReturnType(reg, m)
-  let retFree = freeFn(reg, retC)
+  let retFree = freeStmt(reg, retC, "out")
   let (params, assigns) = buildReqParams(reg, m.extraParams)
   let methodPascal = snakeToPascalCase(stripped)
   let fnType = libType & methodPascal & "ReplyFn"
@@ -705,8 +718,8 @@ proc emitProcWrapper(
   let tramp = libName & "_" & stripped & "_reply_trampoline"
 
   lines.add(
-    "typedef void (*" & fnType & ")(int err_code, const " & retC &
-      "* reply, const char* err_msg, void* user_data);"
+    "typedef void (*" & fnType & ")(int err_code, " & byPtrConst(retC) &
+      " reply, const char* err_msg, void* user_data);"
   )
   emitCallBox(lines, fnType, boxType)
   emitReplyTrampolineHead(lines, tramp, boxType, "FFI call failed")
@@ -722,13 +735,13 @@ proc emitProcWrapper(
   lines.add("        free(err);")
   # Reclaim fields a partial decode allocated (out is zeroed).
   if retFree.len > 0:
-    lines.add("        " & retFree & "(&out);")
+    lines.add("        " & retFree)
   lines.add("        free(box);")
   lines.add("        return;")
   lines.add("    }")
   lines.add("    box->fn(NIMFFI_RET_OK, &out, NULL, box->user_data);")
   if retFree.len > 0:
-    lines.add("    " & retFree & "(&out);")
+    lines.add("    " & retFree)
   lines.add("    free(box);")
   lines.add("}")
 
@@ -950,7 +963,7 @@ proc generateCLibHeader*(
           "(e, (const " & n & "*)v); }"
       )
   var respSet = respTypes
-  respSet.add("NimFfiStr") # ctor address payload
+  respSet.add(CStrType) # ctor address payload
   for n in respSet:
     let tok = cToken(n)
     if ("dec" & tok) notin adaptersDone:

@@ -55,13 +55,12 @@ suite "generateCLibHeader: types and codecs":
 
   test "the lib header pulls in the shared cbor header and uses its codecs":
     check "#include \"nim_ffi_cbor.h\"" in header
-    check "NimFfiStr" in header
     check "nimffi_enc_str" in header
 
   test "user structs become C structs with mapped field types":
     check "} EchoRequest;" in header
     check "int64_t delayMs;" in header
-    check "NimFfiStr message;" in header
+    check "const char* message;" in header
 
   test "per-struct encode/decode/free are emitted":
     check "timer_enc_EchoRequest(" in header
@@ -138,7 +137,7 @@ static inline int timer_ctx_destroy(TimerCtx* ctx) {
 
   test "the async API is callback-driven, not blocking":
     # methods take a typed reply callback + user_data; no out-param, no char** err
-    check "typedef void (*TimerVersionReplyFn)(int err_code, const NimFfiStr* reply, const char* err_msg, void* user_data);" in
+    check "typedef void (*TimerVersionReplyFn)(int err_code, const char* const* reply, const char* err_msg, void* user_data);" in
       header
     check "TimerVersionCallBox" in header
     check "timer_version_reply_trampoline(" in header
@@ -325,8 +324,10 @@ suite "shared headers: prelude and cbor split":
   test "the prelude owns the leaf types and libc/TinyCBOR includes":
     let prelude = generateCPreludeHeader()
     check "#include <tinycbor/cbor.h>" in prelude
-    check "} NimFfiStr;" in prelude
-    check "nimffi_free_str" in prelude
+    check "} NimFfiBytes;" in prelude
+    check "nimffi_free_bytes" in prelude
+    # Strings are a bare `const char*`: no leaf type and no free helper.
+    check "NimFfiStr" notin prelude
 
   test "the cbor header carries the leaf codecs and pulls in the prelude":
     let cbor = generateCCborHeader()

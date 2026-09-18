@@ -17,7 +17,7 @@ static void on_echo_fired(const EchoEvent* evt, void* user_data) {
     atomic_int* hits = (atomic_int*)user_data;
     g_event_count = (int)evt->echoCount;
     snprintf(g_event_message, sizeof(g_event_message), "%s",
-             evt->message.data ? evt->message.data : "");
+             evt->message ? evt->message : "");
     /* Last, and with release: it publishes the two globals above. */
     if (hits) {
         atomic_fetch_add_explicit(hits, 1, memory_order_release);
@@ -35,7 +35,7 @@ static void on_created(int err_code, MyTimerCtx* ctx, const char* err_msg, void*
 static MyTimerCtx* make_ctx(void) {
     CreateWaiter w;
     memset(&w, 0, sizeof(w));
-    TimerConfig config = {nimffi_str("c-e2e")};
+    TimerConfig config = {"c-e2e"};
     my_timer_ctx_create(&config, on_created, &w);
     wait_done(&w.done);
     if (w.err_code != 0) {
@@ -59,9 +59,9 @@ static void on_echo(int err_code, const EchoResponse* reply, const char* err_msg
     ReplyWaiter* w = (ReplyWaiter*)user_data;
     w->err_code = err_code;
     if (reply) {
-        if (reply->echoed.data) snprintf(w->text_a, sizeof(w->text_a), "%s", reply->echoed.data);
-        if (reply->timerName.data)
-            snprintf(w->text_b, sizeof(w->text_b), "%s", reply->timerName.data);
+        if (reply->echoed) snprintf(w->text_a, sizeof(w->text_a), "%s", reply->echoed);
+        if (reply->timerName)
+            snprintf(w->text_b, sizeof(w->text_b), "%s", reply->timerName);
     }
     waiter_settle(&w->done, w->err, sizeof(w->err), err_msg);
 }
@@ -69,7 +69,7 @@ static void on_echo(int err_code, const EchoResponse* reply, const char* err_msg
 static void test_echo(MyTimerCtx* ctx) {
     ReplyWaiter w;
     memset(&w, 0, sizeof(w));
-    EchoRequest req = {nimffi_str("hello"), 10};
+    EchoRequest req = {"hello", 10};
     my_timer_ctx_echo(ctx, &req, on_echo, &w);
     wait_done(&w.done);
     assert(w.err_code == 0);
@@ -83,22 +83,22 @@ static void on_complex(int err_code, const ComplexResponse* reply, const char* e
     if (reply) {
         w->num_a = (long long)reply->itemCount;
         w->flag = (int)reply->hasNote;
-        if (reply->summary.data)
-            snprintf(w->text_a, sizeof(w->text_a), "%s", reply->summary.data);
+        if (reply->summary)
+            snprintf(w->text_a, sizeof(w->text_a), "%s", reply->summary);
     }
     waiter_settle(&w->done, w->err, sizeof(w->err), err_msg);
 }
 
 static void test_complex(MyTimerCtx* ctx) {
-    EchoRequest items[2] = {{nimffi_str("one"), 1}, {nimffi_str("two"), 2}};
-    NimFfiStr tags[2] = {nimffi_str("a"), nimffi_str("b")};
+    EchoRequest items[2] = {{"one", 1}, {"two", 2}};
+    const char* tags[2] = {"a", "b"};
     ComplexRequest req;
     req.messages.data = items;
     req.messages.len = 2;
     req.tags.data = tags;
     req.tags.len = 2;
     req.note.has_value = true;
-    req.note.value = nimffi_str("note");
+    req.note.value = "note";
     req.retries.has_value = false;
     req.retries.value = 0;
 
@@ -119,20 +119,20 @@ static void on_schedule(int err_code, const ScheduleResult* reply, const char* e
         w->num_a = (long long)reply->willRunCount;
         w->num_b = (long long)reply->effectiveBackoffMs;
         w->flag = (int)reply->priority;
-        if (reply->jobId.data) snprintf(w->text_a, sizeof(w->text_a), "%s", reply->jobId.data);
+        if (reply->jobId) snprintf(w->text_a, sizeof(w->text_a), "%s", reply->jobId);
     }
     waiter_settle(&w->done, w->err, sizeof(w->err), err_msg);
 }
 
 static void test_schedule_ok(MyTimerCtx* ctx) {
-    NimFfiStr payload[1] = {nimffi_str("p")};
+    const char* payload[1] = {"p"};
     JobSpec job;
-    job.name = nimffi_str("rollup");
+    job.name = "rollup";
     job.payload.data = payload;
     job.payload.len = 1;
     job.priority = JOB_PRIORITY_JP_HIGH;
 
-    NimFfiStr retry_on[1] = {nimffi_str("timeout")};
+    const char* retry_on[1] = {"timeout"};
     RetryPolicy retry;
     retry.maxAttempts = 3;
     retry.backoffMs = 100;
@@ -158,14 +158,14 @@ static void test_schedule_ok(MyTimerCtx* ctx) {
 }
 
 static void test_schedule_error(MyTimerCtx* ctx) {
-    NimFfiStr payload[1] = {nimffi_str("p")};
+    const char* payload[1] = {"p"};
     JobSpec job;
-    job.name = nimffi_str(""); /* empty name → handler returns err */
+    job.name = ""; /* empty name → handler returns err */
     job.payload.data = payload;
     job.payload.len = 1;
     job.priority = JOB_PRIORITY_JP_LOW;
 
-    NimFfiStr retry_on[1] = {nimffi_str("timeout")};
+    const char* retry_on[1] = {"timeout"};
     RetryPolicy retry;
     retry.maxAttempts = 3;
     retry.backoffMs = 100;
@@ -190,7 +190,7 @@ static void test_schedule_error(MyTimerCtx* ctx) {
 static void test_delay_limit(MyTimerCtx* ctx) {
     ReplyWaiter w;
     memset(&w, 0, sizeof(w));
-    EchoRequest req = {nimffi_str("too-slow"), MAX_DELAY_MS + 1};
+    EchoRequest req = {"too-slow", MAX_DELAY_MS + 1};
     my_timer_ctx_echo(ctx, &req, on_echo, &w);
     wait_done(&w.done);
     assert(w.err_code != 0);
@@ -205,7 +205,7 @@ static void test_event(MyTimerCtx* ctx) {
 
     ReplyWaiter w;
     memset(&w, 0, sizeof(w));
-    EchoRequest req = {nimffi_str("evt"), 1};
+    EchoRequest req = {"evt", 1};
     my_timer_ctx_echo(ctx, &req, on_echo, &w);
     wait_done(&w.done);
     assert(w.err_code == 0);

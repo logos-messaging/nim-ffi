@@ -15,27 +15,27 @@ static const char* const TIMER_VERSION = "nim-timer v0.1.0";
 /* ============================================================ */
 
 typedef struct {
-    NimFfiStr name;
+    const char* name;
 } TimerConfig;
 typedef struct {
-    NimFfiStr message;
+    const char* message;
     int64_t delayMs;
 } EchoRequest;
 typedef struct {
-    NimFfiStr echoed;
-    NimFfiStr timerName;
+    const char* echoed;
+    const char* timerName;
 } EchoResponse;
 typedef struct {
     EchoRequest* data;
     size_t len;
 } MyTimerSeq_EchoRequest;
 typedef struct {
-    NimFfiStr* data;
+    const char** data;
     size_t len;
 } MyTimerSeq_Str;
 typedef struct {
     bool has_value;
-    NimFfiStr value;
+    const char* value;
 } MyTimerOpt_Str;
 typedef struct {
     bool has_value;
@@ -48,16 +48,16 @@ typedef struct {
     MyTimerOpt_I64 retries;
 } ComplexRequest;
 typedef struct {
-    NimFfiStr summary;
+    const char* summary;
     int64_t itemCount;
     bool hasNote;
 } ComplexResponse;
 typedef struct {
-    NimFfiStr message;
+    const char* message;
     int64_t echoCount;
 } EchoEvent;
 typedef struct {
-    NimFfiStr jobId;
+    const char* jobId;
     int64_t willRunCount;
 } OnJobScheduledPayload;
 typedef enum {
@@ -66,7 +66,7 @@ typedef enum {
     JOB_PRIORITY_JP_HIGH = 2
 } JobPriority;
 typedef struct {
-    NimFfiStr name;
+    const char* name;
     MyTimerSeq_Str payload;
     JobPriority priority;
 } JobSpec;
@@ -81,7 +81,7 @@ typedef struct {
     MyTimerOpt_I64 jitter;
 } ScheduleConfig;
 typedef struct {
-    NimFfiStr jobId;
+    const char* jobId;
     int64_t willRunCount;
     int64_t firstRunAtMs;
     int64_t effectiveBackoffMs;
@@ -133,7 +133,7 @@ static inline CborError my_timer_dec_TimerConfig(
 }
 static inline void my_timer_free_TimerConfig(TimerConfig* v) {
     if (!v) return;
-    nimffi_free_str(&v->name);
+    do { free((void*)v->name); v->name = NULL; } while (0);
 }
 static inline CborError my_timer_enc_EchoRequest(
         CborEncoder* e, const EchoRequest* v) {
@@ -169,7 +169,7 @@ static inline CborError my_timer_dec_EchoRequest(
 }
 static inline void my_timer_free_EchoRequest(EchoRequest* v) {
     if (!v) return;
-    nimffi_free_str(&v->message);
+    do { free((void*)v->message); v->message = NULL; } while (0);
 }
 static inline CborError my_timer_enc_EchoResponse(
         CborEncoder* e, const EchoResponse* v) {
@@ -205,8 +205,8 @@ static inline CborError my_timer_dec_EchoResponse(
 }
 static inline void my_timer_free_EchoResponse(EchoResponse* v) {
     if (!v) return;
-    nimffi_free_str(&v->echoed);
-    nimffi_free_str(&v->timerName);
+    do { free((void*)v->echoed); v->echoed = NULL; } while (0);
+    do { free((void*)v->timerName); v->timerName = NULL; } while (0);
 }
 static inline CborError my_timer_enc_MyTimerSeq_EchoRequest(
         CborEncoder* e, const MyTimerSeq_EchoRequest* v) {
@@ -261,7 +261,7 @@ static inline CborError my_timer_dec_MyTimerSeq_Str(
     size_t len = 0;
     CborError err = cbor_value_get_array_length(it, &len);
     if (err) return err;
-    out->data = (NimFfiStr*)calloc(len ? len : 1, sizeof(NimFfiStr));
+    out->data = (const char**)calloc(len ? len : 1, sizeof(const char*));
     if (!out->data) return CborErrorOutOfMemory;
     out->len = len;
     CborValue inner;
@@ -275,7 +275,7 @@ static inline CborError my_timer_dec_MyTimerSeq_Str(
 }
 static inline void my_timer_free_MyTimerSeq_Str(MyTimerSeq_Str* v) {
     if (!v || !v->data) return;
-    for (size_t i = 0; i < v->len; i++) nimffi_free_str(&v->data[i]);
+    for (size_t i = 0; i < v->len; i++) do { free((void*)v->data[i]); v->data[i] = NULL; } while (0);
     free(v->data);
     v->data = NULL;
     v->len = 0;
@@ -297,7 +297,7 @@ static inline CborError my_timer_dec_MyTimerOpt_Str(
 }
 static inline void my_timer_free_MyTimerOpt_Str(MyTimerOpt_Str* v) {
     if (!v || !v->has_value) return;
-    nimffi_free_str(&v->value);
+    do { free((void*)v->value); v->value = NULL; } while (0);
     v->has_value = false;
 }
 static inline CborError my_timer_enc_MyTimerOpt_I64(
@@ -414,7 +414,7 @@ static inline CborError my_timer_dec_ComplexResponse(
 }
 static inline void my_timer_free_ComplexResponse(ComplexResponse* v) {
     if (!v) return;
-    nimffi_free_str(&v->summary);
+    do { free((void*)v->summary); v->summary = NULL; } while (0);
 }
 static inline CborError my_timer_enc_EchoEvent(
         CborEncoder* e, const EchoEvent* v) {
@@ -450,7 +450,7 @@ static inline CborError my_timer_dec_EchoEvent(
 }
 static inline void my_timer_free_EchoEvent(EchoEvent* v) {
     if (!v) return;
-    nimffi_free_str(&v->message);
+    do { free((void*)v->message); v->message = NULL; } while (0);
 }
 static inline CborError my_timer_enc_OnJobScheduledPayload(
         CborEncoder* e, const OnJobScheduledPayload* v) {
@@ -486,7 +486,7 @@ static inline CborError my_timer_dec_OnJobScheduledPayload(
 }
 static inline void my_timer_free_OnJobScheduledPayload(OnJobScheduledPayload* v) {
     if (!v) return;
-    nimffi_free_str(&v->jobId);
+    do { free((void*)v->jobId); v->jobId = NULL; } while (0);
 }
 static inline CborError my_timer_enc_JobPriority(
         CborEncoder* e, const JobPriority* v) {
@@ -557,7 +557,7 @@ static inline CborError my_timer_dec_JobSpec(
 }
 static inline void my_timer_free_JobSpec(JobSpec* v) {
     if (!v) return;
-    nimffi_free_str(&v->name);
+    do { free((void*)v->name); v->name = NULL; } while (0);
     my_timer_free_MyTimerSeq_Str(&v->payload);
 }
 static inline CborError my_timer_enc_RetryPolicy(
@@ -707,7 +707,7 @@ static inline CborError my_timer_dec_ScheduleResult(
 }
 static inline void my_timer_free_ScheduleResult(ScheduleResult* v) {
     if (!v) return;
-    nimffi_free_str(&v->jobId);
+    do { free((void*)v->jobId); v->jobId = NULL; } while (0);
 }
 static inline CborError my_timer_enc_MyTimerCreateCtorReq(
         CborEncoder* e, const MyTimerCreateCtorReq* v) {
@@ -914,7 +914,7 @@ static inline CborError my_timer_encv_MyTimerLibVersionReq(CborEncoder* e, const
 static inline CborError my_timer_encv_MyTimerComplexReq(CborEncoder* e, const void* v) { return my_timer_enc_MyTimerComplexReq(e, (const MyTimerComplexReq*)v); }
 static inline CborError my_timer_encv_MyTimerScheduleReq(CborEncoder* e, const void* v) { return my_timer_enc_MyTimerScheduleReq(e, (const MyTimerScheduleReq*)v); }
 static inline CborError my_timer_decv_EchoResponse(CborValue* it, void* v) { return my_timer_dec_EchoResponse(it, (EchoResponse*)v); }
-static inline CborError my_timer_decv_Str(CborValue* it, void* v) { return nimffi_dec_str(it, (NimFfiStr*)v); }
+static inline CborError my_timer_decv_Str(CborValue* it, void* v) { return nimffi_dec_str(it, (const char**)v); }
 static inline CborError my_timer_decv_ComplexResponse(CborValue* it, void* v) { return my_timer_dec_ComplexResponse(it, (ComplexResponse*)v); }
 static inline CborError my_timer_decv_ScheduleResult(CborValue* it, void* v) { return my_timer_dec_ScheduleResult(it, (ScheduleResult*)v); }
 
@@ -990,7 +990,7 @@ static void my_timer_create_trampoline(int ret, const char* msg, size_t len, voi
         return;
     }
     char* err = NULL;
-    NimFfiStr addr;
+    const char* addr;
     memset(&addr, 0, sizeof(addr));
     if (nimffi_decode_from_buf(my_timer_decv_Str, (const uint8_t*)msg, len, &addr, &err) != 0) {
         box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
@@ -999,9 +999,9 @@ static void my_timer_create_trampoline(int ret, const char* msg, size_t len, voi
         return;
     }
     char* endp = NULL;
-    unsigned long long a = addr.data ? strtoull(addr.data, &endp, 10) : 0;
-    bool ok = addr.data && addr.len > 0 && endp && *endp == '\0';
-    nimffi_free_str(&addr);
+    unsigned long long a = addr ? strtoull(addr, &endp, 10) : 0;
+    bool ok = addr && addr[0] != '\0' && endp && *endp == '\0';
+    free((void*)addr);
     if (!ok) {
         box->fn(-1, NULL, "FFI create returned non-numeric address", box->user_data);
         free(box);
@@ -1185,7 +1185,7 @@ static inline int my_timer_ctx_echo(const MyTimerCtx* ctx, const EchoRequest* re
     return 0;
 }
 
-typedef void (*MyTimerVersionReplyFn)(int err_code, const NimFfiStr* reply, const char* err_msg, void* user_data);
+typedef void (*MyTimerVersionReplyFn)(int err_code, const char* const* reply, const char* err_msg, void* user_data);
 typedef struct { MyTimerVersionReplyFn fn; void* user_data; } MyTimerVersionCallBox;
 static void my_timer_version_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
     MyTimerVersionCallBox* box = (MyTimerVersionCallBox*)ud;
@@ -1203,18 +1203,18 @@ static void my_timer_version_reply_trampoline(int ret, const char* msg, size_t l
         return;
     }
     char* err = NULL;
-    NimFfiStr out;
+    const char* out;
     memset(&out, 0, sizeof(out));
     int dec = nimffi_decode_from_buf(my_timer_decv_Str, (const uint8_t*)msg, len, &out, &err);
     if (dec != 0) {
         box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
         free(err);
-        nimffi_free_str(&out);
+        do { free((void*)out); out = NULL; } while (0);
         free(box);
         return;
     }
     box->fn(NIMFFI_RET_OK, &out, NULL, box->user_data);
-    nimffi_free_str(&out);
+    do { free((void*)out); out = NULL; } while (0);
     free(box);
 }
 /** Returns the library's version string. */
@@ -1374,7 +1374,7 @@ static inline int my_timer_ctx_schedule(const MyTimerCtx* ctx, const JobSpec* jo
     return 0;
 }
 
-typedef void (*MyTimerLibVersionReplyFn)(int err_code, const NimFfiStr* reply, const char* err_msg, void* user_data);
+typedef void (*MyTimerLibVersionReplyFn)(int err_code, const char* const* reply, const char* err_msg, void* user_data);
 typedef struct { MyTimerLibVersionReplyFn fn; void* user_data; } MyTimerLibVersionCallBox;
 static void my_timer_lib_version_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
     MyTimerLibVersionCallBox* box = (MyTimerLibVersionCallBox*)ud;
@@ -1392,18 +1392,18 @@ static void my_timer_lib_version_reply_trampoline(int ret, const char* msg, size
         return;
     }
     char* err = NULL;
-    NimFfiStr out;
+    const char* out;
     memset(&out, 0, sizeof(out));
     int dec = nimffi_decode_from_buf(my_timer_decv_Str, (const uint8_t*)msg, len, &out, &err);
     if (dec != 0) {
         box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
         free(err);
-        nimffi_free_str(&out);
+        do { free((void*)out); out = NULL; } while (0);
         free(box);
         return;
     }
     box->fn(NIMFFI_RET_OK, &out, NULL, box->user_data);
-    nimffi_free_str(&out);
+    do { free((void*)out); out = NULL; } while (0);
     free(box);
 }
 static inline int my_timer_static_lib_version(MyTimerLibVersionReplyFn on_reply, void* user_data) {
