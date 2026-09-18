@@ -11,8 +11,8 @@
  *
  * Memory ownership contract:
  *   - Request-side strings/sequences are *borrowed*: the binding only reads
- *     them while encoding, so a string literal wrapped with nimffi_str() is
- *     fine and is never freed by the binding.
+ *     them while encoding, so a plain string literal is fine and is never
+ *     freed by the binding.
  *   - Response values and error strings passed into a result callback are
  *     *owned by the binding* and valid only for the duration of that callback;
  *     the binding reclaims them once the callback returns. The caller never
@@ -38,15 +38,12 @@
 extern "C" {
 #endif
 
-/* Owned, length-delimited UTF-8 text (Nim `string`/`cstring`). On the request
- * side `data` may point at borrowed storage (see nimffi_str); on the response
- * side it is heap-allocated and freed by nimffi_free_str. Always NUL-padded by
- * one byte after decode so `data` is usable as a C string when it has no
- * embedded NULs. */
-typedef struct {
-    char* data;
-    size_t len;
-} NimFfiStr;
+/* Nim `string`/`cstring` crosses as a plain NUL-terminated C string. A request
+ * field borrows the caller's storage, which must outlive the call that encodes
+ * it; a decoded response string is heap-allocated and freed by
+ * nimffi_free_cstr. Because the wire form is NUL-terminated here, a Nim string
+ * carrying embedded NUL bytes is truncated at the first one — use `seq[byte]`
+ * for binary payloads. */
 
 /* Owned, length-delimited byte buffer (Nim `seq[byte]`). */
 typedef struct {
@@ -54,22 +51,12 @@ typedef struct {
     size_t len;
 } NimFfiBytes;
 
-/* Wrap a borrowed C string for use as a request field. The returned view is
- * not owned by the binding and must outlive the call that encodes it. */
-static inline NimFfiStr nimffi_str(const char* s) {
-    NimFfiStr v;
-    v.data = (char*)s;
-    v.len = s ? strlen(s) : 0;
-    return v;
-}
-
-static inline void nimffi_free_str(NimFfiStr* v) {
-    if (!v || !v->data) {
+static inline void nimffi_free_cstr(const char** v) {
+    if (!v || !*v) {
         return;
     }
-    free(v->data);
-    v->data = NULL;
-    v->len = 0;
+    free((void*)*v); /* decoded by nimffi_dec_str, which owns the allocation */
+    *v = NULL;
 }
 
 static inline void nimffi_free_bytes(NimFfiBytes* v) {

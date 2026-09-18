@@ -101,6 +101,15 @@ All notable changes to this project are documented in this file.
   define if your host needs more.
 
 ### Removed
+- **`NimFfiStr` and its `nimffi_str()` wrapper are gone from the C binding.** A
+  Nim `string`/`cstring` now maps to a plain `const char*`, so a request field
+  takes a string literal directly (`EchoRequest req = {"hello"}`) and a reply
+  string is read without `.data`. `nimffi_free_str` becomes `nimffi_free_cstr`.
+  The pointer-to-length pair only ever carried a length C could already get
+  from `strlen`, at the cost of a wrapper call at every call site. The one
+  behaviour lost is a string carrying embedded NUL bytes, which now truncates
+  at the first one — `seq[byte]`/`NimFfiBytes` remains the binary-safe type.
+  C++, Rust and Go bindings are unaffected; they never used these types.
 - **The `abi = c` wire is gone; CBOR is the only wire.** `declareLibrary` takes
   the library name and its type alone, and no annotation accepts an
   `"abi = ..."` argument. With it go the `_CWire` companions and their codec

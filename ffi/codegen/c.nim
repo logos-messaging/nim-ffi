@@ -14,6 +14,10 @@ import
 ## Fixed 64-bit wire type for any Nim `ptr T`/`pointer` (mirrors CppPtrType).
 const CPtrType* = "uint64_t"
 
+## Nim `string`/`cstring` crosses as a plain NUL-terminated C string: borrowed
+## on the request side, binding-owned on the response side.
+const CStrType* = "const char*"
+
 const
   HeaderPreludeTpl = staticRead("templates/c/header_prelude.h.tpl")
   CborHelpersTpl = staticRead("templates/c/cbor_helpers.h.tpl")
@@ -45,9 +49,16 @@ func leafSuffix(cType: string): string =
       return scalarCInfoTable[s].suffix
   return
     case cType
-    of "NimFfiStr": "str"
+    of CStrType: "str"
     of "NimFfiBytes": "bytes"
     else: ""
+
+func byPtrConst(cType: string): string =
+  ## Read-only by-pointer spelling of `cType`; the string leaf already carries
+  ## its own `const`, so it only gains the outer pointer.
+  if cType == CStrType:
+    return CStrType & "*"
+  return "const " & cType & "*"
 
 func cToken(cType: string): string =
   ## PascalCase token for monomorphised names.
@@ -81,8 +92,8 @@ func freeFn(reg: CTypeReg, cType: string): string =
   ## Free-function name for `cType`, or "" when it owns no heap memory.
   return
     case cType
-    of "NimFfiStr":
-      "nimffi_free_str"
+    of CStrType:
+      "nimffi_free_cstr"
     of "NimFfiBytes":
       "nimffi_free_bytes"
     else:
@@ -308,7 +319,7 @@ proc ensureCType(reg: var CTypeReg, t: FFIType): tuple[cType: string, owns: bool
   of ftScalar:
     return (scalarCInfoTable[t.scalar].cType, false)
   of ftStr:
-    return ("NimFfiStr", true)
+    return (CStrType, true)
   of ftBytes:
     return ("NimFfiBytes", true)
   of ftSeq:
@@ -509,7 +520,7 @@ proc emitConstructors(
   emitCallBox(lines, fnType, boxType)
   emitReplyTrampolineHead(lines, tramp, boxType, "FFI create failed")
   lines.add("    char* err = NULL;")
-  lines.add("    NimFfiStr addr;")
+  lines.add("    " & CStrType & " addr;")
   lines.add("    memset(&addr, 0, sizeof(addr));")
   lines.add(
     "    if (nimffi_decode_from_buf(" & libName &
@@ -521,11 +532,9 @@ proc emitConstructors(
   lines.add("        return;")
   lines.add("    }")
   lines.add("    char* endp = NULL;")
-  lines.add(
-    "    unsigned long long a = addr.data ? strtoull(addr.data, &endp, 10) : 0;"
-  )
-  lines.add("    bool ok = addr.data && addr.len > 0 && endp && *endp == '\\0';")
-  lines.add("    nimffi_free_str(&addr);")
+  lines.add("    unsigned long long a = addr ? strtoull(addr, &endp, 10) : 0;")
+  lines.add("    bool ok = addr && addr[0] != '\\0' && endp && *endp == '\\0';")
+  lines.add("    nimffi_free_cstr(&addr);")
   lines.add("    if (!ok) {")
   lines.add(
     "        box->fn(-1, NULL, \"FFI create returned non-numeric address\", box->user_data);"
@@ -705,8 +714,8 @@ proc emitProcWrapper(
   let tramp = libName & "_" & stripped & "_reply_trampoline"
 
   lines.add(
-    "typedef void (*" & fnType & ")(int err_code, const " & retC &
-      "* reply, const char* err_msg, void* user_data);"
+    "typedef void (*" & fnType & ")(int err_code, " & byPtrConst(retC) &
+      " reply, const char* err_msg, void* user_data);"
   )
   emitCallBox(lines, fnType, boxType)
   emitReplyTrampolineHead(lines, tramp, boxType, "FFI call failed")
@@ -950,7 +959,7 @@ proc generateCLibHeader*(
           "(e, (const " & n & "*)v); }"
       )
   var respSet = respTypes
-  respSet.add("NimFfiStr") # ctor address payload
+  respSet.add(CStrType) # ctor address payload
   for n in respSet:
     let tok = cToken(n)
     if ("dec" & tok) notin adaptersDone:

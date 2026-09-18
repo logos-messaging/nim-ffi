@@ -57,8 +57,8 @@ that turns each async call back into a sequential step.
 
 ## Memory Ownership
 
-- Request-side strings/sequences are *borrowed* — wrap C strings with
-  `nimffi_str(...)`; the binding never frees them.
+- Request-side strings/sequences are *borrowed* — pass a plain `const char*`
+  (a literal is fine); the binding never frees them.
 - Reply values and error strings passed into a result callback are **owned by
   the binding** and valid only for the duration of that callback. The caller
   never frees them — copy out anything you need to keep before returning.

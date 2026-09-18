@@ -1,6 +1,6 @@
 #ifndef NIM_FFI_E2E_WAITER_H_INCLUDED
 #define NIM_FFI_E2E_WAITER_H_INCLUDED
-/* Turns an async binding call into a sequential check. Include after the generated binding header, which defines NimFfiStr. */
+/* Turns an async binding call into a sequential check. Include after the generated binding header, which defines the request/reply types. */
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -60,11 +60,11 @@ static inline void waiter_settle(atomic_int* done, char* err, size_t cap, const 
 }
 
 /* Shared terminal callback for any proc returning a bare string. */
-static inline void on_str(int err_code, const NimFfiStr* reply, const char* err_msg, void* user_data) {
+static inline void on_str(int err_code, const char** reply, const char* err_msg, void* user_data) {
     ReplyWaiter* w = (ReplyWaiter*)user_data;
     w->err_code = err_code;
-    if (reply && reply->data) {
-        snprintf(w->text_a, sizeof(w->text_a), "%s", reply->data);
+    if (reply && *reply) {
+        snprintf(w->text_a, sizeof(w->text_a), "%s", *reply);
     }
     waiter_settle(&w->done, w->err, sizeof(w->err), err_msg);
 }

@@ -45,7 +45,7 @@ static void on_echo_fired(const EchoEvent* evt, void* user_data) {
     (void)user_data;
     atomic_store(&g_echo_count, (int)evt->echoCount);
     snprintf(g_echo_message, sizeof(g_echo_message), "%s",
-             evt->message.data ? evt->message.data : "");
+             evt->message ? evt->message : "");
 }
 
 typedef struct {
@@ -77,10 +77,10 @@ typedef struct {
     int flag;
 } ReplyWaiter;
 
-static void on_version(int ec, const NimFfiStr* reply, const char* em, void* ud) {
+static void on_version(int ec, const char** reply, const char* em, void* ud) {
     ReplyWaiter* w = (ReplyWaiter*)ud;
     w->err_code = ec;
-    if (reply && reply->data) snprintf(w->text_a, sizeof(w->text_a), "%s", reply->data);
+    if (reply && *reply) snprintf(w->text_a, sizeof(w->text_a), "%s", *reply);
     if (em) snprintf(w->err, sizeof(w->err), "%s", em);
     atomic_store(&w->done, 1);
 }
@@ -89,10 +89,10 @@ static void on_echo(int ec, const EchoResponse* reply, const char* em, void* ud)
     ReplyWaiter* w = (ReplyWaiter*)ud;
     w->err_code = ec;
     if (reply) {
-        if (reply->echoed.data)
-            snprintf(w->text_a, sizeof(w->text_a), "%s", reply->echoed.data);
-        if (reply->timerName.data)
-            snprintf(w->text_b, sizeof(w->text_b), "%s", reply->timerName.data);
+        if (reply->echoed)
+            snprintf(w->text_a, sizeof(w->text_a), "%s", reply->echoed);
+        if (reply->timerName)
+            snprintf(w->text_b, sizeof(w->text_b), "%s", reply->timerName);
     }
     if (em) snprintf(w->err, sizeof(w->err), "%s", em);
     atomic_store(&w->done, 1);
@@ -104,8 +104,8 @@ static void on_complex(int ec, const ComplexResponse* reply, const char* em, voi
     if (reply) {
         w->num_a = (long long)reply->itemCount;
         w->flag = (int)reply->hasNote;
-        if (reply->summary.data)
-            snprintf(w->text_a, sizeof(w->text_a), "%s", reply->summary.data);
+        if (reply->summary)
+            snprintf(w->text_a, sizeof(w->text_a), "%s", reply->summary);
     }
     if (em) snprintf(w->err, sizeof(w->err), "%s", em);
     atomic_store(&w->done, 1);
@@ -118,8 +118,8 @@ static void on_schedule(int ec, const ScheduleResult* reply, const char* em, voi
         w->num_a = (long long)reply->willRunCount;
         w->num_b = (long long)reply->effectiveBackoffMs;
         w->flag = (int)reply->priority;
-        if (reply->jobId.data)
-            snprintf(w->text_a, sizeof(w->text_a), "%s", reply->jobId.data);
+        if (reply->jobId)
+            snprintf(w->text_a, sizeof(w->text_a), "%s", reply->jobId);
     }
     if (em) snprintf(w->err, sizeof(w->err), "%s", em);
     atomic_store(&w->done, 1);
@@ -147,7 +147,7 @@ static void on_schedule(int ec, const ScheduleResult* reply, const char* em, voi
 int main(void) {
     CreateWaiter cw;
     memset(&cw, 0, sizeof(cw));
-    TimerConfig config = {nimffi_str("c-demo")};
+    TimerConfig config = {"c-demo"};
     my_timer_ctx_create(&config, on_created, &cw);
     if (!wait_done(&cw.done) || cw.err_code != 0 || !cw.ctx) {
         fprintf(stderr, "Error: %s\n",
@@ -164,22 +164,22 @@ int main(void) {
     printf("[2b] Header consts: TIMER_VERSION=%s, MAX_DELAY_MS=%lld\n", TIMER_VERSION,
            (long long)MAX_DELAY_MS);
 
-    EchoRequest echo_req = {nimffi_str("hello from C"), 50};
+    EchoRequest echo_req = {"hello from C", 50};
     RUN(my_timer_ctx_echo(ctx, &echo_req, on_echo, &w), w);
     printf("[3] Echo: echoed=%s, timerName=%s\n", w.text_a, w.text_b);
 
     EchoRequest items[2] = {
-        {nimffi_str("one"), 10},
-        {nimffi_str("two"), 20},
+        {"one", 10},
+        {"two", 20},
     };
-    NimFfiStr tags[2] = {nimffi_str("fast"), nimffi_str("c")};
+    const char* tags[2] = {"fast", "c"};
     ComplexRequest complex_req;
     complex_req.messages.data = items;
     complex_req.messages.len = 2;
     complex_req.tags.data = tags;
     complex_req.tags.len = 2;
     complex_req.note.has_value = true;
-    complex_req.note.value = nimffi_str("extra note");
+    complex_req.note.value = "extra note";
     complex_req.retries.has_value = true;
     complex_req.retries.value = 3;
 
@@ -187,14 +187,14 @@ int main(void) {
     printf("[4] Complex: summary=%s, itemCount=%lld, hasNote=%d\n", w.text_a, w.num_a,
            w.flag);
 
-    NimFfiStr job_payload[2] = {nimffi_str("rollup"), nimffi_str("v2")};
+    const char* job_payload[2] = {"rollup", "v2"};
     JobSpec job;
-    job.name = nimffi_str("nightly-rollup");
+    job.name = "nightly-rollup";
     job.payload.data = job_payload;
     job.payload.len = 2;
     job.priority = JOB_PRIORITY_JP_HIGH;
 
-    NimFfiStr retry_on[2] = {nimffi_str("timeout"), nimffi_str("5xx")};
+    const char* retry_on[2] = {"timeout", "5xx"};
     RetryPolicy retry;
     retry.maxAttempts = 3;
     retry.backoffMs = 500;
@@ -214,7 +214,7 @@ int main(void) {
 
     uint64_t handle =
         my_timer_ctx_add_on_echo_fired_listener(ctx, on_echo_fired, NULL);
-    EchoRequest evt_req = {nimffi_str("event-demo"), 1};
+    EchoRequest evt_req = {"event-demo", 1};
     memset(&w, 0, sizeof(w));
     my_timer_ctx_echo(ctx, &evt_req, on_echo, &w);
     wait_done(&w.done);

@@ -13,14 +13,14 @@ static const int64_t MAX_SHOUT_LEN = 512;
 /* ============================================================ */
 
 typedef struct {
-    NimFfiStr prefix;
+    const char* prefix;
 } EchoConfig;
 typedef struct {
-    NimFfiStr text;
+    const char* text;
 } ShoutRequest;
 typedef struct {
-    NimFfiStr shouted;
-    NimFfiStr prefix;
+    const char* shouted;
+    const char* prefix;
 } ShoutResponse;
 typedef struct {
     EchoConfig config;
@@ -63,7 +63,7 @@ static inline CborError echo_dec_EchoConfig(
 }
 static inline void echo_free_EchoConfig(EchoConfig* v) {
     if (!v) return;
-    nimffi_free_str(&v->prefix);
+    nimffi_free_cstr(&v->prefix);
 }
 static inline CborError echo_enc_ShoutRequest(
         CborEncoder* e, const ShoutRequest* v) {
@@ -90,7 +90,7 @@ static inline CborError echo_dec_ShoutRequest(
 }
 static inline void echo_free_ShoutRequest(ShoutRequest* v) {
     if (!v) return;
-    nimffi_free_str(&v->text);
+    nimffi_free_cstr(&v->text);
 }
 static inline CborError echo_enc_ShoutResponse(
         CborEncoder* e, const ShoutResponse* v) {
@@ -126,8 +126,8 @@ static inline CborError echo_dec_ShoutResponse(
 }
 static inline void echo_free_ShoutResponse(ShoutResponse* v) {
     if (!v) return;
-    nimffi_free_str(&v->shouted);
-    nimffi_free_str(&v->prefix);
+    nimffi_free_cstr(&v->shouted);
+    nimffi_free_cstr(&v->prefix);
 }
 static inline CborError echo_enc_EchoCreateCtorReq(
         CborEncoder* e, const EchoCreateCtorReq* v) {
@@ -285,7 +285,7 @@ static inline CborError echo_encv_EchoVersionReq(CborEncoder* e, const void* v) 
 static inline CborError echo_encv_EchoLibVersionReq(CborEncoder* e, const void* v) { return echo_enc_EchoLibVersionReq(e, (const EchoLibVersionReq*)v); }
 static inline CborError echo_encv_EchoShoutAnonReq(CborEncoder* e, const void* v) { return echo_enc_EchoShoutAnonReq(e, (const EchoShoutAnonReq*)v); }
 static inline CborError echo_decv_ShoutResponse(CborValue* it, void* v) { return echo_dec_ShoutResponse(it, (ShoutResponse*)v); }
-static inline CborError echo_decv_Str(CborValue* it, void* v) { return nimffi_dec_str(it, (NimFfiStr*)v); }
+static inline CborError echo_decv_Str(CborValue* it, void* v) { return nimffi_dec_str(it, (const char**)v); }
 
 /* ============================================================ */
 /* High-level context wrapper                                   */
@@ -312,7 +312,7 @@ static void echo_create_trampoline(int ret, const char* msg, size_t len, void* u
         return;
     }
     char* err = NULL;
-    NimFfiStr addr;
+    const char* addr;
     memset(&addr, 0, sizeof(addr));
     if (nimffi_decode_from_buf(echo_decv_Str, (const uint8_t*)msg, len, &addr, &err) != 0) {
         box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
@@ -321,9 +321,9 @@ static void echo_create_trampoline(int ret, const char* msg, size_t len, void* u
         return;
     }
     char* endp = NULL;
-    unsigned long long a = addr.data ? strtoull(addr.data, &endp, 10) : 0;
-    bool ok = addr.data && addr.len > 0 && endp && *endp == '\0';
-    nimffi_free_str(&addr);
+    unsigned long long a = addr ? strtoull(addr, &endp, 10) : 0;
+    bool ok = addr && addr[0] != '\0' && endp && *endp == '\0';
+    nimffi_free_cstr(&addr);
     if (!ok) {
         box->fn(-1, NULL, "FFI create returned non-numeric address", box->user_data);
         free(box);
@@ -438,7 +438,7 @@ static inline int echo_ctx_shout(const EchoCtx* ctx, const ShoutRequest* req, Ec
     return 0;
 }
 
-typedef void (*EchoVersionReplyFn)(int err_code, const NimFfiStr* reply, const char* err_msg, void* user_data);
+typedef void (*EchoVersionReplyFn)(int err_code, const char** reply, const char* err_msg, void* user_data);
 typedef struct { EchoVersionReplyFn fn; void* user_data; } EchoVersionCallBox;
 static void echo_version_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
     EchoVersionCallBox* box = (EchoVersionCallBox*)ud;
@@ -456,18 +456,18 @@ static void echo_version_reply_trampoline(int ret, const char* msg, size_t len, 
         return;
     }
     char* err = NULL;
-    NimFfiStr out;
+    const char* out;
     memset(&out, 0, sizeof(out));
     int dec = nimffi_decode_from_buf(echo_decv_Str, (const uint8_t*)msg, len, &out, &err);
     if (dec != 0) {
         box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
         free(err);
-        nimffi_free_str(&out);
+        nimffi_free_cstr(&out);
         free(box);
         return;
     }
     box->fn(NIMFFI_RET_OK, &out, NULL, box->user_data);
-    nimffi_free_str(&out);
+    nimffi_free_cstr(&out);
     free(box);
 }
 /** Returns the library's version string. */
@@ -500,7 +500,7 @@ static inline int echo_ctx_version(const EchoCtx* ctx, EchoVersionReplyFn on_rep
     return 0;
 }
 
-typedef void (*EchoLibVersionReplyFn)(int err_code, const NimFfiStr* reply, const char* err_msg, void* user_data);
+typedef void (*EchoLibVersionReplyFn)(int err_code, const char** reply, const char* err_msg, void* user_data);
 typedef struct { EchoLibVersionReplyFn fn; void* user_data; } EchoLibVersionCallBox;
 static void echo_lib_version_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
     EchoLibVersionCallBox* box = (EchoLibVersionCallBox*)ud;
@@ -518,18 +518,18 @@ static void echo_lib_version_reply_trampoline(int ret, const char* msg, size_t l
         return;
     }
     char* err = NULL;
-    NimFfiStr out;
+    const char* out;
     memset(&out, 0, sizeof(out));
     int dec = nimffi_decode_from_buf(echo_decv_Str, (const uint8_t*)msg, len, &out, &err);
     if (dec != 0) {
         box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
         free(err);
-        nimffi_free_str(&out);
+        nimffi_free_cstr(&out);
         free(box);
         return;
     }
     box->fn(NIMFFI_RET_OK, &out, NULL, box->user_data);
-    nimffi_free_str(&out);
+    nimffi_free_cstr(&out);
     free(box);
 }
 static inline int echo_static_lib_version(EchoLibVersionReplyFn on_reply, void* user_data) {
