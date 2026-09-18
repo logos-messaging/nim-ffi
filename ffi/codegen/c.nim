@@ -55,9 +55,9 @@ func leafSuffix(cType: string): string =
 
 func byPtrConst(cType: string): string =
   ## Read-only by-pointer spelling of `cType`; the string leaf already carries
-  ## its own `const`, so it only gains the outer pointer.
+  ## its own `const`, so the pointer itself is what gains one.
   if cType == CStrType:
-    return CStrType & "*"
+    return CStrType & " const*"
   return "const " & cType & "*"
 
 func cToken(cType: string): string =

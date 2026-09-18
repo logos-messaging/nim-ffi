@@ -60,7 +60,7 @@ static inline void waiter_settle(atomic_int* done, char* err, size_t cap, const 
 }
 
 /* Shared terminal callback for any proc returning a bare string. */
-static inline void on_str(int err_code, const char** reply, const char* err_msg, void* user_data) {
+static inline void on_str(int err_code, const char* const* reply, const char* err_msg, void* user_data) {
     ReplyWaiter* w = (ReplyWaiter*)user_data;
     w->err_code = err_code;
     if (reply && *reply) {

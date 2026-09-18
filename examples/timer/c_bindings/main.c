@@ -77,7 +77,7 @@ typedef struct {
     int flag;
 } ReplyWaiter;
 
-static void on_version(int ec, const char** reply, const char* em, void* ud) {
+static void on_version(int ec, const char* const* reply, const char* em, void* ud) {
     ReplyWaiter* w = (ReplyWaiter*)ud;
     w->err_code = ec;
     if (reply && *reply) snprintf(w->text_a, sizeof(w->text_a), "%s", *reply);

@@ -438,7 +438,7 @@ static inline int echo_ctx_shout(const EchoCtx* ctx, const ShoutRequest* req, Ec
     return 0;
 }
 
-typedef void (*EchoVersionReplyFn)(int err_code, const char** reply, const char* err_msg, void* user_data);
+typedef void (*EchoVersionReplyFn)(int err_code, const char* const* reply, const char* err_msg, void* user_data);
 typedef struct { EchoVersionReplyFn fn; void* user_data; } EchoVersionCallBox;
 static void echo_version_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
     EchoVersionCallBox* box = (EchoVersionCallBox*)ud;
@@ -500,7 +500,7 @@ static inline int echo_ctx_version(const EchoCtx* ctx, EchoVersionReplyFn on_rep
     return 0;
 }
 
-typedef void (*EchoLibVersionReplyFn)(int err_code, const char** reply, const char* err_msg, void* user_data);
+typedef void (*EchoLibVersionReplyFn)(int err_code, const char* const* reply, const char* err_msg, void* user_data);
 typedef struct { EchoLibVersionReplyFn fn; void* user_data; } EchoLibVersionCallBox;
 static void echo_lib_version_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
     EchoLibVersionCallBox* box = (EchoLibVersionCallBox*)ud;

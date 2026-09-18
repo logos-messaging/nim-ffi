@@ -1185,7 +1185,7 @@ static inline int my_timer_ctx_echo(const MyTimerCtx* ctx, const EchoRequest* re
     return 0;
 }
 
-typedef void (*MyTimerVersionReplyFn)(int err_code, const char** reply, const char* err_msg, void* user_data);
+typedef void (*MyTimerVersionReplyFn)(int err_code, const char* const* reply, const char* err_msg, void* user_data);
 typedef struct { MyTimerVersionReplyFn fn; void* user_data; } MyTimerVersionCallBox;
 static void my_timer_version_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
     MyTimerVersionCallBox* box = (MyTimerVersionCallBox*)ud;
@@ -1374,7 +1374,7 @@ static inline int my_timer_ctx_schedule(const MyTimerCtx* ctx, const JobSpec* jo
     return 0;
 }
 
-typedef void (*MyTimerLibVersionReplyFn)(int err_code, const char** reply, const char* err_msg, void* user_data);
+typedef void (*MyTimerLibVersionReplyFn)(int err_code, const char* const* reply, const char* err_msg, void* user_data);
 typedef struct { MyTimerLibVersionReplyFn fn; void* user_data; } MyTimerLibVersionCallBox;
 static void my_timer_lib_version_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
     MyTimerLibVersionCallBox* box = (MyTimerLibVersionCallBox*)ud;

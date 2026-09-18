@@ -137,7 +137,7 @@ static inline int timer_ctx_destroy(TimerCtx* ctx) {
 
   test "the async API is callback-driven, not blocking":
     # methods take a typed reply callback + user_data; no out-param, no char** err
-    check "typedef void (*TimerVersionReplyFn)(int err_code, const char** reply, const char* err_msg, void* user_data);" in
+    check "typedef void (*TimerVersionReplyFn)(int err_code, const char* const* reply, const char* err_msg, void* user_data);" in
       header
     check "TimerVersionCallBox" in header
     check "timer_version_reply_trampoline(" in header
