@@ -126,6 +126,16 @@ All notable changes to this project are documented in this file.
   their `genbindings_*` copies duplicated the root tasks.
 
 ### Fixed
+- **A call that carries a nil or stale handle before the library is initialized
+  no longer segfaults.** The context guard of every `{.ffi.}` proc answers a
+  token it cannot resolve with `RET_ERR` and the message `ctx is not a valid FFI
+  context` — a Nim string, so the error path's first act is an allocation. A
+  host whose very first call passes an uninitialized or already-destroyed handle
+  gets there before any `{.ffiCtor.}` or `{.ffiStatic.}` call has run
+  `initializeLibrary()`, so under `--mm:refc` that allocation reaches a
+  collector that was never started and dies in `collectCT`. The guard now
+  initializes the library on that path, as the static guard already did.
+  `--mm:orc` never showed it: the literal does not go through the collector.
 - **A context whose teardown did not finish is quarantined, not recycled.**
   `recycleContext` gated the slot release on the request drain alone, and
   `runTeardown` returned nothing: a `{.ffiDtor.}` cut short by

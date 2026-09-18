@@ -897,6 +897,9 @@ proc buildFFIProc(prc: NimNode, isStatic: bool): NimNode {.compileTime.} =
         return RET_MISSING_CALLBACK
       let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
       if `ctxIdent`.isNil():
+        # A nil or stale handle can be the host's first call, and `errStr` is a
+        # Nim allocation: without this the runtime is still down and it segfaults.
+        initializeLibrary()
         let errStr = "ctx is not a valid FFI context"
         callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
         return RET_ERR
