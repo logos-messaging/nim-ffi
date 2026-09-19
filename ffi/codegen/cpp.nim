@@ -1,7 +1,14 @@
 ## C++ binding generator: header-only binding + CMakeLists, CBOR over the wire.
 
-import std/[os, strutils]
-import ./meta, ./string_helpers, ./c_cpp_common, ./types_ir, ./consts, ../ret_codes
+import std/strutils
+import
+  ./meta,
+  ./string_helpers,
+  ./c_cpp_common,
+  ./types_ir,
+  ./consts,
+  ./build_paths,
+  ../ret_codes
 
 ## Fixed 64-bit wire type for any Nim `ptr T` / `pointer`.
 const CppPtrType* = "uint64_t"
@@ -776,9 +783,12 @@ proc generateCppBindings*(
     reverse: seq[FFIReverseMeta] = @[],
     reverseEvents: seq[FFIReverseEventMeta] = @[],
 ) =
-  createDir(outputDir)
-  writeFile(
-    outputDir / (libName & ".hpp"),
+  ensureOutputDir(outputDir)
+  writeOutputFile(
+    buildPath(outputDir, libName & ".hpp"),
     generateCppHeader(procs, types, libName, events, consts, reverse, reverseEvents),
   )
-  writeFile(outputDir / "CMakeLists.txt", generateCppCMakeLists(libName, nimSrcRelPath))
+  writeOutputFile(
+    buildPath(outputDir, "CMakeLists.txt"),
+    generateCppCMakeLists(libName, nimSrcRelPath),
+  )

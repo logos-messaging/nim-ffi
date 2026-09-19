@@ -132,6 +132,43 @@ proc genBindingsCmd(flags, src: string, langs = "rust", outDir = ""): string =
   cmd.add " " & src
   cmd
 
+proc checkCrossTargetCodegenPaths() =
+  ## Code generation runs inside the compiler process, so its filesystem paths
+  ## must follow the build OS even when the generated library targets another OS.
+  let testRoot = getTempDir() / "nim_ffi_cross_codegen"
+  let workDir = testRoot / "work"
+  let outDir = testRoot / "bindings"
+  let nimcache = testRoot / "nimcache"
+  let source = thisDir() / echoSrc
+  let targetOs = when defined(windows): "linux" else: "windows"
+
+  rmDir(testRoot)
+  mkDir(workDir)
+
+  withDir(workDir):
+    runOrQuit genBindingsCmd(
+      nimFlagsOrc & " --os:" & targetOs & " --cpu:amd64 --nimcache:" & nimcache &
+        " -d:ffiSrcPath=../echo.nim",
+      source,
+      "c,cpp,rust,cddl",
+      outDir,
+    )
+
+  let expected = [
+    "echo.h", "nim_ffi_prelude.h", "nim_ffi_cbor.h", "echo.hpp", "CMakeLists.txt",
+    "Cargo.toml", "build.rs", "src/lib.rs", "src/ffi.rs", "src/types.rs", "src/api.rs",
+    "echo.cddl",
+  ]
+  var missing: seq[string]
+  for path in expected:
+    if not fileExists(outDir / path):
+      missing.add(path)
+
+  rmDir(testRoot)
+  if missing.len > 0:
+    echo "Cross-target codegen wrote files outside ffiOutputDir: " & missing.join(", ")
+    quit(QuitFailure)
+
 task buildffi, "Compile the library":
   runOrQuit "nim c " & nimFlagsOrc & " --app:lib --noMain ffi.nim"
 
@@ -268,6 +305,10 @@ task genbindings_c_echo, "Generate C bindings for the echo example":
   runOrQuit genBindingsCmd(nimFlagsOrc, echoSrc, "c")
   runOrQuit genBindingsCmd(nimFlagsRefc, echoSrc, "c")
 
+task test_cross_target_codegen_paths,
+  "Verify cross-target codegen writes through build-OS paths":
+  checkCrossTargetCodegenPaths()
+
 task check_bindings_rust, "Verify checked-in Rust bindings match Nim source":
   runOrQuit "nimble genbindings_rust"
   checkBindingsDiff(
@@ -317,6 +358,7 @@ task check_bindings_cddl, "Verify the checked-in CDDL schema matches Nim source"
   )
 
 task check_bindings, "Verify all checked-in example bindings match Nim source":
+  runOrQuit "nimble test_cross_target_codegen_paths"
   runOrQuit "nimble check_bindings_rust"
   runOrQuit "nimble check_bindings_cpp"
   runOrQuit "nimble check_bindings_c"

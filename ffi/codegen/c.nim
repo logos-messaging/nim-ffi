@@ -1,8 +1,15 @@
 ## C99 binding generator: emits the three CBOR headers. C lacks generics, so
 ## each distinct `seq[T]`/`Option[T]` is monomorphised per type.
 
-import std/[os, strutils, tables, sets, options]
-import ./meta, ./string_helpers, ./c_cpp_common, ./types_ir, ./consts, ../ret_codes
+import std/[strutils, tables, sets, options]
+import
+  ./meta,
+  ./string_helpers,
+  ./c_cpp_common,
+  ./types_ir,
+  ./consts,
+  ./build_paths,
+  ../ret_codes
 
 ## Fixed 64-bit wire type for any Nim `ptr T`/`pointer` (mirrors CppPtrType).
 const CPtrType* = "uint64_t"
@@ -1169,11 +1176,13 @@ proc generateCBindings*(
     reverseEvents: seq[FFIReverseEventMeta] = @[],
 ) =
   ## Emits the C binding for `libName`.
-  createDir(outputDir)
-  writeFile(outputDir / PreludeHeaderName, generateCPreludeHeader())
-  writeFile(outputDir / CborHeaderName, generateCCborHeader())
-  writeFile(
-    outputDir / (libName & ".h"),
+  ensureOutputDir(outputDir)
+  writeOutputFile(buildPath(outputDir, PreludeHeaderName), generateCPreludeHeader())
+  writeOutputFile(buildPath(outputDir, CborHeaderName), generateCCborHeader())
+  writeOutputFile(
+    buildPath(outputDir, libName & ".h"),
     generateCLibHeader(procs, types, libName, events, consts, reverse, reverseEvents),
   )
-  writeFile(outputDir / "CMakeLists.txt", generateCCMakeLists(libName, nimSrcRelPath))
+  writeOutputFile(
+    buildPath(outputDir, "CMakeLists.txt"), generateCCMakeLists(libName, nimSrcRelPath)
+  )

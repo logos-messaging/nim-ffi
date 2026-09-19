@@ -1,10 +1,10 @@
 import std/[macros, options, tables, strutils]
-from std/os import `/`, relativePath
+from std/os import relativePath
 from std/compilesettings import querySetting, SingleValueSetting
 import chronos
 import ../ffi_types
 import ../ffi_thread_request
-import ../codegen/[meta, string_helpers]
+import ../codegen/[meta, string_helpers, build_paths]
 import ./ffi_route
 import ./ffi_export
 import ./ffi_codegen_common
@@ -310,11 +310,16 @@ proc buildFFINewReqProc(reqTypeName, body: NimNode): NimNode =
   if procNode.kind != nnkLambda and procNode.kind != nnkProcDef:
     error "registerReqFFI expects a lambda definition. Found: " & $procNode.kind
 
-  let typedescParam =
-    newIdentDefs(ident("T"), nnkBracketExpr.newTree(ident("typedesc"), reqTypeName))
+  let
+    typedescIdent = genSym(nskParam, "ffiReqType")
+    callbackIdent = genSym(nskParam, "ffiCallback")
+    userDataIdent = genSym(nskParam, "ffiUserData")
+    typedescParam = newIdentDefs(
+      typedescIdent, nnkBracketExpr.newTree(ident("typedesc"), reqTypeName)
+    )
   formalParams.add(typedescParam)
-  formalParams.add(newIdentDefs(ident("callback"), ident("FFICallBack")))
-  formalParams.add(newIdentDefs(ident("userData"), ident("pointer")))
+  formalParams.add(newIdentDefs(callbackIdent, ident("FFICallBack")))
+  formalParams.add(newIdentDefs(userDataIdent, ident("pointer")))
 
   # Handle params travel as their uint64 id; others keep the user's type.
   let procParams = procNode[3]
@@ -329,11 +334,11 @@ proc buildFFINewReqProc(reqTypeName, body: NimNode): NimNode =
 
   formalParams = @[retType] & formalParams
 
-  let reqObjIdent = ident("reqObj")
+  let reqObjIdent = genSym(nskVar, "ffiReqObj")
   var newBody = newStmtList()
   newBody.add(
     quote do:
-      var `reqObjIdent`: T
+      var `reqObjIdent`: `typedescIdent`
   )
 
   for p in procParams[1 .. ^1]:
@@ -351,13 +356,20 @@ proc buildFFINewReqProc(reqTypeName, body: NimNode): NimNode =
           `reqObjIdent`.`fieldName` = `fieldName`
       )
 
-  let reqNameLit = newLit($unwrapPostfix(reqTypeName))
+  let
+    reqNameLit = newLit($unwrapPostfix(reqTypeName))
+    sharedDataIdent = genSym(nskLet, "ffiSharedData")
+    sharedLenIdent = genSym(nskLet, "ffiSharedLen")
   newBody.add(
     quote do:
       # Encode into shared memory, avoiding a second seq[byte] copy.
-      let (sharedData, sharedLen) = cborEncodeShared(`reqObjIdent`)
+      let (`sharedDataIdent`, `sharedLenIdent`) = cborEncodeShared(`reqObjIdent`)
       return FFIThreadRequest.initFromOwnedShared(
-        callback, userData, cstring(`reqNameLit`), sharedData, sharedLen
+        `callbackIdent`,
+        `userDataIdent`,
+        cstring(`reqNameLit`),
+        `sharedDataIdent`,
+        `sharedLenIdent`,
       )
   )
 
@@ -372,16 +384,18 @@ proc buildFFINewReqProc(reqTypeName, body: NimNode): NimNode =
     echo newReqProc.repr
   return newReqProc
 
-proc reqDecodePreamble(reqTypeName, reqIdent, decodedIdent: NimNode): NimNode =
+proc reqDecodePreamble(
+    reqTypeName, typedescIdent, requestIdent, reqIdent, decodedIdent: NimNode
+): NimNode =
   ## Materialise the typed Req from the request's CBOR payload.
   return quote:
-    let `reqIdent`: ptr FFIThreadRequest = cast[ptr FFIThreadRequest](request)
+    let `reqIdent`: ptr FFIThreadRequest = cast[ptr FFIThreadRequest](`requestIdent`)
     let `decodedIdent` = cborDecodePtr(
       cast[ptr UncheckedArray[byte]](`reqIdent`[].data),
       `reqIdent`[].dataLen,
       `reqTypeName`,
     ).valueOr:
-      return err("CBOR decode failed for " & $T & ": " & $error)
+      return err("CBOR decode failed for " & $`typedescIdent` & ": " & $error)
 
 proc buildProcessFFIRequestProc(reqTypeName, reqHandler, body: NimNode): NimNode =
   ## FFI-thread processor: materialises the Req, unpacks fields, runs user body.
@@ -401,14 +415,18 @@ proc buildProcessFFIRequestProc(reqTypeName, reqHandler, body: NimNode): NimNode
   if procNode.kind != nnkLambda and procNode.kind != nnkProcDef:
     error "registerReqFFI expects a lambda definition. Found: " & $procNode.kind
 
-  let typedescParam =
-    newIdentDefs(ident("T"), nnkBracketExpr.newTree(ident("typedesc"), reqTypeName))
+  let
+    typedescIdent = genSym(nskParam, "ffiReqType")
+    requestIdent = genSym(nskParam, "ffiRequest")
+    typedescParam = newIdentDefs(
+      typedescIdent, nnkBracketExpr.newTree(ident("typedesc"), reqTypeName)
+    )
 
   let procParams = procNode[3]
   var formalParams: seq[NimNode] = @[]
   formalParams.add(procParams[0])
   formalParams.add(typedescParam)
-  formalParams.add(newIdentDefs(ident("request"), ident("pointer")))
+  formalParams.add(newIdentDefs(requestIdent, ident("pointer")))
   formalParams.add(newIdentDefs(reqHandler[0], rhs))
 
   let bodyNode =
@@ -421,7 +439,9 @@ proc buildProcessFFIRequestProc(reqTypeName, reqHandler, body: NimNode): NimNode
   let reqIdent = genSym(nskLet, "ffiReq")
   let decodedIdent = genSym(nskLet, "decoded")
 
-  newBody.add reqDecodePreamble(reqTypeName, reqIdent, decodedIdent)
+  newBody.add(
+    reqDecodePreamble(reqTypeName, typedescIdent, requestIdent, reqIdent, decodedIdent)
+  )
 
   for p in procParams[1 ..^ 1]:
     if isHandleType(p[1]):
@@ -1180,21 +1200,28 @@ proc buildCtorProcessFFIRequestProc(
   let ctxType =
     nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), libTypeName))
 
-  let typedescParam =
-    newIdentDefs(ident("T"), nnkBracketExpr.newTree(ident("typedesc"), reqTypeName))
+  let
+    typedescIdent = genSym(nskParam, "ffiReqType")
+    requestIdent = genSym(nskParam, "ffiRequest")
+    ctxIdent = genSym(nskParam, "ffiCtx")
+    typedescParam = newIdentDefs(
+      typedescIdent, nnkBracketExpr.newTree(ident("typedesc"), reqTypeName)
+    )
 
   var formalParams: seq[NimNode] = @[]
   formalParams.add(returnType)
   formalParams.add(typedescParam)
-  formalParams.add(newIdentDefs(ident("request"), ident("pointer")))
-  formalParams.add(newIdentDefs(ident("ctx"), ctxType))
+  formalParams.add(newIdentDefs(requestIdent, ident("pointer")))
+  formalParams.add(newIdentDefs(ctxIdent, ctxType))
 
   let newBody = newStmtList()
-  let reqIdent = ident("req")
-  let ctxIdent = ident("ctx")
-  let decodedIdent = ident("decoded")
+  let
+    reqIdent = genSym(nskLet, "ffiReq")
+    decodedIdent = genSym(nskLet, "ffiDecoded")
 
-  newBody.add reqDecodePreamble(reqTypeName, reqIdent, decodedIdent)
+  newBody.add(
+    reqDecodePreamble(reqTypeName, typedescIdent, requestIdent, reqIdent, decodedIdent)
+  )
 
   for i in 0 ..< paramNames.len:
     newBody.add unpackReqField(ident(paramNames[i]), paramTypes[i], decodedIdent)
@@ -1203,7 +1230,7 @@ proc buildCtorProcessFFIRequestProc(
   for name in paramNames:
     helperCallNode.add(ident(name))
 
-  let libValIdent = ident("libVal")
+  let libValIdent = genSym(nskLet, "ffiLibValue")
   newBody.add quote do:
     let `libValIdent` = (await `helperCallNode`).valueOr:
       return err($error)
@@ -2149,7 +2176,7 @@ proc bindingsOutputDir(lang, explicit: string): string {.compileTime.} =
   if explicit.len > 0:
     explicit
   else:
-    return querySetting(SingleValueSetting.projectPath) / (lang & "_bindings")
+    return buildPath(querySetting(SingleValueSetting.projectPath), lang & "_bindings")
 
 proc bindingsSrcPath(outDir, explicit: string): string {.compileTime.} =
   ## Nim source path embedded in build files, relative to `outDir`; defaults to
@@ -2208,14 +2235,22 @@ macro genBindings*(
     )
 
   when defined(ffiGenBindings):
-    let libName = deriveLibName(ffiProcRegistry)
-    for rawLang in targetLang.split(','):
-      let lang = string_helpers.toLower(rawLang.strip())
-      if lang.len == 0:
-        continue
-      let outDir = bindingsOutputDir(lang, outputDir)
-      emitBindingsFor(
-        lang, ffiProcRegistry, libName, outDir, bindingsSrcPath(outDir, nimSrcRelPath)
+    if querySetting(SingleValueSetting.command) == "check" and
+        not compileOption("experimental", "vmopsDanger"):
+      error(
+        "genBindings: `nim check` suppresses compile-time filesystem writes. " &
+          "Pass `--experimental:vmopsDanger`, or generate bindings with " &
+          "`nim c --compileOnly`."
       )
+    else:
+      let libName = deriveLibName(ffiProcRegistry)
+      for rawLang in targetLang.split(','):
+        let lang = string_helpers.toLower(rawLang.strip())
+        if lang.len == 0:
+          continue
+        let outDir = bindingsOutputDir(lang, outputDir)
+        emitBindingsFor(
+          lang, ffiProcRegistry, libName, outDir, bindingsSrcPath(outDir, nimSrcRelPath)
+        )
 
   newStmtList()

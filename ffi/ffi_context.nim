@@ -4,6 +4,8 @@
 
 import std/[atomics, locks, options, os, sequtils, sysatomics, tables]
 import chronicles, chronos, chronos/threadsync, results
+# Needed only by the fallback in `closeDispatcherHook`, for chronos builds that
+# predate `closeThreadDispatcher`.
 when defined(windows):
   import chronos/osdefs
 else:
@@ -146,14 +148,55 @@ proc reverseWakeHook[T](ud: pointer) {.nimcall, gcsafe, raises: [].} =
 proc reverseGenerationHook[T](ud: pointer): uint {.nimcall, gcsafe, raises: [].} =
   return cast[ptr FFIContext[T]](ud).generation.load()
 
-proc closeThreadDispatcher() =
-  ## chronos leaks a thread's dispatcher; free it last, once nothing polls (nim-chronos#614).
-  when defined(windows):
-    if closeHandle(getThreadDispatcher().getIoHandler()) == 0:
-      error "failed to close the thread's IOCP port; the handle leaks"
-  else:
-    getThreadDispatcher().getIoHandler().close2().isOkOr:
-      error "failed to close the thread's poller; the fd leaks", err = error
+proc unregisterWaitedSignal(signal: ThreadSignalPtr) =
+  ## `wait` leaves the signal's fd registered in this thread's dispatcher, and
+  ## `closeThreadDispatcher` refuses to close a dispatcher that still has one.
+  ## chronos keeps that fd private, so it is read from the signal's layout until
+  ## `ThreadSignalPtr.unregister` ships:
+  ## https://github.com/status-im/nim-chronos/pull/740
+  when not defined(windows):
+    # `ThreadSignal` is `efd` on Linux, `rfd, wfd` elsewhere; `wait` registers the first.
+    const fdFields = when defined(linux) and not defined(emscripten): 1 else: 2
+    static:
+      doAssert sizeof(ThreadSignal) == fdFields * sizeof(AsyncFD),
+        "chronos changed ThreadSignal's layout; revisit unregisterWaitedSignal"
+    let fd = cast[ptr AsyncFD](signal)[]
+    if getThreadDispatcher().contains(fd):
+      unregister2(fd).isOkOr:
+        error "failed to unregister a signal from its thread's dispatcher",
+          err = osErrorMsg(error)
+
+proc closeDispatcherHook() {.gcsafe, raises: [].} =
+  ## chronos never closes a thread's dispatcher, and a library's `onThreadDestruction`
+  ## hook can still poll it after the thread body returns (nim-brokers does). Nim
+  ## runs the hooks in reverse, so registering this one first makes it run last.
+  try:
+    when compiles(closeThreadDispatcher()):
+      let diagnostic = closeThreadDispatcher()
+      if diagnostic.isSome():
+        error "a thread's chronos dispatcher did not close cleanly",
+          error = diagnostic.get()
+    else:
+      # Two packages both call themselves chronos 4.4.0 and only the newer one
+      # exports `closeThreadDispatcher`. Close the poller directly on the older
+      # one rather than force every consumer onto a particular build.
+      when defined(windows):
+        if closeHandle(getThreadDispatcher().getIoHandler()) == 0:
+          error "failed to close the thread's IOCP port; the handle leaks"
+      else:
+        getThreadDispatcher().getIoHandler().close2().isOkOr:
+          error "failed to close the thread's poller; the fd leaks", err = error
+  except Defect as e:
+    # chronos asserts nothing is still registered; leak the dispatcher rather than abort the host.
+    error "a thread's chronos dispatcher still had work registered; it leaks",
+      error = e.msg
+  when defined(gcDestructors):
+    # orc never frees the hook list; this is the last hook, so nothing reads it after.
+    reset(nimThreadDestructionHandlers)
+
+proc registerCloseDispatcherHook() =
+  ## Call first thing in a thread body, before any library can register its own hook.
+  onThreadDestruction(closeDispatcherHook)
 
 include ./event_thread
 include ./ffi_thread

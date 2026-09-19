@@ -70,6 +70,14 @@ All notable changes to this project are documented in this file.
   router would silently give it the ctor ABI instead.
 
 ### Changed
+- **FFI parameter names no longer collide with generated request internals.**
+  Names such as `callback`, `userData`, `T`, and `request` remain available to
+  user APIs and keep their original CBOR field names.
+- **Cross-compiled bindings now land in `ffiOutputDir`.** `genBindings` joined
+    paths with the target OS's separator, so building for another OS wrote
+    backslash-named files into the working directory. `nim check` now fails with a
+    diagnostic instead of silently skipping generation; pass
+    `--experimental:vmopsDanger`, or generate with `nim c --compileOnly`.
 - **The generated `NIMFFI_RET_*` codes come from the Nim constants.** The four
   codes were typed by hand in the C template, the C++ template and the Rust
   generator, and they had already drifted: the C header defined
