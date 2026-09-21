@@ -1,0 +1,11 @@
+# The binding files are emitted by `nimble genbindings_*` and checked in so a
+# consumer can read the API without running the generator; `nimble
+# check_bindings` fails if they drift. Marking them generated collapses them in
+# a pull request, where the generator that produced them is what to review.
+examples/*/c_bindings/*.h          linguist-generated=true
+examples/*/cpp_bindings/*.hpp      linguist-generated=true
+examples/*/cddl_bindings/*.cddl    linguist-generated=true
+examples/*/rust_bindings/src/*.rs  linguist-generated=true
+examples/*/rust_bindings/Cargo.toml linguist-generated=true
+examples/*/rust_bindings/build.rs  linguist-generated=true
+examples/*/*_bindings/CMakeLists.txt linguist-generated=true
