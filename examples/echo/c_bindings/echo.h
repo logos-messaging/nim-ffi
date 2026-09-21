@@ -340,24 +340,24 @@ static inline CborError echo_decv_Str(CborValue* it, void* v) { return nimffi_de
 /* echo API                                                     */
 /* ============================================================ */
 /* The library calls nothing back and the binding starts no thread: a reply,
- * an event or a liveness report reaches the host inside echo_ctx_pump_once(),
+ * an event or a liveness report reaches the host inside echo_ctx_dispatch_next(),
  * on the thread that calls it.
  *
  * Threads: a context of this binding is single-threaded by design. Submit and
- * pump it from one thread, or hold one lock around both. A host that wants
+ * dispatch it from one thread, or hold one lock around both. A host that wants
  * something else uses the raw echo_<proc>() and echo_poll() exports with the
  * decoders below.
  *
  * Context: echo_ctx_create_sync(), echo_ctx_create(), echo_ctx_destroy().
  *
- * Requests. Each has an asynchronous form, whose on_reply runs inside the pump;
- * a _sync form for a sequential program, which pumps until its own reply
+ * Requests. Each has an asynchronous form, whose on_reply runs inside the dispatch thread;
+ * a _sync form for a sequential program, which dispatches until its own reply
  * arrives; and a decoder of the raw reply:
  *   echo_ctx_shout()  echo_ctx_shout_sync()  echo_decode_shout_reply()
  *   echo_ctx_version()  echo_ctx_version_sync()  echo_decode_version_reply()
  *   echo_static_lib_version()  echo_static_lib_version_sync()  echo_decode_lib_version_reply()
  *   echo_static_shout_anon()  echo_static_shout_anon_sync()  echo_decode_shout_anon_reply()
- * The replies of the static requests arrive on the static context: echo_static_pump_once().
+ * The replies of the static requests arrive on the static context: echo_static_dispatch_next().
  *
  * on_reply(ret, reply, err, user_data) runs once, with `ret`:
  *   NIMFFI_RET_OK      `reply` is set and `err` is NULL
@@ -385,7 +385,7 @@ typedef struct {
 
 /* ---- everything the library can send ---- */
 /* Replies go to the on_reply of their request; the rest is listed here. A NULL
- * entry means "ignore". Each handler runs on the thread that pumps; what it is
+ * entry means "ignore". Each handler runs on the thread that dispatches; what it is
  * handed belongs to the binding and is valid only until it returns. */
 typedef struct {
     /* Request `req_id` is still running after `elapsed_ms`; its reply still comes. */
@@ -444,9 +444,9 @@ static inline int echo_ctx_dispatch(EchoCtx* ctx, const NimFfiMsg* msg, const Ec
 /* One echo_poll() and the dispatch of what it returned.
  * Returns the poll code (NIMFFI_RET_OK, _TIMEOUT, _CLOSED after the `closed`
  * handler ran, _INVALID_CTX, _BUSY, _ERR), or -1 when the message did not
- * dispatch. `ctx` must stay alive for the whole call: stop pumping before
+ * dispatch. `ctx` must stay alive for the whole call: stop dispatching before
  * echo_ctx_destroy(). */
-static inline int echo_ctx_pump_once(EchoCtx* ctx, int32_t timeout_ms, const EchoHandlers* handlers) {
+static inline int echo_ctx_dispatch_next(EchoCtx* ctx, int32_t timeout_ms, const EchoHandlers* handlers) {
     if (!ctx) return NIMFFI_RET_INVALID_CTX;
     const NimFfiMsg* msg = NULL;
     int rc = echo_poll(ctx->ptr, timeout_ms, &msg);
@@ -461,7 +461,7 @@ static inline intptr_t echo_ctx_poll_fd(const EchoCtx* ctx) {
     return echo_poll_fd(ctx->ptr);
 }
 
-/* Pumps `ctx` until `slot` is settled, handing every other message to
+/* Dispatches `ctx` until `slot` is settled, handing every other message to
  * `handlers`. A request given up on is forgotten, so that its late reply is
  * dropped instead of written into a stack frame that is gone. */
 static inline int echo_ctx_await_(EchoCtx* ctx, uint64_t req_id, const NimFfiSyncSlot* slot, int32_t timeout_ms, const EchoHandlers* handlers) {
@@ -473,7 +473,7 @@ static inline int echo_ctx_await_(EchoCtx* ctx, uint64_t req_id, const NimFfiSyn
             int64_t left = deadline - nimffi_now_ms();
             wait_ms = left > 0 ? (int32_t)left : 0;
         }
-        int rc = echo_ctx_pump_once(ctx, wait_ms, handlers);
+        int rc = echo_ctx_dispatch_next(ctx, wait_ms, handlers);
         if (slot->done) break;
         /* A message that did not dispatch (-1) was not ours: keep waiting. */
         if (rc == NIMFFI_RET_OK || rc == -1) continue;
@@ -496,10 +496,10 @@ static inline EchoCtx* echo_static_(void) {
     return &echo_static_binding_;
 }
 
-/* echo_ctx_pump_once() on the static context: delivers the replies of the
+/* echo_ctx_dispatch_next() on the static context: delivers the replies of the
  * echo_static_*() requests. */
-static inline int echo_static_pump_once(int32_t timeout_ms, const EchoHandlers* handlers) {
-    return echo_ctx_pump_once(echo_static_(), timeout_ms, handlers);
+static inline int echo_static_dispatch_next(int32_t timeout_ms, const EchoHandlers* handlers) {
+    return echo_ctx_dispatch_next(echo_static_(), timeout_ms, handlers);
 }
 
 /* ---- context ---- */

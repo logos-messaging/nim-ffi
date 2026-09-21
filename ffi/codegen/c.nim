@@ -491,7 +491,7 @@ proc emitApiIndex(
   )
   lines.add(
     " * an event or a liveness report reaches the host inside " & libName &
-      "_ctx_pump_once(),"
+      "_ctx_dispatch_next(),"
   )
   lines.add(" * on the thread that calls it.")
   lines.add(" *")
@@ -499,7 +499,7 @@ proc emitApiIndex(
     " * Threads: a context of this binding is single-threaded by design. Submit and"
   )
   lines.add(
-    " * pump it from one thread, or hold one lock around both. A host that wants"
+    " * dispatch it from one thread, or hold one lock around both. A host that wants"
   )
   lines.add(
     " * something else uses the raw " & libName & "_<proc>() and " & libName &
@@ -516,9 +516,11 @@ proc emitApiIndex(
     lines.add(" * Context: " & libName & "_ctx_destroy().")
   lines.add(" *")
   lines.add(
-    " * Requests. Each has an asynchronous form, whose on_reply runs inside the pump;"
+    " * Requests. Each has an asynchronous form, whose on_reply runs inside the dispatch thread;"
   )
-  lines.add(" * a _sync form for a sequential program, which pumps until its own reply")
+  lines.add(
+    " * a _sync form for a sequential program, which dispatches until its own reply"
+  )
   lines.add(" * arrives; and a decoder of the raw reply:")
   for m in classified.replyProcs():
     let name = wrapperName(libName, m)
@@ -528,7 +530,7 @@ proc emitApiIndex(
   if classified.statics.len > 0:
     lines.add(
       " * The replies of the static requests arrive on the static context: " & libName &
-        "_static_pump_once()."
+        "_static_dispatch_next()."
     )
   lines.add(" *")
   lines.add(" * on_reply(ret, reply, err, user_data) runs once, with `ret`:")
@@ -640,14 +642,14 @@ proc emitHandlers(
     events: seq[FFIEventMeta],
     hasStatics: bool,
 ) =
-  ## The one place that lists everything the library sends, and the pump over it.
+  ## The one place that lists everything the library sends, and the loop over it.
   let handlersType = libType & "Handlers"
   lines.add("/* ---- everything the library can send ---- */")
   lines.add(
     "/* Replies go to the on_reply of their request; the rest is listed here. A NULL"
   )
   lines.add(
-    " * entry means \"ignore\". Each handler runs on the thread that pumps; what it is"
+    " * entry means \"ignore\". Each handler runs on the thread that dispatches; what it is"
   )
   lines.add(" * handed belongs to the binding and is valid only until it returns. */")
   lines.add("typedef struct {")
@@ -773,11 +775,11 @@ proc emitHandlers(
     " * handler ran, _INVALID_CTX, _BUSY, _ERR), or -1 when the message did not"
   )
   lines.add(
-    " * dispatch. `ctx` must stay alive for the whole call: stop pumping before"
+    " * dispatch. `ctx` must stay alive for the whole call: stop dispatching before"
   )
   lines.add(" * " & libName & "_ctx_destroy(). */")
   lines.add(
-    "static inline int " & libName & "_ctx_pump_once(" & ctxType &
+    "static inline int " & libName & "_ctx_dispatch_next(" & ctxType &
       "* ctx, int32_t timeout_ms, const " & handlersType & "* handlers) {"
   )
   lines.add("    if (!ctx) return NIMFFI_RET_INVALID_CTX;")

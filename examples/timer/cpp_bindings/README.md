@@ -4,7 +4,7 @@
 
 This folder contains **auto-generated C++ bindings** for the `my_timer` Nim library. It is generated from `../timer.nim` and provides:
 
-- `my_timer.hpp`: High-level C++ class (`MyTimerCtx`) wrapping the FFI interface. Each context runs one pump thread that takes everything the library sends out of `my_timer_poll`: a reply goes to the call that made the request (`echo` blocks up to the context's timeout, `echoAsync` returns a `std::future` and starts no thread), anything else to the listeners (`addOn<Event>Listener`, `addStaleWarnListener`, `addNotRespondingListener`, `addRespondingListener`, `addClosedListener`). A listener may make a blocking call on its context, which then polls in place; it must never wait on a future of that context. `MyTimerCtx::shutdown()` stops the pump of the static procs, then the library
+- `my_timer.hpp`: High-level C++ class (`MyTimerCtx`) wrapping the FFI interface. Each context runs one dispatch thread that takes everything the library sends out of `my_timer_poll`: a reply goes to the call that made the request (`echo` blocks up to the context's timeout, `echoAsync` returns a `std::future` and starts no thread), anything else to the listeners (`addOn<Event>Listener`, `addStaleWarnListener`, `addNotRespondingListener`, `addRespondingListener`, `addClosedListener`). A listener may make a blocking call on its context, which then polls in place; it must never wait on a future of that context. `MyTimerCtx::shutdown()` stops the dispatch thread of the static procs, then the library
 - `main.cpp`: Example executable demonstrating how to use the bindings
 - `CMakeLists.txt`: Build configuration that compiles the Nim library and links the C++ example
 

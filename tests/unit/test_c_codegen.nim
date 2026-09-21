@@ -164,7 +164,7 @@ typedef struct {
         header
     )
 
-  test "a request has an asynchronous form whose reply comes through the pump":
+  test "a request has an asynchronous form whose reply comes through the dispatch thread":
     check "typedef void (*TimerVersionReplyFn)(int ret, const char* const* reply, const char* err, void* user_data);" in
       header
     check "static inline int timer_ctx_version(TimerCtx* ctx, TimerVersionReplyFn on_reply, void* user_data, uint64_t* req_id_out) {" in
@@ -172,7 +172,7 @@ typedef struct {
     check "const int rc_ = timer_version_submit_(ctx, timer_version_settle_, (nimffi_generic_fn)on_reply, user_data, &req_id, NULL);" in
       header
 
-  test "a request has a _sync form that pumps until its own reply":
+  test "a request has a _sync form that dispatches until its own reply":
     check "static inline int timer_ctx_version_sync(TimerCtx* ctx, const char** out, char** err, int32_t timeout_ms, const TimerHandlers* handlers) {" in
       header
     check "return timer_ctx_await_(ctx, req_id, &slot, timeout_ms, handlers);" in header
@@ -278,11 +278,11 @@ suite "generateCLibHeader: context-independent procs":
   test "the wrapper calls the raw symbol without a ctx argument":
     check "int rc = timer_parse(req_buf, req_len, req_id_out);" in header
 
-  test "its reply arrives on the static context, which has a pump of its own":
+  test "its reply arrives on the static context, which has a dispatch thread of its own":
     check "NIMFFI_SHARED TimerCtx timer_static_binding_ = {NULL, {NULL, 0, 0}};" in
       header
     check "timer_static_binding_.ptr = timer_static_ctx();" in header
-    check "static inline int timer_static_pump_once(int32_t timeout_ms, const TimerHandlers* handlers) {" in
+    check "static inline int timer_static_dispatch_next(int32_t timeout_ms, const TimerHandlers* handlers) {" in
       header
     check "    TimerCtx* ctx = timer_static_();" in header
     check "return timer_ctx_await_(timer_static_(), req_id, &slot, timeout_ms, handlers);" in
@@ -431,8 +431,8 @@ typedef struct {
     check closing >= 0
     check closing < handler
 
-  test "the pump and the wake handle are emitted":
-    check "static inline int timer_ctx_pump_once(TimerCtx* ctx, int32_t timeout_ms, const TimerHandlers* handlers) {" in
+  test "the dispatch loop and the wake handle are emitted":
+    check "static inline int timer_ctx_dispatch_next(TimerCtx* ctx, int32_t timeout_ms, const TimerHandlers* handlers) {" in
       header
     check "int rc = timer_poll(ctx->ptr, timeout_ms, &msg);" in header
     check "static inline intptr_t timer_ctx_poll_fd(const TimerCtx* ctx) {" in header
@@ -458,7 +458,7 @@ typedef struct {
     )
 
 suite "generateCLibHeader: a library without events":
-  test "it still gets Handlers, dispatch, the pump and the wake handle":
+  test "it still gets Handlers, dispatch, the dispatch loop and the wake handle":
     let procs = @[
       FFIProcMeta(
         procName: "timer_create",
@@ -473,7 +473,7 @@ suite "generateCLibHeader: a library without events":
     check "} TimerHandlers;" in header
     check "    void (*closed)(int ret, const char* reason, void* user_data);" in header
     check "timer_ctx_dispatch(" in header
-    check "timer_ctx_pump_once(" in header
+    check "timer_ctx_dispatch_next(" in header
     check "timer_ctx_poll_fd(" in header
     check "int timer_poll(void* ctx" in header
     check "_EVT_" notin header

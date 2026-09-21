@@ -1,21 +1,21 @@
 // ============================================================
-// Message pump
+// Message dispatch
 // ============================================================
-// The library never calls into the host. Each context owns one pump thread that
+// The library never calls into the host. Each context owns one dispatch thread that
 // takes everything the library sends out through `<lib>_poll`: a reply goes to
 // the call waiting for it, anything else to the listeners registered for it.
 // Guarded so two nim-ffi headers can share a translation unit.
-#ifndef NIM_FFI_PUMP_HPP_INCLUDED
-#define NIM_FFI_PUMP_HPP_INCLUDED
+#ifndef NIM_FFI_DISPATCHER_HPP_INCLUDED
+#define NIM_FFI_DISPATCHER_HPP_INCLUDED
 
-class NimFfiPump : public std::enable_shared_from_this<NimFfiPump> {
+class NimFfiDispatcher : public std::enable_shared_from_this<NimFfiDispatcher> {
 public:
     using Bytes = std::vector<std::uint8_t>;
     using PollFn = int (*)(void* ctx, std::int32_t timeout_ms, const NimFfiMsg** msg);
     using LastErrorFn = const char* (*)();
     // Decodes one NIMFFI_MSG_EVENT and delivers it; generated per library.
-    using EventFn = void (*)(NimFfiPump& pump, const NimFfiMsg& msg);
-    // What a reply (or the lack of one) resolves to. Runs on the pump thread, so
+    using EventFn = void (*)(NimFfiDispatcher& dispatcher, const NimFfiMsg& msg);
+    // What a reply (or the lack of one) resolves to. Runs on the dispatch thread, so
     // it holds no user code: it decodes and hands the value over.
     using Completion = std::function<void(Result<Bytes>)>;
 
@@ -24,7 +24,7 @@ public:
     using RespondingFn = std::function<void()>;
     using ClosedFn = std::function<void(bool ok, const std::string& reason)>;
 
-    NimFfiPump(PollFn poll, LastErrorFn lastError, void* ctx, EventFn onEvent)
+    NimFfiDispatcher(PollFn poll, LastErrorFn lastError, void* ctx, EventFn onEvent)
         : poll_(poll), lastError_(lastError), ctx_(ctx), onEvent_(onEvent) {}
 
     // False when the thread could not be started.
@@ -43,12 +43,12 @@ public:
         }
     }
 
-    // Joins the pump thread. Called on the pump thread itself (a listener is
+    // Joins the dispatch thread. Called on the dispatch thread itself (a listener is
     // destroying its context) it detaches instead, and no listener runs once
     // the handler in flight returns.
     void stop() {
-        const bool onPump = onPumpThread();
-        if (onPump) detached_.store(true);
+        const bool onOwnThread = onDispatchThread();
+        if (onOwnThread) detached_.store(true);
         stop_.store(true);
         std::thread thread;
         {
@@ -56,11 +56,11 @@ public:
             thread = std::move(thread_);
         }
         if (!thread.joinable()) return;
-        if (onPump) thread.detach();
+        if (onOwnThread) thread.detach();
         else thread.join();
     }
 
-    // True once the pump is over: no reply will be delivered any more.
+    // True once the dispatch thread is over: no reply will be delivered any more.
     bool finished() {
         std::lock_guard<std::mutex> lock(waitMtx_);
         return finished_;
@@ -92,7 +92,7 @@ public:
         return decodeCborFFI<T>(raw.value());
     }
 
-    // The future is fulfilled by the pump thread, or failed by it once `timeout`
+    // The future is fulfilled by the dispatch thread, or failed by it once `timeout`
     // passed or the context closed. No thread is started.
     template <class T, class Send>
     std::future<Result<T>> callAsync(Send&& send, std::chrono::milliseconds timeout) {
@@ -115,20 +115,20 @@ public:
         return future;
     }
 
-    // The constructor's reply: its id is known before the pump runs, so the
+    // The constructor's reply: its id is known before the dispatch loop runs, so the
     // waiter is in place before the reply can be taken out.
     Result<Bytes> startAndWait(std::uint64_t id, std::chrono::milliseconds timeout) {
         auto state = std::make_shared<SyncState>();
         expect(id, timeout, false, syncCompletion(state));
         if (!start()) {
-            abandon("could not start the pump thread");
+            abandon("could not start the dispatch thread");
         }
         return wait(*state, id, timeout);
     }
 
     void startAndThen(std::uint64_t id, std::chrono::milliseconds timeout, Completion done) {
         expect(id, timeout, true, std::move(done));
-        if (!start()) abandon("could not start the pump thread");
+        if (!start()) abandon("could not start the dispatch thread");
     }
 
     // 0 when `fn` is empty.
@@ -180,7 +180,7 @@ private:
     struct Waiter {
         std::chrono::steady_clock::time_point deadline;
         std::chrono::milliseconds timeout;
-        bool swept; // the pump fails it at `deadline`; a blocking caller times itself out
+        bool swept; // the dispatch thread fails it at `deadline`; a blocking caller times itself out
         Completion done;
     };
 
@@ -210,17 +210,17 @@ private:
         return std::min(std::max(timeout, std::chrono::milliseconds(0)), Max);
     }
 
-    static NimFfiPump*& current() {
-        thread_local NimFfiPump* pump = nullptr;
-        return pump;
+    static NimFfiDispatcher*& current() {
+        thread_local NimFfiDispatcher* dispatcher = nullptr;
+        return dispatcher;
     }
 
-    bool onPumpThread() { return current() == this; }
+    bool onDispatchThread() { return current() == this; }
 
     // Empty: the request is queued and `done` runs exactly once. Otherwise why
     // it was refused; `done` never runs.
     // The lock is held across `send`: the reply can be polled before `send`
-    // returns, and the pump takes this lock before it looks a waiter up.
+    // returns, and the dispatch thread takes this lock before it looks a waiter up.
     template <class Send>
     std::string submit(Send& send, std::chrono::milliseconds timeout, bool swept,
                        Completion done, std::uint64_t& id) {
@@ -256,7 +256,7 @@ private:
     }
 
     Result<Bytes> wait(SyncState& state, std::uint64_t id, std::chrono::milliseconds timeout) {
-        if (onPumpThread()) {
+        if (onDispatchThread()) {
             // A listener is calling in: only this thread can take the reply out,
             // so poll here, dispatching whatever else arrives meanwhile.
             const auto deadline = std::chrono::steady_clock::now() + clamp(timeout);
@@ -268,7 +268,7 @@ private:
                 const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
                     deadline - std::chrono::steady_clock::now()).count();
                 if (left <= 0) break;
-                pumpOnce(static_cast<std::int32_t>(std::min<long long>(left, SliceMs)));
+                dispatchOnce(static_cast<std::int32_t>(std::min<long long>(left, SliceMs)));
             }
         } else {
             std::unique_lock<std::mutex> lock(state.mtx);
@@ -281,7 +281,7 @@ private:
                 if (stop_.load()) return Result<Bytes>::err(ClosedText);
                 return Result<Bytes>::err(timeoutText(timeout));
             }
-            lock.lock(); // the pump holds the waiter: its completion is imminent
+            lock.lock(); // the dispatch thread holds the waiter: its completion is imminent
             state.cv.wait(lock, [&] { return state.done; });
         }
         return std::move(state.result);
@@ -370,7 +370,7 @@ private:
             try {
                 (*fn)(args...);
             } catch (...) {
-                // A listener's exception must not end the pump thread.
+                // A listener's exception must not end the dispatch thread.
             }
         }
     }
@@ -404,8 +404,8 @@ private:
         }
     }
 
-    // One poll slice. Pump thread only.
-    void pumpOnce(std::int32_t sliceMs) {
+    // One poll slice. Dispatch thread only.
+    void dispatchOnce(std::int32_t sliceMs) {
         using namespace std::chrono_literals;
         const NimFfiMsg* msg = nullptr;
         const int rc = poll_(ctx_, sliceMs, &msg);
@@ -431,7 +431,7 @@ private:
     // stopped it: a closed listener runs exactly once (never after a detach).
     void run() {
         current() = this;
-        while (!stop_.load() && !closed_) pumpOnce(SliceMs);
+        while (!stop_.load() && !closed_) dispatchOnce(SliceMs);
         abandon(ClosedText);
         call(matching<ClosedFn>(NIMFFI_MSG_CLOSED, 0), closedOk_, closedReason_);
         current() = nullptr;
@@ -455,35 +455,35 @@ private:
     std::atomic<bool> stop_{false};
     std::atomic<bool> detached_{false};
 
-    // Pump thread only.
+    // Dispatch thread only.
     bool closed_{false};
     bool closedOk_{true};
     std::string closedReason_;
     std::chrono::steady_clock::time_point nextSweep_{};
 };
 
-// The pump of a library's static context, where `{.ffiStatic.}` replies arrive.
+// The dispatch thread of a library's static context, where `{.ffiStatic.}` replies arrive.
 // One per library and process, started by the first static call. Never
 // destroyed: the thread may still be polling while the process exits.
-class NimFfiStaticPump {
+class NimFfiStaticDispatcher {
 public:
     using StaticCtxFn = void* (*)();
 
-    // The running pump; a new one when there is none or the static context is
+    // The running dispatch thread; a new one when there is none or the static context is
     // another one by now (the library was shut down in between).
-    Result<std::shared_ptr<NimFfiPump>> acquire(StaticCtxFn staticCtx, NimFfiPump::PollFn poll,
-                                                NimFfiPump::LastErrorFn lastError) {
-        using Ret = Result<std::shared_ptr<NimFfiPump>>;
+    Result<std::shared_ptr<NimFfiDispatcher>> acquire(StaticCtxFn staticCtx, NimFfiDispatcher::PollFn poll,
+                                                NimFfiDispatcher::LastErrorFn lastError) {
+        using Ret = Result<std::shared_ptr<NimFfiDispatcher>>;
         std::lock_guard<std::mutex> lock(mtx_);
         void* token = staticCtx();
-        if (!token) return Ret::err(NimFfiPump::refusal(lastError, NIMFFI_RET_ERR));
-        if (pump_ && token == token_ && !pump_->finished()) return Ret::ok(pump_);
+        if (!token) return Ret::err(NimFfiDispatcher::refusal(lastError, NIMFFI_RET_ERR));
+        if (dispatcher_ && token == token_ && !dispatcher_->finished()) return Ret::ok(dispatcher_);
         stopLocked();
-        auto pump = std::make_shared<NimFfiPump>(poll, lastError, token, &noEvents);
-        if (!pump->start()) return Ret::err("could not start the pump thread");
-        pump_ = pump;
+        auto dispatcher = std::make_shared<NimFfiDispatcher>(poll, lastError, token, &noEvents);
+        if (!dispatcher->start()) return Ret::err("could not start the dispatch thread");
+        dispatcher_ = dispatcher;
         token_ = token;
-        return Ret::ok(std::move(pump));
+        return Ret::ok(std::move(dispatcher));
     }
 
     // Fails the static calls still waiting and joins the thread, which takes up
@@ -494,18 +494,18 @@ public:
     }
 
 private:
-    static void noEvents(NimFfiPump&, const NimFfiMsg&) {}
+    static void noEvents(NimFfiDispatcher&, const NimFfiMsg&) {}
 
     void stopLocked() {
-        if (!pump_) return;
-        pump_->stop();
-        pump_.reset();
+        if (!dispatcher_) return;
+        dispatcher_->stop();
+        dispatcher_.reset();
         token_ = nullptr;
     }
 
     std::mutex mtx_;
-    std::shared_ptr<NimFfiPump> pump_;
+    std::shared_ptr<NimFfiDispatcher> dispatcher_;
     void* token_{nullptr};
 };
 
-#endif // NIM_FFI_PUMP_HPP_INCLUDED
+#endif // NIM_FFI_DISPATCHER_HPP_INCLUDED

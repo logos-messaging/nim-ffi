@@ -10,8 +10,8 @@ static inline {{CTX}}* {{LIB}}_static_(void) {
     return &{{LIB}}_static_binding_;
 }
 
-/* {{LIB}}_ctx_pump_once() on the static context: delivers the replies of the
+/* {{LIB}}_ctx_dispatch_next() on the static context: delivers the replies of the
  * {{LIB}}_static_*() requests. */
-static inline int {{LIB}}_static_pump_once(int32_t timeout_ms, const {{HANDLERS}}* handlers) {
-    return {{LIB}}_ctx_pump_once({{LIB}}_static_(), timeout_ms, handlers);
+static inline int {{LIB}}_static_dispatch_next(int32_t timeout_ms, const {{HANDLERS}}* handlers) {
+    return {{LIB}}_ctx_dispatch_next({{LIB}}_static_(), timeout_ms, handlers);
 }

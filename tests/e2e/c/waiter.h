@@ -8,7 +8,7 @@
 /* Long enough for a loaded CI machine; a healthy run never gets near it. */
 #define WAIT_LIMIT_MS 5000
 
-/* Callbacks run inside the pump, on the thread that waits: plain fields, no atomics. */
+/* Callbacks run inside the dispatch thread, on the thread that waits: plain fields, no atomics. */
 typedef struct {
     int done;
     int ret;
@@ -33,13 +33,13 @@ static inline void waiter_settle(int* done, char* err, size_t cap, const char* e
     (*done)++;
 }
 
-/* Pumps with `pump_call` (an expression returning the pump's code) until `done`
+/* Dispatches with `dispatcher_call` (an expression returning the dispatch loop’s code) until `done`
  * is set. A -1 is a message that did not dispatch, which no test here expects. */
-#define WAIT_DONE(done, pump_call)                                        \
+#define WAIT_DONE(done, dispatcher_call)                                        \
     do {                                                                  \
         int64_t wait_deadline_ = nimffi_now_ms() + WAIT_LIMIT_MS;         \
         while (!(done) && nimffi_now_ms() < wait_deadline_) {             \
-            int wait_rc_ = (pump_call);                                   \
+            int wait_rc_ = (dispatcher_call);                                   \
             assert(wait_rc_ == NIMFFI_RET_OK || wait_rc_ == NIMFFI_RET_TIMEOUT); \
         }                                                                 \
         assert(done);                                                     \

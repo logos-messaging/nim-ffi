@@ -24,7 +24,7 @@ NIMFFI_RET_CLOSED: the context ended; `*msg` is a NIMFFI_MSG_CLOSED whose
 `ret_code` is NIMFFI_RET_OK, or NIMFFI_RET_ERR with the reason as UTF-8 payload.
 NIMFFI_RET_INVALID_CTX: `ctx` names no live context.
 NIMFFI_RET_BUSY: another thread is polling `ctx`; there is one consumer at a time.
-The context class below already polls from its pump thread."""
+The context class below already polls from its dispatch thread."""
 
 const PollFdDoc =
   """A handle that is ready while a message waits or `ctx` is closed: an epoll fd
@@ -52,11 +52,11 @@ const LastErrorDoc =
 
 ## Trailing param of every call that can't inherit a ctx's `timeout_`.
 const ListenerRulesDoc =
-  """    // Listeners run on the pump thread, in the order they were added. One may add
+  """    // Listeners run on the dispatch thread, in the order they were added. One may add
     // or remove listeners, destroy the context, or make a blocking call on this
     // context: the call then polls in place, so other listeners can run before it
     // returns. It must never wait on a future of this context (`xAsync().get()`):
-    // only the pump thread, which it is blocking, can fulfil that future."""
+    // only the dispatch thread, which it is blocking, can fulfil that future."""
 
 const CppTimeoutParam = "std::chrono::milliseconds timeout = std::chrono::seconds{30}"
 
@@ -65,7 +65,7 @@ const
   ResultTpl = staticRead("templates/cpp/result.hpp.tpl")
   CborHelpersTpl = staticRead("templates/cpp/cbor_helpers.hpp.tpl")
   MsgTpl = staticRead("templates/cpp/msg.hpp.tpl")
-  PumpTpl = staticRead("templates/cpp/pump.hpp.tpl")
+  DispatcherTpl = staticRead("templates/cpp/dispatcher.hpp.tpl")
   ContextCreateTpl = staticRead("templates/cpp/context_create.hpp.tpl")
   ContextCreateAsyncTpl = staticRead("templates/cpp/context_create_async.hpp.tpl")
   ContextRuleOf5Tpl = staticRead("templates/cpp/context_rule_of_5.hpp.tpl")
@@ -204,7 +204,7 @@ proc emitListenerApi(
     "    // ── Messages from the library ───────────────────────────"
   )
   lines.add(
-    "    // Everything $1 sends comes out of $1_poll on this context's pump thread:" %
+    "    // Everything $1 sends comes out of $1_poll on this context's dispatch thread:" %
       [libName]
   )
   lines.add("    //   NIMFFI_MSG_REPLY           -> the method that made the request")
@@ -236,7 +236,7 @@ proc emitListenerApi(
         [eventListenerMethod(ev), ev.payloadTypeName]
     )
     lines.add(
-      "        return ListenerHandle{pump_->add(NIMFFI_MSG_EVENT, $1, std::move(handler))};" %
+      "        return ListenerHandle{dispatcher_->add(NIMFFI_MSG_EVENT, $1, std::move(handler))};" %
         [eventNameIdConst(ev)]
     )
     lines.add("    }")
@@ -244,15 +244,17 @@ proc emitListenerApi(
   lines.add(ContextListenersTpl)
 
 proc emitEventDecoder(lines: var seq[string], events: seq[FFIEventMeta]) =
-  ## The pump's per-library half: maps a name id to the payload type to decode.
+  ## The dispatch loop's per-library half: maps a name id to the payload type to decode.
   if events.len == 0:
-    lines.add("    static void dispatchEvent_(NimFfiPump&, const NimFfiMsg&) {}")
+    lines.add("    static void dispatchEvent_(NimFfiDispatcher&, const NimFfiMsg&) {}")
     return
-  lines.add("    static void dispatchEvent_(NimFfiPump& pump, const NimFfiMsg& msg) {")
+  lines.add(
+    "    static void dispatchEvent_(NimFfiDispatcher& dispatcher, const NimFfiMsg& msg) {"
+  )
   lines.add("        switch (msg.name_id) {")
   for ev in events:
     lines.add(
-      "        case $1: pump.deliverEvent<$2>(msg); break;" %
+      "        case $1: dispatcher.deliverEvent<$2>(msg); break;" %
         [eventNameIdConst(ev), ev.payloadTypeName]
     )
   lines.add("        default: break; // an event from a newer library")
@@ -390,7 +392,7 @@ proc generateCppHeader*(
   lines.add("} // extern \"C\"")
   lines.add("")
 
-  lines.add(PumpTpl)
+  lines.add(DispatcherTpl)
 
   let classified = classifyProcs(procs)
   let ctors = classified.ctors
@@ -481,11 +483,11 @@ proc generateCppHeader*(
         "    std::future<$1> $2Async($3) const {"
 
     # The blocking and the future flavour differ in how a failure is returned
-    # and in which pump entry point waits for the reply.
+    # and in which dispatch entry point waits for the reply.
     for isAsync in [false, true]:
       var errFmt = "return $1::err($2);"
       if isAsync:
-        errFmt = "return NimFfiPump::ready($1::err($2));"
+        errFmt = "return NimFfiDispatcher::ready($1::err($2));"
       lines.add(renderMemberDocComment(m.doc))
       lines.add(
         (if isAsync: asyncDecl else: syncDecl) % [methRet, methodName, methParamsStr]
@@ -496,16 +498,17 @@ proc generateCppHeader*(
         "        if (ffi_enc_.isErr()) " & errFmt % [methRet, "ffi_enc_.error()"]
       )
       lines.add("        const auto& ffi_req_bytes_ = ffi_enc_.value();")
-      var pumpExpr = "pump_"
+      var dispatcherExpr = "dispatcher_"
       if isStatic:
-        lines.add("        auto ffi_pump_ = staticPump_();")
+        lines.add("        auto ffi_dispatcher_ = staticDispatcher_();")
         lines.add(
-          "        if (ffi_pump_.isErr()) " & errFmt % [methRet, "ffi_pump_.error()"]
+          "        if (ffi_dispatcher_.isErr()) " &
+            errFmt % [methRet, "ffi_dispatcher_.error()"]
         )
-        pumpExpr = "ffi_pump_.value()"
+        dispatcherExpr = "ffi_dispatcher_.value()"
       lines.add(
         "        return $1->$2<$3>([&](std::uint64_t* ffi_id_) {" %
-          [pumpExpr, (if isAsync: "callAsync" else: "call"), retCppType]
+          [dispatcherExpr, (if isAsync: "callAsync" else: "call"), retCppType]
       )
       lines.add(
         "            return $1($2ffi_req_bytes_.data(), ffi_req_bytes_.size(), ffi_id_);" %
@@ -524,13 +527,13 @@ proc generateCppHeader*(
   lines.add(ContextStaticTpl.replace("{{LIB}}", libName))
   lines.add("    void* ptr_;")
   lines.add("    std::chrono::milliseconds timeout_;")
-  # Shared with the pump thread, which outlives `this` when a listener destroys the context.
-  lines.add("    std::shared_ptr<NimFfiPump> pump_;")
-  # `create` starts the pump, once the waiter of the constructor's reply is in place.
+  # Shared with the dispatch thread, which outlives `this` when a listener destroys the context.
+  lines.add("    std::shared_ptr<NimFfiDispatcher> dispatcher_;")
+  # `create` starts the dispatch thread, once the waiter of the constructor's reply is in place.
   lines.add("    explicit $1(void* p, std::chrono::milliseconds t)" % [ctxTypeName])
   lines.add("        : ptr_(p), timeout_(t),")
   lines.add(
-    "          pump_(std::make_shared<NimFfiPump>(&$1_poll, &$1_last_error, p, &$2::dispatchEvent_)) {}" %
+    "          dispatcher_(std::make_shared<NimFfiDispatcher>(&$1_poll, &$1_last_error, p, &$2::dispatchEvent_)) {}" %
       [libName, ctxTypeName]
   )
   lines.add("};")

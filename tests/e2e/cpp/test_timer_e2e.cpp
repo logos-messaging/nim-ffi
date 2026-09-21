@@ -414,9 +414,9 @@ TEST(TimerE2E, ThreadedHammer) {
 
 
 // Library-initiated events flow through `MyTimerCtx::addOnEchoFiredListener`:
-// the context's pump thread takes each event out of `my_timer_poll`, decodes
+// the context's dispatch thread takes each event out of `my_timer_poll`, decodes
 // its CBOR payload and calls the listeners. The promise here is fulfilled from
-// that pump thread; we wait for it before destroying the context.
+// that dispatch thread; we wait for it before destroying the context.
 TEST(TimerE2E, TypedEventFiresAfterEcho) {
     auto ctx = makeCtx("events");
 
@@ -475,7 +475,7 @@ TEST(TimerE2E, RemoveEventListenerStopsDelivery) {
 
     ctx->echo(EchoRequest{"before-remove", 1});
 
-    // Give the pump thread a beat to deliver the first event to both
+    // Give the dispatch thread a beat to deliver the first event to both
     // listeners before we yank one of them out.
     for (int i = 0; i < 200 && (removedHits.load() == 0 || keptHits.load() == 0); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -495,7 +495,7 @@ TEST(TimerE2E, RemoveEventListenerStopsDelivery) {
     EXPECT_EQ(removedHits.load(), 1) << "removed listener fired after removeEventListener";
 }
 
-// One pump thread per context: events come out in the order the library
+// One dispatch thread per context: events come out in the order the library
 // produced them, each decoded into its own payload type.
 TEST(TimerE2E, EventsArriveInOrderWithTypedPayloads) {
     auto ctx = makeCtx("ordered-events");
@@ -598,7 +598,7 @@ TEST(TimerE2E, HandlerAddsAnotherListener) {
     EXPECT_EQ(innerSeen[0], "second");
 }
 
-// A listener may call back into its own context: it runs on the pump thread,
+// A listener may call back into its own context: it runs on the dispatch thread,
 // not on the library's FFI thread.
 TEST(TimerE2E, HandlerCallsBackIntoTheContext) {
     auto ctx = makeCtx("reentrant");
@@ -615,7 +615,7 @@ TEST(TimerE2E, HandlerCallsBackIntoTheContext) {
     EXPECT_EQ(mustOk(versionFuture.get()), TIMER_VERSION);
 }
 
-// Tearing a context down while its pump is still delivering must neither crash
+// Tearing a context down while its dispatch thread is still delivering must neither crash
 // nor hang, and no listener may run once the destructor returned.
 TEST(TimerE2E, DestroyWhileEventsInFlight) {
     for (int round = 0; round < 10; ++round) {
@@ -654,14 +654,14 @@ TEST(TimerE2E, ClosedListenerFiresOnceOnDestroy) {
     EXPECT_TRUE(ctx->removeEventListener(quiet));
 
     mustOk(ctx->echo(EchoRequest{"x", 0}));
-    ctx.reset(); // joins the pump, so the hook has run by now
+    ctx.reset(); // joins the dispatch thread, so the hook has run by now
 
     EXPECT_EQ(closedHits.load(), 1);
     EXPECT_TRUE(closedOk.load());
     EXPECT_EQ(closedReason, "");
 }
 
-// A listener may destroy its own context: the destructor then runs on the pump
+// A listener may destroy its own context: the destructor then runs on the dispatch thread
 // thread, which detaches instead of joining itself.
 TEST(TimerE2E, HandlerDestroysItsContext) {
     auto ctx = makeCtx("self-destroy");
@@ -694,7 +694,7 @@ TEST(TimerE2E, HandlerDestroysItsContext) {
     EXPECT_NE(echo.error().find("context closed"), std::string::npos) << echo.error();
 }
 
-// echo declares no event; it still has a pump, so the liveness and closed hooks work.
+// echo declares no event; it still has a dispatch thread, so the liveness and closed hooks work.
 TEST(TimerE2E, EventlessLibraryStillReportsClosed) {
     auto ctx = mustOk(EchoCtx::create(EchoConfig{"NO-EVENTS"}));
 
@@ -708,9 +708,9 @@ TEST(TimerE2E, EventlessLibraryStillReportsClosed) {
     EXPECT_EQ(closedHits.load(), 1);
 }
 
-// ── Replies through the pump ──────────────────────────────────────────────────
+// ── Replies through the dispatch thread ──────────────────────────────────────────────────
 
-// A blocking call made inside a listener runs on the pump thread, the only one
+// A blocking call made inside a listener runs on the dispatch thread, the only one
 // that can take its reply out: the call polls in place. The echo it makes fires
 // the event again, which is delivered while that call is still waiting.
 TEST(TimerE2E, BlockingCallsInsideAListenerPollInPlace) {
@@ -746,7 +746,7 @@ TEST(TimerE2E, BlockingCallsInsideAListenerPollInPlace) {
     EXPECT_EQ(mustOk(std::move(seen.libVersion)), "nim-timer v0.1.0");
     EXPECT_EQ(seen.nestedEvents, 1) << "the nested echo's event was not delivered in place";
 
-    // The pump is back to normal afterwards.
+    // The dispatch thread is back to normal afterwards.
     EXPECT_EQ(mustOk(ctx->echo(EchoRequest{"after", 0})).echoed, "after");
 }
 
@@ -770,8 +770,8 @@ TEST(TimerE2E, BlockingCallInsideAListenerTimesOut) {
     EXPECT_EQ(mustOk(ctx->version()), TIMER_VERSION);
 }
 
-// Every *Async call is one waiter in the pump, not one thread.
-TEST(TimerE2E, ManyConcurrentAsyncCallsShareThePumpThread) {
+// Every *Async call is one waiter in the dispatch thread, not one thread.
+TEST(TimerE2E, ManyConcurrentAsyncCallsShareTheDispatchThread) {
     constexpr int kCalls = 300;
     auto ctx = makeCtx("many-async");
     mustOk(ctx->echo(EchoRequest{"warm-up", 0}));
@@ -845,7 +845,7 @@ TEST(TimerE2E, TimedOutCallLeavesTheContextUsable) {
     }
 }
 
-// Nobody waits on a future's deadline but the pump, which fails it in time.
+// Nobody waits on a future's deadline but the dispatch thread, which fails it in time.
 TEST(TimerE2E, AsyncCallTimesOutInsteadOfHanging) {
     auto ctx = mustOk(MyTimerCtx::create(TimerConfig{"async-timeout"},
                                          std::chrono::milliseconds(100)));
@@ -919,9 +919,9 @@ TEST(TimerE2E, CreateAsyncBuildsAWorkingContext) {
     EXPECT_EQ(mustOk(c2->echo(EchoRequest{"x", 0})).timerName, "async-2");
 }
 
-// shutdown stops the static pump before the library; a later static call
-// starts a new static context and a new pump for it.
-TEST(TimerE2E, ShutdownStopsTheStaticPumpAndStaticCallsStartOver) {
+// shutdown stops the static dispatch thread before the library; a later static call
+// starts a new static context and a new dispatch thread for it.
+TEST(TimerE2E, ShutdownStopsTheStaticDispatcherAndStaticCallsStartOver) {
     EXPECT_EQ(mustOk(EchoCtx::lib_version()), "nim-echo v0.1.0");
     const auto down = EchoCtx::shutdown();
     EXPECT_TRUE(down.isOk()) << down.error();

@@ -23,7 +23,7 @@ extern "C" {
  * or NIMFFI_RET_ERR (the payload is UTF-8 error text).
  *
  * NIMFFI_RET_TIMEOUT, _CLOSED and _BUSY come from <lib>_poll(), and so from
- * the pump and the `_sync` helpers built on it; see its comment in <lib>.h. */
+ * the dispatch loop and the `_sync` helpers built on it; see its comment in <lib>.h. */
 #define NIMFFI_RET_OK 0
 #define NIMFFI_RET_ERR 1
 #define NIMFFI_RET_TIMEOUT 4
@@ -381,7 +381,7 @@ static inline int nimffi_decode_reply(
 /* ── requests waiting for their reply ──────────────────────────────────── */
 /* The library calls nothing back: the binding remembers who asked, and the
  * dispatch of a NIMFFI_MSG_REPLY looks the request id up here. Not locked: a
- * table belongs to the one thread that submits and pumps its context. */
+ * table belongs to the one thread that submits and dispatches its context. */
 
 /* Any typed reply callback; cast back to its own type before it is called. */
 typedef void (*nimffi_generic_fn)(void);

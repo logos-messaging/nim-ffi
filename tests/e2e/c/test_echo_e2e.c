@@ -22,7 +22,7 @@ static void test_create_async(void) {
     EchoCtx* ctx = NULL;
     assert(echo_ctx_create(&config, &ctx, on_created, &w) == NIMFFI_RET_OK);
     assert(ctx != NULL && w.done == 0);
-    WAIT_DONE(w.done, echo_ctx_pump_once(ctx, 50, NULL));
+    WAIT_DONE(w.done, echo_ctx_dispatch_next(ctx, 50, NULL));
     assert(w.done == 1 && w.ret == NIMFFI_RET_OK);
     assert(echo_ctx_destroy(ctx) == NIMFFI_RET_OK);
 }
@@ -45,7 +45,7 @@ static void test_shout(EchoCtx* ctx) {
     ShoutRequest req = {"hello"};
     assert(echo_ctx_shout(ctx, &req, on_shout, &w, NULL) == NIMFFI_RET_OK);
     assert(w.done == 0);
-    WAIT_DONE(w.done, echo_ctx_pump_once(ctx, 50, NULL));
+    WAIT_DONE(w.done, echo_ctx_dispatch_next(ctx, 50, NULL));
     assert(w.done == 1 && w.ret == NIMFFI_RET_OK);
     assert(strcmp(w.text_a, "X-ECHO: HELLO") == 0);
     assert(strcmp(w.text_b, "X-ECHO") == 0);
@@ -67,7 +67,7 @@ static void test_shout_too_long(EchoCtx* ctx) {
     memset(&w, 0, sizeof(w));
     ShoutRequest req = {text};
     assert(echo_ctx_shout(ctx, &req, on_shout, &w, NULL) == NIMFFI_RET_OK);
-    WAIT_DONE(w.done, echo_ctx_pump_once(ctx, 50, NULL));
+    WAIT_DONE(w.done, echo_ctx_dispatch_next(ctx, 50, NULL));
     assert(w.ret == NIMFFI_RET_ERR);
     assert(strstr(w.err, "must not exceed") != NULL);
 
@@ -86,12 +86,12 @@ static void test_version(EchoCtx* ctx) {
     free((void*)version);
 }
 
-/* A library without events still has the pump: replies, liveness and `closed` use it. */
-static void test_pump_without_events(EchoCtx* ctx) {
+/* A library without events still has the dispatch thread: replies, liveness and `closed` use it. */
+static void test_dispatcher_without_events(EchoCtx* ctx) {
     EchoHandlers handlers;
     memset(&handlers, 0, sizeof(handlers));
-    assert(echo_ctx_pump_once(ctx, 0, &handlers) == NIMFFI_RET_TIMEOUT);
-    assert(echo_ctx_pump_once(ctx, 20, NULL) == NIMFFI_RET_TIMEOUT);
+    assert(echo_ctx_dispatch_next(ctx, 0, &handlers) == NIMFFI_RET_TIMEOUT);
+    assert(echo_ctx_dispatch_next(ctx, 20, NULL) == NIMFFI_RET_TIMEOUT);
 }
 
 /* A host can hand back a nil or stale handle as its very first call, before
@@ -126,7 +126,7 @@ static void test_statics(void) {
     ShoutRequest req = {"anon"};
     assert(echo_static_shout_anon(&req, on_shout, &ws, NULL) == NIMFFI_RET_OK);
     assert(echo_static_lib_version(on_str, &wv, NULL) == NIMFFI_RET_OK);
-    WAIT_DONE(wv.done && ws.done, echo_static_pump_once(50, NULL));
+    WAIT_DONE(wv.done && ws.done, echo_static_dispatch_next(50, NULL));
     assert(wv.done == 1 && wv.ret == NIMFFI_RET_OK);
     assert(strcmp(wv.text_a, "nim-echo v0.1.0") == 0);
     assert(ws.done == 1 && ws.ret == NIMFFI_RET_OK);
@@ -148,7 +148,7 @@ int main(void) {
     test_shout(ctx);
     test_shout_too_long(ctx);
     test_version(ctx);
-    test_pump_without_events(ctx);
+    test_dispatcher_without_events(ctx);
     assert(echo_ctx_destroy(ctx) == NIMFFI_RET_OK);
     assert(echo_shutdown() == NIMFFI_RET_OK);
     printf("all C echo e2e checks passed\n");

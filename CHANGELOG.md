@@ -10,8 +10,8 @@ All notable changes to this project are documented in this file.
   them out with the new `<lib>_poll(ctx, timeout_ms, &msg)`, or waits on the handle
   from `<lib>_poll_fd(ctx)` in its own event loop and then drains. `poll` also
   delivers `NOT_RESPONDING` / `RESPONDING` and the `CLOSED` end of a context. The
-  generated C++ and Rust bindings keep their listener API on top of a pump thread;
-  the C binding gets `<lib>_ctx_pump_once` and a typed `<Lib>Handlers` struct.
+  generated C++ and Rust bindings keep their listener API on top of a dispatch thread;
+  the C binding gets `<lib>_ctx_dispatch_next` and a typed `<Lib>Handlers` struct.
 - **Breaking:** an event's CBOR is the bare payload. Its name travels as
   `msg.name_id`, the FNV-1a 64 hash of the wire name; the `{eventType, payload}`
   envelope is gone. Two event names of one library that share an id stop the

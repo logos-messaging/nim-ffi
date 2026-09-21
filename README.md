@@ -291,9 +291,9 @@ not a backlog. The dev decides what to do with a slow request — keep waiting,
 surface a spinner, tear the context down — nim-ffi does not decide for them.
 
 The generated bindings hide all of this: C++ and Rust keep `ctx.echo(req)` and
-`ctx.echoAsync(req)` on top of their pump thread, and C offers both
+`ctx.echoAsync(req)` on top of their dispatch thread, and C offers both
 `<lib>_ctx_<proc>(ctx, ..., on_reply, user_data)`, answered from
-`<lib>_ctx_pump_once`, and a blocking `<lib>_ctx_<proc>_sync(...)`.
+`<lib>_ctx_dispatch_next`, and a blocking `<lib>_ctx_<proc>_sync(...)`.
 
 ### Events
 
@@ -369,9 +369,9 @@ The handle is an epoll descriptor on Linux, a kqueue descriptor on macOS and the
 BSDs, and an Event `HANDLE` on Windows. It can only be waited on, and the caller
 owns it and closes it.
 
-The generated C++ and Rust bindings run one pump thread per context and keep the
+The generated C++ and Rust bindings run one dispatch thread per context and keep the
 `addOn<Event>Listener(closure)` shape. The C binding starts no thread:
-`<lib>_ctx_pump_once(ctx, timeout_ms, &handlers)` polls once and calls the
+`<lib>_ctx_dispatch_next(ctx, timeout_ms, &handlers)` polls once and calls the
 matching typed handler on the caller's thread.
 
 ## Placement of `genBindings()`

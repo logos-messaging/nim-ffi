@@ -15,7 +15,7 @@ async fn main() -> Result<(), String> {
     )
     .await?;
 
-    // Handler fires on the ctx's pump thread (outside the tokio runtime); forward via tokio mpsc to await it below.
+    // Handler fires on the ctx's dispatch thread (outside the tokio runtime); forward via tokio mpsc to await it below.
     let (typed_tx, mut typed_rx) = mpsc::unbounded_channel::<EchoEvent>();
     let typed_handle = ctx.add_on_echo_fired_listener(move |evt: &EchoEvent| {
         let _ = typed_tx.send(evt.clone());

@@ -41,7 +41,7 @@ The library never calls into your program and the binding starts no thread. A
 request returns as soon as it is queued; its reply waits inside the library
 until you take it out. Every request comes in two shapes.
 
-**Sequential program** — the `_sync` form submits, then pumps the context until
+**Sequential program** — the `_sync` form submits, then dispatches the context until
 its own reply arrives. You own what it hands out:
 
 ```c
@@ -64,7 +64,7 @@ Every other message that arrives meanwhile (an event, a liveness report) goes
 to `handlers`, which may be `NULL`. After a timeout the late reply is dropped.
 
 **Program with a loop** — the asynchronous form takes a typed reply callback,
-which runs later, inside `my_timer_ctx_pump_once()`, on the thread that pumps:
+which runs later, inside `my_timer_ctx_dispatch_next()`, on the thread that dispatches:
 
 ```c
 static void on_echo(int ret, const EchoResponse* reply,
@@ -82,16 +82,16 @@ if (rc != NIMFFI_RET_OK) {
 
 The constructor follows the same split: `my_timer_ctx_create_sync()`, or
 `my_timer_ctx_create()`, which hands the context out at once so that you can
-pump it for the constructor's reply. Static requests (`my_timer_static_*`) need
-no context; their replies arrive on the library's static context, pumped with
-`my_timer_static_pump_once()` (the `_sync` forms do it for you).
+dispatch it for the constructor's reply. Static requests (`my_timer_static_*`) need
+no context; their replies arrive on the library's static context, dispatched with
+`my_timer_static_dispatch_next()` (the `_sync` forms do it for you).
 
 See `main.c` for the full pattern.
 
-## Events and the pump
+## Events and the dispatch thread
 
 Events, liveness reports and the end of the context are queued inside the
-library like replies, and come out of the same pump:
+library like replies, and come out of the same loop:
 
 ```c
 static void on_echo_fired(const EchoEvent* ev, void* user_data) {
@@ -101,7 +101,7 @@ static void on_echo_fired(const EchoEvent* ev, void* user_data) {
 MyTimerHandlers handlers = {0};          /* a NULL entry ignores that message */
 handlers.on_echo_fired = on_echo_fired;
 for (;;) {
-    int rc = my_timer_ctx_pump_once(ctx, /*timeout_ms=*/100, &handlers);
+    int rc = my_timer_ctx_dispatch_next(ctx, /*timeout_ms=*/100, &handlers);
     if (rc != NIMFFI_RET_OK && rc != NIMFFI_RET_TIMEOUT) break;
 }
 ```
@@ -109,12 +109,12 @@ for (;;) {
 `MyTimerHandlers` in `my_timer.h` lists everything the library can send besides
 replies. A host with an event loop of its own waits on
 `my_timer_ctx_poll_fd(ctx)` instead (an epoll fd on Linux, a kqueue fd on
-macOS/BSD, an Event `HANDLE` on Windows), then pumps with a timeout of 0 until
+macOS/BSD, an Event `HANDLE` on Windows), then dispatches with a timeout of 0 until
 `NIMFFI_RET_TIMEOUT`, and closes the handle when done.
 
 ## Threads
 
-A context of this binding is single-threaded by design: submit and pump it from
+A context of this binding is single-threaded by design: submit and dispatch it from
 one thread, or hold one lock around both. `my_timer_ctx_destroy()` settles the
 requests still waiting with `NIMFFI_RET_CLOSED`; never call it from inside a
 handler or a reply callback. A host that wants another threading model uses the

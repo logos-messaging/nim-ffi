@@ -16,13 +16,13 @@ fn main() -> Result<(), String> {
         Duration::from_secs(5),
     )?);
 
-    // Closure runs on the ctx's pump thread; forward to `main` via mpsc and recv_timeout below.
+    // Closure runs on the ctx's dispatch thread; forward to `main` via mpsc and recv_timeout below.
     let (tx, rx) = mpsc::channel::<EchoEvent>();
     let typed_handle = ctx.add_on_echo_fired_listener(move |evt: &EchoEvent| {
         let _ = tx.send(evt.clone());
     });
 
-    // Liveness and the end of the context arrive through the same pump.
+    // Liveness and the end of the context arrive through the same dispatch thread.
     ctx.add_not_responding_listener(|reason| eprintln!("my_timer is not responding (reason {reason})"));
     let (closed_tx, closed_rx) = mpsc::channel::<(bool, String)>();
     ctx.add_closed_listener(move |ok, reason| {
@@ -38,8 +38,8 @@ fn main() -> Result<(), String> {
 
     ctx.remove_event_listener(typed_handle);
 
-    // A listener runs on the pump thread, the one that delivers replies. A blocking
-    // call from inside it still works: it pumps the context until its reply arrives.
+    // A listener runs on the dispatch thread, the one that delivers replies. A blocking
+    // call from inside it still works: it dispatches the context until its reply arrives.
     // `Weak`, because the context owns its listeners: an `Arc` would keep it alive forever.
     let (version_tx, version_rx) = mpsc::channel::<Result<String, String>>();
     let weak = Arc::downgrade(&ctx);
@@ -87,7 +87,7 @@ fn main() -> Result<(), String> {
     }
     println!("still working: version {}", ctx.version()?);
 
-    // Dropping the ctx destroys it and joins the pump, so `Closed` has been delivered by then.
+    // Dropping the ctx destroys it and joins the dispatch thread, so `Closed` has been delivered by then.
     drop(ctx);
     match closed_rx.try_recv() {
         Ok((ok, reason)) => println!("closed: ok={ok} reason={reason:?}"),

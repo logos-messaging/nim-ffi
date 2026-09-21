@@ -140,7 +140,7 @@ suite "events arrive through <lib>_poll":
     for name in ["not_responding", "responding", "closed", "message"]:
       check ("pub fn add_" & name & "_listener<F>") in apiRs
 
-  test "a library with only statics gets the static pump and no listeners":
+  test "a library with only statics gets the static dispatch thread and no listeners":
     let staticOnly = @[
       FFIProcMeta(
         procName: "lib_version",
@@ -151,9 +151,9 @@ suite "events arrive through <lib>_poll":
       )
     ]
     let staticApi = generateApiRs(staticOnly, "lib")
-    check "static STATIC_PUMP: Mutex<Option<StaticPump>>" in staticApi
+    check "static STATIC_DISPATCHER: Mutex<Option<StaticDispatcher>>" in staticApi
     check "_listener<F>" notin staticApi
-    check "static STATIC_PUMP" notin apiRs
+    check "static STATIC_DISPATCHER" notin apiRs
 
 suite "replies arrive through <lib>_poll":
   setup:
@@ -244,7 +244,7 @@ suite "replies arrive through <lib>_poll":
     check "rx.recv_timeout(timeout)" in apiRs
     check "tokio::time::timeout(timeout, rx.recv_async()).await" in apiRs
 
-  test "the pump hands a reply to its waiter and never to a listener":
+  test "the dispatch thread hands a reply to its waiter and never to a listener":
     check "if msg.kind == ffi::NIMFFI_MSG_REPLY {" in apiRs
     check "let waiter = lock(&self.waiters).remove(&msg.id);" in apiRs
     check "Reply" notin
@@ -261,35 +261,36 @@ suite "replies arrive through <lib>_poll":
     check "Err(_) => self.timed_out(req_id, &rx, timeout)," in apiRs
 
   test "the end of the context fails the waiters before the Closed listeners run":
-    let step = apiRs.find("fn pump_step(")
+    let step = apiRs.find("fn dispatch_step(")
     let failAt = apiRs.find("inner.fail_waiters();", step)
     let dispatchAt = apiRs.find("inner.dispatch(&message);", step)
     check failAt > step
     check dispatchAt > failAt
     check "Err(flume::RecvTimeoutError::Disconnected) => Err(CONTEXT_CLOSED.into())," in
       apiRs
-    # The pump's exit, whatever its cause, leaves no call waiting.
-    let loopAt = apiRs.find("fn pump_loop(")
+    # The dispatch thread's exit, whatever its cause, leaves no call waiting.
+    let loopAt = apiRs.find("fn dispatch_loop(")
     check apiRs.find("inner.fail_waiters();", loopAt) > loopAt
 
-  test "a blocking call on the pump thread pumps its own reply":
-    check "if self.pump_thread.get() == Some(&std::thread::current().id()) {" in apiRs
-    check "return self.wait_on_pump(req_id, rx, timeout);" in apiRs
-    check "pump_step(self, slice_ms);" in apiRs
-    check "inner.pump_thread.set(std::thread::current().id());" in apiRs
+  test "a blocking call on the dispatch thread dispatches its own reply":
+    check "if self.dispatch_thread.get() == Some(&std::thread::current().id()) {" in
+      apiRs
+    check "return self.wait_on_dispatch_thread(req_id, rx, timeout);" in apiRs
+    check "dispatch_step(self, slice_ms);" in apiRs
+    check "inner.dispatch_thread.set(std::thread::current().id());" in apiRs
 
   test "STALE_WARN is a message with a listener":
     check "StaleWarn { req_id: u64, elapsed_ms: u64 }," in apiRs
     check "ffi::NIMFFI_MSG_STALE_WARN => Ok(LibMessage::StaleWarn {" in apiRs
     check "pub fn add_stale_warn_listener<F>" in apiRs
 
-  test "the ctor registers its waiter before the pump starts, and an error destroys the context":
+  test "the ctor registers its waiter before the dispatch thread starts, and an error destroys the context":
     let start = apiRs.find("    fn start(")
     let submitAt = apiRs.find(
       "submit(req_bytes.as_ptr(), req_bytes.len(), &mut ptr, &mut req_id)", start
     )
     let insertAt = apiRs.find("lock(&inner.waiters).insert(req_id, tx);", start)
-    let spawnAt = apiRs.find("spawn_pump(\"lib-pump\", inner)", start)
+    let spawnAt = apiRs.find("spawn_dispatcher(\"lib-dispatch\", inner)", start)
     check submitAt > start
     check insertAt > submitAt
     check spawnAt > insertAt
@@ -297,17 +298,17 @@ suite "replies arrive through <lib>_poll":
     check "ctx.inner.wait(req_id, &rx, timeout)?;" in apiRs
     check "ctx.inner.wait_async(req_id, rx, timeout).await?;" in apiRs
 
-  test "statics wait on the static context's pump, which shutdown stops first":
+  test "statics wait on the static context's dispatch thread, which shutdown stops first":
     check "let ptr = unsafe { ffi::lib_static_ctx() };" in apiRs
     check "let inner = static_inner()?;" in apiRs
     check "ffi::lib_version(req_bytes.as_ptr(), req_bytes.len(), req_id)" in apiRs
     let shutdown = apiRs.find("pub fn shutdown() -> bool {")
-    let stopAt = apiRs.find("stop_static_pump(&mut static_pump);", shutdown)
+    let stopAt = apiRs.find("stop_static_dispatcher(&mut static_dispatcher);", shutdown)
     let callAt = apiRs.find("ffi::lib_shutdown()", shutdown)
     check stopAt > shutdown
     check callAt > stopAt
 
-  test "drop destroys the context before it stops the pump":
+  test "drop destroys the context before it stops the dispatch thread":
     let dropAt = apiRs.find("impl Drop for LibCtx {")
     let destroyAt = apiRs.find("ffi::lib_destroy(self.ptr);", dropAt)
     let stopAt = apiRs.find("self.inner.stop.store(true, Ordering::Release);", dropAt)

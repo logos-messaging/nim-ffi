@@ -11,12 +11,12 @@ nimble test_c_e2e
 which regenerates the bindings, configures CMake, builds, and runs the test via
 `ctest`. The test program (`test_timer_e2e.c`) exercises the constructor, both
 shapes of every request (the asynchronous one, answered inside
-`my_timer_ctx_pump_once`, and the `_sync` one), nested `seq`/`Option` payloads,
+`my_timer_ctx_dispatch_next`, and the `_sync` one), nested `seq`/`Option` payloads,
 multi-parameter requests, the error channel, a `_sync` timeout, several requests
 in flight, a refused submit, the static requests, the raw exports with the typed
-decoders, and the events, taken out with the pump or after a wait on the
+decoders, and the events, taken out with the dispatch thread or after a wait on the
 `my_timer_ctx_poll_fd` handle. The binding starts no thread and neither does the
-test: nothing is waited on but the pump. `test_echo_e2e.c` compiles and runs the
+test: nothing is waited on but the dispatch thread. `test_echo_e2e.c` compiles and runs the
 second generated header.
 
 `test_timer_e2e.c` is hand-written (it is the consumer of the bindings, not a

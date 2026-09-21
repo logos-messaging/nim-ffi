@@ -971,25 +971,25 @@ static inline CborError my_timer_decv_ScheduleResult(CborValue* it, void* v) { r
 /* my_timer API                                                 */
 /* ============================================================ */
 /* The library calls nothing back and the binding starts no thread: a reply,
- * an event or a liveness report reaches the host inside my_timer_ctx_pump_once(),
+ * an event or a liveness report reaches the host inside my_timer_ctx_dispatch_next(),
  * on the thread that calls it.
  *
  * Threads: a context of this binding is single-threaded by design. Submit and
- * pump it from one thread, or hold one lock around both. A host that wants
+ * dispatch it from one thread, or hold one lock around both. A host that wants
  * something else uses the raw my_timer_<proc>() and my_timer_poll() exports with the
  * decoders below.
  *
  * Context: my_timer_ctx_create_sync(), my_timer_ctx_create(), my_timer_ctx_destroy().
  *
- * Requests. Each has an asynchronous form, whose on_reply runs inside the pump;
- * a _sync form for a sequential program, which pumps until its own reply
+ * Requests. Each has an asynchronous form, whose on_reply runs inside the dispatch thread;
+ * a _sync form for a sequential program, which dispatches until its own reply
  * arrives; and a decoder of the raw reply:
  *   my_timer_ctx_echo()  my_timer_ctx_echo_sync()  my_timer_decode_echo_reply()
  *   my_timer_ctx_version()  my_timer_ctx_version_sync()  my_timer_decode_version_reply()
  *   my_timer_ctx_complex()  my_timer_ctx_complex_sync()  my_timer_decode_complex_reply()
  *   my_timer_ctx_schedule()  my_timer_ctx_schedule_sync()  my_timer_decode_schedule_reply()
  *   my_timer_static_lib_version()  my_timer_static_lib_version_sync()  my_timer_decode_lib_version_reply()
- * The replies of the static requests arrive on the static context: my_timer_static_pump_once().
+ * The replies of the static requests arrive on the static context: my_timer_static_dispatch_next().
  *
  * on_reply(ret, reply, err, user_data) runs once, with `ret`:
  *   NIMFFI_RET_OK      `reply` is set and `err` is NULL
@@ -1061,7 +1061,7 @@ static inline int my_timer_decode_on_job_scheduled(const NimFfiMsg* msg, OnJobSc
 
 /* ---- everything the library can send ---- */
 /* Replies go to the on_reply of their request; the rest is listed here. A NULL
- * entry means "ignore". Each handler runs on the thread that pumps; what it is
+ * entry means "ignore". Each handler runs on the thread that dispatches; what it is
  * handed belongs to the binding and is valid only until it returns. */
 typedef struct {
     /** Fired by `myTimerEcho` once the reply is ready. */
@@ -1141,9 +1141,9 @@ static inline int my_timer_ctx_dispatch(MyTimerCtx* ctx, const NimFfiMsg* msg, c
 /* One my_timer_poll() and the dispatch of what it returned.
  * Returns the poll code (NIMFFI_RET_OK, _TIMEOUT, _CLOSED after the `closed`
  * handler ran, _INVALID_CTX, _BUSY, _ERR), or -1 when the message did not
- * dispatch. `ctx` must stay alive for the whole call: stop pumping before
+ * dispatch. `ctx` must stay alive for the whole call: stop dispatching before
  * my_timer_ctx_destroy(). */
-static inline int my_timer_ctx_pump_once(MyTimerCtx* ctx, int32_t timeout_ms, const MyTimerHandlers* handlers) {
+static inline int my_timer_ctx_dispatch_next(MyTimerCtx* ctx, int32_t timeout_ms, const MyTimerHandlers* handlers) {
     if (!ctx) return NIMFFI_RET_INVALID_CTX;
     const NimFfiMsg* msg = NULL;
     int rc = my_timer_poll(ctx->ptr, timeout_ms, &msg);
@@ -1158,7 +1158,7 @@ static inline intptr_t my_timer_ctx_poll_fd(const MyTimerCtx* ctx) {
     return my_timer_poll_fd(ctx->ptr);
 }
 
-/* Pumps `ctx` until `slot` is settled, handing every other message to
+/* Dispatches `ctx` until `slot` is settled, handing every other message to
  * `handlers`. A request given up on is forgotten, so that its late reply is
  * dropped instead of written into a stack frame that is gone. */
 static inline int my_timer_ctx_await_(MyTimerCtx* ctx, uint64_t req_id, const NimFfiSyncSlot* slot, int32_t timeout_ms, const MyTimerHandlers* handlers) {
@@ -1170,7 +1170,7 @@ static inline int my_timer_ctx_await_(MyTimerCtx* ctx, uint64_t req_id, const Ni
             int64_t left = deadline - nimffi_now_ms();
             wait_ms = left > 0 ? (int32_t)left : 0;
         }
-        int rc = my_timer_ctx_pump_once(ctx, wait_ms, handlers);
+        int rc = my_timer_ctx_dispatch_next(ctx, wait_ms, handlers);
         if (slot->done) break;
         /* A message that did not dispatch (-1) was not ours: keep waiting. */
         if (rc == NIMFFI_RET_OK || rc == -1) continue;
@@ -1193,10 +1193,10 @@ static inline MyTimerCtx* my_timer_static_(void) {
     return &my_timer_static_binding_;
 }
 
-/* my_timer_ctx_pump_once() on the static context: delivers the replies of the
+/* my_timer_ctx_dispatch_next() on the static context: delivers the replies of the
  * my_timer_static_*() requests. */
-static inline int my_timer_static_pump_once(int32_t timeout_ms, const MyTimerHandlers* handlers) {
-    return my_timer_ctx_pump_once(my_timer_static_(), timeout_ms, handlers);
+static inline int my_timer_static_dispatch_next(int32_t timeout_ms, const MyTimerHandlers* handlers) {
+    return my_timer_ctx_dispatch_next(my_timer_static_(), timeout_ms, handlers);
 }
 
 /* ---- context ---- */

@@ -7,16 +7,16 @@
  * The library never calls into the host and the binding starts no thread.
  * A request returns as soon as it is queued. Its reply, like every event and
  * liveness report, waits inside the library until the host takes it out with
- * <lib>_ctx_pump_once(), which calls the request's reply callback or the
+ * <lib>_ctx_dispatch_next(), which calls the request's reply callback or the
  * matching entry of <Lib>Handlers on the calling thread. <lib>.h lists every
  * request and every message the library can send.
  *
  * Each request comes in two shapes: <lib>_ctx_<proc>(..., on_reply, user_data)
  * for a host with a loop, and <lib>_ctx_<proc>_sync(..., &out, &err, timeout)
- * for a sequential program, which pumps until its own reply arrives.
+ * for a sequential program, which dispatches until its own reply arrives.
  *
  * Threads: a context of this binding is single-threaded by design. Submit and
- * pump it from one thread, or hold one lock around both. A host that wants
+ * dispatch it from one thread, or hold one lock around both. A host that wants
  * something else uses the raw <lib>_<proc>() and <lib>_poll() exports with the
  * typed <lib>_decode_*() decoders.
  *

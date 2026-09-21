@@ -362,7 +362,7 @@ proc generateTypesRs*(
 
   return lines.join("\n")
 
-const PumpSliceMs = 250 ## A waiting pump looks at its stop flag this often.
+const DispatchSliceMs = 250 ## A waiting dispatch loop looks at its stop flag this often.
 
 func evConstName(libName: string, ev: FFIEventMeta): string =
   return
@@ -388,7 +388,7 @@ proc generateMessages(events: seq[FFIEventMeta], libName, msgTypeName: string): 
     "/// Everything `$1` sends to the host besides replies: its events, the" % [libName]
   )
   lines.add(
-    "/// progress and liveness reports and the end of the context. The pump thread"
+    "/// progress and liveness reports and the end of the context. The dispatch thread"
   )
   lines.add(
     "/// of a context decodes each message into one of these before a listener runs."
@@ -482,7 +482,7 @@ proc generateMessages(events: seq[FFIEventMeta], libName, msgTypeName: string): 
   return lines.join("\n")
 
 # $1 lib name, $2 message enum, $3 poll slice in ms.
-const PumpTemplate =
+const DispatcherTemplate =
   """// A reply: the CBOR of the return value, or the library's error text.
 type FFIResult = Result<Vec<u8>, String>;
 type Handler = Arc<dyn Fn(&$2) + Send + Sync>;
@@ -493,7 +493,7 @@ const CONTEXT_CLOSED: &str = "context closed before the reply arrived";
 #[derive(Debug, Clone, Copy)]
 pub struct ListenerHandle { pub id: u64 }
 
-// What a context shares with its pump thread.
+// What a context shares with its dispatch thread.
 struct Inner {
     ptr: *mut c_void,
     listeners: Mutex<Vec<(u64, Handler)>>,
@@ -503,12 +503,12 @@ struct Inner {
     stop: AtomicBool,
     // Written under the `waiters` lock: no reply can be delivered any more.
     ended: AtomicBool,
-    pump_thread: OnceLock<ThreadId>,
+    dispatch_thread: OnceLock<ThreadId>,
 }
 
 // SAFETY: `ptr` is a token the library validates on every call, never
 // dereferenced here. `$1_poll` admits one consumer per context and only the
-// pump thread polls; everything else in `Inner` is already Sync.
+// dispatch thread polls; everything else in `Inner` is already Sync.
 unsafe impl Send for Inner {}
 unsafe impl Sync for Inner {}
 
@@ -524,10 +524,10 @@ fn last_error(ret: c_int) -> String {
     if text.is_empty() { format!("request refused (NIMFFI_RET {ret})") } else { text }
 }
 
-fn spawn_pump(name: &str, inner: Arc<Inner>) -> Result<JoinHandle<()>, String> {
+fn spawn_dispatcher(name: &str, inner: Arc<Inner>) -> Result<JoinHandle<()>, String> {
     std::thread::Builder::new()
         .name(name.into())
-        .spawn(move || pump_loop(inner))
+        .spawn(move || dispatch_loop(inner))
         .map_err(|e| e.to_string())
 }
 
@@ -540,7 +540,7 @@ impl Inner {
             next_id: AtomicU64::new(1),
             stop: AtomicBool::new(false),
             ended: AtomicBool::new(false),
-            pump_thread: OnceLock::new(),
+            dispatch_thread: OnceLock::new(),
         }
     }
 
@@ -561,7 +561,7 @@ impl Inner {
         // Cloned out so a handler may add or remove listeners.
         let handlers: Vec<Handler> = lock(&self.listeners).iter().map(|(_, h)| h.clone()).collect();
         for handler in handlers {
-            // A panicking handler must not end the pump; the panic hook already reported it.
+            // A panicking handler must not end the dispatch thread; the panic hook already reported it.
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(message)));
         }
     }
@@ -573,7 +573,7 @@ impl Inner {
     {
         let (tx, rx) = flume::bounded::<FFIResult>(1);
         let mut req_id: u64 = 0;
-        // Held across the call: the pump can poll the reply before the call
+        // Held across the call: the dispatch thread can poll the reply before the call
         // returns, and takes this lock before it looks the waiter up.
         let mut waiters = lock(&self.waiters);
         let ret = send(self.ptr, &mut req_id);
@@ -618,8 +618,8 @@ impl Inner {
     }
 
     fn wait(&self, req_id: u64, rx: &flume::Receiver<FFIResult>, timeout: Duration) -> FFIResult {
-        if self.pump_thread.get() == Some(&std::thread::current().id()) {
-            return self.wait_on_pump(req_id, rx, timeout);
+        if self.dispatch_thread.get() == Some(&std::thread::current().id()) {
+            return self.wait_on_dispatch_thread(req_id, rx, timeout);
         }
         match rx.recv_timeout(timeout) {
             Ok(reply) => reply,
@@ -628,9 +628,9 @@ impl Inner {
         }
     }
 
-    // A blocking call made by a listener runs on the pump thread, the only one
-    // that can deliver its reply: keep pumping here until that reply arrives.
-    fn wait_on_pump(&self, req_id: u64, rx: &flume::Receiver<FFIResult>, timeout: Duration) -> FFIResult {
+    // A blocking call made by a listener runs on the dispatch thread, the only one
+    // that can deliver its reply: keep dispatching here until that reply arrives.
+    fn wait_on_dispatch_thread(&self, req_id: u64, rx: &flume::Receiver<FFIResult>, timeout: Duration) -> FFIResult {
         let deadline = Instant::now() + timeout;
         loop {
             match rx.try_recv() {
@@ -643,12 +643,12 @@ impl Inner {
                 return self.timed_out(req_id, rx, timeout);
             }
             let slice_ms = left.as_millis().clamp(1, $3) as i32;
-            pump_step(self, slice_ms);
+            dispatch_step(self, slice_ms);
         }
     }
 
-    // The `.await` of an `_async` call. It must not run on the pump thread (inside
-    // a listener): nothing would pump the reply, and the call would time out.
+    // The `.await` of an `_async` call. It must not run on the dispatch thread (inside
+    // a listener): nothing would dispatch the reply, and the call would time out.
     async fn wait_async(&self, req_id: u64, rx: flume::Receiver<FFIResult>, timeout: Duration) -> FFIResult {
         match tokio::time::timeout(timeout, rx.recv_async()).await {
             Ok(Ok(reply)) => reply,
@@ -661,7 +661,7 @@ impl Inner {
 enum Step { Message, Idle, Ended }
 
 // One poll: a reply goes to its waiter, anything else to the listeners.
-fn pump_step(inner: &Inner, timeout_ms: i32) -> Step {
+fn dispatch_step(inner: &Inner, timeout_ms: i32) -> Step {
     if inner.ended.load(Ordering::Acquire) {
         return Step::Ended;
     }
@@ -699,13 +699,13 @@ fn pump_step(inner: &Inner, timeout_ms: i32) -> Step {
 }
 
 // The context's only poller.
-fn pump_loop(inner: Arc<Inner>) {
-    let _ = inner.pump_thread.set(std::thread::current().id());
+fn dispatch_loop(inner: Arc<Inner>) {
+    let _ = inner.dispatch_thread.set(std::thread::current().id());
     loop {
         // Once asked to stop, only take what already waits: a teardown's last messages.
         let stopping = inner.stop.load(Ordering::Acquire);
         let timeout_ms = if stopping { 0 } else { $3 };
-        match pump_step(&inner, timeout_ms) {
+        match dispatch_step(&inner, timeout_ms) {
             Step::Message => {}
             Step::Idle => {
                 if stopping {
@@ -721,21 +721,21 @@ fn pump_loop(inner: Arc<Inner>) {
 """
 
 # $1 lib name.
-const StaticPumpTemplate = """struct StaticPump {
+const StaticDispatcherTemplate = """struct StaticDispatcher {
     inner: Arc<Inner>,
     thread: JoinHandle<()>,
 }
 
 // The reply of a static request arrives on the library's static context: one
-// pump per process, started by the first static call and stopped by `shutdown`.
+// dispatch thread per process, started by the first static call and stopped by `shutdown`.
 // Its thread does not keep the process alive.
-static STATIC_PUMP: Mutex<Option<StaticPump>> = Mutex::new(None);
+static STATIC_DISPATCHER: Mutex<Option<StaticDispatcher>> = Mutex::new(None);
 
 fn static_inner() -> Result<Arc<Inner>, String> {
-    let mut slot = lock(&STATIC_PUMP);
-    if let Some(pump) = slot.as_ref() {
-        if !pump.inner.ended.load(Ordering::Acquire) {
-            return Ok(pump.inner.clone());
+    let mut slot = lock(&STATIC_DISPATCHER);
+    if let Some(dispatcher) = slot.as_ref() {
+        if !dispatcher.inner.ended.load(Ordering::Acquire) {
+            return Ok(dispatcher.inner.clone());
         }
     }
     let ptr = unsafe { ffi::$1_static_ctx() };
@@ -743,16 +743,16 @@ fn static_inner() -> Result<Arc<Inner>, String> {
         return Err(last_error(NIMFFI_RET_ERR));
     }
     let inner = Arc::new(Inner::new(ptr));
-    let thread = spawn_pump("$1-static-pump", inner.clone())?;
-    *slot = Some(StaticPump { inner: inner.clone(), thread });
+    let thread = spawn_dispatcher("$1-static-dispatch", inner.clone())?;
+    *slot = Some(StaticDispatcher { inner: inner.clone(), thread });
     Ok(inner)
 }
 
-fn stop_static_pump(slot: &mut Option<StaticPump>) {
-    if let Some(pump) = slot.take() {
-        pump.inner.stop.store(true, Ordering::Release);
-        if pump.thread.thread().id() != std::thread::current().id() {
-            let _ = pump.thread.join();
+fn stop_static_dispatcher(slot: &mut Option<StaticDispatcher>) {
+    if let Some(dispatcher) = slot.take() {
+        dispatcher.inner.stop.store(true, Ordering::Release);
+        if dispatcher.thread.thread().id() != std::thread::current().id() {
+            let _ = dispatcher.thread.join();
         }
     }
 }
@@ -761,7 +761,7 @@ fn stop_static_pump(slot: &mut Option<StaticPump>) {
 # $1 lib name.
 const StartTemplate =
   """    // `submit` is the ctor export. The waiter of its reply is registered before
-    // the pump starts, so the pump cannot see the reply first.
+    // the dispatch thread starts, so the dispatch thread cannot see the reply first.
     fn start(
         req_bytes: &[u8],
         timeout: Duration,
@@ -778,8 +778,8 @@ const StartTemplate =
         let (tx, rx) = flume::bounded::<FFIResult>(1);
         lock(&inner.waiters).insert(req_id, tx);
         // Built before the thread: from here on, an early return drops it, which destroys the context.
-        let mut ctx = Self { ptr, timeout, inner: inner.clone(), pump: None };
-        ctx.pump = Some(spawn_pump("$1-pump", inner)?);
+        let mut ctx = Self { ptr, timeout, inner: inner.clone(), dispatcher: None };
+        ctx.dispatcher = Some(spawn_dispatcher("$1-dispatch", inner)?);
         Ok((ctx, req_id, rx))
     }
 """
@@ -832,7 +832,7 @@ const ListenersTemplate =
 
     /// Remove a previously-registered listener by handle. Returns true
     /// if the listener existed and was removed; false otherwise.
-    /// Listeners run on the context's pump thread, one message at a time, and may
+    /// Listeners run on the context's dispatch thread, one message at a time, and may
     /// call this for any listener: a dispatch in flight still runs the handlers it
     /// took, so a removed handler can run once more.
     pub fn remove_event_listener(&self, handle: ListenerHandle) -> bool {
@@ -864,7 +864,7 @@ proc generateApiRs*(
   let hasStatics = classified.statics.len > 0
 
   if not hasCtor:
-    # No context to hang the listeners on, so that half of the pump goes unused.
+    # No context to hang the listeners on, so that half of the dispatch loop goes unused.
     lines.add("#![allow(dead_code)]")
     lines.add("")
   lines.add("use std::collections::HashMap;")
@@ -898,16 +898,18 @@ proc generateApiRs*(
   lines.add("")
 
   lines.add(generateMessages(events, libName, msgTypeName))
-  lines.add(PumpTemplate % [libName, msgTypeName, $PumpSliceMs])
+  lines.add(DispatcherTemplate % [libName, msgTypeName, $DispatchSliceMs])
   if hasStatics:
-    lines.add(StaticPumpTemplate % [libName])
+    lines.add(StaticDispatcherTemplate % [libName])
 
   lines.add("/// High-level context for `$1`." % [libTypeName])
   lines.add("///")
   lines.add(
     "/// Every request has a blocking method and an `_async` one. Both send the request,"
   )
-  lines.add("/// then wait for its reply, which the context's pump thread takes out of")
+  lines.add(
+    "/// then wait for its reply, which the context's dispatch thread takes out of"
+  )
   lines.add(
     "/// `$1_poll`; `Err` carries the library's error text, the reason a request was" %
       [libName]
@@ -915,23 +917,23 @@ proc generateApiRs*(
   lines.add("/// refused, a timeout, or the end of the context.")
   lines.add("///")
   lines.add(
-    "/// Listeners run on the pump thread. One may make a blocking call on its own"
+    "/// Listeners run on the dispatch thread. One may make a blocking call on its own"
   )
   lines.add(
-    "/// context: the call pumps the context itself until its reply arrives, so other"
+    "/// context: the call runs the dispatch loop itself until its reply arrives, so other"
   )
   lines.add(
     "/// listeners can run meanwhile. It must not block on an `_async` call: nothing"
   )
   lines.add(
-    "/// pumps the reply while the pump thread is parked, so the call times out."
+    "/// dispatches the reply while the dispatch thread is parked, so the call times out."
   )
   lines.add("pub struct $1 {" % [ctxTypeName])
   lines.add("    ptr: *mut c_void,")
   lines.add("    timeout: Duration,")
   if hasCtor:
     lines.add("    inner: Arc<Inner>,")
-    lines.add("    pump: Option<JoinHandle<()>>,")
+    lines.add("    dispatcher: Option<JoinHandle<()>>,")
   lines.add("}")
   lines.add("")
   # SAFETY block applies to both impls below.
@@ -946,7 +948,7 @@ proc generateApiRs*(
     "// the library's single FFI thread runs every handler. Replies and events come"
   )
   lines.add(
-    "// back through the pump thread alone, and the waiter table and the listeners"
+    "// back through the dispatch thread alone, and the waiter table and the listeners"
   )
   lines.add("// it shares with the callers are behind mutexes.")
   lines.add("unsafe impl Send for $1 {}" % [ctxTypeName])
@@ -960,7 +962,7 @@ proc generateApiRs*(
     if dtorProcName.len > 0:
       if hasCtor:
         lines.add(
-          "        // Before the pump stops: the teardown may still send events, and it wakes a blocked poll."
+          "        // Before the dispatch loop stops: the teardown may still send events, and it wakes a blocked poll."
         )
       lines.add("        if !self.ptr.is_null() {")
       lines.add("            unsafe { ffi::$1(self.ptr); }" % [dtorProcName])
@@ -968,12 +970,14 @@ proc generateApiRs*(
       lines.add("        }")
     if hasCtor:
       lines.add("        self.inner.stop.store(true, Ordering::Release);")
-      lines.add("        if let Some(pump) = self.pump.take() {")
+      lines.add("        if let Some(dispatcher) = self.dispatcher.take() {")
       lines.add(
-        "            // A listener that drops the context runs on the pump: it cannot join itself."
+        "            // A listener that drops the context runs on the dispatch thread: it cannot join itself."
       )
-      lines.add("            if pump.thread().id() != std::thread::current().id() {")
-      lines.add("                let _ = pump.join();")
+      lines.add(
+        "            if dispatcher.thread().id() != std::thread::current().id() {"
+      )
+      lines.add("                let _ = dispatcher.join();")
       lines.add("            }")
       lines.add("        }")
     lines.add("    }")
@@ -1154,10 +1158,10 @@ proc generateApiRs*(
   lines.add("    pub fn shutdown() -> bool {")
   if hasStatics:
     lines.add(
-      "        // Held across the shutdown, so no static call starts a pump on a context about to go."
+      "        // Held across the shutdown, so no static call starts a dispatch thread on a context about to go."
     )
-    lines.add("        let mut static_pump = lock(&STATIC_PUMP);")
-    lines.add("        stop_static_pump(&mut static_pump);")
+    lines.add("        let mut static_dispatcher = lock(&STATIC_DISPATCHER);")
+    lines.add("        stop_static_dispatcher(&mut static_dispatcher);")
   lines.add("        unsafe { ffi::$1_shutdown() == 0 }" % [libName])
   lines.add("    }")
   lines.add("")

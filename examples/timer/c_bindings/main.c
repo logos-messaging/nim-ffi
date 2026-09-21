@@ -4,13 +4,13 @@
 
 /* A sequential program. The library calls nothing back and the binding starts
  * no thread, so each step uses the `_sync` form of its request: it submits,
- * then pumps the context until its own reply arrives, and hands every other
+ * then dispatches the context until its own reply arrives, and hands every other
  * message that turns up meanwhile (an event, a liveness report) to the
  * handlers. What a `_sync` call returns belongs to the caller, who frees it.
  *
  * A program with a loop of its own uses the other form instead,
  * my_timer_ctx_<proc>(ctx, ..., on_reply, user_data), and calls
- * my_timer_ctx_pump_once() from that loop; step [7] shows it. */
+ * my_timer_ctx_dispatch_next() from that loop; step [7] shows it. */
 
 #define TIMEOUT_MS 5000
 
@@ -38,7 +38,7 @@ typedef struct {
     char echoed[256];
 } AsyncEcho;
 
-/* Runs inside my_timer_ctx_pump_once(). `reply` and `err` belong to the binding
+/* Runs inside my_timer_ctx_dispatch_next(). `reply` and `err` belong to the binding
  * and are gone once this returns: copy out what is worth keeping. */
 static void on_echo(int ret, const EchoResponse* reply, const char* err, void* user_data) {
     AsyncEcho* a = (AsyncEcho*)user_data;
@@ -155,8 +155,8 @@ int main(void) {
     free(err);
     err = NULL;
 
-    /* The other shape, for a program with a loop: submit, then pump. on_echo
-     * runs inside a pump, on this thread. */
+    /* The other shape, for a program with a loop: submit, then dispatch. on_echo
+     * runs inside a dispatch thread, on this thread. */
     AsyncEcho async_echo;
     memset(&async_echo, 0, sizeof(async_echo));
     EchoRequest async_req = {"async from C", 1};
@@ -167,10 +167,10 @@ int main(void) {
         return 1;
     }
     for (int i = 0; i < 50 && !async_echo.done; i++) {
-        /* Each pump waits up to 100ms for one message and dispatches it. */
-        rc = my_timer_ctx_pump_once(ctx, 100, &handlers);
+        /* Each turn waits up to 100ms for one message and dispatches it. */
+        rc = my_timer_ctx_dispatch_next(ctx, 100, &handlers);
         if (rc != NIMFFI_RET_OK && rc != NIMFFI_RET_TIMEOUT) {
-            fprintf(stderr, "Error: pump returned %d\n", rc);
+            fprintf(stderr, "Error: dispatch returned %d\n", rc);
             break;
         }
     }

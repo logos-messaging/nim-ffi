@@ -91,7 +91,7 @@ int main() {
 
     // Each `{.ffiEvent.}` declared on the Nim side gets a typed
     // registration method — `addOnEchoFiredListener(handler)` here. The
-    // context's pump thread takes the events out of `my_timer_poll` and calls
+    // context's dispatch thread takes the events out of `my_timer_poll` and calls
     // the handlers, so synchronise via std::promise / atomics.
     std::promise<EchoEvent> echoEvtPromise;
     auto echoEvtFuture = echoEvtPromise.get_future();
@@ -109,7 +109,7 @@ int main() {
     std::cout << "[7] after removeEventListener: typed listener removed\n";
 
     // The liveness and closed hooks are listeners too. The closed hook is the
-    // last call a context makes; the destructor joins the pump, so it has run
+    // last call a context makes; the destructor joins the dispatch thread, so it has run
     // by the time `reset` returns.
     ctx->addNotRespondingListener([](std::uint64_t reason) {
         std::cerr << "context stopped answering, reason=" << reason << "\n";
@@ -121,7 +121,7 @@ int main() {
     std::cout << "[8] context closed: ok=" << closedOk.load() << "\n";
 
     // A static proc needs no context: its reply arrives on the library's static
-    // context, which has a pump of its own. `shutdown` stops that pump, then
+    // context, which has a dispatch thread of its own. `shutdown` stops that thread, then
     // every context the library still holds.
     auto libVersion = MyTimerCtx::lib_version();
     if (libVersion.isErr()) {

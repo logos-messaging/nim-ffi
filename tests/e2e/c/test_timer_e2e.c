@@ -4,7 +4,7 @@
  * It aborts (non-zero exit) on the first failure so ctest reports it.
  *
  * The library calls nothing back and the binding starts no thread: a reply or
- * an event reaches this program only while it pumps, either itself or inside a
+ * an event reaches this program only while it dispatches, either itself or inside a
  * `_sync` helper. What an on_reply is handed belongs to the binding and is valid
  * only inside it, so each callback copies out what it needs into a waiter (see
  * waiter.h); what a `_sync` helper hands out belongs to the caller. */
@@ -70,7 +70,7 @@ static MyTimerHandlers sink_handlers(EventSink* sink) {
 static int drain(MyTimerCtx* ctx, const MyTimerHandlers* handlers) {
     int taken = 0;
     for (;;) {
-        int rc = my_timer_ctx_pump_once(ctx, 0, handlers);
+        int rc = my_timer_ctx_dispatch_next(ctx, 0, handlers);
         if (rc == NIMFFI_RET_TIMEOUT) return taken;
         assert(rc == NIMFFI_RET_OK);
         taken++;
@@ -91,7 +91,7 @@ static MyTimerCtx* make_ctx(void) {
     return ctx;
 }
 
-/* The context is handed out at once, so that the host can pump it for the reply. */
+/* The context is handed out at once, so that the host can dispatch it for the reply. */
 static void test_create_async(void) {
     CreateWaiter w;
     memset(&w, 0, sizeof(w));
@@ -100,7 +100,7 @@ static void test_create_async(void) {
     assert(my_timer_ctx_create(&config, &ctx, on_created, &w) == NIMFFI_RET_OK);
     assert(ctx != NULL && ctx->ptr != NULL);
     assert(w.done == 0);
-    WAIT_DONE(w.done, my_timer_ctx_pump_once(ctx, 50, NULL));
+    WAIT_DONE(w.done, my_timer_ctx_dispatch_next(ctx, 50, NULL));
     assert(w.done == 1 && w.ret == NIMFFI_RET_OK && w.err[0] == '\0');
 
     const char* version = NULL;
@@ -114,9 +114,9 @@ static void test_version(MyTimerCtx* ctx) {
     ReplyWaiter w;
     memset(&w, 0, sizeof(w));
     assert(my_timer_ctx_version(ctx, on_str, &w, NULL) == NIMFFI_RET_OK);
-    /* Nothing runs before the host pumps. */
+    /* Nothing runs before the host dispatches. */
     assert(w.done == 0 && ctx->pending.len == 1);
-    WAIT_DONE(w.done, my_timer_ctx_pump_once(ctx, 50, NULL));
+    WAIT_DONE(w.done, my_timer_ctx_dispatch_next(ctx, 50, NULL));
     assert(w.done == 1 && w.ret == NIMFFI_RET_OK);
     assert(strcmp(w.text_a, TIMER_VERSION) == 0);
     assert(ctx->pending.len == 0);
@@ -145,7 +145,7 @@ static void test_echo(MyTimerCtx* ctx) {
     assert(my_timer_ctx_echo(ctx, &req, on_echo, &w, NULL) == NIMFFI_RET_OK);
     while (!w.done) {
         assert(sink.echo_hits <= 1);
-        int rc = my_timer_ctx_pump_once(ctx, WAIT_LIMIT_MS, &handlers);
+        int rc = my_timer_ctx_dispatch_next(ctx, WAIT_LIMIT_MS, &handlers);
         assert(rc == NIMFFI_RET_OK);
     }
     assert(w.done == 1 && w.ret == NIMFFI_RET_OK);
@@ -154,10 +154,10 @@ static void test_echo(MyTimerCtx* ctx) {
     assert(sink.echo_hits == 1);
     assert(strcmp(sink.message, "hello") == 0);
     assert(sink.echo_count == 1);
-    assert(my_timer_ctx_pump_once(ctx, 0, &handlers) == NIMFFI_RET_TIMEOUT);
+    assert(my_timer_ctx_dispatch_next(ctx, 0, &handlers) == NIMFFI_RET_TIMEOUT);
 }
 
-/* The sequential shape: the helper pumps, and everything else that arrives
+/* The sequential shape: the helper dispatches, and everything else that arrives
  * meanwhile goes to the handlers. The caller owns what it is handed. */
 static void test_echo_sync(MyTimerCtx* ctx) {
     EventSink sink;
@@ -205,7 +205,7 @@ static void test_complex(MyTimerCtx* ctx) {
     ReplyWaiter w;
     memset(&w, 0, sizeof(w));
     assert(my_timer_ctx_complex(ctx, &req, on_complex, &w, NULL) == NIMFFI_RET_OK);
-    WAIT_DONE(w.done, my_timer_ctx_pump_once(ctx, 50, NULL));
+    WAIT_DONE(w.done, my_timer_ctx_dispatch_next(ctx, 50, NULL));
     assert(w.ret == NIMFFI_RET_OK);
     assert(w.num_a == 2);
     assert(w.flag == true);
@@ -264,7 +264,7 @@ static void test_schedule_ok(MyTimerCtx* ctx) {
     ReplyWaiter w;
     memset(&w, 0, sizeof(w));
     assert(my_timer_ctx_schedule(ctx, &a.job, &a.retry, &a.sched, on_schedule, &w, NULL) == NIMFFI_RET_OK);
-    WAIT_DONE(w.done, my_timer_ctx_pump_once(ctx, 50, &handlers));
+    WAIT_DONE(w.done, my_timer_ctx_dispatch_next(ctx, 50, &handlers));
     assert(w.ret == NIMFFI_RET_OK);
     assert(strcmp(w.text_a, "c-e2e:rollup") == 0);
     assert(w.num_a == 1);
@@ -282,7 +282,7 @@ static void test_schedule_error(MyTimerCtx* ctx) {
     ReplyWaiter w;
     memset(&w, 0, sizeof(w));
     assert(my_timer_ctx_schedule(ctx, &a.job, &a.retry, &a.sched, on_schedule, &w, NULL) == NIMFFI_RET_OK);
-    WAIT_DONE(w.done, my_timer_ctx_pump_once(ctx, 50, NULL));
+    WAIT_DONE(w.done, my_timer_ctx_dispatch_next(ctx, 50, NULL));
     assert(w.done == 1 && w.ret == NIMFFI_RET_ERR);
     assert(strstr(w.err, "job name") != NULL);
 }
@@ -328,7 +328,7 @@ static void test_sync_timeout(MyTimerCtx* ctx) {
     int64_t deadline = nimffi_now_ms() + WAIT_LIMIT_MS;
     int taken = 0;
     while (taken < 2 && nimffi_now_ms() < deadline) {
-        int rc = my_timer_ctx_pump_once(ctx, 50, NULL);
+        int rc = my_timer_ctx_dispatch_next(ctx, 50, NULL);
         assert(rc == NIMFFI_RET_OK || rc == NIMFFI_RET_TIMEOUT);
         if (rc == NIMFFI_RET_OK) taken++;
     }
@@ -340,7 +340,7 @@ static void test_sync_timeout(MyTimerCtx* ctx) {
     assert(rc == NIMFFI_RET_OK || rc == NIMFFI_RET_TIMEOUT);
     if (rc == NIMFFI_RET_OK) my_timer_free_EchoResponse(&out);
     assert(ctx->pending.len == 0);
-    while (my_timer_ctx_pump_once(ctx, 100, NULL) == NIMFFI_RET_OK) {
+    while (my_timer_ctx_dispatch_next(ctx, 100, NULL) == NIMFFI_RET_OK) {
     }
 }
 
@@ -370,7 +370,7 @@ static void test_in_flight(MyTimerCtx* ctx) {
         assert(my_timer_ctx_echo(ctx, &req, on_echo_ordered, &ow[i], NULL) == NIMFFI_RET_OK);
     }
     assert(ctx->pending.len == 3);
-    WAIT_DONE(order == 3, my_timer_ctx_pump_once(ctx, 50, NULL));
+    WAIT_DONE(order == 3, my_timer_ctx_dispatch_next(ctx, 50, NULL));
     for (int i = 0; i < 3; i++) {
         assert(ow[i].w.done == 1 && ow[i].w.ret == NIMFFI_RET_OK);
         assert(strcmp(ow[i].w.text_a, names[i]) == 0);
@@ -396,7 +396,7 @@ static void test_sync_among_async(MyTimerCtx* ctx) {
     assert(w.done == 1 && strcmp(w.text_a, "quick") == 0);
 }
 
-/* A handler may itself make a `_sync` request: the pump it runs in has already
+/* A handler may itself make a `_sync` request: the dispatch thread it runs in has already
  * let go of the message. */
 typedef struct {
     MyTimerCtx* ctx;
@@ -410,7 +410,7 @@ static void on_echo_fired_nested(const EchoEvent* ev, void* user_data) {
     assert(my_timer_ctx_version_sync(sink->ctx, &version, NULL, WAIT_LIMIT_MS, NULL) == NIMFFI_RET_OK);
     snprintf(sink->version, sizeof(sink->version), "%s", version);
     free((void*)version);
-    /* The event outlives the nested pump: it was decoded before the handler ran. */
+    /* The event outlives the nested dispatch: it was decoded before the handler ran. */
     assert(strcmp(ev->message, "nested") == 0);
     sink->hits++;
 }
@@ -458,7 +458,7 @@ static void test_refused_submit(void) {
     assert(err != NULL && strstr(err, "not a valid FFI context") != NULL);
     free(err);
     assert(out.echoed == NULL && stale.pending.len == 0);
-    assert(my_timer_ctx_pump_once(&stale, 0, NULL) == NIMFFI_RET_INVALID_CTX);
+    assert(my_timer_ctx_dispatch_next(&stale, 0, NULL) == NIMFFI_RET_INVALID_CTX);
     assert(w.done == 0);
     /* `stale` was built by hand, so nothing else frees the room a submit made. */
     free(stale.pending.items);
@@ -483,10 +483,10 @@ static void test_statics(void) {
     memset(&w, 0, sizeof(w));
     assert(my_timer_static_lib_version(on_str, &w, NULL) == NIMFFI_RET_OK);
     assert(w.done == 0);
-    WAIT_DONE(w.done, my_timer_static_pump_once(50, NULL));
+    WAIT_DONE(w.done, my_timer_static_dispatch_next(50, NULL));
     assert(w.done == 1 && w.ret == NIMFFI_RET_OK);
     assert(strcmp(w.text_a, TIMER_VERSION) == 0);
-    assert(my_timer_static_pump_once(0, NULL) == NIMFFI_RET_TIMEOUT);
+    assert(my_timer_static_dispatch_next(0, NULL) == NIMFFI_RET_TIMEOUT);
 }
 
 /* A NULL entry, or no handlers at all, ignores the message without leaking it. */
@@ -604,7 +604,7 @@ static void test_dispatch_liveness(MyTimerCtx* ctx) {
     assert(strcmp(w.err, "context closed") == 0);
     assert(sink.closed_hits == 1 && ctx->pending.len == 0);
     /* The context is in fact alive: its event and its reply come out, to nobody. */
-    while (my_timer_ctx_pump_once(ctx, 100, NULL) == NIMFFI_RET_OK) {
+    while (my_timer_ctx_dispatch_next(ctx, 100, NULL) == NIMFFI_RET_OK) {
     }
     assert(w.done == 1);
 }
@@ -680,7 +680,7 @@ static void test_destroy(MyTimerCtx* ctx) {
     assert(my_timer_poll(token, 0, &msg) == NIMFFI_RET_INVALID_CTX);
     assert(msg == NULL);
     assert(my_timer_poll_fd(token) == -1);
-    assert(my_timer_ctx_pump_once(NULL, 0, NULL) == NIMFFI_RET_INVALID_CTX);
+    assert(my_timer_ctx_dispatch_next(NULL, 0, NULL) == NIMFFI_RET_INVALID_CTX);
     assert(my_timer_ctx_poll_fd(NULL) == -1);
     assert(my_timer_ctx_destroy(NULL) == NIMFFI_RET_OK);
     close_handle(handle);
