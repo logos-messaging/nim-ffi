@@ -7,18 +7,31 @@ const MaxFFIContexts* = 32
 const
   SlotBits = 5
   SlotMask = (1'u shl SlotBits) - 1
+  TokenBase = 1'u shl 12
+    ## A token is an opaque handle, not an address, but a host in a garbage-collected
+    ## language holds it in a pointer variable. Keeping every token clear of the
+    ## first page means the collector reads it as a pointer of no interest instead
+    ## of a corrupt one: Go, for one, kills the process over a pointer below 4096.
 
 static:
   doAssert MaxFFIContexts <= int(SlotMask) + 1,
     "SlotBits is too small for MaxFFIContexts"
 
 proc makeToken(slot: int, generation: uint): FFICtxToken =
-  ## Host handle: the generation of the claim above the slot index. A claim makes the generation odd and non-zero, so a nil token never resolves.
-  cast[FFICtxToken]((generation shl SlotBits) or (uint(slot) and SlotMask))
+  ## Host handle: the generation of the claim above the slot index, over `TokenBase`. A claim makes the generation odd and non-zero, so a nil token never resolves.
+  cast[FFICtxToken](TokenBase + (generation shl SlotBits) + (uint(slot) and SlotMask))
+
+func tokenSlotAndGeneration(token: FFICtxToken): tuple[slot: int, generation: uint] =
+  let raw = cast[uint](token)
+  if raw < TokenBase:
+    # Nil, or a value this pool never issued.
+    return (0, 0'u)
+  let packed = raw - TokenBase
+  return (int(packed and SlotMask), packed shr SlotBits)
 
 func tokenGeneration*(token: FFICtxToken): uint =
   ## The claim a token was issued under: odd by construction, and 0 for a nil token.
-  cast[uint](token) shr SlotBits
+  token.tokenSlotAndGeneration().generation
 
 type
   StaticCtxState = enum
@@ -268,11 +281,11 @@ proc resolveCtx*[T](
 ): ptr FFIContext[T] =
   ## The context a host token names, or nil when the token is nil, forged, or
   ## issued for an earlier owner of the slot.
-  let generation = token.tokenGeneration()
+  let (slot, generation) = token.tokenSlotAndGeneration()
   if generation == 0:
     return nil
   # An issued generation is odd, so matching it also proves the slot is claimed.
-  let ctx = pool.contexts[int(cast[uint](token) and SlotMask)].addr
+  let ctx = pool.contexts[slot].addr
   if ctx.generation.load() != generation:
     return nil
   ctx
