@@ -146,9 +146,10 @@ proc checkCrossTargetCodegenPaths() =
   mkDir(workDir)
 
   withDir(workDir):
+    # No -d:ffiSrcPath: the embedded source path is derived for the build OS,
+    # so a cross target must not need an override to get a usable one.
     runOrQuit genBindingsCmd(
-      nimFlagsOrc & " --os:" & targetOs & " --cpu:amd64 --nimcache:" & nimcache &
-        " -d:ffiSrcPath=../echo.nim",
+      nimFlagsOrc & " --os:" & targetOs & " --cpu:amd64 --nimcache:" & nimcache,
       source,
       "c,cpp,rust,cddl",
       outDir,
