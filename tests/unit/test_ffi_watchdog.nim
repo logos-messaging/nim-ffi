@@ -21,8 +21,6 @@ when not defined(gcRefc):
   ## Skipped under refc: sleeping the FFI thread in a sync handler misbehaves there.
   suite "FFI heartbeat staleness":
     test "a wedged FFI thread is reported, and so is its recovery":
-      setupCallbackData(rsp)
-
       var pool: FFIContextPool[TestWatchLib]
       let ctx = pool.createFFIContext().valueOr:
         check false
@@ -38,19 +36,27 @@ when not defined(gcRefc):
 
       gBlockingEnabled.store(true)
       let wedgeMs = FFIHeartbeatStaleThreshold.milliseconds.int + 2500
-      check sendRequestToFFIThread(
-        ctx, BlockingRequest.ffiNewReq(testCallback, addr rsp, wedgeMs)
-      )
-        .isOk()
+      let reqId = sendRequestToFFIThread(ctx, BlockingRequest.ffiNewReq(wedgeMs)).valueOr:
+        check false
+        return
 
       let stale = pollMsg(ctx, wedgeMs)
       check stale.ret == RET_OK
       check stale.kind == MsgNotResponding
       check stale.aux == NotRespondingHeartbeat
 
-      waitCallback(rsp)
+      # The handler's return brings two messages, in either order: its reply, and
+      # the recovery, which a poll notices once the heartbeat moves again.
+      var replied = false
+      var recovered = false
+      for _ in 0 ..< 2:
+        let got = pollMsg(ctx, wedgeMs + 3000)
+        check got.ret == RET_OK
+        if got.kind == MsgReply:
+          check got.id == reqId
+          replied = true
+        elif got.kind == MsgResponding:
+          recovered = true
       gBlockingEnabled.store(false)
-
-      let recovered = pollMsg(ctx, 3000)
-      check recovered.ret == RET_OK
-      check recovered.kind == MsgResponding
+      check replied
+      check recovered

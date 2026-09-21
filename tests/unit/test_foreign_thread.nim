@@ -33,13 +33,7 @@ proc runFixture(name: string): tuple[output: string, exitCode: int] =
   execCmdEx(cmd)
 
 suite "entry points are callable from foreign host threads":
-  test "method calls from unregistered host threads succeed":
+  test "method calls and polls from unregistered host threads succeed":
     let (output, code) = runFixture("foreign_thread_fixture")
-    checkpoint(output)
-    check code == 0
-
-suite "foreignThreadGc":
-  test "a Nim thread keeps allocating after the block returns":
-    let (output, code) = runFixture("foreign_thread_gc_fixture")
     checkpoint(output)
     check code == 0

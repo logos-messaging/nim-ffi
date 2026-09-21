@@ -12,19 +12,12 @@ registerReqFFI(NoopRequest, lib: ptr BenchLib):
     return ok("ok")
 
 var gStart: Atomic[bool]
-var gCompleted: Atomic[int] ## bumped once per callback; also the callback userData
 var gSendErrors: Atomic[int]
 
 let settleTimeout = 30.seconds
 
 ## Min submit-throughput scaling gate (max-threads / 1-thread). See README.
 const RequiredScaling = 1.5
-
-proc benchCallback(
-    retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
-) {.cdecl, gcsafe, raises: [].} =
-  let counter = cast[ptr Atomic[int]](userData)
-  discard counter[].fetchAdd(1)
 
 type ProducerArg = object
   ctx: ptr FFIContext[BenchLib]
@@ -34,18 +27,36 @@ proc producerBody(arg: ptr ProducerArg) {.thread, gcsafe.} =
   while not gStart.load():
     discard
   for _ in 0 ..< arg[].count:
-    let req = NoopRequest.ffiNewReq(benchCallback, addr gCompleted)
-    if sendRequestToFFIThread(arg[].ctx, req).isErr():
+    if sendRequestToFFIThread(arg[].ctx, NoopRequest.ffiNewReq()).isErr():
       discard gSendErrors.fetchAdd(1)
 
-proc waitForCompletions(target: int): bool =
-  ## Spins until `gCompleted` reaches `target`, bounded by `settleTimeout`.
+type Collected = object
+  replies: int
+  duplicates: int ## replies carrying an id already seen — must be 0
+  extra: int ## replies beyond the accepted submits — must be 0
+
+proc collectReplies(ctx: ptr FFIContext[BenchLib], target: int): Collected =
+  ## Polls until `target` replies arrived, bounded by `settleTimeout`, then looks
+  ## for one more: an accepted request is answered exactly once.
+  var collected: Collected
+  var ids = newSeqOfCap[uint64](target)
+  let generation = ctx.currentGeneration()
   let deadline = Moment.now() + settleTimeout
-  while gCompleted.load() < target:
-    if Moment.now() > deadline:
-      return false
-    os.sleep(1)
-  true
+  var msg: ptr NimFfiMsg
+  while collected.replies < target and Moment.now() <= deadline:
+    if pollContext(ctx, generation, 100, addr msg) != RET_OK:
+      continue
+    if msg.kind == MsgReply:
+      ids.add(msg.id)
+      collected.replies.inc()
+  while pollContext(ctx, generation, 50, addr msg) == RET_OK:
+    if msg.kind == MsgReply:
+      collected.extra.inc()
+  ids.sort()
+  for i in 1 ..< ids.len:
+    if ids[i] == ids[i - 1]:
+      collected.duplicates.inc()
+  return collected
 
 proc median(xs: seq[float]): float =
   if xs.len == 0:
@@ -58,7 +69,7 @@ proc median(xs: seq[float]): float =
 type IterResult = object
   submitRate: float ## submits/sec over the submit phase only (sends issued)
   sendErrors: int
-  overruns: int ## callbacks beyond `total` — must be 0 (no double-fire)
+  overruns: int ## duplicate or extra replies — must be 0 (one reply per request)
 
 proc runOnce(
     pool: var FFIContextPool[BenchLib], numThreads, perThread: int
@@ -70,7 +81,6 @@ proc runOnce(
 
   let total = numThreads * perThread
   gStart.store(false)
-  gCompleted.store(0)
   gSendErrors.store(0)
 
   var threads = newSeq[Thread[ptr ProducerArg]](numThreads)
@@ -85,19 +95,19 @@ proc runOnce(
   joinThreads(threads)
   let submitSec = (Moment.now() - start).nanoseconds.float / 1_000_000_000.0
 
-  # A rejected submit fires no callback, so wait only for the accepted ones.
+  # A refused submit gets no reply, so collect only the accepted ones. Nobody
+  # polls during the submit phase: the replies wait, which is what the raised
+  # `ffiMaxOutstandingRequests` in the sibling .cfg allows.
   let sendErrors = gSendErrors.load()
   let accepted = total - sendErrors
-  if not waitForCompletions(accepted):
-    quit(
-      "timed out waiting for callbacks: got " & $gCompleted.load() & " of " & $accepted
-    )
-  os.sleep(50) # let any erroneous extra callbacks land before reading overruns
+  let collected = collectReplies(ctx, accepted)
+  if collected.replies < accepted:
+    quit("timed out polling replies: got " & $collected.replies & " of " & $accepted)
 
   IterResult(
     submitRate: total.float / submitSec,
     sendErrors: sendErrors,
-    overruns: max(0, gCompleted.load() - accepted),
+    overruns: collected.duplicates + collected.extra,
   )
 
 proc enforceScalingGate(medianRate: seq[float]) =
@@ -168,13 +178,13 @@ proc main() =
       echo "  !! ", sendErrors, " submit errors at ", n, " threads"
       allPassed = false
     if overruns != 0:
-      echo "  !! ", overruns, " callbacks fired beyond expected at ", n, " threads"
+      echo "  !! ", overruns, " duplicate or extra replies at ", n, " threads"
       allPassed = false
 
   if not allPassed:
     quit("stress test FAILED: see !! lines above")
   echo ""
-  echo "  correctness: callback count matched submits exactly (no drops/dupes)."
+  echo "  correctness: reply count matched submits exactly (no drops/dupes)."
 
   if gateOn:
     enforceScalingGate(medianRate)

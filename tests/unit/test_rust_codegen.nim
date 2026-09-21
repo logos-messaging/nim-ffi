@@ -140,7 +140,7 @@ suite "events arrive through <lib>_poll":
     for name in ["not_responding", "responding", "closed", "message"]:
       check ("pub fn add_" & name & "_listener<F>") in apiRs
 
-  test "a library without a ctor gets no dispatch thread":
+  test "a library with only statics gets the static dispatch thread and no listeners":
     let staticOnly = @[
       FFIProcMeta(
         procName: "lib_version",
@@ -150,4 +150,167 @@ suite "events arrive through <lib>_poll":
         returnTypeName: "string",
       )
     ]
-    check "dispatch_loop" notin generateApiRs(staticOnly, "lib")
+    let staticApi = generateApiRs(staticOnly, "lib")
+    check "static STATIC_DISPATCHER: Mutex<Option<StaticDispatcher>>" in staticApi
+    check "_listener<F>" notin staticApi
+    check "static STATIC_DISPATCHER" notin apiRs
+
+suite "replies arrive through <lib>_poll":
+  setup:
+    let procs = @[
+      FFIProcMeta(
+        procName: "lib_create",
+        libName: "lib",
+        kind: FFIKind.CTOR,
+        libTypeName: "Lib",
+        extraParams: @[FFIParamMeta(name: "config", typeName: "LibConfig")],
+      ),
+      FFIProcMeta(
+        procName: "lib_echo",
+        libName: "lib",
+        kind: FFIKind.FFI,
+        libTypeName: "Lib",
+        extraParams: @[FFIParamMeta(name: "req", typeName: "EchoRequest")],
+        returnTypeName: "EchoResponse",
+      ),
+      FFIProcMeta(
+        procName: "lib_version",
+        libName: "lib",
+        kind: FFIKind.STATIC,
+        libTypeName: "Lib",
+        returnTypeName: "string",
+      ),
+      FFIProcMeta(
+        procName: "lib_destroy", libName: "lib", kind: FFIKind.DTOR, libTypeName: "Lib"
+      ),
+    ]
+    let ffiRs = generateFFIRs(procs)
+    let apiRs = generateApiRs(procs, "lib")
+
+  test "ffi.rs declares the exports without a callback":
+    check "pub fn lib_create(req_cbor: *const u8, req_cbor_len: usize, ctx_out: *mut *mut c_void, req_id_out: *mut u64) -> c_int;" in
+      ffiRs
+    check "pub fn lib_echo(ctx: *mut c_void, req_cbor: *const u8, req_cbor_len: usize, req_id_out: *mut u64) -> c_int;" in
+      ffiRs
+    check "pub fn lib_version(req_cbor: *const u8, req_cbor_len: usize, req_id_out: *mut u64) -> c_int;" in
+      ffiRs
+    check "pub fn lib_destroy(ctx: *mut c_void) -> c_int;" in ffiRs
+    check "pub fn lib_static_ctx() -> *mut c_void;" in ffiRs
+    check "pub fn lib_last_error() -> *const c_char;" in ffiRs
+    check "FFICallback" notin ffiRs
+    check "user_data" notin ffiRs
+
+  test "the callback plumbing is gone from api.rs":
+    for gone in [
+      "on_result", "FFICallback", "Box::into_raw", "Box::from_raw", "user_data",
+      "NIMFFI_RET_MISSING_CALLBACK", "NIMFFI_RET_STALE_WARN",
+    ]:
+      check gone notin apiRs
+
+  test "the public request API keeps its shape":
+    check "    pub fn create(config: LibConfig, timeout: Duration) -> Result<Self, String> {" in
+      apiRs
+    check "    pub async fn new_async(config: LibConfig, timeout: Duration) -> Result<Self, String> {" in
+      apiRs
+    check "    pub fn echo(&self, req: EchoRequest) -> Result<EchoResponse, String> {" in
+      apiRs
+    check "    pub async fn echo_async(&self, req: EchoRequest) -> Result<EchoResponse, String> {" in
+      apiRs
+    check "    pub fn version(timeout: Duration) -> Result<String, String> {" in apiRs
+    check "    pub async fn version_async(timeout: Duration) -> Result<String, String> {" in
+      apiRs
+    check "decode_cbor::<EchoResponse>(&raw_bytes)" in apiRs
+
+  test "a waiter is registered under the lock held across the submit":
+    check "waiters: Mutex<HashMap<u64, flume::Sender<FFIResult>>>," in apiRs
+    let submit = apiRs.find("fn submit<F>")
+    let lockAt = apiRs.find("let mut waiters = lock(&self.waiters);", submit)
+    let sendAt = apiRs.find("let ret = send(self.ptr, &mut req_id);", submit)
+    let insertAt = apiRs.find("waiters.insert(req_id, tx);", submit)
+    check submit >= 0
+    check lockAt > submit
+    check sendAt > lockAt
+    check insertAt > sendAt
+    # A refusal returns the library's words before anything is registered.
+    let refusedAt = apiRs.find("return Err(last_error(ret));", submit)
+    check refusedAt > sendAt
+    check refusedAt < insertAt
+    check "CStr::from_ptr(ffi::lib_last_error())" in apiRs
+
+  test "a request goes through submit and its reply through wait":
+    check "ffi::lib_echo(ctx, req_bytes.as_ptr(), req_bytes.len(), req_id)" in apiRs
+    check "self.inner.wait(req_id, &rx, self.timeout)?;" in apiRs
+    check "self.inner.wait_async(req_id, rx, self.timeout).await?;" in apiRs
+    check "rx.recv_timeout(timeout)" in apiRs
+    check "tokio::time::timeout(timeout, rx.recv_async()).await" in apiRs
+
+  test "the dispatch thread hands a reply to its waiter and never to a listener":
+    check "if msg.kind == ffi::NIMFFI_MSG_REPLY {" in apiRs
+    check "let waiter = lock(&self.waiters).remove(&msg.id);" in apiRs
+    check "Reply" notin
+      apiRs.substr(
+        apiRs.find("pub enum LibMessage {"), apiRs.find("unsafe fn payload_bytes")
+      )
+
+  test "a timeout forgets the waiter, so the late reply is dropped":
+    let timedOut = apiRs.find("fn timed_out(")
+    check timedOut >= 0
+    check apiRs.find("lock(&self.waiters).remove(&req_id);", timedOut) > timedOut
+    check "Err(flume::RecvTimeoutError::Timeout) => self.timed_out(req_id, rx, timeout)," in
+      apiRs
+    check "Err(_) => self.timed_out(req_id, &rx, timeout)," in apiRs
+
+  test "the end of the context fails the waiters before the Closed listeners run":
+    let step = apiRs.find("fn dispatch_step(")
+    let failAt = apiRs.find("inner.fail_waiters();", step)
+    let dispatchAt = apiRs.find("inner.dispatch(&message);", step)
+    check failAt > step
+    check dispatchAt > failAt
+    check "Err(flume::RecvTimeoutError::Disconnected) => Err(CONTEXT_CLOSED.into())," in
+      apiRs
+    # The dispatch thread's exit, whatever its cause, leaves no call waiting.
+    let loopAt = apiRs.find("fn dispatch_loop(")
+    check apiRs.find("inner.fail_waiters();", loopAt) > loopAt
+
+  test "a blocking call on the dispatch thread dispatches its own reply":
+    check "if self.dispatch_thread.get() == Some(&std::thread::current().id()) {" in
+      apiRs
+    check "return self.wait_on_dispatch_thread(req_id, rx, timeout);" in apiRs
+    check "dispatch_step(self, slice_ms);" in apiRs
+    check "inner.dispatch_thread.set(std::thread::current().id());" in apiRs
+
+  test "STALE_WARN is a message with a listener":
+    check "StaleWarn { req_id: u64, elapsed_ms: u64 }," in apiRs
+    check "ffi::NIMFFI_MSG_STALE_WARN => Ok(LibMessage::StaleWarn {" in apiRs
+    check "pub fn add_stale_warn_listener<F>" in apiRs
+
+  test "the ctor registers its waiter before the dispatch thread starts, and an error destroys the context":
+    let start = apiRs.find("    fn start(")
+    let submitAt = apiRs.find(
+      "submit(req_bytes.as_ptr(), req_bytes.len(), &mut ptr, &mut req_id)", start
+    )
+    let insertAt = apiRs.find("lock(&inner.waiters).insert(req_id, tx);", start)
+    let spawnAt = apiRs.find("spawn_dispatcher(\"lib-dispatch\", inner)", start)
+    check submitAt > start
+    check insertAt > submitAt
+    check spawnAt > insertAt
+    check "Self::start(&req_bytes, timeout, ffi::lib_create)?;" in apiRs
+    check "ctx.inner.wait(req_id, &rx, timeout)?;" in apiRs
+    check "ctx.inner.wait_async(req_id, rx, timeout).await?;" in apiRs
+
+  test "statics wait on the static context's dispatch thread, which shutdown stops first":
+    check "let ptr = unsafe { ffi::lib_static_ctx() };" in apiRs
+    check "let inner = static_inner()?;" in apiRs
+    check "ffi::lib_version(req_bytes.as_ptr(), req_bytes.len(), req_id)" in apiRs
+    let shutdown = apiRs.find("pub fn shutdown() -> bool {")
+    let stopAt = apiRs.find("stop_static_dispatcher(&mut static_dispatcher);", shutdown)
+    let callAt = apiRs.find("ffi::lib_shutdown()", shutdown)
+    check stopAt > shutdown
+    check callAt > stopAt
+
+  test "drop destroys the context before it stops the dispatch thread":
+    let dropAt = apiRs.find("impl Drop for LibCtx {")
+    let destroyAt = apiRs.find("ffi::lib_destroy(self.ptr);", dropAt)
+    let stopAt = apiRs.find("self.inner.stop.store(true, Ordering::Release);", dropAt)
+    check destroyAt > dropAt
+    check stopAt > destroyAt

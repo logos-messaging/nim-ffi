@@ -4,11 +4,6 @@ project(nim_ffi_c_e2e C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# MSVC gates <stdatomic.h> behind this flag (C11 atomics, VS 2022 17.5+).
-if(MSVC)
-    add_compile_options(/experimental:c11atomics)
-endif()
-
 include("${CMAKE_CURRENT_SOURCE_DIR}/../sanitizer.cmake")
 
 # Thread the sanitizer into every Nim dylib built below. `CACHE ... FORCE` is

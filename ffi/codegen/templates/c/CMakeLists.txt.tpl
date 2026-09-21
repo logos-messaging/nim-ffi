@@ -16,9 +16,9 @@ find_package(Threads REQUIRED)
 add_library({{LIB}}_headers INTERFACE)
 target_include_directories({{LIB}}_headers INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries({{LIB}}_headers INTERFACE {{LIB}} tinycbor Threads::Threads)
-# The generated header is async (no blocking helper), but consumer code that
-# waits on a result callback typically uses nanosleep / pthreads, which need a
-# POSIX feature level that strict `-std=c11` hides. Define it for consumers.
+# The `_sync` helpers of the generated header time out against clock_gettime,
+# which needs a POSIX feature level that strict `-std=c11` hides. Define it for
+# consumers.
 target_compile_definitions({{LIB}}_headers INTERFACE _POSIX_C_SOURCE=200809L)
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/main.c")

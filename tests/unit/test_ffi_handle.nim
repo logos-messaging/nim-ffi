@@ -37,12 +37,14 @@ proc handletest_session_bump*(s: Session): Future[Result[int, string]] {.ffi.} =
   s.hits.inc()
   return ok(s.hits)
 
-template runCall(d, ctx, reqBytes, exportProc) =
-  initCallbackData(d)
-  var rb = reqBytes
-  check exportProc(ctx.ffiToken(), testCallback, addr d, encodedPtr(rb), rb.len.csize_t) ==
-    RET_OK
-  waitCallback(d)
+template runCall(ctx, req, exportProc: untyped): PolledMsg =
+  ## A template: the export shares its name with the Nim-native proc, so only a call resolves it.
+  block:
+    var rb = cborEncode(req)
+    var reqId: uint64
+    doAssert exportProc(ctx.ffiToken(), encodedPtr(rb), rb.len.csize_t, addr reqId) ==
+      RET_OK
+    pollReply(ctx, reqId)
 
 suite "{.ffiHandle.} round-trip":
   setup:
@@ -52,58 +54,29 @@ suite "{.ffiHandle.} round-trip":
     discard HandleLibFFIPool.destroyFFIContext(ctx)
 
   test "handle returned as uint64, reconstituted on the next call":
-    var od: CallbackData
-    runCall(
-      od,
-      ctx,
-      cborEncode(HandletestOpenReq(req: OpenReq(name: "alpha"))),
-      handletest_open,
-    )
-    defer:
-      deinitCallbackData(od)
-    check od.retCode == RET_OK
-    let handle = cborDecode(payload(od), uint64).value
+    let opened =
+      runCall(ctx, HandletestOpenReq(req: OpenReq(name: "alpha")), handletest_open)
+    check opened.retCode == RET_OK
+    let handle = cborDecode(opened.payload, uint64).value
     check handle == 1'u64
 
-    var td: CallbackData
-    runCall(td, ctx, cborEncode(HandletestTokenReq(s: handle)), handletest_token)
-    defer:
-      deinitCallbackData(td)
-    check td.retCode == RET_OK
-    check cborDecode(payload(td), string).value == "alpha:0#1"
+    check runCall(ctx, HandletestTokenReq(s: handle), handletest_token).okString() ==
+      "alpha:0#1"
 
   test "handle as receiver (first param)":
-    var od: CallbackData
-    runCall(
-      od,
-      ctx,
-      cborEncode(HandletestOpenReq(req: OpenReq(name: "beta"))),
-      handletest_open,
-    )
-    defer:
-      deinitCallbackData(od)
-    let handle = cborDecode(payload(od), uint64).value
+    let opened =
+      runCall(ctx, HandletestOpenReq(req: OpenReq(name: "beta")), handletest_open)
+    let handle = cborDecode(opened.payload, uint64).value
 
-    var bd: CallbackData
-    runCall(
-      bd, ctx, cborEncode(HandletestSessionBumpReq(s: handle)), handletest_session_bump
-    )
-    defer:
-      deinitCallbackData(bd)
-    check bd.retCode == RET_OK
-    check cborDecode(payload(bd), int).value == 1
+    let bumped =
+      runCall(ctx, HandletestSessionBumpReq(s: handle), handletest_session_bump)
+    check bumped.retCode == RET_OK
+    check cborDecode(bumped.payload, int).value == 1
 
   test "forged handle misses cleanly with RET_ERR":
-    var td: CallbackData
-    runCall(td, ctx, cborEncode(HandletestTokenReq(s: 9999'u64)), handletest_token)
-    defer:
-      deinitCallbackData(td)
-    check td.retCode == RET_ERR
-    check "ffiHandle" in rawText(td)
+    let missed = runCall(ctx, HandletestTokenReq(s: 9999'u64), handletest_token)
+    check missed.retCode == RET_ERR
+    check "ffiHandle" in missed.text()
 
   test "null handle (0) misses with RET_ERR":
-    var td: CallbackData
-    runCall(td, ctx, cborEncode(HandletestTokenReq(s: 0'u64)), handletest_token)
-    defer:
-      deinitCallbackData(td)
-    check td.retCode == RET_ERR
+    check runCall(ctx, HandletestTokenReq(s: 0'u64), handletest_token).retCode == RET_ERR

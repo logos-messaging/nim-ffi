@@ -1,7 +1,6 @@
-## Fixture for test_foreign_thread. It calls CBOR method entry points from
-## threads that the Nim runtime does not know.
+## Fixture for test_foreign_thread. It calls CBOR method entry points and `poll`
+## from threads that the Nim runtime does not know.
 
-import std/[locks, strutils]
 import results
 import ffi
 
@@ -32,71 +31,42 @@ proc threadedcbor_destroy*(lib: ThreadLib) {.ffiDtor.} =
 
 genBindings()
 
-type ReplyData = object
-  lock: Lock
-  cond: Cond
-  called: bool
-  retCode: cint
-  payload: seq[byte]
-
-proc initReplyData(d: var ReplyData) =
-  d.lock.initLock()
-  d.cond.initCond()
-
-proc deinitReplyData(d: var ReplyData) =
-  d.cond.deinitCond()
-  d.lock.deinitLock()
-
-proc waitReply(d: var ReplyData) =
-  acquire(d.lock)
-  while not d.called:
-    wait(d.cond, d.lock)
-  release(d.lock)
-
-proc onReply(
-    ret: cint, msg: ptr cchar, len: csize_t, ud: pointer
-) {.cdecl, gcsafe, raises: [].} =
-  if ret == RET_STALE_WARN:
-    return
-  let d = cast[ptr ReplyData](ud)
-  acquire(d[].lock)
-  d[].payload = newSeq[byte](int(len))
-  if len > 0 and not msg.isNil():
-    copyMem(addr d[].payload[0], msg, int(len))
-  d[].retCode = ret
-  d[].called = true
-  signal(d[].cond)
-  release(d[].lock)
-
-proc replyString(d: var ReplyData): string =
-  cborDecode(d.payload, string).valueOr:
+proc replyString(msg: ptr NimFfiMsg): string =
+  var bytes = newSeq[byte](int(msg.len))
+  if msg.len > 0:
+    copyMem(addr bytes[0], msg.payload, int(msg.len))
+  return cborDecode(bytes, string).valueOr:
     ""
 
 proc makeCtx(tag: string): FFICtxToken =
-  var d: ReplyData
-  initReplyData(d)
-  defer:
-    deinitReplyData(d)
-
   var req = cborEncode(ThreadedcborCreateCtorReq(cfg: ThreadConfig(tag: tag)))
-  let token =
-    threadedcbor_create(cast[ptr byte](addr req[0]), csize_t(req.len), onReply, addr d)
+  var token: FFICtxToken
+  var reqId: uint64
+  doAssert threadedcbor_create(
+    cast[ptr byte](addr req[0]), csize_t(req.len), addr token, addr reqId
+  ) == RET_OK
   doAssert not token.isNil()
-  waitReply(d)
-  doAssert d.retCode == RET_OK
-  token
+  var msg: ptr NimFfiMsg
+  doAssert threadedcbor_poll(token, 5000, addr msg) == RET_OK
+  doAssert msg.kind == MsgReply and msg.id == reqId and msg.retCode == RET_OK
+  return token
 
 # createThread registers the thread with the GC, which hides the bug; use the platform API.
 {.
   emit: """
-typedef int (*NimFfiEchoFn)(void*, void*, void*, const void*, size_t);
+typedef int (*NimFfiEchoFn)(void*, const void*, size_t, unsigned long long*);
+typedef int (*NimFfiPollFn)(void*, int, const void**);
 
 typedef struct {
-  void* fn; void* ctx; void* cb; void* ud; const void* req; size_t reqLen; int ret;
+  void* fn; void* poll; void* ctx; const void* req; size_t reqLen;
+  unsigned long long reqId; const void* msg; int ret; int pollRet;
 } NimFfiForeignCall;
 
+/* Submits and polls on the same unregistered thread: both must work there. */
 static void nimffi_foreign_body(NimFfiForeignCall* c) {
-  c->ret = ((NimFfiEchoFn)c->fn)(c->ctx, c->cb, c->ud, c->req, c->reqLen);
+  c->ret = ((NimFfiEchoFn)c->fn)(c->ctx, c->req, c->reqLen, &c->reqId);
+  if (c->ret == 0)
+    c->pollRet = ((NimFfiPollFn)c->poll)(c->ctx, 5000, &c->msg);
 }
 """
 .}
@@ -115,15 +85,17 @@ static DWORD WINAPI nimffi_foreign_thread_main(LPVOID arg) {
 }
 
 int nimffi_call_on_foreign_thread(
-    void* fn, void* ctx, void* cb, void* ud, const void* req, size_t reqLen) {
+    void* fn, void* poll, void* ctx, const void* req, size_t reqLen,
+    unsigned long long* reqId, const void** msg, int* pollRet) {
   NimFfiForeignCall c;
   HANDLE t;
-  c.fn = fn; c.ctx = ctx; c.cb = cb; c.ud = ud; c.req = req; c.reqLen = reqLen;
-  c.ret = -1;
+  c.fn = fn; c.poll = poll; c.ctx = ctx; c.req = req; c.reqLen = reqLen;
+  c.reqId = 0; c.msg = (void*)0; c.ret = -1; c.pollRet = -1;
   t = CreateThread(NULL, 0, nimffi_foreign_thread_main, &c, 0, NULL);
   if (t == NULL) return -2;
   WaitForSingleObject(t, INFINITE);
   CloseHandle(t);
+  *reqId = c.reqId; *msg = c.msg; *pollRet = c.pollRet;
   return c.ret;
 }
 """
@@ -142,58 +114,81 @@ static void* nimffi_foreign_thread_main(void* arg) {
 }
 
 int nimffi_call_on_foreign_thread(
-    void* fn, void* ctx, void* cb, void* ud, const void* req, size_t reqLen) {
+    void* fn, void* poll, void* ctx, const void* req, size_t reqLen,
+    unsigned long long* reqId, const void** msg, int* pollRet) {
   NimFfiForeignCall c;
   pthread_t t;
-  c.fn = fn; c.ctx = ctx; c.cb = cb; c.ud = ud; c.req = req; c.reqLen = reqLen;
-  c.ret = -1;
+  c.fn = fn; c.poll = poll; c.ctx = ctx; c.req = req; c.reqLen = reqLen;
+  c.reqId = 0; c.msg = (void*)0; c.ret = -1; c.pollRet = -1;
   if (pthread_create(&t, (void*)0, nimffi_foreign_thread_main, &c) != 0) return -2;
   pthread_join(t, (void*)0);
+  *reqId = c.reqId; *msg = c.msg; *pollRet = c.pollRet;
   return c.ret;
 }
 """
   .}
 
 proc nimffi_call_on_foreign_thread(
-  fn, ctx, cb, ud, req: pointer, reqLen: csize_t
+  fn, poll, ctx, req: pointer,
+  reqLen: csize_t,
+  reqId: ptr culonglong,
+  msg: ptr pointer,
+  pollRet: ptr cint,
 ): cint {.importc, nodecl.}
 
-type EchoExport = proc(
-  ctxToken: FFICtxToken,
-  callback: FFICallBack,
-  userData: pointer,
-  reqCbor: ptr byte,
-  reqCborLen: csize_t,
-): cint {.cdecl, raises: [].}
+type
+  EchoExport = proc(
+    ctxToken: FFICtxToken, reqCbor: ptr byte, reqCborLen: csize_t, reqIdOut: ptr uint64
+  ): cint {.cdecl, raises: [].}
+  PollExport = proc(
+    ctxToken: FFICtxToken, timeoutMs: int32, msg: ptr ptr NimFfiMsg
+  ): cint {.cdecl, raises: [].}
 
-proc callOnForeignThread(ctx: FFICtxToken, req: var seq[byte], d: ptr ReplyData): cint =
-  ## The export goes to C as an opaque pointer; only the typedef above can drift.
+type ForeignReply = object
+  rc: cint
+  pollRet: cint
+  reqId: uint64
+  msg: ptr NimFfiMsg ## Valid until the next poll of the context.
+
+proc callOnForeignThread(ctx: FFICtxToken, req: var seq[byte]): ForeignReply =
+  ## The exports go to C as opaque pointers; only the typedefs above can drift.
   let echoExport: EchoExport = threadedcbor_echo
-  nimffi_call_on_foreign_thread(
+  let pollExport: PollExport = threadedcbor_poll
+  var reply: ForeignReply
+  var reqId: culonglong
+  var msg: pointer
+  reply.rc = nimffi_call_on_foreign_thread(
     cast[pointer](echoExport),
+    cast[pointer](pollExport),
     cast[pointer](ctx),
-    cast[pointer](onReply),
-    cast[pointer](d),
     cast[pointer](addr req[0]),
     csize_t(req.len),
+    addr reqId,
+    addr msg,
+    addr reply.pollRet,
   )
+  reply.reqId = uint64(reqId)
+  reply.msg = cast[ptr NimFfiMsg](msg)
+  return reply
 
 proc runScenario(tag: string, rounds: int): bool =
   ## One context, `rounds` calls, each on its own fresh platform thread.
   let ctx = makeCtx(tag)
   for i in 0 ..< rounds:
-    var d: ReplyData
-    initReplyData(d)
     var req = cborEncode(ThreadedcborEchoReq(text: "call " & $i))
 
-    let rc = callOnForeignThread(ctx, req, addr d)
-    waitReply(d)
-    let text = replyString(d)
-    let good = rc == RET_OK and d.retCode == RET_OK and text == tag & ":call " & $i
+    let reply = callOnForeignThread(ctx, req)
+    var good = reply.rc == RET_OK and reply.pollRet == RET_OK and not reply.msg.isNil()
+    var text = ""
+    if good:
+      text = replyString(reply.msg)
+      good =
+        reply.msg.kind == MsgReply and reply.msg.id == reply.reqId and
+        reply.msg.retCode == RET_OK and text == tag & ":call " & $i
 
-    deinitReplyData(d)
     if not good:
-      echo tag, ": round ", i, " failed: rc=", rc, " ret=", d.retCode, " text=", text
+      echo tag,
+        ": round ", i, " failed: rc=", reply.rc, " poll=", reply.pollRet, " text=", text
       return false
 
   if ThreadLibFFIPool.destroyFFIContext(ThreadLibFFIPool.resolveCtx(ctx)).isErr():

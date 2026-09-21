@@ -1,7 +1,7 @@
 ## Recycle hands the pool slot back with nothing of the previous owner left on
 ## it: no live handles, and no teardown at all while a handler still runs.
 
-import std/[atomics, os]
+import std/[atomics, os, strutils]
 import unittest2
 import results
 import ffi
@@ -44,16 +44,14 @@ proc recyclelib_block*(lib: RecycleLib): Future[Result[int, string]] {.ffi.} =
   await noCancel(waitForRelease())
   return ok(1)
 
-template runCall(d, ctx, reqBytes, exportProc) =
-  initCallbackData(d)
-  var rb = reqBytes
-  check exportProc(ctx.ffiToken(), testCallback, addr d, encodedPtr(rb), rb.len.csize_t) ==
-    RET_OK
-  waitCallback(d)
-
-# The blocked handler answers long after its test returns, so its state is a
-# global: a stack copy would be gone by then.
-var gBlockData: CallbackData
+template runCall(ctx, req, exportProc: untyped): PolledMsg =
+  ## A template: the export shares its name with the Nim-native proc, so only a call resolves it.
+  block:
+    var rb = cborEncode(req)
+    var reqId: uint64
+    doAssert exportProc(ctx.ffiToken(), encodedPtr(rb), rb.len.csize_t, addr reqId) ==
+      RET_OK
+    pollReply(ctx, reqId)
 
 suite "recycle opens a new generation on the slot":
   test "the token of the previous owner no longer resolves":
@@ -74,18 +72,15 @@ suite "recycle opens a new generation on the slot":
     check not RecycleLibFFIPool.isValidCtx(staleToken)
     check RecycleLibFFIPool.resolveCtx(staleToken).isNil()
 
-    var d: CallbackData
-    initCallbackData(d)
-    defer:
-      deinitCallbackData(d)
     var rb = cborEncode(RecyclelibOpenReq(req: OpenReq(name: "stale")))
-    check recyclelib_open(
-      staleToken, testCallback, addr d, encodedPtr(rb), rb.len.csize_t
-    ) == RET_ERR
-    # Rejected before the enqueue: the callback carries the error, and the new
-    # owner never sees the request.
-    check wasCalled(d)
-    check d.retCode == RET_ERR
+    var reqId = 0'u64
+    check recyclelib_open(staleToken, encodedPtr(rb), rb.len.csize_t, addr reqId) ==
+      RET_INVALID_CTX
+    # Refused before the enqueue: the code and the last error say so, and the new
+    # owner sees neither the request nor a reply to it.
+    check reqId == 0
+    check $recyclelib_last_error() == "ctx is not a valid FFI context"
+    check nextMsg(second, 100).ret == RET_TIMEOUT
     check second[].handles.byHandle.len == 0
 
     check RecycleLibFFIPool.recycleFFIContext(second).isOk()
@@ -109,17 +104,10 @@ suite "recycle clears the handle registry":
   test "the handle ids of the previous owner do not resolve for the next one":
     let first = RecycleLibFFIPool.createFFIContext().get()
 
-    var od: CallbackData
-    runCall(
-      od,
-      first,
-      cborEncode(RecyclelibOpenReq(req: OpenReq(name: "alpha"))),
-      recyclelib_open,
-    )
-    defer:
-      deinitCallbackData(od)
-    check od.retCode == RET_OK
-    let handle = cborDecode(payload(od), uint64).value
+    let opened =
+      runCall(first, RecyclelibOpenReq(req: OpenReq(name: "alpha")), recyclelib_open)
+    check opened.retCode == RET_OK
+    let handle = cborDecode(opened.payload, uint64).value
     check handle == 1'u64
     check first[].handles.byHandle.len == 1
 
@@ -131,26 +119,17 @@ suite "recycle clears the handle registry":
     # Lowest free slot wins, so a fresh slot here would prove nothing.
     check second == first
 
-    var td: CallbackData
-    runCall(td, second, cborEncode(RecyclelibTokenReq(s: handle)), recyclelib_token)
-    defer:
-      deinitCallbackData(td)
-    check td.retCode == RET_ERR
+    check runCall(second, RecyclelibTokenReq(s: handle), recyclelib_token).retCode ==
+      RET_ERR
 
     check RecycleLibFFIPool.recycleFFIContext(second).isOk()
 
   test "handles of a reused slot start from a clean table":
     let ctx = RecycleLibFFIPool.createFFIContext().get()
     for i in 0 .. 4:
-      var od: CallbackData
-      runCall(
-        od,
-        ctx,
-        cborEncode(RecyclelibOpenReq(req: OpenReq(name: "s" & $i))),
-        recyclelib_open,
-      )
-      check od.retCode == RET_OK
-      deinitCallbackData(od)
+      check runCall(
+        ctx, RecyclelibOpenReq(req: OpenReq(name: "s" & $i)), recyclelib_open
+      ).retCode == RET_OK
     check ctx[].handles.byHandle.len == 5
 
     check RecycleLibFFIPool.recycleFFIContext(ctx).isOk()
@@ -159,14 +138,14 @@ suite "recycle clears the handle registry":
 suite "recycle with a handler that does not drain":
   # Leaks its slot on purpose, so it runs last in this file.
   test "the recycle reports the failure and keeps the library":
-    initCallbackData(gBlockData)
     let ctx = RecycleLibFFIPool.createFFIContext().get()
 
     gHold.store(true)
     gEntered.store(false)
     var rb = cborEncode(RecyclelibBlockReq())
+    var blockReqId: uint64
     check recyclelib_block(
-      ctx.ffiToken(), testCallback, addr gBlockData, encodedPtr(rb), rb.len.csize_t
+      ctx.ffiToken(), encodedPtr(rb), rb.len.csize_t, addr blockReqId
     ) == RET_OK
     while not gEntered.load():
       os.sleep(5)
@@ -179,23 +158,19 @@ suite "recycle with a handler that does not drain":
     check res.isErr()
     check elapsed >= 2 * RecycleTimeout
     check elapsed < RecycleWaitTimeout
-    # The host still owns the userData of the in-flight request, so the callback
-    # it carries must not have fired yet.
-    check not wasCalled(gBlockData)
+    # The handler still runs, so the failed recycle must not have answered for it.
+    check not waitReplyQueued(ctx, 0)
     check not ctx[].myLib.isNil()
 
     # The failure is terminal, so the wedged slot answers every later caller the same way.
     check RecycleLibFFIPool.recycleFFIContext(ctx).isErr()
 
-    var rd: CallbackData
-    initCallbackData(rd)
-    defer:
-      deinitCallbackData(rd)
     var rejected = cborEncode(RecyclelibOpenReq(req: OpenReq(name: "after-failure")))
+    var rejectedId: uint64
     check recyclelib_open(
-      ctx.ffiToken(), testCallback, addr rd, encodedPtr(rejected), rejected.len.csize_t
+      ctx.ffiToken(), encodedPtr(rejected), rejected.len.csize_t, addr rejectedId
     ) == RET_ERR
-    check rd.retCode == RET_ERR
+    check "being recycled" in $recyclelib_last_error()
 
     # The slot stays claimed: handing it to a new owner is what the failed drain
     # rules out.
@@ -203,6 +178,14 @@ suite "recycle with a handler that does not drain":
     check other != ctx
     check RecycleLibFFIPool.recycleFFIContext(other).isOk()
 
+    # The quarantined slot still hands out the one reply it owes, then says why it closed.
     gHold.store(false)
-    waitCallback(gBlockData)
-    deinitCallbackData(gBlockData)
+    check waitReplyQueued(ctx)
+    let reply = pollMsg(ctx)
+    check reply.kind == MsgReply
+    check reply.id == blockReqId
+    check reply.retCode == RET_OK
+    let closed = pollMsg(ctx)
+    check closed.ret == RET_CLOSED
+    check closed.retCode == RET_ERR
+    check closed.payload.len > 0
