@@ -47,7 +47,6 @@ var
   gTeardownHold: Atomic[bool]
   gTeardownRan: Atomic[bool]
   gTeardownThreadId: Atomic[int]
-  gReplied: Atomic[bool]
 
 startWatchdog(120_000, "a recycle or a drain never returned")
 
@@ -103,16 +102,11 @@ proc teardownlib_destroy*(lib: TeardownLib): Future[void] {.ffiDtor.} =
   gTeardownThreadId.store(getThreadId())
   gTeardownRan.store(true)
 
-proc replyCallback(
-    retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
-) {.cdecl, gcsafe, raises: [].} =
-  gReplied.store(true)
-
 proc orphanEventsSeenBy(ctx: ptr FFIContext[TeardownLib]): int =
   ## What the next owner polls: an orphan event here is an event of a past owner.
   var seen = 0
   while true:
-    let got = pollMsg(ctx, 0)
+    let got = nextMsg(ctx, 0)
     if got.ret != RET_OK:
       break
     if got.kind == MsgEvent and got.nameId == nameId(OrphanEvent):
@@ -136,36 +130,35 @@ proc waitTicks(id: int, want: int, timeoutMs = 5000): bool =
   true
 
 proc createCtxWithLib(): ptr FFIContext[TeardownLib] =
-  ## Spins up a context and waits on `libReady`, the flag the teardown gates on.
+  ## Spins up a context and waits for the ctor's reply; `libReady` is the flag the teardown gates on.
   # Not `myLib`: the worker points that at its fallback before the ctor runs.
   var cfg = cborEncode(TeardownlibCreateCtorReq(config: NoopConfig(dummy: 0)))
-  let token = teardownlib_create(encodedPtr(cfg), cfg.len.csize_t, noopCallback, nil)
-  if token.isNil():
+  var token: FFICtxToken
+  var reqId: uint64
+  if teardownlib_create(encodedPtr(cfg), cfg.len.csize_t, addr token, addr reqId) !=
+      RET_OK:
     return nil
   let ctx = TeardownLibFFIPool.resolveCtx(token)
-  var tries = 0
-  while not ctx[].libReady.load() and tries < 500:
-    os.sleep(5)
-    inc tries
-  ctx
+  # The ctor's reply is queued after `libReady` is set.
+  if pollReply(ctx, reqId).retCode != RET_OK or not ctx[].libReady.load():
+    return nil
+  return ctx
 
 proc callSpawn(ctx: ptr FFIContext[TeardownLib]): bool =
-  gReplied.store(false)
   var rb = cborEncode(TeardownlibSpawnReq())
-  if teardownlib_spawn(
-    ctx.ffiToken(), replyCallback, nil, encodedPtr(rb), rb.len.csize_t
-  ) != RET_OK:
+  var reqId: uint64
+  if teardownlib_spawn(ctx.ffiToken(), encodedPtr(rb), rb.len.csize_t, addr reqId) !=
+      RET_OK:
     return false
-  waitFlag(gReplied)
+  return pollReply(ctx, reqId).retCode == RET_OK
 
 proc callPing(ctx: ptr FFIContext[TeardownLib]): bool =
-  gReplied.store(false)
   var rb = cborEncode(TeardownlibPingReq())
-  if teardownlib_ping(
-    ctx.ffiToken(), replyCallback, nil, encodedPtr(rb), rb.len.csize_t
-  ) != RET_OK:
+  var reqId: uint64
+  if teardownlib_ping(ctx.ffiToken(), encodedPtr(rb), rb.len.csize_t, addr reqId) !=
+      RET_OK:
     return false
-  waitFlag(gReplied)
+  return pollReply(ctx, reqId).retCode == RET_OK
 
 suite "async {.ffiDtor.} teardown hook":
   test "destroy blocks until the async teardown body completes":

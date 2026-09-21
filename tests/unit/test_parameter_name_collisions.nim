@@ -1,6 +1,7 @@
 import unittest2
 import results
 import ffi
+import ./helpers
 
 type CollisionLib = object
 
@@ -34,3 +35,19 @@ suite "generated request identifiers":
     check request.reqObj == "reqObj"
     check request.sharedData == 11
     check request.sharedLen == 13
+
+  test "a request with those names is built, dispatched and answered":
+    var pool: FFIContextPool[CollisionLib]
+    let ctx = pool.createFFIContext().valueOr:
+      check false
+      return
+    defer:
+      discard pool.destroyFFIContext(ctx)
+
+    let reply = call(
+      ctx,
+      ParameterCollisionRequest.ffiNewReq(
+        "callback", 42'u64, true, 7, "reqObj", 11'u64, 13
+      ),
+    )
+    check reply.okString() == "callback42true7reqObj1113"

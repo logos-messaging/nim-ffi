@@ -35,31 +35,63 @@ cmake --build build
 ./build/my_timer_example
 ```
 
-## Asynchronous API
+## Requests
 
-Every method and the constructor take a typed **result callback** and return
-immediately. The callback fires exactly once — synchronously if the request
-fails to even submit, otherwise from the Nim dispatch thread when the reply
-arrives:
+The library never calls into your program and the binding starts no thread. A
+request returns as soon as it is queued; its reply waits inside the library
+until you take it out. Every request comes in two shapes.
+
+**Sequential program** — the `_sync` form submits, then pumps the context until
+its own reply arrives. You own what it hands out:
 
 ```c
-static void on_echo(int err_code, const EchoResponse* reply,
-                    const char* err_msg, void* user_data) {
-    if (err_code != 0) { /* err_msg is set, reply is NULL */ return; }
+EchoRequest req = {"hello", 50};
+EchoResponse res;
+char* err = NULL;
+int rc = my_timer_ctx_echo_sync(ctx, &req, &res, &err, /*timeout_ms=*/5000, &handlers);
+if (rc == NIMFFI_RET_OK) {
+    printf("echoed: %s\n", res.echoed);
+    my_timer_free_EchoResponse(&res);
+} else {
+    /* NIMFFI_RET_ERR: the library's error. NIMFFI_RET_TIMEOUT, NIMFFI_RET_CLOSED,
+     * or the code of a refused submit. */
+    fprintf(stderr, "echo failed (%d): %s\n", rc, err ? err : "");
+    free(err);
+}
+```
+
+Every other message that arrives meanwhile (an event, a liveness report) goes
+to `handlers`, which may be `NULL`. After a timeout the late reply is dropped.
+
+**Program with a loop** — the asynchronous form takes a typed reply callback,
+which runs later, inside `my_timer_ctx_pump_once()`, on the thread that pumps:
+
+```c
+static void on_echo(int ret, const EchoResponse* reply,
+                    const char* err, void* user_data) {
+    if (ret != NIMFFI_RET_OK) { /* err is set, reply is NULL */ return; }
     printf("echoed: %s\n", reply->echoed);
 }
 ...
-my_timer_ctx_echo(ctx, &req, on_echo, /*user_data=*/NULL);
+int rc = my_timer_ctx_echo(ctx, &req, on_echo, /*user_data=*/NULL);
+if (rc != NIMFFI_RET_OK) {
+    /* Refused: on_echo will never run. */
+    fprintf(stderr, "refused (%d): %s\n", rc, my_timer_last_error());
+}
 ```
 
-See `main.c` for the full pattern, including a small `wait_done()` poll helper
-that turns each async call back into a sequential step.
+The constructor follows the same split: `my_timer_ctx_create_sync()`, or
+`my_timer_ctx_create()`, which hands the context out at once so that you can
+pump it for the constructor's reply. Static requests (`my_timer_static_*`) need
+no context; their replies arrive on the library's static context, pumped with
+`my_timer_static_pump_once()` (the `_sync` forms do it for you).
 
-## Events
+See `main.c` for the full pattern.
 
-The library calls no event callback and the binding starts no thread. Events,
-liveness reports and the end of the context are queued inside the library, and
-the host takes them out on a thread of its choice:
+## Events and the pump
+
+Events, liveness reports and the end of the context are queued inside the
+library like replies, and come out of the same pump:
 
 ```c
 static void on_echo_fired(const EchoEvent* ev, void* user_data) {
@@ -74,24 +106,37 @@ for (;;) {
 }
 ```
 
-`MyTimerHandlers` in `my_timer.h` lists everything the library can send. A host
-with an event loop of its own waits on `my_timer_ctx_poll_fd(ctx)` instead (an
-epoll fd on Linux, a kqueue fd on macOS/BSD, an Event `HANDLE` on Windows), then
-pumps with a timeout of 0 until `NIMFFI_RET_TIMEOUT`, and closes the handle when
-done. Stop pumping a context before `my_timer_ctx_destroy()`.
+`MyTimerHandlers` in `my_timer.h` lists everything the library can send besides
+replies. A host with an event loop of its own waits on
+`my_timer_ctx_poll_fd(ctx)` instead (an epoll fd on Linux, a kqueue fd on
+macOS/BSD, an Event `HANDLE` on Windows), then pumps with a timeout of 0 until
+`NIMFFI_RET_TIMEOUT`, and closes the handle when done.
+
+## Threads
+
+A context of this binding is single-threaded by design: submit and pump it from
+one thread, or hold one lock around both. `my_timer_ctx_destroy()` settles the
+requests still waiting with `NIMFFI_RET_CLOSED`; never call it from inside a
+handler or a reply callback. A host that wants another threading model uses the
+raw exports (`my_timer_<proc>()`, `my_timer_poll()`) with the typed decoders
+`my_timer_decode_<proc>_reply()` and `my_timer_decode_<event>()`.
 
 ## Memory Ownership
 
 - Request-side strings/sequences are *borrowed* — pass a plain `const char*`
   (a literal is fine); the binding never frees them.
-- Reply values and error strings passed into a result callback are **owned by
+- Reply values and error strings passed into a reply callback are **owned by
   the binding** and valid only for the duration of that callback. The caller
   never frees them — copy out anything you need to keep before returning.
-- An event handed to a `MyTimerHandlers` entry follows the same rule. A value
-  you decode yourself with `my_timer_decode_<event>()` is yours to release with
-  the `my_timer_free_<Type>()` helper of its type.
-- A `MyTimerCtx*` delivered to the constructor callback is the exception:
-  ownership transfers to you, and you release it with `my_timer_ctx_destroy()`.
+- An event handed to a `MyTimerHandlers` entry follows the same rule.
+- What a `_sync` call hands out, and what you decode yourself with
+  `my_timer_decode_<event>()` or `my_timer_decode_<proc>_reply()`, is yours:
+  release it with the `my_timer_free_<Type>()` helper of its type (a bare
+  string with `free()`). An error text handed out through a `char**` is yours
+  too; release it with `free()`.
+- A `MyTimerCtx*` is yours from the moment the constructor hands it out,
+  whatever the constructor's reply says; release it with
+  `my_timer_ctx_destroy()`.
 
 ## Do Not Edit
 

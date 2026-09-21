@@ -11,11 +11,6 @@ proc encodedPtr*(bytes: var seq[byte]): ptr byte =
   else:
     cast[ptr byte](addr bytes[0])
 
-proc noopCallback*(
-    retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
-) {.cdecl, gcsafe, raises: [].} =
-  discard
-
 proc waitFlag*(flag: var Atomic[bool], timeoutMs = 5000): bool =
   let deadline = Moment.now() + timeoutMs.milliseconds
   while not flag.load():
@@ -30,103 +25,12 @@ proc waitSlotFree*[T](ctx: ptr FFIContext[T]) =
   while ctx.isInUse() and Moment.now() < deadline:
     os.sleep(1)
 
-type CallbackData* = object
-  ## Reply landing pad for a request: the callback runs on the FFI thread, so
-  ## the test waits on the condvar rather than polling.
-  lock*: Lock
-  cond*: Cond
-  called*: bool
-  retCode*: cint
-  msg*: array[1024, byte]
-  msgLen*: int
-
-proc initCallbackData*(d: var CallbackData) =
-  d.lock.initLock()
-  d.cond.initCond()
-
-proc deinitCallbackData*(d: var CallbackData) =
-  d.cond.deinitCond()
-  d.lock.deinitLock()
-
-template setupCallbackData*(name: untyped) =
-  var name: CallbackData
-  initCallbackData(name)
-  defer:
-    deinitCallbackData(name)
-
-proc testCallback*(
-    retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
-) {.cdecl, gcsafe, raises: [].} =
-  # A progress ping is not a terminal answer; skip it here.
-  if retCode == RET_STALE_WARN:
-    return
-  let d = cast[ptr CallbackData](userData)
-  acquire(d[].lock)
-  d[].retCode = retCode
-  let n = min(int(len), d[].msg.len)
-  if n > 0 and not msg.isNil:
-    copyMem(addr d[].msg[0], msg, n)
-  d[].msgLen = n
-  d[].called = true
-  signal(d[].cond)
-  release(d[].lock)
-
-proc waitCallback*(d: var CallbackData) =
-  acquire(d.lock)
-  while not d.called:
-    wait(d.cond, d.lock)
-  release(d.lock)
-
-proc waitCallbackTimeout*(d: var CallbackData, timeoutMs: int): bool =
-  ## `waitCallback` for a reply that may never come; false on timeout.
-  let deadline = Moment.now() + timeoutMs.milliseconds
-  while true:
-    acquire(d.lock)
-    let done = d.called
-    release(d.lock)
-    if done:
-      return true
-    if Moment.now() >= deadline:
-      return false
-    os.sleep(10)
-
-proc resetCalled*(d: var CallbackData) =
-  acquire(d.lock)
-  d.called = false
-  release(d.lock)
-
-proc wasCalled*(d: var CallbackData): bool =
-  acquire(d.lock)
-  let called = d.called
-  release(d.lock)
-  called
-
-proc payload*(d: var CallbackData): seq[byte] =
-  var b = newSeq[byte](d.msgLen)
-  if d.msgLen > 0:
-    copyMem(addr b[0], addr d.msg[0], d.msgLen)
-  b
-
-proc rawText*(d: var CallbackData): string =
-  ## The reply bytes as text: an error message, or a CBOR payload to decode.
-  var s = newString(d.msgLen)
-  if d.msgLen > 0:
-    copyMem(addr s[0], addr d.msg[0], d.msgLen)
-  s
-
-proc okString*(d: var CallbackData): string =
-  ## The CBOR-decoded `string` an OK reply carries; asserts the request succeeded,
-  ## so a failure reports the error text instead of an empty string.
-  doAssert d.retCode == RET_OK,
-    "okString on retCode " & $d.retCode & " (msg=" & d.rawText() & ")"
-  cborDecode(d.payload(), string).valueOr:
-    ""
-
 type PolledMsg* = object
   ## One `poll` result, with the payload copied out: the library's copy dies at the next poll.
   ret*: cint
   kind*: uint32
   seq*: uint64
+  id*: uint64
   nameId*: uint64
   aux*: uint64
   retCode*: int32
@@ -142,6 +46,7 @@ proc pollMsg*[T](
     return polled
   polled.kind = msg.kind
   polled.seq = msg.seq
+  polled.id = msg.id
   polled.nameId = msg.nameId
   polled.aux = msg.aux
   polled.retCode = msg.retCode
@@ -152,6 +57,102 @@ proc pollMsg*[T](
 
 proc pollMsg*[T](ctx: ptr FFIContext[T], timeoutMs = 5000): PolledMsg =
   return pollMsg(ctx, ctx.currentGeneration(), timeoutMs)
+
+type SkippedMsg = object
+  ctx: pointer
+  generation: uint
+  msg: PolledMsg
+
+var skipped {.threadvar.}: seq[SkippedMsg]
+  ## What `pollReply` polled on its way to the reply it wanted; `nextMsg` hands them
+  ## out first. Tagged with the claim, so one owner's leftovers never reach the next.
+
+proc takeSkipped[T](
+    ctx: ptr FFIContext[T], wanted: proc(m: PolledMsg): bool, found: var PolledMsg
+): bool =
+  for i in 0 ..< skipped.len:
+    if skipped[i].ctx == cast[pointer](ctx) and
+        skipped[i].generation == ctx.currentGeneration() and wanted(skipped[i].msg):
+      found = skipped[i].msg
+      skipped.delete(i)
+      return true
+  return false
+
+proc nextMsg*[T](ctx: ptr FFIContext[T], timeoutMs = 5000): PolledMsg =
+  ## `pollMsg` for a test that also uses `pollReply`: no message is lost between them.
+  var first: PolledMsg
+  if takeSkipped(
+    ctx,
+    proc(m: PolledMsg): bool =
+      true,
+    first,
+  ):
+    return first
+  return pollMsg(ctx, timeoutMs)
+
+proc pollReply*[T](ctx: ptr FFIContext[T], reqId: uint64, timeoutMs = 5000): PolledMsg =
+  ## The reply of `reqId`. Stale warnings about it are dropped; every other message
+  ## is kept for `nextMsg`. `ret` is `RET_TIMEOUT` when it does not come in time.
+  var found: PolledMsg
+  if takeSkipped(
+    ctx,
+    proc(m: PolledMsg): bool =
+      m.kind == MsgReply and m.id == reqId,
+    found,
+  ):
+    return found
+  let deadline = Moment.now() + timeoutMs.milliseconds
+  while true:
+    let left = (deadline - Moment.now()).milliseconds
+    if left <= 0:
+      return PolledMsg(ret: RET_TIMEOUT)
+    let got = pollMsg(ctx, int(left))
+    if got.ret != RET_OK:
+      return got
+    if got.kind == MsgReply and got.id == reqId:
+      return got
+    if got.kind == MsgStaleWarn and got.id == reqId:
+      continue
+    skipped.add(
+      SkippedMsg(ctx: cast[pointer](ctx), generation: ctx.currentGeneration(), msg: got)
+    )
+
+proc text*(m: PolledMsg): string =
+  ## The payload as text: the error of a RET_ERR reply.
+  var s = newString(m.payload.len)
+  if m.payload.len > 0:
+    copyMem(addr s[0], unsafeAddr m.payload[0], m.payload.len)
+  return s
+
+proc okString*(m: PolledMsg): string =
+  ## The CBOR-decoded `string` an OK reply carries; asserts the request succeeded,
+  ## so a failure reports the error text instead of an empty string.
+  doAssert m.ret == RET_OK and m.retCode == RET_OK,
+    "okString on ret " & $m.ret & " retCode " & $m.retCode & " (msg=" & m.text() & ")"
+  return cborDecode(m.payload, string).valueOr:
+    ""
+
+proc call*[T](
+    ctx: ptr FFIContext[T], request: ptr FFIThreadRequest, timeoutMs = 5000
+): PolledMsg =
+  ## Submits `request` and waits for its reply.
+  let reqId = sendRequestToFFIThread(ctx, request).valueOr:
+    return PolledMsg(ret: RET_ERR, retCode: RET_ERR, payload: cast[seq[byte]](error))
+  return pollReply(ctx, reqId, timeoutMs)
+
+proc waitReplyQueued*[T](ctx: ptr FFIContext[T], timeoutMs = 5000): bool =
+  ## Looks without polling: for a test where polling would change what it observes,
+  ## or where another thread is the poller.
+  let deadline = Moment.now() + timeoutMs.milliseconds
+  while true:
+    var queued = false
+    withLock ctx[].outbound.lock:
+      queued = not ctx[].outbound.replyHead.isNil()
+    if queued:
+      return true
+    if Moment.now() >= deadline:
+      return false
+    os.sleep(2)
 
 proc watchdogBody(args: (int, cstring)) {.thread.} =
   os.sleep(args[0])

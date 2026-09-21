@@ -9,7 +9,12 @@ and assert the round-tripped values. The event cases cover the per-context pump
 thread that takes the library's messages out of `my_timer_poll`: ordered, typed
 delivery, a listener that removes itself, adds another listener, calls back
 into its context or destroys it, teardown while events are in flight, and the
-closed hook. The `CrossLibrary` test additionally
+closed hook. Replies come out of the same pump: the reply cases cover a blocking
+call made inside a listener (it polls in place), hundreds of `*Async` calls in
+flight without a thread apiece, a call that times out and its late reply,
+futures failed by the destruction of their context, a refused `create` that
+claims no pool slot, and `shutdown` with the pump of the static procs. The
+`CrossLibrary` test additionally
 loads `examples/echo`'s `echo.hpp` alongside the timer to prove two
 independent nim-ffi libraries coexist in one process with no symbol clash
 and no shared global state.

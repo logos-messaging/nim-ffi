@@ -13,9 +13,9 @@
 #endif
 #include <string>
 #include <cstdint>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <charconv>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -26,24 +26,24 @@
 #include <vector>
 #include <optional>
 #include <type_traits>
+#include <unordered_map>
 #include <cstring>
 #include <cassert>
 extern "C" {
 #include <tinycbor/cbor.h>
 }
 
-// nim-ffi result-callback status codes (mirror ffi/ffi_types.nim and the C
-// header). Guarded so a translation unit that also pulls in the C header keeps
-// a single definition.
+// nim-ffi status codes (mirror ffi/ret_codes.nim and the C header). Guarded so
+// a translation unit that also pulls in the C header keeps a single definition.
 #ifndef NIMFFI_RET_OK
 #define NIMFFI_RET_OK 0
 #define NIMFFI_RET_ERR 1
-#define NIMFFI_RET_MISSING_CALLBACK 2
-#define NIMFFI_RET_STALE_WARN 3
 #define NIMFFI_RET_TIMEOUT 4
 #define NIMFFI_RET_CLOSED 5
 #define NIMFFI_RET_INVALID_CTX 6
 #define NIMFFI_RET_BUSY 7
+#define NIMFFI_RET_QUEUE_FULL 8
+#define NIMFFI_RET_TOO_LARGE 9
 #endif
 
 // ============================================================
@@ -821,7 +821,7 @@ typedef struct {
   uint32_t struct_size;   /* sizeof(NimFfiMsg) of the library; fields are only appended */
   uint32_t kind;          /* NIMFFI_MSG_* */
   uint64_t seq;           /* production order within the context */
-  uint64_t id;
+  uint64_t id;            /* REPLY, STALE_WARN: the request id. Otherwise 0 */
   uint64_t name_id;       /* EVENT: which one. Otherwise 0 */
   uint64_t aux;
   int32_t  ret_code;
@@ -830,6 +830,8 @@ typedef struct {
   size_t   len;
 } NimFfiMsg;
 
+#define NIMFFI_MSG_REPLY 1  /* id is the request; ret_code OK: payload is its CBOR, ERR: UTF-8 text */
+#define NIMFFI_MSG_STALE_WARN 3  /* request id is still running after aux ms; its REPLY still comes */
 #define NIMFFI_MSG_EVENT 2  /* name_id names it; payload is its CBOR */
 #define NIMFFI_MSG_NOT_RESPONDING 5  /* aux is a NIMFFI_NOT_RESPONDING_* reason */
 #define NIMFFI_MSG_RESPONDING 6  /* the FFI thread's heartbeat resumed */
@@ -846,20 +848,35 @@ typedef struct {
 // ============================================================
 
 extern "C" {
-typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_data);
+/**
+ * A request returns as soon as it is queued. NIMFFI_RET_OK promises exactly one
+ * NIMFFI_MSG_REPLY out of `<lib>_poll` whose `id` is `*req_id_out`, unless the
+ * context closes first; the reply can be polled before the request call returns.
+ * Any other return means no reply will come; `<lib>_last_error` says why.
+ * A reply's `ret_code` is NIMFFI_RET_OK and its payload the CBOR return value, or
+ * NIMFFI_RET_ERR and its payload UTF-8 error text.
+ * The constructor sets `*ctx_out` at once, so it can be polled; whether the
+ * construction worked is the reply `*req_id_out` on it. After a NIMFFI_RET_ERR
+ * reply the context is still claimed and must be destroyed.
+ * The context class below does all of this: one typed method per request.
+ */
 
 /** Creates the FFIContext + MyTimer; async via chronos. */
-void* my_timer_create(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback callback, void* user_data);
+int my_timer_create(const uint8_t* req_cbor, size_t req_cbor_len, void** ctx_out, uint64_t* req_id_out);
 /** Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`. */
-int my_timer_echo(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int my_timer_echo(void* ctx, const uint8_t* req_cbor, size_t req_cbor_len, uint64_t* req_id_out);
 /** Returns the library's version string. */
-int my_timer_version(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
-int my_timer_lib_version(FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
-int my_timer_complex(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int my_timer_version(void* ctx, const uint8_t* req_cbor, size_t req_cbor_len, uint64_t* req_id_out);
+int my_timer_lib_version(const uint8_t* req_cbor, size_t req_cbor_len, uint64_t* req_id_out);
+int my_timer_complex(void* ctx, const uint8_t* req_cbor, size_t req_cbor_len, uint64_t* req_id_out);
 /** Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope. */
-int my_timer_schedule(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+int my_timer_schedule(void* ctx, const uint8_t* req_cbor, size_t req_cbor_len, uint64_t* req_id_out);
 /** Tears down the FFI context; blocks until FFI + watchdog threads join. */
 int my_timer_destroy(void* ctx);
+/** The context the replies of the static procs arrive on; NULL on failure. */
+void* my_timer_static_ctx(void);
+/** Why the last request of the calling thread was refused. Never NULL. */
+const char* my_timer_last_error(void);
 /**
  * Take the next message of `ctx` out, waiting up to `timeout_ms` (0 never
  * blocks, negative waits until a message or the end of the context).
@@ -890,109 +907,136 @@ int my_timer_shutdown(void);
 } // extern "C"
 
 // ============================================================
-// Synchronous call helper
-// ============================================================
-// Guarded so two nim-ffi headers can share a translation unit.
-#ifndef NIM_FFI_SYNC_CALL_HELPER_HPP_INCLUDED
-#define NIM_FFI_SYNC_CALL_HELPER_HPP_INCLUDED
-
-namespace {
-
-struct FFICallState_ {
-    std::mutex              mtx;
-    std::condition_variable cv;
-    bool                    done{false};
-    bool                    ok{false};
-    std::vector<std::uint8_t> bytes;
-    std::string             err;
-};
-
-inline void ffi_cb_(int ret, const char* msg, size_t len, void* ud) {
-    // NIMFFI_RET_STALE_WARN (3) is a non-terminal progress ping: the request is
-    // still running. This blocking wrapper only reports the final result, so
-    // ignore it WITHOUT touching `ud` — a terminal callback still owns the
-    // shared handle and will free it.
-    if (ret == NIMFFI_RET_STALE_WARN) return;
-
-    // ffi_call_ heap-allocated a shared_ptr and passed its address as ud;
-    // take ownership here so it's freed on every exit path.
-    std::unique_ptr<std::shared_ptr<FFICallState_>> handle(
-        static_cast<std::shared_ptr<FFICallState_>*>(ud));
-    FFICallState_& s = **handle;
-
-    std::lock_guard<std::mutex> lock(s.mtx);
-    s.ok = (ret == NIMFFI_RET_OK);
-    if (msg && len > 0) {
-        const auto* p = reinterpret_cast<const std::uint8_t*>(msg);
-        if (s.ok) s.bytes.assign(p, p + len);
-        else      s.err.assign(msg, len);
-    }
-    s.done = true;
-    s.cv.notify_one();
-}
-
-inline Result<std::vector<std::uint8_t>> ffi_call_(
-        std::function<int(FFICallback, void*)> f,
-        std::chrono::milliseconds timeout) {
-    using Bytes = std::vector<std::uint8_t>;
-    auto state = std::make_shared<FFICallState_>();
-    auto* cb_ref = new std::shared_ptr<FFICallState_>(state);
-    const int ret = f(ffi_cb_, cb_ref);
-    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
-        delete cb_ref;
-        return Result<Bytes>::err("RET_MISSING_CALLBACK (internal error)");
-    }
-    std::unique_lock<std::mutex> lock(state->mtx);
-    const bool fired = state->cv.wait_for(lock, timeout, [&]{ return state->done; });
-    if (!fired)
-        return Result<Bytes>::err("FFI call timed out after " +
-                                  std::to_string(timeout.count()) + "ms");
-    if (!state->ok)
-        return Result<Bytes>::err(state->err);
-    return Result<Bytes>::ok(std::move(state->bytes));
-}
-
-} // anonymous namespace
-
-#endif // NIM_FFI_SYNC_CALL_HELPER_HPP_INCLUDED
-
-// ============================================================
 // Message pump
 // ============================================================
-// The library never calls into the host for an event. Each context owns one
-// pump thread that takes the messages out through `<lib>_poll` and calls the
-// listeners registered on it.
+// The library never calls into the host. Each context owns one pump thread that
+// takes everything the library sends out through `<lib>_poll`: a reply goes to
+// the call waiting for it, anything else to the listeners registered for it.
 // Guarded so two nim-ffi headers can share a translation unit.
 #ifndef NIM_FFI_PUMP_HPP_INCLUDED
 #define NIM_FFI_PUMP_HPP_INCLUDED
 
-class NimFfiPump {
+class NimFfiPump : public std::enable_shared_from_this<NimFfiPump> {
 public:
+    using Bytes = std::vector<std::uint8_t>;
     using PollFn = int (*)(void* ctx, std::int32_t timeout_ms, const NimFfiMsg** msg);
+    using LastErrorFn = const char* (*)();
     // Decodes one NIMFFI_MSG_EVENT and delivers it; generated per library.
     using EventFn = void (*)(NimFfiPump& pump, const NimFfiMsg& msg);
+    // What a reply (or the lack of one) resolves to. Runs on the pump thread, so
+    // it holds no user code: it decodes and hands the value over.
+    using Completion = std::function<void(Result<Bytes>)>;
 
+    using StaleWarnFn = std::function<void(std::uint64_t reqId, std::uint64_t elapsedMs)>;
     using NotRespondingFn = std::function<void(std::uint64_t reason)>;
     using RespondingFn = std::function<void()>;
     using ClosedFn = std::function<void(bool ok, const std::string& reason)>;
 
-    // Returns a non-joinable thread when the thread could not be started.
-    static std::thread start(std::shared_ptr<NimFfiPump> pump, PollFn poll,
-                             void* ctx, EventFn onEvent) noexcept {
+    NimFfiPump(PollFn poll, LastErrorFn lastError, void* ctx, EventFn onEvent)
+        : poll_(poll), lastError_(lastError), ctx_(ctx), onEvent_(onEvent) {}
+
+    // False when the thread could not be started.
+    bool start() noexcept {
         try {
-            return std::thread([pump = std::move(pump), poll, ctx, onEvent] {
-                pump->run(poll, ctx, onEvent);
+            auto self = shared_from_this();
+            std::lock_guard<std::mutex> lock(threadMtx_);
+            thread_ = std::thread([self] {
+                // `thread_` is assigned by now: `stop` may run on this thread.
+                { std::lock_guard<std::mutex> started(self->threadMtx_); }
+                self->run();
             });
+            return true;
         } catch (...) {
-            return std::thread();
+            return false;
         }
     }
 
-    // `detached`: the owner is going away on the pump thread itself, so no
-    // listener may run once the handler in flight returns.
-    void stop(bool detached) {
-        if (detached) detached_.store(true);
+    // Joins the pump thread. Called on the pump thread itself (a listener is
+    // destroying its context) it detaches instead, and no listener runs once
+    // the handler in flight returns.
+    void stop() {
+        const bool onPump = onPumpThread();
+        if (onPump) detached_.store(true);
         stop_.store(true);
+        std::thread thread;
+        {
+            std::lock_guard<std::mutex> lock(threadMtx_);
+            thread = std::move(thread_);
+        }
+        if (!thread.joinable()) return;
+        if (onPump) thread.detach();
+        else thread.join();
+    }
+
+    // True once the pump is over: no reply will be delivered any more.
+    bool finished() {
+        std::lock_guard<std::mutex> lock(waitMtx_);
+        return finished_;
+    }
+
+    static std::string refusal(LastErrorFn lastError, int rc) {
+        const char* text = lastError ? lastError() : nullptr;
+        if (text && *text) return text;
+        return "FFI request refused (ret code " + std::to_string(rc) + ")";
+    }
+
+    template <class T>
+    static std::future<Result<T>> ready(Result<T> value) {
+        std::promise<Result<T>> promise;
+        auto future = promise.get_future();
+        promise.set_value(std::move(value));
+        return future;
+    }
+
+    // Blocking request. `send(&id)` is the `<lib>_<proc>` call.
+    template <class T, class Send>
+    Result<T> call(Send&& send, std::chrono::milliseconds timeout) {
+        auto state = std::make_shared<SyncState>();
+        std::uint64_t id = 0;
+        std::string refused = submit(send, timeout, false, syncCompletion(state), id);
+        if (!refused.empty()) return Result<T>::err(std::move(refused));
+        auto raw = wait(*state, id, timeout);
+        if (raw.isErr()) return Result<T>::err(raw.error());
+        return decodeCborFFI<T>(raw.value());
+    }
+
+    // The future is fulfilled by the pump thread, or failed by it once `timeout`
+    // passed or the context closed. No thread is started.
+    template <class T, class Send>
+    std::future<Result<T>> callAsync(Send&& send, std::chrono::milliseconds timeout) {
+        auto promise = std::make_shared<std::promise<Result<T>>>();
+        auto future = promise->get_future();
+        std::uint64_t id = 0;
+        std::string refused = submit(send, timeout, true, [promise](Result<Bytes> raw) {
+            auto out = Result<T>::err("the FFI reply could not be decoded");
+            try {
+                if (raw.isErr()) out = Result<T>::err(raw.error());
+                else out = decodeCborFFI<T>(raw.value());
+            } catch (...) {
+            }
+            try {
+                promise->set_value(std::move(out));
+            } catch (...) {
+            }
+        }, id);
+        if (!refused.empty()) promise->set_value(Result<T>::err(std::move(refused)));
+        return future;
+    }
+
+    // The constructor's reply: its id is known before the pump runs, so the
+    // waiter is in place before the reply can be taken out.
+    Result<Bytes> startAndWait(std::uint64_t id, std::chrono::milliseconds timeout) {
+        auto state = std::make_shared<SyncState>();
+        expect(id, timeout, false, syncCompletion(state));
+        if (!start()) {
+            abandon("could not start the pump thread");
+        }
+        return wait(*state, id, timeout);
+    }
+
+    void startAndThen(std::uint64_t id, std::chrono::milliseconds timeout, Completion done) {
+        expect(id, timeout, true, std::move(done));
+        if (!start()) abandon("could not start the pump thread");
     }
 
     // 0 when `fn` is empty.
@@ -1017,7 +1061,7 @@ public:
     }
 
     // The payload is decoded in full before any handler runs: `msg` belongs to
-    // the library and a handler may end the context.
+    // the library and a handler may end the context or poll again.
     template <class T>
     void deliverEvent(const NimFfiMsg& msg) {
         using Fn = std::function<void(const T&)>;
@@ -1032,11 +1076,187 @@ public:
     }
 
 private:
+    static constexpr std::int32_t SliceMs = 250;
+    static constexpr const char* ClosedText = "context closed before the reply arrived";
+
     struct Listener {
         std::uint32_t kind;
         std::uint64_t nameId;
         std::shared_ptr<void> fn; // the std::function type that `kind`/`nameId` imply
     };
+
+    struct Waiter {
+        std::chrono::steady_clock::time_point deadline;
+        std::chrono::milliseconds timeout;
+        bool swept; // the pump fails it at `deadline`; a blocking caller times itself out
+        Completion done;
+    };
+
+    struct SyncState {
+        std::mutex mtx;
+        std::condition_variable cv;
+        bool done{false};
+        Result<Bytes> result;
+    };
+
+    static Completion syncCompletion(const std::shared_ptr<SyncState>& state) {
+        return [state](Result<Bytes> raw) {
+            std::lock_guard<std::mutex> lock(state->mtx);
+            state->result = std::move(raw);
+            state->done = true;
+            state->cv.notify_all();
+        };
+    }
+
+    static std::string timeoutText(std::chrono::milliseconds timeout) {
+        return "FFI call timed out after " + std::to_string(timeout.count()) + "ms";
+    }
+
+    // Clamped: a caller's "forever" must not overflow the clock arithmetic.
+    static std::chrono::milliseconds clamp(std::chrono::milliseconds timeout) {
+        constexpr std::chrono::milliseconds Max = std::chrono::hours(24 * 365);
+        return std::min(std::max(timeout, std::chrono::milliseconds(0)), Max);
+    }
+
+    static NimFfiPump*& current() {
+        thread_local NimFfiPump* pump = nullptr;
+        return pump;
+    }
+
+    bool onPumpThread() { return current() == this; }
+
+    // Empty: the request is queued and `done` runs exactly once. Otherwise why
+    // it was refused; `done` never runs.
+    // The lock is held across `send`: the reply can be polled before `send`
+    // returns, and the pump takes this lock before it looks a waiter up.
+    template <class Send>
+    std::string submit(Send& send, std::chrono::milliseconds timeout, bool swept,
+                       Completion done, std::uint64_t& id) {
+        std::lock_guard<std::mutex> lock(waitMtx_);
+        if (finished_) return ClosedText;
+        const int rc = send(&id);
+        if (rc != NIMFFI_RET_OK) return refusal(lastError_, rc);
+        try {
+            waiters_.emplace(id, Waiter{std::chrono::steady_clock::now() + clamp(timeout),
+                                        timeout, swept, std::move(done)});
+        } catch (...) {
+            return "out of memory"; // its reply is dropped like any unknown id
+        }
+        return {};
+    }
+
+    void expect(std::uint64_t id, std::chrono::milliseconds timeout, bool swept,
+                Completion done) {
+        std::lock_guard<std::mutex> lock(waitMtx_);
+        waiters_.emplace(id, Waiter{std::chrono::steady_clock::now() + clamp(timeout),
+                                    timeout, swept, std::move(done)});
+    }
+
+    // False when the waiter is already gone: its completion ran or is running.
+    bool forget(std::uint64_t id) {
+        Waiter dropped; // its captures die outside the lock
+        std::lock_guard<std::mutex> lock(waitMtx_);
+        auto it = waiters_.find(id);
+        if (it == waiters_.end()) return false;
+        dropped = std::move(it->second);
+        waiters_.erase(it);
+        return true;
+    }
+
+    Result<Bytes> wait(SyncState& state, std::uint64_t id, std::chrono::milliseconds timeout) {
+        if (onPumpThread()) {
+            // A listener is calling in: only this thread can take the reply out,
+            // so poll here, dispatching whatever else arrives meanwhile.
+            const auto deadline = std::chrono::steady_clock::now() + clamp(timeout);
+            while (!stop_.load() && !closed_) {
+                {
+                    std::lock_guard<std::mutex> lock(state.mtx);
+                    if (state.done) break;
+                }
+                const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - std::chrono::steady_clock::now()).count();
+                if (left <= 0) break;
+                pumpOnce(static_cast<std::int32_t>(std::min<long long>(left, SliceMs)));
+            }
+        } else {
+            std::unique_lock<std::mutex> lock(state.mtx);
+            state.cv.wait_for(lock, clamp(timeout), [&] { return state.done; });
+        }
+        std::unique_lock<std::mutex> lock(state.mtx);
+        if (!state.done) {
+            lock.unlock();
+            if (forget(id)) {
+                if (stop_.load()) return Result<Bytes>::err(ClosedText);
+                return Result<Bytes>::err(timeoutText(timeout));
+            }
+            lock.lock(); // the pump holds the waiter: its completion is imminent
+            state.cv.wait(lock, [&] { return state.done; });
+        }
+        return std::move(state.result);
+    }
+
+    static void finish(Waiter& waiter, Result<Bytes> result) {
+        try {
+            waiter.done(std::move(result));
+        } catch (...) {
+        }
+    }
+
+    // A reply nobody waits for (its caller timed out) is dropped.
+    void deliverReply(const NimFfiMsg& msg) {
+        Waiter waiter;
+        {
+            std::lock_guard<std::mutex> lock(waitMtx_);
+            auto it = waiters_.find(msg.id);
+            if (it == waiters_.end()) return;
+            waiter = std::move(it->second);
+            waiters_.erase(it);
+        }
+        auto result = Result<Bytes>::err("out of memory");
+        try {
+            if (msg.ret_code == NIMFFI_RET_OK)
+                result = Result<Bytes>::ok(Bytes(msg.payload, msg.payload + msg.len));
+            else
+                result = Result<Bytes>::err(
+                    std::string(reinterpret_cast<const char*>(msg.payload), msg.len));
+        } catch (...) {
+        }
+        finish(waiter, std::move(result));
+    }
+
+    // So a future never hangs: nobody else watches an async call's deadline.
+    void sweepExpired() {
+        const auto now = std::chrono::steady_clock::now();
+        if (now < nextSweep_) return;
+        nextSweep_ = now + std::chrono::milliseconds(SliceMs);
+        std::vector<Waiter> expired;
+        {
+            std::lock_guard<std::mutex> lock(waitMtx_);
+            for (auto it = waiters_.begin(); it != waiters_.end();) {
+                if (it->second.swept && it->second.deadline <= now) {
+                    expired.push_back(std::move(it->second));
+                    it = waiters_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+        for (auto& waiter : expired)
+            finish(waiter, Result<Bytes>::err(timeoutText(waiter.timeout)));
+    }
+
+    // Every request still waiting will never be answered.
+    void abandon(const std::string& why) {
+        std::vector<Waiter> pending;
+        {
+            std::lock_guard<std::mutex> lock(waitMtx_);
+            finished_ = true;
+            pending.reserve(waiters_.size());
+            for (auto& [id, waiter] : waiters_) pending.push_back(std::move(waiter));
+            waiters_.clear();
+        }
+        for (auto& waiter : pending) finish(waiter, Result<Bytes>::err(why));
+    }
 
     // Copies out under the lock; the handlers then run with the lock released,
     // so a handler may add or remove listeners.
@@ -1063,14 +1283,27 @@ private:
         }
     }
 
-    void dispatch(const NimFfiMsg& msg, EventFn onEvent) {
+    // A handler may poll again (a blocking call made inside it), which ends the
+    // life of `msg`: whatever a handler is given is copied out first.
+    void dispatch(const NimFfiMsg& msg) {
         switch (msg.kind) {
+        case NIMFFI_MSG_REPLY:
+            deliverReply(msg);
+            break;
         case NIMFFI_MSG_EVENT:
-            onEvent(*this, msg);
+            onEvent_(*this, msg);
             break;
-        case NIMFFI_MSG_NOT_RESPONDING:
-            call(matching<NotRespondingFn>(NIMFFI_MSG_NOT_RESPONDING, 0), msg.aux);
+        case NIMFFI_MSG_STALE_WARN: {
+            const std::uint64_t reqId = msg.id;
+            const std::uint64_t elapsedMs = msg.aux;
+            call(matching<StaleWarnFn>(NIMFFI_MSG_STALE_WARN, 0), reqId, elapsedMs);
             break;
+        }
+        case NIMFFI_MSG_NOT_RESPONDING: {
+            const std::uint64_t reason = msg.aux;
+            call(matching<NotRespondingFn>(NIMFFI_MSG_NOT_RESPONDING, 0), reason);
+            break;
+        }
         case NIMFFI_MSG_RESPONDING:
             call(matching<RespondingFn>(NIMFFI_MSG_RESPONDING, 0));
             break;
@@ -1079,36 +1312,108 @@ private:
         }
     }
 
-    // Ends with the closed notification whatever stopped it, so a closed
-    // listener runs exactly once (never after a `stop(true)`).
-    void run(PollFn poll, void* ctx, EventFn onEvent) {
+    // One poll slice. Pump thread only.
+    void pumpOnce(std::int32_t sliceMs) {
         using namespace std::chrono_literals;
-        bool ok = true;
-        std::string reason;
-        while (!stop_.load()) {
-            const NimFfiMsg* msg = nullptr;
-            const int rc = poll(ctx, 250, &msg);
-            if (rc == NIMFFI_RET_OK && msg) {
-                dispatch(*msg, onEvent);
-            } else if (rc == NIMFFI_RET_CLOSED) {
-                ok = !msg || msg->ret_code == NIMFFI_RET_OK;
-                if (!ok && msg->payload && msg->len > 0)
-                    reason.assign(reinterpret_cast<const char*>(msg->payload), msg->len);
-                break;
-            } else if (rc == NIMFFI_RET_INVALID_CTX) {
-                break; // the context ended between two polls
-            } else if (rc != NIMFFI_RET_TIMEOUT) {
-                std::this_thread::sleep_for(10ms); // BUSY or ERR: try again
+        const NimFfiMsg* msg = nullptr;
+        const int rc = poll_(ctx_, sliceMs, &msg);
+        if (rc == NIMFFI_RET_OK && msg) {
+            dispatch(*msg);
+        } else if (rc == NIMFFI_RET_CLOSED || rc == NIMFFI_RET_INVALID_CTX) {
+            // INVALID_CTX: the context ended between two polls.
+            if (rc == NIMFFI_RET_CLOSED && msg && msg->ret_code != NIMFFI_RET_OK) {
+                closedOk_ = false;
+                if (msg->payload && msg->len > 0)
+                    closedReason_.assign(reinterpret_cast<const char*>(msg->payload), msg->len);
             }
+            closed_ = true;
+            abandon(ClosedText);
+            return;
+        } else if (rc != NIMFFI_RET_TIMEOUT) {
+            std::this_thread::sleep_for(10ms); // BUSY or ERR: try again
         }
-        call(matching<ClosedFn>(NIMFFI_MSG_CLOSED, 0), ok, reason);
+        sweepExpired();
     }
+
+    // Ends by failing the waiters, then with the closed notification, whatever
+    // stopped it: a closed listener runs exactly once (never after a detach).
+    void run() {
+        current() = this;
+        while (!stop_.load() && !closed_) pumpOnce(SliceMs);
+        abandon(ClosedText);
+        call(matching<ClosedFn>(NIMFFI_MSG_CLOSED, 0), closedOk_, closedReason_);
+        current() = nullptr;
+    }
+
+    const PollFn poll_;
+    const LastErrorFn lastError_;
+    void* const ctx_;
+    const EventFn onEvent_;
 
     std::mutex mtx_;
     std::map<std::uint64_t, Listener> listeners_; // ordered: handlers run in the order they were added
     std::uint64_t nextId_{1};
+
+    std::mutex waitMtx_;
+    std::unordered_map<std::uint64_t, Waiter> waiters_;
+    bool finished_{false};
+
+    std::mutex threadMtx_;
+    std::thread thread_;
     std::atomic<bool> stop_{false};
     std::atomic<bool> detached_{false};
+
+    // Pump thread only.
+    bool closed_{false};
+    bool closedOk_{true};
+    std::string closedReason_;
+    std::chrono::steady_clock::time_point nextSweep_{};
+};
+
+// The pump of a library's static context, where `{.ffiStatic.}` replies arrive.
+// One per library and process, started by the first static call. Never
+// destroyed: the thread may still be polling while the process exits.
+class NimFfiStaticPump {
+public:
+    using StaticCtxFn = void* (*)();
+
+    // The running pump; a new one when there is none or the static context is
+    // another one by now (the library was shut down in between).
+    Result<std::shared_ptr<NimFfiPump>> acquire(StaticCtxFn staticCtx, NimFfiPump::PollFn poll,
+                                                NimFfiPump::LastErrorFn lastError) {
+        using Ret = Result<std::shared_ptr<NimFfiPump>>;
+        std::lock_guard<std::mutex> lock(mtx_);
+        void* token = staticCtx();
+        if (!token) return Ret::err(NimFfiPump::refusal(lastError, NIMFFI_RET_ERR));
+        if (pump_ && token == token_ && !pump_->finished()) return Ret::ok(pump_);
+        stopLocked();
+        auto pump = std::make_shared<NimFfiPump>(poll, lastError, token, &noEvents);
+        if (!pump->start()) return Ret::err("could not start the pump thread");
+        pump_ = pump;
+        token_ = token;
+        return Ret::ok(std::move(pump));
+    }
+
+    // Fails the static calls still waiting and joins the thread, which takes up
+    // to one poll slice.
+    void stop() {
+        std::lock_guard<std::mutex> lock(mtx_);
+        stopLocked();
+    }
+
+private:
+    static void noEvents(NimFfiPump&, const NimFfiMsg&) {}
+
+    void stopLocked() {
+        if (!pump_) return;
+        pump_->stop();
+        pump_.reset();
+        token_ = nullptr;
+    }
+
+    std::mutex mtx_;
+    std::shared_ptr<NimFfiPump> pump_;
+    void* token_{nullptr};
 };
 
 #endif // NIM_FFI_PUMP_HPP_INCLUDED
@@ -1121,35 +1426,54 @@ class MyTimerCtx {
 public:
     /// Creates the FFIContext + MyTimer; async via chronos.
     static Result<std::unique_ptr<MyTimerCtx>> create(const TimerConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
+        using Ret = Result<std::unique_ptr<MyTimerCtx>>;
         const auto ffi_req_ = MyTimerCreateCtorReq{config};
         auto ffi_enc_ = encodeCborFFI(ffi_req_);
-        if (ffi_enc_.isErr()) return Result<std::unique_ptr<MyTimerCtx>>::err(ffi_enc_.error());
+        if (ffi_enc_.isErr()) return Ret::err(ffi_enc_.error());
         const auto& ffi_req_bytes_ = ffi_enc_.value();
-        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            (void)my_timer_create(ffi_req_bytes_.data(), ffi_req_bytes_.size(), cb, ud);
-            return 0;
-        }, timeout);
-        if (ffi_raw_.isErr()) return Result<std::unique_ptr<MyTimerCtx>>::err(ffi_raw_.error());
-        auto ffi_addr_ = decodeCborFFI<std::string>(ffi_raw_.value());
-        if (ffi_addr_.isErr()) return Result<std::unique_ptr<MyTimerCtx>>::err(ffi_addr_.error());
-        const auto& addr_str = ffi_addr_.value();
-        std::uint64_t addr = 0;
-        const char* addr_begin = addr_str.data();
-        const char* addr_end = addr_begin + addr_str.size();
-        const auto fc_ = std::from_chars(addr_begin, addr_end, addr);
-        if (fc_.ec != std::errc() || fc_.ptr != addr_end) {
-            return Result<std::unique_ptr<MyTimerCtx>>::err("FFI create returned non-numeric address: " + addr_str);
-        }
-        auto ffi_ctx_ = std::unique_ptr<MyTimerCtx>(new MyTimerCtx(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout));
-        if (!ffi_ctx_->pumpThread_.joinable()) {
-            return Result<std::unique_ptr<MyTimerCtx>>::err("could not start the event pump thread");
-        }
-        return Result<std::unique_ptr<MyTimerCtx>>::ok(std::move(ffi_ctx_));
+        void* ffi_ptr_ = nullptr;
+        std::uint64_t ffi_id_ = 0;
+        const int ffi_rc_ = my_timer_create(ffi_req_bytes_.data(), ffi_req_bytes_.size(), &ffi_ptr_, &ffi_id_);
+        if (ffi_rc_ != NIMFFI_RET_OK)
+            return Ret::err(NimFfiPump::refusal(&my_timer_last_error, ffi_rc_));
+        // `new` (not make_unique) so the constructor can stay private.
+        auto ffi_ctx_ = std::unique_ptr<MyTimerCtx>(new MyTimerCtx(ffi_ptr_, timeout));
+        // Whether the construction worked is a reply on the new context. A failed
+        // one still claimed it: the destructor of `ffi_ctx_` releases it.
+        auto ffi_raw_ = ffi_ctx_->pump_->startAndWait(ffi_id_, timeout);
+        if (ffi_raw_.isErr()) return Ret::err(ffi_raw_.error());
+        return Ret::ok(std::move(ffi_ctx_));
     }
 
     /// Creates the FFIContext + MyTimer; async via chronos.
     static std::future<Result<std::unique_ptr<MyTimerCtx>>> createAsync(const TimerConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
-        return std::async(std::launch::async, [config, timeout]() { return create(config, timeout); });
+        using Ret = Result<std::unique_ptr<MyTimerCtx>>;
+        const auto ffi_req_ = MyTimerCreateCtorReq{config};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) return NimFfiPump::ready(Ret::err(ffi_enc_.error()));
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        void* ffi_ptr_ = nullptr;
+        std::uint64_t ffi_id_ = 0;
+        const int ffi_rc_ = my_timer_create(ffi_req_bytes_.data(), ffi_req_bytes_.size(), &ffi_ptr_, &ffi_id_);
+        if (ffi_rc_ != NIMFFI_RET_OK)
+            return NimFfiPump::ready(Ret::err(NimFfiPump::refusal(&my_timer_last_error, ffi_rc_)));
+        auto ffi_promise_ = std::make_shared<std::promise<Ret>>();
+        auto ffi_future_ = ffi_promise_->get_future();
+        // The completion owns the context until the reply says it was built
+        // (shared: a std::function must be copyable).
+        auto ffi_held_ = std::make_shared<std::unique_ptr<MyTimerCtx>>(new MyTimerCtx(ffi_ptr_, timeout));
+        auto ffi_pump_ = (*ffi_held_)->pump_;
+        ffi_pump_->startAndThen(ffi_id_, timeout,
+            [ffi_held_, ffi_promise_](Result<NimFfiPump::Bytes> ffi_raw_) {
+                auto ffi_ctx_ = std::move(*ffi_held_);
+                if (ffi_raw_.isErr()) {
+                    ffi_ctx_.reset(); // a failed construction still claimed the context
+                    ffi_promise_->set_value(Ret::err(ffi_raw_.error()));
+                } else {
+                    ffi_promise_->set_value(Ret::ok(std::move(ffi_ctx_)));
+                }
+            });
+        return ffi_future_;
     }
 
     // Special-member policy: this class owns a my_timer context, which in
@@ -1170,13 +1494,7 @@ public:
         }
         // A listener may destroy its own context: that runs on the pump thread,
         // which cannot join itself and owns its own reference to `pump_`.
-        const bool onPump = std::this_thread::get_id() == pumpThread_.get_id();
-        pump_->stop(onPump);
-        if (onPump) {
-            pumpThread_.detach();
-        } else if (pumpThread_.joinable()) {
-            pumpThread_.join();
-        }
+        pump_->stop();
     }
 
     MyTimerCtx(const MyTimerCtx&) = delete;
@@ -1185,15 +1503,19 @@ public:
     MyTimerCtx& operator=(MyTimerCtx&&) = delete;
 
     // ── Messages from the library ───────────────────────────
-    // Everything my_timer sends comes out of my_timer_poll on this context's pump thread,
-    // which calls the listeners below, in the order they were added:
+    // Everything my_timer sends comes out of my_timer_poll on this context's pump thread:
+    //   NIMFFI_MSG_REPLY           -> the method that made the request
+    //   NIMFFI_MSG_STALE_WARN      -> addStaleWarnListener
     //   event "on_echo_fired" (EchoEvent)  -> addOnEchoFiredListener
     //   event "on_job_scheduled" (OnJobScheduledPayload)  -> addOnJobScheduledListener
     //   NIMFFI_MSG_NOT_RESPONDING  -> addNotRespondingListener
     //   NIMFFI_MSG_RESPONDING      -> addRespondingListener
     //   NIMFFI_MSG_CLOSED          -> addClosedListener
-    // A listener may call back into this context, add or remove listeners, or
-    // destroy the context.
+    // Listeners run on the pump thread, in the order they were added. One may add
+    // or remove listeners, destroy the context, or make a blocking call on this
+    // context: the call then polls in place, so other listeners can run before it
+    // returns. It must never wait on a future of this context (`xAsync().get()`):
+    // only the pump thread, which it is blocking, can fulfil that future.
     struct ListenerHandle { std::uint64_t id = 0; };
 
     /// FNV-1a 64 of "on_echo_fired": the NimFfiMsg.name_id of this event.
@@ -1211,6 +1533,11 @@ public:
         return ListenerHandle{pump_->add(NIMFFI_MSG_EVENT, ON_JOB_SCHEDULED_NAME_ID, std::move(handler))};
     }
 
+    /// Request `reqId` is still running after `elapsedMs`; its reply still comes.
+    ListenerHandle addStaleWarnListener(std::function<void(std::uint64_t reqId, std::uint64_t elapsedMs)> handler) {
+        return ListenerHandle{pump_->add(NIMFFI_MSG_STALE_WARN, 0, std::move(handler))};
+    }
+
     /// The context stopped answering. `reason` is NIMFFI_NOT_RESPONDING_HEARTBEAT
     /// (the FFI thread's heartbeat stalled) or NIMFFI_NOT_RESPONDING_EVENT_QUEUE_FULL
     /// (the event queue overflowed; requests are refused until the context is recycled).
@@ -1224,9 +1551,9 @@ public:
     }
 
     /// The context is gone: the last call any listener of this context receives,
-    /// exactly once. `ok` is false when the library gave the context up, and
-    /// `reason` then says why. Not called when a listener destroys the context
-    /// from the pump thread.
+    /// exactly once. Every call still waiting for its reply has failed by then.
+    /// `ok` is false when the library gave the context up, and `reason` then says
+    /// why. Not called when a listener destroys the context from the pump thread.
     ListenerHandle addClosedListener(std::function<void(bool ok, const std::string& reason)> handler) {
         return ListenerHandle{pump_->add(NIMFFI_MSG_CLOSED, 0, std::move(handler))};
     }
@@ -1246,16 +1573,20 @@ public:
         auto ffi_enc_ = encodeCborFFI(ffi_req_);
         if (ffi_enc_.isErr()) return Result<EchoResponse>::err(ffi_enc_.error());
         const auto& ffi_req_bytes_ = ffi_enc_.value();
-        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return my_timer_echo(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        return pump_->call<EchoResponse>([&](std::uint64_t* ffi_id_) {
+            return my_timer_echo(ptr_, ffi_req_bytes_.data(), ffi_req_bytes_.size(), ffi_id_);
         }, timeout_);
-        if (ffi_raw_.isErr()) return Result<EchoResponse>::err(ffi_raw_.error());
-        return decodeCborFFI<EchoResponse>(ffi_raw_.value());
     }
 
     /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
     std::future<Result<EchoResponse>> echoAsync(const EchoRequest& req) const {
-        return std::async(std::launch::async, [this, req]() { return this->echo(req); });
+        const auto ffi_req_ = MyTimerEchoReq{req};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) return NimFfiPump::ready(Result<EchoResponse>::err(ffi_enc_.error()));
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        return pump_->callAsync<EchoResponse>([&](std::uint64_t* ffi_id_) {
+            return my_timer_echo(ptr_, ffi_req_bytes_.data(), ffi_req_bytes_.size(), ffi_id_);
+        }, timeout_);
     }
 
     /// Returns the library's version string.
@@ -1264,16 +1595,20 @@ public:
         auto ffi_enc_ = encodeCborFFI(ffi_req_);
         if (ffi_enc_.isErr()) return Result<std::string>::err(ffi_enc_.error());
         const auto& ffi_req_bytes_ = ffi_enc_.value();
-        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return my_timer_version(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        return pump_->call<std::string>([&](std::uint64_t* ffi_id_) {
+            return my_timer_version(ptr_, ffi_req_bytes_.data(), ffi_req_bytes_.size(), ffi_id_);
         }, timeout_);
-        if (ffi_raw_.isErr()) return Result<std::string>::err(ffi_raw_.error());
-        return decodeCborFFI<std::string>(ffi_raw_.value());
     }
 
     /// Returns the library's version string.
     std::future<Result<std::string>> versionAsync() const {
-        return std::async(std::launch::async, [this]() { return this->version(); });
+        const auto ffi_req_ = MyTimerVersionReq{};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) return NimFfiPump::ready(Result<std::string>::err(ffi_enc_.error()));
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        return pump_->callAsync<std::string>([&](std::uint64_t* ffi_id_) {
+            return my_timer_version(ptr_, ffi_req_bytes_.data(), ffi_req_bytes_.size(), ffi_id_);
+        }, timeout_);
     }
 
     Result<ComplexResponse> complex(const ComplexRequest& req) const {
@@ -1281,15 +1616,19 @@ public:
         auto ffi_enc_ = encodeCborFFI(ffi_req_);
         if (ffi_enc_.isErr()) return Result<ComplexResponse>::err(ffi_enc_.error());
         const auto& ffi_req_bytes_ = ffi_enc_.value();
-        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return my_timer_complex(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        return pump_->call<ComplexResponse>([&](std::uint64_t* ffi_id_) {
+            return my_timer_complex(ptr_, ffi_req_bytes_.data(), ffi_req_bytes_.size(), ffi_id_);
         }, timeout_);
-        if (ffi_raw_.isErr()) return Result<ComplexResponse>::err(ffi_raw_.error());
-        return decodeCborFFI<ComplexResponse>(ffi_raw_.value());
     }
 
     std::future<Result<ComplexResponse>> complexAsync(const ComplexRequest& req) const {
-        return std::async(std::launch::async, [this, req]() { return this->complex(req); });
+        const auto ffi_req_ = MyTimerComplexReq{req};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) return NimFfiPump::ready(Result<ComplexResponse>::err(ffi_enc_.error()));
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        return pump_->callAsync<ComplexResponse>([&](std::uint64_t* ffi_id_) {
+            return my_timer_complex(ptr_, ffi_req_bytes_.data(), ffi_req_bytes_.size(), ffi_id_);
+        }, timeout_);
     }
 
     /// Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
@@ -1298,16 +1637,20 @@ public:
         auto ffi_enc_ = encodeCborFFI(ffi_req_);
         if (ffi_enc_.isErr()) return Result<ScheduleResult>::err(ffi_enc_.error());
         const auto& ffi_req_bytes_ = ffi_enc_.value();
-        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return my_timer_schedule(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        return pump_->call<ScheduleResult>([&](std::uint64_t* ffi_id_) {
+            return my_timer_schedule(ptr_, ffi_req_bytes_.data(), ffi_req_bytes_.size(), ffi_id_);
         }, timeout_);
-        if (ffi_raw_.isErr()) return Result<ScheduleResult>::err(ffi_raw_.error());
-        return decodeCborFFI<ScheduleResult>(ffi_raw_.value());
     }
 
     /// Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
     std::future<Result<ScheduleResult>> scheduleAsync(const JobSpec& job, const RetryPolicy& retry, const ScheduleConfig& schedule) const {
-        return std::async(std::launch::async, [this, job, retry, schedule]() { return this->schedule(job, retry, schedule); });
+        const auto ffi_req_ = MyTimerScheduleReq{job, retry, schedule};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) return NimFfiPump::ready(Result<ScheduleResult>::err(ffi_enc_.error()));
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        return pump_->callAsync<ScheduleResult>([&](std::uint64_t* ffi_id_) {
+            return my_timer_schedule(ptr_, ffi_req_bytes_.data(), ffi_req_bytes_.size(), ffi_id_);
+        }, timeout_);
     }
 
     static Result<std::string> lib_version(std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
@@ -1315,15 +1658,36 @@ public:
         auto ffi_enc_ = encodeCborFFI(ffi_req_);
         if (ffi_enc_.isErr()) return Result<std::string>::err(ffi_enc_.error());
         const auto& ffi_req_bytes_ = ffi_enc_.value();
-        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return my_timer_lib_version(cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        auto ffi_pump_ = staticPump_();
+        if (ffi_pump_.isErr()) return Result<std::string>::err(ffi_pump_.error());
+        return ffi_pump_.value()->call<std::string>([&](std::uint64_t* ffi_id_) {
+            return my_timer_lib_version(ffi_req_bytes_.data(), ffi_req_bytes_.size(), ffi_id_);
         }, timeout);
-        if (ffi_raw_.isErr()) return Result<std::string>::err(ffi_raw_.error());
-        return decodeCborFFI<std::string>(ffi_raw_.value());
     }
 
     static std::future<Result<std::string>> lib_versionAsync(std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
-        return std::async(std::launch::async, [timeout]() { return lib_version(timeout); });
+        const auto ffi_req_ = MyTimerLibVersionReq{};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) return NimFfiPump::ready(Result<std::string>::err(ffi_enc_.error()));
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        auto ffi_pump_ = staticPump_();
+        if (ffi_pump_.isErr()) return NimFfiPump::ready(Result<std::string>::err(ffi_pump_.error()));
+        return ffi_pump_.value()->callAsync<std::string>([&](std::uint64_t* ffi_id_) {
+            return my_timer_lib_version(ffi_req_bytes_.data(), ffi_req_bytes_.size(), ffi_id_);
+        }, timeout);
+    }
+
+    /// Stop every context the library still holds and join their threads.
+    /// Call it before the process exits when a context is still alive, or when a
+    /// static proc built the shared context.
+    /// Returns 0 when every context stopped, 1 when one was left running.
+    /// Static calls still waiting fail with a "context closed" error, and a
+    /// later static call starts over. Must not race a call in flight.
+    static Result<void> shutdown() {
+        // The static pump goes first: nothing polls a context being torn down.
+        staticPumpHolder_().stop();
+        if (my_timer_shutdown() != 0) return Result<void>::err("my_timer_shutdown: a context was left running");
+        return Result<void>::ok();
     }
 
 private:
@@ -1335,12 +1699,21 @@ private:
         }
     }
 
+    // `{.ffiStatic.}` replies arrive on the library's static context, which has
+    // one pump per process, started by the first static call.
+    static Result<std::shared_ptr<NimFfiPump>> staticPump_() {
+        return staticPumpHolder_().acquire(&my_timer_static_ctx, &my_timer_poll, &my_timer_last_error);
+    }
+    // Never destroyed: no static destructor may race the pump thread at exit.
+    static NimFfiStaticPump& staticPumpHolder_() {
+        static NimFfiStaticPump* holder = new NimFfiStaticPump();
+        return *holder;
+    }
+
     void* ptr_;
     std::chrono::milliseconds timeout_;
     std::shared_ptr<NimFfiPump> pump_;
-    std::thread pumpThread_;
     explicit MyTimerCtx(void* p, std::chrono::milliseconds t)
-        : ptr_(p), timeout_(t), pump_(std::make_shared<NimFfiPump>()) {
-        pumpThread_ = NimFfiPump::start(pump_, &my_timer_poll, ptr_, &MyTimerCtx::dispatchEvent_);
-    }
+        : ptr_(p), timeout_(t),
+          pump_(std::make_shared<NimFfiPump>(&my_timer_poll, &my_timer_last_error, p, &MyTimerCtx::dispatchEvent_)) {}
 };

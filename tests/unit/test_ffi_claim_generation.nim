@@ -1,7 +1,7 @@
 ## The claim marker and the request stamp are cut from the same generation, so a
 ## token or a request of a past owner never reaches the next one.
 
-import std/[atomics, os]
+import std/strutils
 import unittest2
 import results
 import ffi
@@ -16,22 +16,6 @@ registerReqFFI(NoopRequest, lib: ptr ClaimLib):
 # Module-level, as declareLibrary emits it: a recycled slot keeps its threads,
 # so the pool must outlive every test that claims from it.
 var gPool: FFIContextPool[ClaimLib]
-
-var gCalls: Atomic[int]
-
-proc countingCallback(
-    retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
-) {.cdecl, gcsafe, raises: [].} =
-  if retCode == RET_STALE_WARN:
-    return
-  gCalls.atomicInc()
-
-proc waitForCalls(n: int): bool =
-  for _ in 0 ..< 500:
-    if gCalls.load() >= n:
-      return true
-    os.sleep(10)
-  false
 
 suite "claim and generation are one atomic":
   test "a claim leaves an odd generation and a token that names it":
@@ -78,14 +62,12 @@ suite "a request carries the claim it was submitted under":
     defer:
       check gPool.recycleFFIContext(ctx).isOk()
 
-    gCalls.store(0)
     let staleGeneration = ctx.currentGeneration() - 2
-    check sendRequestToFFIThread(
-      ctx, NoopRequest.ffiNewReq(countingCallback, nil), staleGeneration
-    )
-      .isErr()
-    # The send owns the rejection, so the callback of the past owner stays untouched.
-    check gCalls.load() == 0
+    let refused = sendRequestToFFIThread(ctx, NoopRequest.ffiNewReq(), staleGeneration)
+    check refused.isErr()
+    check refused.error.contains("recycled")
+    # The send owns the rejection: no reply reaches the queue the next owner polls.
+    check nextMsg(ctx, 100).ret == RET_TIMEOUT
 
-    check sendRequestToFFIThread(ctx, NoopRequest.ffiNewReq(countingCallback, nil)).isOk()
-    check waitForCalls(1)
+    check call(ctx, NoopRequest.ffiNewReq()).okString() == "noop"
+    check nextMsg(ctx, 0).ret == RET_TIMEOUT

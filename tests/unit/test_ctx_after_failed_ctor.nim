@@ -1,4 +1,4 @@
-import std/[atomics, os]
+import std/atomics
 import unittest2
 import results
 import ffi
@@ -38,46 +38,35 @@ proc failedctor_echo*(
 ): Future[Result[string, string]] {.ffi.} =
   return ok(note & ":" & $lib.marker)
 
-type CallbackState = object
-  called: Atomic[bool]
-  retCode: Atomic[int]
+proc failedctor_destroy*(lib: FailedCtorLib) {.ffiDtor.} =
+  discard
 
-proc resetState(s: var CallbackState) =
-  s.called.store(false)
-  s.retCode.store(-1)
-
-proc recordingCallback(
-    retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
-) {.cdecl, gcsafe, raises: [].} =
-  let s = cast[ptr CallbackState](userData)
-  s[].retCode.store(int(retCode))
-  s[].called.store(true)
-
-proc waitCalled(s: var CallbackState): bool =
-  var tries = 0
-  while not s.called.load() and tries < 500:
-    os.sleep(5)
-    inc tries
-  s.called.load()
-
-proc createFailedCtx(s: var CallbackState): ptr FFIContext[FailedCtorLib] =
-  ## Sends the ctor down its error path and returns the context, which stays alive.
-  resetState(s)
-  var cfg =
-    cborEncode(FailedctorCreateCtorReq(config: FailedCtorConfig(shouldFail: true)))
-  let ret =
-    failedctor_create(encodedPtr(cfg), cfg.len.csize_t, recordingCallback, addr s)
-  if ret.isNil():
+proc createCtx(shouldFail: bool, ctorReqId: var uint64): ptr FFIContext[FailedCtorLib] =
+  ## The token comes back at once; whether the ctor worked is a reply on the new context.
+  var cfg = cborEncode(
+    FailedctorCreateCtorReq(config: FailedCtorConfig(shouldFail: shouldFail))
+  )
+  var token: FFICtxToken
+  if failedctor_create(encodedPtr(cfg), cfg.len.csize_t, addr token, addr ctorReqId) !=
+      RET_OK:
     return nil
-  discard waitCalled(s)
-  FailedCtorLibFFIPool.resolveCtx(ret)
+  return FailedCtorLibFFIPool.resolveCtx(token)
+
+proc createFailedCtx(): ptr FFIContext[FailedCtorLib] =
+  ## Sends the ctor down its error path and returns the context, which stays alive.
+  var ctorReqId: uint64
+  let ctx = createCtx(true, ctorReqId)
+  if ctx.isNil():
+    return nil
+  let reply = pollReply(ctx, ctorReqId)
+  doAssert reply.ret == RET_OK and reply.retCode == RET_ERR
+  doAssert reply.text() == "ctor deliberately failed"
+  return ctx
 
 suite "{.ffi.} call after a failed constructor":
   test "the failed ctor reports the error but leaves the context alive":
-    var s: CallbackState
-    let ctx = createFailedCtx(s)
+    let ctx = createFailedCtx()
     check not ctx.isNil()
-    check s.retCode.load() == int(RET_ERR)
     # `myLib` is not nil even here. The FFI thread points it at a default
     # fallback before it dispatches the request. `libReady` shows if the ctor
     # stored a real library.
@@ -86,59 +75,52 @@ suite "{.ffi.} call after a failed constructor":
     check not ctx[].libReady.load()
 
   # The synchronous return only reports that the FFI thread accepted the
-  # request. The callback delivers the rejection.
+  # request. The reply delivers the rejection.
   test "a no-arg call on an uninitialized library reports RET_ERR, no crash":
-    var s: CallbackState
-    let ctx = createFailedCtx(s)
+    let ctx = createFailedCtx()
     check not ctx.isNil()
 
-    resetState(s)
     var req = cborEncode(FailedctorPingReq())
-    let ret = failedctor_ping(
-      ctx.ffiToken(), recordingCallback, addr s, encodedPtr(req), req.len.csize_t
-    )
-    check ret == RET_OK
-    check waitCalled(s)
-    check s.retCode.load() == int(RET_ERR)
+    var reqId: uint64
+    check failedctor_ping(ctx.ffiToken(), encodedPtr(req), req.len.csize_t, addr reqId) ==
+      RET_OK
+    check pollReply(ctx, reqId).retCode == RET_ERR
 
   test "an argument-taking call on an uninitialized library reports RET_ERR, no crash":
-    var s: CallbackState
-    let ctx = createFailedCtx(s)
+    let ctx = createFailedCtx()
     check not ctx.isNil()
 
-    resetState(s)
     var req = cborEncode(FailedctorEchoReq(note: "hello"))
-    let ret = failedctor_echo(
-      ctx.ffiToken(), recordingCallback, addr s, encodedPtr(req), req.len.csize_t
-    )
-    check ret == RET_OK
-    check waitCalled(s)
-    check s.retCode.load() == int(RET_ERR)
+    var reqId: uint64
+    check failedctor_echo(ctx.ffiToken(), encodedPtr(req), req.len.csize_t, addr reqId) ==
+      RET_OK
+    check pollReply(ctx, reqId).retCode == RET_ERR
+
+  test "the context of a failed ctor can be destroyed":
+    let ctx = createFailedCtx()
+    check not ctx.isNil()
+    let token = ctx.ffiToken()
+    check failedctor_destroy(token) == RET_OK
+    check not FailedCtorLibFFIPool.isValidCtx(token)
 
   # The guard runs on the FFI thread, behind the ctor in the queue. Thus a host
-  # can send a call before it waits for the create callback.
-  test "a call issued before the successful ctor callback still succeeds":
-    var ctorState: CallbackState
-    resetState(ctorState)
-    var cfg =
-      cborEncode(FailedctorCreateCtorReq(config: FailedCtorConfig(shouldFail: false)))
-    let raw = failedctor_create(
-      encodedPtr(cfg), cfg.len.csize_t, recordingCallback, addr ctorState
-    )
-    check not raw.isNil()
-    let ctx = FailedCtorLibFFIPool.resolveCtx(raw)
+  # can send a call before it polls the reply of the create.
+  test "a call issued before the successful ctor reply still succeeds":
+    var ctorReqId: uint64
+    let ctx = createCtx(false, ctorReqId)
+    check not ctx.isNil()
 
     # No wait here, on purpose: the request goes into the queue behind the ctor.
-    var callState: CallbackState
-    resetState(callState)
     var req = cborEncode(FailedctorPingReq())
-    let ret = failedctor_ping(
-      ctx.ffiToken(),
-      recordingCallback,
-      addr callState,
-      encodedPtr(req),
-      req.len.csize_t,
-    )
-    check ret == RET_OK
-    check waitCalled(callState)
-    check callState.retCode.load() == int(RET_OK)
+    var reqId: uint64
+    check failedctor_ping(ctx.ffiToken(), encodedPtr(req), req.len.csize_t, addr reqId) ==
+      RET_OK
+    check reqId > ctorReqId
+
+    # One stream: the ctor's reply comes first, and carries CBOR null.
+    let ctorReply = nextMsg(ctx)
+    check ctorReply.kind == MsgReply
+    check ctorReply.id == ctorReqId
+    check ctorReply.retCode == RET_OK
+    check ctorReply.payload == @[CborNullByte]
+    check pollReply(ctx, reqId).okString() == "pong:1"

@@ -5,7 +5,7 @@
 This folder contains **auto-generated Rust bindings** (the `my_timer` crate) for the `my_timer` Nim library. It is generated from `../timer.nim` and provides:
 
 - `src/lib.rs`: Main library exposing high-level Rust types and the `MyTimerCtx` API
-- `src/api.rs`: High-level async/sync wrapper around the FFI. `MyTimerMessage` lists everything the library sends (events, liveness, closed); one pump thread per context takes the messages out with `my_timer_poll` and runs the `add_*_listener` handlers
+- `src/api.rs`: High-level async/sync wrapper around the FFI. One pump thread per context takes the messages out with `my_timer_poll`: a reply goes to the call that waits for it (every request has a blocking method and an `_async` one), and everything else the library sends (events, stale warnings, liveness, closed) is listed by `MyTimerMessage` and runs the `add_*_listener` handlers. A listener may make a blocking call, but must not block on an `_async` one
 - `src/ffi.rs`: Raw `extern "C"` declarations for the Nim library, `NimFfiMsg` included
 - `src/types.rs`: Serializable Rust types matching the Nim FFI types
 - `build.rs`: Build script that compiles the Nim library to `libmy_timer.dylib` (or `.so`/`.dll`)

@@ -13,9 +13,9 @@
 #endif
 #include <string>
 #include <cstdint>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <charconv>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -26,15 +26,15 @@
 #include <vector>
 #include <optional>
 #include <type_traits>
+#include <unordered_map>
 #include <cstring>
 #include <cassert>
 extern "C" {
 #include <tinycbor/cbor.h>
 }
 
-// nim-ffi result-callback status codes (mirror ffi/ffi_types.nim and the C
-// header). Guarded so a translation unit that also pulls in the C header keeps
-// a single definition.
+// nim-ffi status codes (mirror ffi/ret_codes.nim and the C header). Guarded so
+// a translation unit that also pulls in the C header keeps a single definition.
 #ifndef NIMFFI_RET_OK
 {{RET_CODES}}
 #endif

@@ -23,6 +23,8 @@ const
   HeaderPreludeTpl = staticRead("templates/c/header_prelude.h.tpl")
   CborHelpersTpl = staticRead("templates/c/cbor_helpers.h.tpl")
   CMakeListsTpl = staticRead("templates/c/CMakeLists.txt.tpl")
+  CtxAwaitTpl = staticRead("templates/c/ctx_await.h.tpl")
+  StaticCtxTpl = staticRead("templates/c/static_ctx.h.tpl")
   FindRepoRootTpl = staticRead("templates/find_repo_root.cmake.part")
 
   # Shared header names; must match the include guards baked into the templates.
@@ -401,9 +403,32 @@ proc buildReqParams(
   return (params, assigns)
 
 const
-  PollDoc =
-    """Take the next message of `ctx` out of the library: an event, a liveness report
-or the end of the context. `*msg` is set to a message the library owns, or to NULL.
+  RequestDoc = """A request export queues the request and returns; it never calls back.
+NIMFFI_RET_OK: exactly one NIMFFI_MSG_REPLY whose `id` is `*req_id_out` will come
+out of poll on that context, unless the context closes first. The reply of a
+static request arrives on the static context, the reply of the constructor on
+the context it hands out in `*ctx_out`.
+Anything else: the request was refused and no reply will come. NIMFFI_RET_ERR
+(bad argument, undecodable request, context not accepting requests),
+NIMFFI_RET_INVALID_CTX, NIMFFI_RET_QUEUE_FULL or NIMFFI_RET_TOO_LARGE; the text
+is in last_error(). `req_id_out` must not be NULL. Request ids are never 0.
+A reply can be polled before the submitting call has returned: a host that
+polls on another thread registers its waiter under a lock held across the call.
+When the constructor's reply is NIMFFI_RET_ERR the context still has to be
+destroyed; after a refused constructor `*ctx_out` is NULL and nothing does."""
+
+  StaticCtxDoc =
+    """The token of the static context, where the replies of the static requests
+arrive: poll it like any other context. Never destroy it; shutdown ends it.
+NULL on failure, with the text in last_error()."""
+
+  LastErrorDoc =
+    """Why the last request of the calling thread was refused. Thread-local, never
+NULL, empty when nothing was refused, valid until that thread's next call into
+the library. Owned by the library: never free it."""
+
+  PollDoc = """Take the next message of `ctx` out of the library: a reply, an event, a
+liveness report or the end of the context. `*msg` is set to a message the library owns, or to NULL.
 `timeout_ms` 0 never blocks; a negative value waits until a message arrives or
 the context closes.
 Returns NIMFFI_RET_OK (`*msg` is set), NIMFFI_RET_TIMEOUT (nothing arrived in
@@ -441,42 +466,118 @@ func evConstName(libName: string, ev: FFIEventMeta): string =
 func evDecodeName(libName: string, ev: FFIEventMeta): string =
   return libName & "_decode_" & evSnake(ev)
 
+func wrapperName(libName: string, m: FFIProcMeta): string =
+  ## `<lib>_ctx_<name>`, or `<lib>_static_<name>` for a static; `<lib>_<name>`
+  ## itself is the raw symbol the dylib exports.
+  var prefix = libName & "_ctx_"
+  if m.isStatic():
+    prefix = libName & "_static_"
+  return prefix & stripLibPrefix(m.procName, libName)
+
+func replyDecodeName(libName: string, m: FFIProcMeta): string =
+  return libName & "_decode_" & stripLibPrefix(m.procName, libName) & "_reply"
+
 proc emitApiIndex(
     lines: var seq[string],
     ctxType, libType, libName: string,
-    replyProcs: seq[FFIProcMeta],
+    classified: ClassifiedProcs,
     events: seq[FFIEventMeta],
 ) =
   lines.add("/* ============================================================ */")
   lines.add("/* " & alignLeft(libName & " API", 60) & " */")
   lines.add("/* ============================================================ */")
-  lines.add("/* Context: " & libName & "_ctx_create(), " & libName & "_ctx_destroy().")
-  lines.add(" *")
-  lines.add(" * Requests. The reply arrives once, through the callback given to the")
-  lines.add(" * call, on the library's FFI thread:")
-  for m in replyProcs:
-    let stripped = stripLibPrefix(m.procName, libName)
-    var name = libName & "_ctx_" & stripped
-    if m.isStatic():
-      name = libName & "_static_" & stripped
-    lines.add(" *   " & name & "()")
-  lines.add(" *")
   lines.add(
-    " * Messages from the library. The binding starts no thread: the host takes"
+    "/* The library calls nothing back and the binding starts no thread: a reply,"
   )
   lines.add(
-    " * them out with " & libName & "_ctx_pump_once(), which calls the matching"
+    " * an event or a liveness report reaches the host inside " & libName &
+      "_ctx_pump_once(),"
   )
-  lines.add(" * entry of " & libType & "Handlers on the calling thread:")
+  lines.add(" * on the thread that calls it.")
+  lines.add(" *")
+  lines.add(
+    " * Threads: a context of this binding is single-threaded by design. Submit and"
+  )
+  lines.add(
+    " * pump it from one thread, or hold one lock around both. A host that wants"
+  )
+  lines.add(
+    " * something else uses the raw " & libName & "_<proc>() and " & libName &
+      "_poll() exports with the"
+  )
+  lines.add(" * decoders below.")
+  lines.add(" *")
+  if classified.ctors.len > 0:
+    lines.add(
+      " * Context: " & libName & "_ctx_create_sync(), " & libName & "_ctx_create(), " &
+        libName & "_ctx_destroy()."
+    )
+  else:
+    lines.add(" * Context: " & libName & "_ctx_destroy().")
+  lines.add(" *")
+  lines.add(
+    " * Requests. Each has an asynchronous form, whose on_reply runs inside the pump;"
+  )
+  lines.add(" * a _sync form for a sequential program, which pumps until its own reply")
+  lines.add(" * arrives; and a decoder of the raw reply:")
+  for m in classified.replyProcs():
+    let name = wrapperName(libName, m)
+    lines.add(
+      " *   " & name & "()  " & name & "_sync()  " & replyDecodeName(libName, m) & "()"
+    )
+  if classified.statics.len > 0:
+    lines.add(
+      " * The replies of the static requests arrive on the static context: " & libName &
+        "_static_pump_once()."
+    )
+  lines.add(" *")
+  lines.add(" * on_reply(ret, reply, err, user_data) runs once, with `ret`:")
+  lines.add(" *   NIMFFI_RET_OK      `reply` is set and `err` is NULL")
+  lines.add(
+    " *   NIMFFI_RET_ERR     the library answered with an error: `err` is its text"
+  )
+  lines.add(" *   NIMFFI_RET_CLOSED  the context closed before the reply came")
+  lines.add(" *   -1                 the reply did not decode: `err` says why")
+  lines.add(
+    " * Submitting returns NIMFFI_RET_OK; or the code of the library's refusal, with"
+  )
+  lines.add(
+    " * the text in " & libName &
+      "_last_error(); or -1 when the binding could not encode the"
+  )
+  lines.add(
+    " * request or is out of memory. After anything but NIMFFI_RET_OK nothing was"
+  )
+  lines.add(" * recorded and on_reply never runs.")
+  lines.add(
+    " * A _sync form returns the same codes, and NIMFFI_RET_TIMEOUT when `timeout_ms`"
+  )
+  lines.add(
+    " * passed first (negative waits forever; the late reply is then dropped). On"
+  )
+  lines.add(
+    " * NIMFFI_RET_OK the caller owns `*out`; otherwise `*out` is zeroed and `*err`,"
+  )
+  lines.add(
+    " * when `err` is not NULL, is a text the caller frees with free(). Every other"
+  )
+  lines.add(" * message that arrives meanwhile goes to `handlers`, which may be NULL.")
+  lines.add(" *")
+  lines.add(
+    " * Messages from the library, each an entry of " & libType &
+      "Handlers. A handler may"
+  )
+  lines.add(" * submit requests, _sync ones included:")
   for ev in events:
     lines.add(
       " *   " & evSnake(ev) & "(const " & ev.payloadTypeName & "*)  " &
         evConstName(libName, ev)
     )
-  lines.add(" *   not_responding, responding, closed")
+  lines.add(" *   stale_warn, not_responding, responding, closed")
   lines.add(" */")
   lines.add("typedef struct {")
-  lines.add("    void* ptr;")
+  lines.add("    void* ptr;             /* the library's token, for the raw exports */")
+  lines.add("    NimFfiPending pending; /* requests waiting for their reply */")
   lines.add("} " & ctxType & ";")
   lines.add("")
 
@@ -484,6 +585,8 @@ proc emitEventDecoders(
     lines: var seq[string], reg: CTypeReg, libName: string, events: seq[FFIEventMeta]
 ) =
   ## Per event: the name id constant and a decoder of the bare payload.
+  if events.len > 0:
+    lines.add("/* ---- events ---- */")
   for ev in events:
     let constName = evConstName(libName, ev)
     let payC = ev.payloadTypeName
@@ -525,21 +628,28 @@ proc emitEventDecoders(
     lines.add("}")
     lines.add("")
 
+func fillLibTpl(tpl, ctxType, libType, libName: string): string =
+  return tpl.strip(leading = false).multiReplace(
+      ("{{LIB}}", libName), ("{{CTX}}", ctxType), ("{{HANDLERS}}", libType & "Handlers")
+    )
+
 proc emitHandlers(
     lines: var seq[string],
     reg: CTypeReg,
     ctxType, libType, libName: string,
     events: seq[FFIEventMeta],
+    hasStatics: bool,
 ) =
   ## The one place that lists everything the library sends, and the pump over it.
   let handlersType = libType & "Handlers"
+  lines.add("/* ---- everything the library can send ---- */")
   lines.add(
-    "/* Everything " & libName & " can send. A NULL entry means \"ignore\". Each"
+    "/* Replies go to the on_reply of their request; the rest is listed here. A NULL"
   )
   lines.add(
-    " * handler runs on the thread that pumps; what it is handed belongs to the"
+    " * entry means \"ignore\". Each handler runs on the thread that pumps; what it is"
   )
-  lines.add(" * binding and is valid only until it returns. */")
+  lines.add(" * handed belongs to the binding and is valid only until it returns. */")
   lines.add("typedef struct {")
   for ev in events:
     lines.add(renderBlockDocComment(ev.doc, "    "))
@@ -547,6 +657,12 @@ proc emitHandlers(
       "    void (*" & evSnake(ev) & ")(const " & ev.payloadTypeName &
         "* ev, void* user_data);"
     )
+  lines.add(
+    "    /* Request `req_id` is still running after `elapsed_ms`; its reply still comes. */"
+  )
+  lines.add(
+    "    void (*stale_warn)(uint64_t req_id, uint64_t elapsed_ms, void* user_data);"
+  )
   lines.add(
     "    /* `reason` is a NIMFFI_NOT_RESPONDING_*: the FFI thread stalled, or the event"
   )
@@ -558,7 +674,10 @@ proc emitHandlers(
     "    /* The context is gone. `ret` is NIMFFI_RET_OK, or NIMFFI_RET_ERR with `reason`"
   )
   lines.add(
-    "     * (a NUL-terminated copy, NULL when none) saying why it was quarantined. */"
+    "     * (a NUL-terminated copy, NULL when none) saying why it was quarantined. Runs"
+  )
+  lines.add(
+    "     * after every request still waiting was settled with NIMFFI_RET_CLOSED. */"
   )
   lines.add("    void (*closed)(int ret, const char* reason, void* user_data);")
   lines.add("    void* user_data;")
@@ -566,19 +685,36 @@ proc emitHandlers(
   lines.add("")
 
   lines.add(
-    "/* Decodes `msg` fully, then calls its handler, then frees what it decoded."
+    "/* Decodes `msg` fully, then calls its on_reply or its handler, then frees what"
   )
   lines.add(
-    " * Returns 0, also for an event this header does not know, or -1 on a decode"
+    " * it decoded. Returns 0, also for an event this header does not know and for a"
   )
-  lines.add(" * error or an unknown message kind. */")
+  lines.add(
+    " * reply nobody waits for, or -1 on a decode error or an unknown message kind. */"
+  )
   lines.add(
     "static inline int " & libName & "_ctx_dispatch(" & ctxType &
       "* ctx, const NimFfiMsg* msg, const " & handlersType & "* handlers) {"
   )
-  lines.add("    (void)ctx;")
-  lines.add("    if (!msg) return -1;")
+  lines.add("    if (!ctx || !msg) return -1;")
   lines.add("    switch (msg->kind) {")
+  lines.add("    case NIMFFI_MSG_REPLY: {")
+  lines.add("        NimFfiPendingEntry entry;")
+  lines.add(
+    "        /* Nobody waits: given up on by a _sync timeout, or sent through the raw export. */"
+  )
+  lines.add(
+    "        if (!nimffi_pending_take(&ctx->pending, msg->id, &entry)) return 0;"
+  )
+  lines.add("        entry.settle(msg, entry.on_reply, entry.user_data);")
+  lines.add("        return 0;")
+  lines.add("    }")
+  lines.add("    case NIMFFI_MSG_STALE_WARN:")
+  lines.add(
+    "        if (handlers && handlers->stale_warn) handlers->stale_warn(msg->id, msg->aux, handlers->user_data);"
+  )
+  lines.add("        return 0;")
   lines.add("    case NIMFFI_MSG_EVENT:")
   for ev in events:
     let payC = ev.payloadTypeName
@@ -608,13 +744,17 @@ proc emitHandlers(
   )
   lines.add("        return 0;")
   lines.add("    case NIMFFI_MSG_CLOSED: {")
-  lines.add("        if (!handlers || !handlers->closed) return 0;")
+  lines.add(
+    "        /* Copied first: a callback below may poll, which ends the life of `msg`. */"
+  )
+  lines.add("        int ret = (int)msg->ret_code;")
   lines.add("        char* reason = NULL;")
   lines.add(
     "        if (msg->len > 0) reason = nimffi_dup_cstr_n((const char*)msg->payload, msg->len);"
   )
+  lines.add("        nimffi_pending_close(&ctx->pending);")
   lines.add(
-    "        handlers->closed((int)msg->ret_code, reason, handlers->user_data);"
+    "        if (handlers && handlers->closed) handlers->closed(ret, reason, handlers->user_data);"
   )
   lines.add("        free(reason);")
   lines.add("        return 0;")
@@ -658,34 +798,60 @@ proc emitHandlers(
   lines.add("    return " & libName & "_poll_fd(ctx->ptr);")
   lines.add("}")
   lines.add("")
+  lines.add(fillLibTpl(CtxAwaitTpl, ctxType, libType, libName))
+  lines.add("")
+  if hasStatics:
+    lines.add(fillLibTpl(StaticCtxTpl, ctxType, libType, libName))
+    lines.add("")
 
-proc emitCallBox(lines: var seq[string], fnType, boxType: string) =
-  lines.add("typedef struct { " & fnType & " fn; void* user_data; } " & boxType & ";")
+const RoomCond = "nimffi_pending_reserve(&ctx->pending) != 0"
 
-proc emitReplyTrampolineHead(lines: var seq[string], tramp, boxType, fallback: string) =
-  ## Opens a reply trampoline: recover the box, fail if no callback, deliver a
-  ## non-zero `ret` as an error (msg/len isn't NUL-terminated, so copy it).
+const SettleParams = "(const NimFfiMsg* msg, nimffi_generic_fn fn, void* user_data) {"
+
+proc emitSubmit(
+    lines: var seq[string],
+    libName, head, reqName: string,
+    prologue, assigns: seq[string],
+    target, roomCond, rawCall: string,
+    onRefused: seq[string],
+) =
+  ## `<x>_submit_`: encode, make room, call the raw export, record who waits.
+  ## Room is made before the call so that an accepted request is never lost.
   lines.add(
-    "static void " & tramp & "(int ret, const char* msg, size_t len, void* ud) {"
+    head &
+      "nimffi_settle_fn settle, nimffi_generic_fn fn, void* user_data, uint64_t* req_id_out, char** err) {"
   )
-  lines.add("    " & boxType & "* box = (" & boxType & "*)ud;")
+  for l in prologue:
+    lines.add(l)
+  lines.add("    " & reqName & " ffi_req;")
+  lines.add("    memset(&ffi_req, 0, sizeof(ffi_req));")
+  for a in assigns:
+    lines.add(a)
+  lines.add("    uint8_t* req_buf = NULL;")
+  lines.add("    size_t req_len = 0;")
   lines.add(
-    "    /* Non-terminal progress ping: keep the box for the terminal reply. */"
+    "    if (nimffi_encode_to_buf(" & libName & "_encv_" & cToken(reqName) &
+      ", &ffi_req, &req_buf, &req_len, err) != 0) return -1;"
   )
-  lines.add("    if (ret == NIMFFI_RET_STALE_WARN) return;")
-  lines.add("    if (!box->fn) {")
-  lines.add("        free(box);")
-  lines.add("        return;")
+  if target.len > 0:
+    lines.add(target)
+  lines.add("    if (" & roomCond & ") {")
+  lines.add("        free(req_buf);")
+  for l in onRefused:
+    lines.add("    " & l)
+  lines.add("        if (err) *err = nimffi_dup_cstr(\"out of memory\");")
+  lines.add("        return -1;")
   lines.add("    }")
-  lines.add("    if (ret != 0) {")
-  lines.add("        char* em = nimffi_dup_cstr_n(msg ? msg : \"\", msg ? len : 0);")
-  lines.add(
-    "        box->fn(ret, NULL, em ? em : \"" & fallback & "\", box->user_data);"
-  )
-  lines.add("        free(em);")
-  lines.add("        free(box);")
-  lines.add("        return;")
+  lines.add("    int rc = " & rawCall & ";")
+  lines.add("    free(req_buf);")
+  lines.add("    if (rc != NIMFFI_RET_OK) {")
+  lines.add("        if (err) *err = nimffi_dup_cstr(" & libName & "_last_error());")
+  for l in onRefused:
+    lines.add("    " & l)
+  lines.add("        return rc;")
   lines.add("    }")
+  lines.add("    NimFfiPendingEntry entry = {*req_id_out, settle, fn, user_data};")
+  lines.add("    nimffi_pending_add(&ctx->pending, entry);")
 
 proc emitConstructors(
     lines: var seq[string],
@@ -696,99 +862,119 @@ proc emitConstructors(
   if ctors.len == 0:
     return
   let fnType = libType & "CreateFn"
-  let boxType = libType & "CreateBox"
-  let tramp = libName & "_create_trampoline"
+  let settle = libName & "_create_settle_"
+  let settleSync = libName & "_create_settle_sync_"
   lines.add(
-    "typedef void (*" & fnType & ")(int err_code, " & ctxType &
-      "* ctx, const char* err_msg, void* user_data);"
+    "/* `ret` as for a request's on_reply. The context is the caller's whatever `ret`"
   )
-  emitCallBox(lines, fnType, boxType)
-  emitReplyTrampolineHead(lines, tramp, boxType, "FFI create failed")
+  lines.add(" * says: release it with " & libName & "_ctx_destroy(). */")
+  lines.add(
+    "typedef void (*" & fnType & ")(int ret, const char* err, void* user_data);"
+  )
+  lines.add("static inline void " & settle & SettleParams)
+  lines.add("    " & fnType & " on_created = (" & fnType & ")fn;")
+  lines.add("    if (!on_created) return;")
+  lines.add("    if (!msg) {")
+  lines.add("        on_created(NIMFFI_RET_CLOSED, \"context closed\", user_data);")
+  lines.add("        return;")
+  lines.add("    }")
   lines.add("    char* err = NULL;")
-  lines.add("    " & CStrType & " addr;")
-  lines.add("    memset(&addr, 0, sizeof(addr));")
-  lines.add(
-    "    if (nimffi_decode_from_buf(" & libName &
-      "_decv_Str, (const uint8_t*)msg, len, &addr, &err) != 0) {"
-  )
-  lines.add("        box->fn(-1, NULL, err ? err : \"decode failed\", box->user_data);")
-  lines.add("        free(err);")
-  lines.add("        free(box);")
-  lines.add("        return;")
-  lines.add("    }")
-  lines.add("    char* endp = NULL;")
-  lines.add("    unsigned long long a = addr ? strtoull(addr, &endp, 10) : 0;")
-  lines.add("    bool ok = addr && addr[0] != '\\0' && endp && *endp == '\\0';")
-  lines.add("    free((void*)addr);")
-  lines.add("    if (!ok) {")
-  lines.add(
-    "        box->fn(-1, NULL, \"FFI create returned non-numeric address\", box->user_data);"
-  )
-  lines.add("        free(box);")
-  lines.add("        return;")
-  lines.add("    }")
-  lines.add(
-    "    " & ctxType & "* ctx = (" & ctxType & "*)calloc(1, sizeof(" & ctxType & "));"
-  )
-  lines.add("    if (!ctx) {")
-  lines.add("        box->fn(-1, NULL, \"out of memory\", box->user_data);")
-  lines.add("        free(box);")
-  lines.add("        return;")
-  lines.add("    }")
-  lines.add("    ctx->ptr = (void*)(uintptr_t)a;")
-  lines.add("    box->fn(NIMFFI_RET_OK, ctx, NULL, box->user_data);")
-  lines.add("    free(box);")
+  lines.add("    int rc = nimffi_reply_status(msg, &err);")
+  lines.add("    const char* text = NULL;")
+  lines.add("    if (rc != NIMFFI_RET_OK) text = err ? err : \"\";")
+  lines.add("    on_created(rc, text, user_data);")
+  lines.add("    free(err);")
   lines.add("}")
-  lines.add("")
+  lines.add("static inline void " & settleSync & SettleParams)
+  lines.add("    NimFfiSyncSlot* slot = (NimFfiSyncSlot*)user_data;")
+  lines.add("    (void)fn;")
+  lines.add("    if (!msg) {")
+  lines.add("        nimffi_sync_slot_closed(slot);")
+  lines.add("        return;")
+  lines.add("    }")
+  lines.add("    slot->ret = nimffi_reply_status(msg, slot->err);")
+  lines.add("    slot->done = true;")
+  lines.add("}")
   for ctor in ctors:
     let reqName = reqStructName(ctor)
     let (params, assigns) = buildReqParams(reg, ctor.extraParams)
-    let head = "static inline int " & libName & "_ctx_create("
-    let sig =
-      if params.len > 0:
-        head & params.join(", ") & ", " & fnType & " on_created, void* user_data) {"
-      else:
-        head & fnType & " on_created, void* user_data) {"
+    var paramList = ""
+    var argList = ""
+    if params.len > 0:
+      paramList = params.join(", ") & ", "
+    for ep in ctor.extraParams:
+      argList.add(ep.name & ", ")
+    let submit = libName & "_create_submit_"
+
+    emitSubmit(
+      lines,
+      libName,
+      "static inline int " & submit & "(" & paramList & ctxType & "** ctx_out, ",
+      reqName,
+      @[],
+      assigns,
+      "    " & ctxType & "* ctx = (" & ctxType & "*)calloc(1, sizeof(" & ctxType & "));",
+      "!ctx || " & RoomCond,
+      ctor.procName & "(req_buf, req_len, &ctx->ptr, req_id_out)",
+      @["    if (ctx) free(ctx->pending.items);", "    free(ctx);"],
+    )
+    lines.add("    *ctx_out = ctx;")
+    lines.add("    return NIMFFI_RET_OK;")
+    lines.add("}")
+
     lines.add(renderBlockDocComment(ctor.doc))
-    lines.add(sig)
-    lines.add("    " & reqName & " ffi_req;")
-    lines.add("    memset(&ffi_req, 0, sizeof(ffi_req));")
-    for a in assigns:
-      lines.add(a)
-    lines.add("    uint8_t* req_buf = NULL;")
-    lines.add("    size_t req_len = 0;")
-    lines.add("    char* err = NULL;")
     lines.add(
-      "    if (nimffi_encode_to_buf(" & libName & "_encv_" & cToken(reqName) &
-        ", &ffi_req, &req_buf, &req_len, &err) != 0) {"
+      "static inline int " & libName & "_ctx_create(" & paramList & ctxType &
+        "** ctx_out, " & fnType & " on_created, void* user_data) {"
     )
+    lines.add("    if (!ctx_out) return -1;")
+    lines.add("    *ctx_out = NULL;")
+    lines.add("    uint64_t req_id = 0;")
     lines.add(
-      "        if (on_created) on_created(-1, NULL, err ? err : \"encode failed\", user_data);"
+      "    return " & submit & "(" & argList & "ctx_out, " & settle &
+        ", (nimffi_generic_fn)on_created, user_data, &req_id, NULL);"
     )
-    lines.add("        free(err);")
-    lines.add("        return -1;")
+    lines.add("}")
+
+    lines.add(renderBlockDocComment(ctor.doc))
+    lines.add(
+      "static inline int " & libName & "_ctx_create_sync(" & paramList & ctxType &
+        "** out, char** err, int32_t timeout_ms) {"
+    )
+    lines.add("    if (err) *err = NULL;")
+    lines.add("    if (!out) return -1;")
+    lines.add("    *out = NULL;")
+    lines.add("    NimFfiSyncSlot slot = {false, NIMFFI_RET_OK, NULL, err};")
+    lines.add("    " & ctxType & "* ctx = NULL;")
+    lines.add("    uint64_t req_id = 0;")
+    lines.add(
+      "    int rc = " & submit & "(" & argList & "&ctx, " & settleSync &
+        ", NULL, &slot, &req_id, err);"
+    )
+    lines.add("    if (rc != NIMFFI_RET_OK) return rc;")
+    lines.add(
+      "    rc = " & libName & "_ctx_await_(ctx, req_id, &slot, timeout_ms, NULL);"
+    )
+    lines.add("    if (rc != NIMFFI_RET_OK) {")
+    lines.add("        /* The slot is claimed even when construction failed. */")
+    lines.add("        (void)" & libName & "_ctx_destroy(ctx);")
+    lines.add("        return rc;")
     lines.add("    }")
-    lines.add(
-      "    " & boxType & "* box = (" & boxType & "*)malloc(sizeof(" & boxType & "));"
-    )
-    lines.add("    if (!box) {")
-    lines.add("        free(req_buf);")
-    lines.add(
-      "        if (on_created) on_created(-1, NULL, \"out of memory\", user_data);"
-    )
-    lines.add("        return -1;")
-    lines.add("    }")
-    lines.add("    box->fn = on_created;")
-    lines.add("    box->user_data = user_data;")
-    lines.add("    (void)" & ctor.procName & "(req_buf, req_len, " & tramp & ", box);")
-    lines.add("    free(req_buf);")
-    lines.add("    return 0;")
+    lines.add("    *out = ctx;")
+    lines.add("    return NIMFFI_RET_OK;")
     lines.add("}")
     lines.add("")
 
 proc emitDestructor(
     lines: var seq[string], ctxType, libName: string, dtor: Option[FFIProcMeta]
 ) =
+  lines.add("/* ---- context ---- */")
+  lines.add(
+    "/* Requests still waiting are settled with NIMFFI_RET_CLOSED, after the library"
+  )
+  lines.add(
+    " * let go of the context. Never call it from a handler or an on_reply of `ctx`. */"
+  )
   if dtor.isSome():
     lines.add(renderBlockDocComment(dtor.get().doc))
   lines.add("static inline int " & libName & "_ctx_destroy(" & ctxType & "* ctx) {")
@@ -799,6 +985,11 @@ proc emitDestructor(
       "    if (ctx->ptr) { rc = " & dtor.get().procName &
         "(ctx->ptr); ctx->ptr = NULL; }"
     )
+  lines.add("    nimffi_pending_close(&ctx->pending);")
+  lines.add(
+    "    /* A callback above may have made room for a request that was refused. */"
+  )
+  lines.add("    free(ctx->pending.items);")
   lines.add("    free(ctx);")
   lines.add("    return rc;")
   lines.add("}")
@@ -810,100 +1001,168 @@ proc emitProcWrapper(
     ctxType, libType, libName: string,
     m: FFIProcMeta,
 ) =
-  ## Reply trampoline + wrapper: `<lib>_ctx_<name>`, or `<lib>_static_<name>` for a
-  ## static; `<lib>_<name>` itself is the raw symbol the dylib exports.
+  ## Per request: the reply callback type, the raw reply decoder, and the
+  ## asynchronous and `_sync` wrappers over one internal submit.
   let isStatic = m.isStatic()
   let stripped = stripLibPrefix(m.procName, libName)
   let reqName = reqStructName(m)
   let retC = cReturnType(reg, m)
-  let retFree = freeStmt(reg, retC, "out")
   let (params, assigns) = buildReqParams(reg, m.extraParams)
-  let methodPascal = snakeToPascalCase(stripped)
-  let fnType = libType & methodPascal & "ReplyFn"
-  let boxType = libType & methodPascal & "CallBox"
-  let tramp = libName & "_" & stripped & "_reply_trampoline"
+  let fnType = libType & snakeToPascalCase(stripped) & "ReplyFn"
+  let decode = replyDecodeName(libName, m)
+  let settle = libName & "_" & stripped & "_settle_"
+  let settleSync = libName & "_" & stripped & "_settle_sync_"
+  let submit = libName & "_" & stripped & "_submit_"
+  let wrapper = wrapperName(libName, m)
+
+  var paramList = ""
+  if params.len > 0:
+    paramList = params.join(", ") & ", "
+  var argList = ""
+  var ctxParam = ""
+  var target = "    " & ctxType & "* ctx = " & libName & "_static_();"
+  var prologue: seq[string] = @[]
+  var rawCall = m.procName & "(req_buf, req_len, req_id_out)"
+  if not isStatic:
+    argList = "ctx, "
+    ctxParam = ctxType & "* ctx, "
+    target = ""
+    prologue = @[
+      "    if (!ctx) {", "        if (err) *err = nimffi_dup_cstr(\"ctx is NULL\");",
+      "        return NIMFFI_RET_INVALID_CTX;", "    }",
+    ]
+    rawCall = m.procName & "(ctx->ptr, req_buf, req_len, req_id_out)"
+  for ep in m.extraParams:
+    argList.add(ep.name & ", ")
 
   lines.add(
-    "typedef void (*" & fnType & ")(int err_code, " & byPtrConst(retC) &
-      " reply, const char* err_msg, void* user_data);"
+    "typedef void (*" & fnType & ")(int ret, " & byPtrConst(retC) &
+      " reply, const char* err, void* user_data);"
   )
-  emitCallBox(lines, fnType, boxType)
-  emitReplyTrampolineHead(lines, tramp, boxType, "FFI call failed")
-  lines.add("    char* err = NULL;")
-  lines.add("    " & retC & " out;")
-  lines.add("    memset(&out, 0, sizeof(out));")
+
+  var freeOut = freeStmt(reg, retC, "*out")
+  if freeOut.len > 0 and leafSuffix(retC).len == 0:
+    freeOut = libName & "_free_" & retC & "(out);"
   lines.add(
-    "    int dec = nimffi_decode_from_buf(" & libName & "_decv_" & cToken(retC) &
-      ", (const uint8_t*)msg, len, &out, &err);"
+    "/* Decodes the NIMFFI_MSG_REPLY that answers " & m.procName &
+      "(); the caller matches"
   )
-  lines.add("    if (dec != 0) {")
-  lines.add("        box->fn(-1, NULL, err ? err : \"decode failed\", box->user_data);")
-  lines.add("        free(err);")
+  lines.add(
+    " * `msg->id` against the request id first. Returns NIMFFI_RET_OK; NIMFFI_RET_ERR"
+  )
+  lines.add(
+    " * with the library's error text in `*err`; or -1 when `msg` is not a reply or"
+  )
+  lines.add(" * does not decode, `*err` saying why. `*err` is freed with free().")
+  if retC == CStrType:
+    lines.add(" * On success the caller frees `*out` with free(). */")
+  elif freeOut.len > 0:
+    lines.add(
+      " * On success the caller frees `out` with " & libName & "_free_" & retC & "(). */"
+    )
+  else:
+    lines.add(" * `out` owns no heap memory. */")
+  lines.add(
+    "static inline int " & decode & "(const NimFfiMsg* msg, " & retC &
+      "* out, char** err) {"
+  )
+  lines.add("    if (out) memset(out, 0, sizeof(*out));")
+  lines.add(
+    "    int rc = nimffi_decode_reply(msg, " & libName & "_decv_" & cToken(retC) &
+      ", out, err);"
+  )
   # Reclaim fields a partial decode allocated (out is zeroed).
-  if retFree.len > 0:
-    lines.add("        " & retFree)
-  lines.add("        free(box);")
-  lines.add("        return;")
-  lines.add("    }")
-  lines.add("    box->fn(NIMFFI_RET_OK, &out, NULL, box->user_data);")
-  if retFree.len > 0:
-    lines.add("    " & retFree)
-  lines.add("    free(box);")
+  if freeOut.len > 0:
+    lines.add("    if (rc == -1 && out) " & freeOut)
+  lines.add("    return rc;")
   lines.add("}")
 
-  let head =
-    if isStatic:
-      "static inline int " & libName & "_static_" & stripped & "("
-    else:
-      "static inline int " & libName & "_ctx_" & stripped & "(const " & ctxType &
-        "* ctx, "
-  let sig =
-    if params.len > 0:
-      head & params.join(", ") & ", " & fnType & " on_reply, void* user_data) {"
-    else:
-      head & fnType & " on_reply, void* user_data) {"
-  lines.add(renderBlockDocComment(m.doc))
-  lines.add(sig)
-  lines.add("    " & reqName & " ffi_req;")
-  lines.add("    memset(&ffi_req, 0, sizeof(ffi_req));")
-  for a in assigns:
-    lines.add(a)
-  lines.add("    uint8_t* req_buf = NULL;")
-  lines.add("    size_t req_len = 0;")
+  let freeLocal = freeStmt(reg, retC, "out")
+  lines.add("static inline void " & settle & SettleParams)
+  lines.add("    " & fnType & " on_reply = (" & fnType & ")fn;")
+  lines.add("    if (!on_reply) return;")
+  lines.add("    if (!msg) {")
+  lines.add("        on_reply(NIMFFI_RET_CLOSED, NULL, \"context closed\", user_data);")
+  lines.add("        return;")
+  lines.add("    }")
+  lines.add("    " & retC & " out;")
   lines.add("    char* err = NULL;")
-  lines.add(
-    "    if (nimffi_encode_to_buf(" & libName & "_encv_" & cToken(reqName) &
-      ", &ffi_req, &req_buf, &req_len, &err) != 0) {"
-  )
-  lines.add(
-    "        if (on_reply) on_reply(-1, NULL, err ? err : \"encode failed\", user_data);"
-  )
+  lines.add("    int rc = " & decode & "(msg, &out, &err);")
+  lines.add("    if (rc != NIMFFI_RET_OK) {")
+  lines.add("        on_reply(rc, NULL, err ? err : \"\", user_data);")
   lines.add("        free(err);")
-  lines.add("        return -1;")
+  lines.add("        return;")
   lines.add("    }")
-  lines.add(
-    "    " & boxType & "* box = (" & boxType & "*)malloc(sizeof(" & boxType & "));"
-  )
-  lines.add("    if (!box) {")
-  lines.add("        free(req_buf);")
-  lines.add("        if (on_reply) on_reply(-1, NULL, \"out of memory\", user_data);")
-  lines.add("        return -1;")
+  lines.add("    on_reply(NIMFFI_RET_OK, &out, NULL, user_data);")
+  if freeLocal.len > 0:
+    lines.add("    " & freeLocal)
+  lines.add("}")
+
+  lines.add("static inline void " & settleSync & SettleParams)
+  lines.add("    NimFfiSyncSlot* slot = (NimFfiSyncSlot*)user_data;")
+  lines.add("    (void)fn;")
+  lines.add("    if (!msg) {")
+  lines.add("        nimffi_sync_slot_closed(slot);")
+  lines.add("        return;")
   lines.add("    }")
-  lines.add("    box->fn = on_reply;")
-  lines.add("    box->user_data = user_data;")
-  let ctxArg = if isStatic: "" else: "ctx->ptr, "
-  lines.add(
-    "    int ret = " & m.procName & "(" & ctxArg & tramp & ", box, req_buf, req_len);"
+  lines.add("    slot->ret = " & decode & "(msg, (" & retC & "*)slot->out, slot->err);")
+  lines.add("    slot->done = true;")
+  lines.add("}")
+
+  emitSubmit(
+    lines,
+    libName,
+    "static inline int " & submit & "(" & ctxParam & paramList,
+    reqName,
+    prologue,
+    assigns,
+    target,
+    RoomCond,
+    rawCall,
+    @[],
   )
-  lines.add("    free(req_buf);")
-  lines.add("    if (ret == NIMFFI_RET_MISSING_CALLBACK) {")
+  lines.add("    return NIMFFI_RET_OK;")
+  lines.add("}")
+
+  lines.add(renderBlockDocComment(m.doc))
   lines.add(
-    "        if (on_reply) on_reply(-1, NULL, \"RET_MISSING_CALLBACK (internal error)\", user_data);"
+    "static inline int " & wrapper & "(" & ctxParam & paramList & fnType &
+      " on_reply, void* user_data, uint64_t* req_id_out) {"
   )
-  lines.add("        free(box);")
-  lines.add("        return -1;")
-  lines.add("    }")
-  lines.add("    return 0;")
+  # The id the reply and any stale warning carry; NULL when the caller does not
+  # need to match a warning to this call.
+  lines.add("    uint64_t req_id = 0;")
+  lines.add("    if (req_id_out) *req_id_out = 0;")
+  lines.add(
+    "    const int rc_ = " & submit & "(" & argList & settle &
+      ", (nimffi_generic_fn)on_reply, user_data, &req_id, NULL);"
+  )
+  lines.add("    if (rc_ == NIMFFI_RET_OK && req_id_out) *req_id_out = req_id;")
+  lines.add("    return rc_;")
+  lines.add("}")
+
+  lines.add(renderBlockDocComment(m.doc))
+  lines.add(
+    "static inline int " & wrapper & "_sync(" & ctxParam & paramList & retC &
+      "* out, char** err, int32_t timeout_ms, const " & libType & "Handlers* handlers) {"
+  )
+  lines.add("    if (err) *err = NULL;")
+  lines.add("    if (!out) return -1;")
+  lines.add("    memset(out, 0, sizeof(*out));")
+  lines.add("    NimFfiSyncSlot slot = {false, NIMFFI_RET_OK, out, err};")
+  lines.add("    uint64_t req_id = 0;")
+  lines.add(
+    "    int rc = " & submit & "(" & argList & settleSync &
+      ", NULL, &slot, &req_id, err);"
+  )
+  lines.add("    if (rc != NIMFFI_RET_OK) return rc;")
+  var awaitCtx = "ctx"
+  if isStatic:
+    awaitCtx = libName & "_static_()"
+  lines.add(
+    "    return " & libName & "_ctx_await_(" & awaitCtx &
+      ", req_id, &slot, timeout_ms, handlers);"
+  )
   lines.add("}")
   lines.add("")
 
@@ -1020,26 +1279,29 @@ proc generateCLibHeader*(
   lines.add("extern \"C\" {")
   lines.add("#endif")
   lines.add("")
+  # A plain comment: a doc comment would attach to the first declaration.
+  lines.add("/*" & renderBlockDocComment(RequestDoc)[3 .. ^1])
+  lines.add("")
   for p in procs:
     lines.add(renderBlockDocComment(p.doc))
+    const ReqArgs = "const uint8_t* req_cbor, size_t req_cbor_len, "
     case p.kind
     of FFIKind.FFI:
       lines.add(
-        "int " & p.procName & "(void* ctx, FFICallback callback, void* user_data, " &
-          "const uint8_t* req_cbor, size_t req_cbor_len);"
+        "int " & p.procName & "(void* ctx, " & ReqArgs & "uint64_t* req_id_out);"
       )
     of FFIKind.STATIC:
-      lines.add(
-        "int " & p.procName & "(FFICallback callback, void* user_data, " &
-          "const uint8_t* req_cbor, size_t req_cbor_len);"
-      )
+      lines.add("int " & p.procName & "(" & ReqArgs & "uint64_t* req_id_out);")
     of FFIKind.CTOR:
       lines.add(
-        "void* " & p.procName & "(const uint8_t* req_cbor, size_t req_cbor_len, " &
-          "FFICallback callback, void* user_data);"
+        "int " & p.procName & "(" & ReqArgs & "void** ctx_out, uint64_t* req_id_out);"
       )
     of FFIKind.DTOR:
       lines.add("int " & p.procName & "(void* ctx);")
+  lines.add(renderBlockDocComment(StaticCtxDoc))
+  lines.add("void* " & libName & "_static_ctx(void);")
+  lines.add(renderBlockDocComment(LastErrorDoc))
+  lines.add("const char* " & libName & "_last_error(void);")
   lines.add(renderBlockDocComment(PollDoc))
   lines.add(
     "int " & libName & "_poll(void* ctx, int32_t timeout_ms, const NimFfiMsg** msg);"
@@ -1066,9 +1328,7 @@ proc generateCLibHeader*(
           "(CborEncoder* e, const void* v) { return " & reg.libName & "_enc_" & n &
           "(e, (const " & n & "*)v); }"
       )
-  var respSet = respTypes
-  respSet.add(CStrType) # ctor address payload
-  for n in respSet:
+  for n in respTypes:
     let tok = cToken(n)
     if ("dec" & tok) notin adaptersDone:
       adaptersDone.incl("dec" & tok)
@@ -1078,11 +1338,15 @@ proc generateCLibHeader*(
       )
   lines.add("")
 
-  emitApiIndex(lines, ctxType, libType, libName, classified.replyProcs(), events)
-  emitConstructors(lines, reg, ctxType, libType, libName, ctors)
-  emitDestructor(lines, ctxType, libName, classified.dtor)
+  emitApiIndex(lines, ctxType, libType, libName, classified, events)
   emitEventDecoders(lines, reg, libName, events)
-  emitHandlers(lines, reg, ctxType, libType, libName, events)
+  emitHandlers(
+    lines, reg, ctxType, libType, libName, events, classified.statics.len > 0
+  )
+  emitDestructor(lines, ctxType, libName, classified.dtor)
+  emitConstructors(lines, reg, ctxType, libType, libName, ctors)
+  if classified.replyProcs().len > 0:
+    lines.add("/* ---- requests ---- */")
   for m in classified.replyProcs():
     emitProcWrapper(lines, reg, ctxType, libType, libName, m)
 

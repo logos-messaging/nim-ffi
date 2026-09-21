@@ -86,15 +86,17 @@ suite "doc comments reach the C header":
     let header = generateCLibHeader(procs, types, "widget")
 
   test "the exported symbol carries the doc":
-    check "/** " & CtorDoc & " */\nvoid* widget_create(" in header
+    check "/** " & CtorDoc & " */\nint widget_create(" in header
 
-  test "the high-level wrapper carries the doc":
+  test "the high-level wrapper carries the doc, in both forms":
     check "/** " & CtorDoc & " */\nstatic inline int widget_ctx_create(" in header
+    check "/** " & CtorDoc & " */\nstatic inline int widget_ctx_create_sync(" in header
     check "/** " & DtorDoc & " */\nstatic inline int widget_ctx_destroy(" in header
 
   test "a multi-line doc becomes a star block":
-    check "/**\n * Echoes `req` back.\n * Second line.\n */\nstatic inline int widget_ctx_echo(" in
-      header
+    const Block = "/**\n * Echoes `req` back.\n * Second line.\n */\n"
+    check Block & "static inline int widget_ctx_echo(" in header
+    check Block & "static inline int widget_ctx_echo_sync(" in header
 
   test "the event's constant and its handler entry carry the event's doc":
     let withEvents = generateCLibHeader(procs, types, "widget", events)
@@ -109,7 +111,7 @@ suite "doc comments reach the C++ header":
     let header = generateCppHeader(procs, types, "widget")
 
   test "the extern \"C\" declaration carries the doc":
-    check "/** " & CtorDoc & " */\nvoid* widget_create(" in header
+    check "/** " & CtorDoc & " */\nint widget_create(" in header
 
   test "class members carry an indented /// doc":
     check "    /// " & CtorDoc &

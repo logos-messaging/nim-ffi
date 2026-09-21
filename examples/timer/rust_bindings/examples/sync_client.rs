@@ -18,7 +18,7 @@ fn main() {
 
     // ── 2. Sync call: version ──────────────────────────────────────────────
     let version = ctx.version().expect("my_timer_version failed");
-    println!("[2] Version (sync call, callback fired inline): {version}");
+    println!("[2] Version (blocking call): {version}");
     assert_eq!(version, TIMER_VERSION);
     println!("[2b] Consts from the bindings: MAX_DELAY_MS={MAX_DELAY_MS}");
 

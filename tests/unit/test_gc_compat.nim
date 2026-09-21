@@ -1,4 +1,4 @@
-## foreignThreadGc + string-lifetime guarantees under both orc and refc.
+## String-lifetime guarantees of a reply under both orc and refc.
 
 import unittest2
 import results
@@ -25,26 +25,8 @@ registerReqFFI(GcErrRequest, lib: ptr GcTestLib):
   proc(input: cstring): Future[Result[string, string]] {.async.} =
     return err("gc-err:" & $input)
 
-suite "foreignThreadGc template":
-  test "body executes under current --mm":
-    var executed = false
-    foreignThreadGc:
-      executed = true
-    check executed
-
-  test "body executes exactly once":
-    var count = 0
-    foreignThreadGc:
-      inc count
-    check count == 1
-
 suite "GC safety - string lifetime across thread boundary":
-  test "ok string result remains valid when callback fires":
-    var d: CallbackData
-    initCallbackData(d)
-    defer:
-      deinitCallbackData(d)
-
+  test "ok string result remains valid when the host polls it":
     var pool: FFIContextPool[GcTestLib]
     let ctx = pool.createFFIContext().valueOr:
       checkpoint "createFFIContext failed: " & $error
@@ -53,20 +35,10 @@ suite "GC safety - string lifetime across thread boundary":
     defer:
       discard pool.destroyFFIContext(ctx)
 
-    check sendRequestToFFIThread(
-      ctx, StringLifetimeRequest.ffiNewReq(testCallback, addr d, "hello".cstring)
-    )
-      .isOk()
-    waitCallback(d)
-    check d.retCode == RET_OK
-    check okString(d) == "lifetime:hello"
+    check call(ctx, StringLifetimeRequest.ffiNewReq("hello".cstring)).okString() ==
+      "lifetime:hello"
 
   test "error string lifetime across thread boundary":
-    var d: CallbackData
-    initCallbackData(d)
-    defer:
-      deinitCallbackData(d)
-
     var pool: FFIContextPool[GcTestLib]
     let ctx = pool.createFFIContext().valueOr:
       check false
@@ -74,24 +46,15 @@ suite "GC safety - string lifetime across thread boundary":
     defer:
       discard pool.destroyFFIContext(ctx)
 
-    check sendRequestToFFIThread(
-      ctx, GcErrRequest.ffiNewReq(testCallback, addr d, "test".cstring)
-    )
-      .isOk()
-    waitCallback(d)
-    check d.retCode == RET_ERR
-    check rawText(d) == "gc-err:test"
+    let reply = call(ctx, GcErrRequest.ffiNewReq("test".cstring))
+    check reply.retCode == RET_ERR
+    check reply.text() == "gc-err:test"
 
   test "large string result is delivered without corruption":
     var expected = newString(512)
     for i in 0 ..< 512:
       expected[i] = char(ord('a') + (i mod 26))
 
-    var d: CallbackData
-    initCallbackData(d)
-    defer:
-      deinitCallbackData(d)
-
     var pool: FFIContextPool[GcTestLib]
     let ctx = pool.createFFIContext().valueOr:
       check false
@@ -99,13 +62,7 @@ suite "GC safety - string lifetime across thread boundary":
     defer:
       discard pool.destroyFFIContext(ctx)
 
-    check sendRequestToFFIThread(
-      ctx, LargeStringRequest.ffiNewReq(testCallback, addr d)
-    )
-      .isOk()
-    waitCallback(d)
-    check d.retCode == RET_OK
-    check okString(d) == expected
+    check call(ctx, LargeStringRequest.ffiNewReq()).okString() == expected
 
 suite "GC stability - repeated requests":
   test "20 sequential requests without GC corruption":
@@ -117,14 +74,6 @@ suite "GC stability - repeated requests":
       discard pool.destroyFFIContext(ctx)
 
     for i in 1 .. 20:
-      var d: CallbackData
-      initCallbackData(d)
       let input = "iter" & $i
-      check sendRequestToFFIThread(
-        ctx, StringLifetimeRequest.ffiNewReq(testCallback, addr d, input.cstring)
-      )
-        .isOk()
-      waitCallback(d)
-      check d.retCode == RET_OK
-      check okString(d) == "lifetime:" & input
-      deinitCallbackData(d)
+      check call(ctx, StringLifetimeRequest.ffiNewReq(input.cstring)).okString() ==
+        "lifetime:" & input

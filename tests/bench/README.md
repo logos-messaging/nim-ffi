@@ -10,15 +10,15 @@ This directory holds a Nim stress benchmark. It is not part of `nimble test`.
 
 The bench fans **K producer threads** at one context (default sweep `1,2,4,8`), each firing the same per-thread volume of no-op requests. It times the **submit phase only** — from the start gate until every producer returns from its last `sendRequestToFFIThread` — because that is the path the fix parallelises; completion is bounded by the single FFI thread and deliberately excluded. Each thread count runs `FFI_SUBMIT_ITERS` times (default 5) and the **median** submit/sec is reported, so run-to-run noise can't move the verdict.
 
-The high-contention curve (up to 100 producers) is **opt-in for local runs**, not CI: under a sanitizer on a slow runner, 100 threads can't settle their callbacks within the bench's timeout and would fail on time, not on a bug. Run it on demand with `FFI_SUBMIT_THREADS`:
+The high-contention curve (up to 100 producers) is **opt-in for local runs**, not CI: under a sanitizer on a slow runner, 100 threads can't have their replies polled within the bench's timeout and would fail on time, not on a bug. Run it on demand with `FFI_SUBMIT_THREADS`:
 
 ```sh
 FFI_SUBMIT_THREADS="1,8,16,32,64,100" nimble bench_ffi_submit
 ```
 
-It is also a correctness stress test: the aggregate callback count must match the submit count **exactly** (no drops or double-fires), with zero submit errors and (under asan/lsan/tsan) zero leaks or races.
+It is also a correctness stress test: the replies polled after the submit phase must match the accepted submits **exactly** (one `NIMFFI_MSG_REPLY` per request id: no drops, no duplicates), with zero submit errors and (under asan/lsan/tsan) zero leaks or races.
 
-The bench submits far faster than the single FFI thread drains, so it raises the ingress cap in `bench_ffi_submit.nim.cfg` (`-d:ffiRequestQueueDepth=262144`) to keep timing the submit path alone. With the production default of 1024 the queue fills, the submits come back rejected, and the numbers would measure backpressure instead. Push `FFI_SUBMIT_PER_THREAD` or `FFI_SUBMIT_THREADS` past that cap and the run fails with the submit-error count.
+The bench submits far faster than the single FFI thread drains, so it raises the ingress cap in `bench_ffi_submit.nim.cfg` (`-d:ffiRequestQueueDepth=262144`) to keep timing the submit path alone. Nobody polls during the timed phase, so the same file raises `-d:ffiMaxOutstandingRequests` too: every reply of a run waits at once. With the production default of 1024 the queue fills, the submits come back rejected, and the numbers would measure backpressure instead. Push `FFI_SUBMIT_PER_THREAD` or `FFI_SUBMIT_THREADS` past that cap and the run fails with the submit-error count.
 
 ```sh
 nimble bench_ffi_submit

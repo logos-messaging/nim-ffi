@@ -10,71 +10,127 @@ var registeredRequests*: Table[cstring, FFIRequestProc]
 let registeredRequestsPtr = addr registeredRequests
   ## Read path of every FFI thread; the pointer keeps a `{.gcsafe.}` handler off the GC'ed global, which nothing writes after init.
 
-proc sendRequestToFFIThread*(
-    ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, generation: uint
-): Result[void, string] =
-  ## `generation` is the claim the caller resolved its token under; the request carries it so a slot that changes owner between the resolve and the dispatch answers nobody.
+const MaxOutstandingRequests* {.intdefine: "ffiMaxOutstandingRequests".} = 16384
+  ## Requests a context holds that the host has not collected the reply of. Replies
+  ## are never dropped, so this is what bounds a host that submits and never polls.
+  ## Override with `-d:ffiMaxOutstandingRequests=<n>`.
+
+proc refuse(request: ptr FFIThreadRequest, code: cint, why: string): cint =
+  deleteRequest(request)
+  setLastError(why)
+  return code
+
+proc submitRequest*(
+    ctx: ptr FFIContext,
+    ffiRequest: ptr FFIThreadRequest,
+    generation: uint,
+    reqIdOut: ptr uint64,
+): cint =
+  ## Queues the request for the FFI thread. `RET_OK` promises exactly one reply
+  ## carrying `reqIdOut[]`, unless the context closes first; any other code means
+  ## no reply comes, and `lastError()` says why. `generation` is the claim the
+  ## caller resolved its token under; the request carries it so a slot that changes
+  ## owner between the resolve and the dispatch answers nobody.
 
   # A nil request means the allocator failed; report it instead of dereferencing.
   if ffiRequest.isNil():
-    return err("out of memory: could not allocate the FFI request")
+    setLastError("out of memory: could not allocate the FFI request")
+    return RET_ERR
+
+  if reqIdOut.isNil():
+    return
+      refuse(ffiRequest, RET_ERR, "req_id_out is NULL: the reply could not be matched")
 
   if ctx.eventQueueStuck.load():
-    deleteRequest(ffiRequest)
-    return err("event queue stuck - library cannot accept new requests")
+    return refuse(
+      ffiRequest, RET_QUEUE_FULL,
+      "event queue stuck - library cannot accept new requests",
+    )
 
   if onFFIThread:
     # A handler re-dispatching onto its own FFI thread would deadlock; reject.
-    deleteRequest(ffiRequest)
-    return err(
-      "reentrant ffi call: a handler invoked sendRequestToFFIThread on its own context"
+    return refuse(
+      ffiRequest, RET_ERR,
+      "reentrant ffi call: a handler invoked sendRequestToFFIThread on its own context",
     )
 
   if ctx.lifecycle.load() != CtxLifecycle.Active:
-    deleteRequest(ffiRequest)
-    return err("FFI context is not accepting requests (being recycled)")
+    return refuse(
+      ffiRequest, RET_ERR, "FFI context is not accepting requests (being recycled)"
+    )
 
   ffiRequest.generation = generation
   if generation != ctx.currentGeneration():
-    deleteRequest(ffiRequest)
-    return err("FFI context was recycled; the token names an owner that is gone")
+    return refuse(
+      ffiRequest, RET_INVALID_CTX,
+      "FFI context was recycled; the token names an owner that is gone",
+    )
 
   let payloadLen = ffiRequest[].dataLen
   if payloadLen > MaxRequestPayloadBytes:
-    deleteRequest(ffiRequest)
-    return err(
+    return refuse(
+      ffiRequest,
+      RET_TOO_LARGE,
       "request payload of " & $payloadLen & " bytes exceeds the " &
-        $MaxRequestPayloadBytes & " byte cap"
+        $MaxRequestPayloadBytes & " byte cap",
     )
+
+  if ctx[].outbound.outstanding.fetchAdd(1) >= MaxOutstandingRequests:
+    ctx[].outbound.outstanding.atomicDec()
+    return refuse(
+      ffiRequest,
+      RET_QUEUE_FULL,
+      $MaxOutstandingRequests & " requests wait for the host to poll their replies",
+    )
+
+  # Before the push: the reply can reach a poller before this call returns.
+  ffiRequest.reqId = ctx.nextReqId.fetchAdd(1) + 1
+  reqIdOut[] = ffiRequest.reqId
 
   # Wake only when the push found the queue empty: waking per submit kills scaling, and a skipped wake just waits the consumer's 100ms poll.
   case ctx.reqQueueBank.pushRequest(ffiRequest)
   of QueueFull:
-    deleteRequest(ffiRequest)
-    return err("request queue full: " & $RequestQueueDepth & " requests already queued")
+    ctx[].outbound.outstanding.atomicDec()
+    # The id was handed out for a reply that will not come; take it back.
+    reqIdOut[] = 0
+    return refuse(
+      ffiRequest,
+      RET_QUEUE_FULL,
+      "request queue full: " & $RequestQueueDepth & " requests already queued",
+    )
   of Queued:
     discard
   of QueuedWake:
-    # A failed wake is non-fatal (poll-drain still dispatches); erroring here would double-fire the callback for a request that still completes.
+    # A failed wake is non-fatal (poll-drain still dispatches); erroring here would answer twice a request that still completes.
     ctx.reqSignal.fireSync().isOkOr:
       error "failed to wake FFI thread after enqueue (request still queued)",
         error = error
 
-  ok()
+  return RET_OK
+
+proc sendRequestToFFIThread*(
+    ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, generation: uint
+): Result[uint64, string] =
+  ## `submitRequest` for Nim callers: the request id, or the refusal as text.
+  var reqId: uint64
+  if submitRequest(ctx, ffiRequest, generation, addr reqId) != RET_OK:
+    return err($lastError())
+  return ok(reqId)
 
 proc sendRequestToFFIThread*(
     ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest
-): Result[void, string] =
+): Result[uint64, string] =
   ## For a caller holding the context itself (a ctor, the static ctx, a test): no token, so the live claim is the generation to stamp.
   sendRequestToFFIThread(ctx, ffiRequest, ctx.currentGeneration())
 
 proc awaitWithStaleWarnings(
     retFut: Future[Result[seq[byte], string]],
     request: ptr FFIThreadRequest,
+    outb: ptr FFIOutbound,
     interval: Duration,
-    reqId: string,
+    reqTypeName: string,
 ): Future[Result[seq[byte], string]] {.async.} =
-  ## Pings RET_STALE_WARN every `interval` while the handler runs, then returns
+  ## Queues a stale warning every `interval` while the handler runs, then returns
   ## its real result. Never cancels the handler: a hard-cancel mid-call could
   ## leave the underlying library partially applied. A cancel of this future
   ## therefore waits for the handler too — the recycle drain counts this future,
@@ -97,9 +153,9 @@ proc awaitWithStaleWarnings(
         await timer.cancelAndWait()
       break
     elapsed += intervalMs
-    warn "ffi request still in flight; caller notified via RET_STALE_WARN",
-      reqId = reqId, elapsedMs = elapsed
-    fireStaleWarn(request, elapsed)
+    warn "ffi request still in flight; the host is told through a stale warning",
+      request = reqTypeName, elapsedMs = elapsed
+    enqueueStaleWarn(outb[], request, elapsed)
   return await retFut
 
 proc processRequest[T](
@@ -107,28 +163,29 @@ proc processRequest[T](
 ) {.async.} =
   ## Processes one request on the FFI thread.
 
-  let reqId = $request[].reqId
-  let reqIdCs = reqId.cstring # keeps reqId alive
+  let reqTypeName = $request[].reqTypeName
+  let reqTypeNameCs = reqTypeName.cstring # keeps reqTypeName alive
 
   let retFut =
-    if not registeredRequestsPtr[].contains(reqIdCs):
-      nilProcess(request[].reqId)
+    if not registeredRequestsPtr[].contains(reqTypeNameCs):
+      nilProcess(request[].reqTypeName)
     else:
-      registeredRequestsPtr[][reqIdCs](cast[pointer](request), ctx)
+      registeredRequestsPtr[][reqTypeNameCs](cast[pointer](request), ctx)
 
-  # One try over warn-loop + handler so a shutdown-drain cancel still reaches the response-and-free below.
+  # One try over warn-loop + handler so a shutdown-drain cancel still reaches the reply below.
   let res =
     try:
-      await awaitWithStaleWarnings(retFut, request, ctx.staleWarnInterval, reqId)
+      await awaitWithStaleWarnings(
+        retFut, request, addr ctx[].outbound, ctx.staleWarnInterval, reqTypeName
+      )
     except CatchableError as e:
       Result[seq[byte], string].err(
-        "Error in processRequest for " & reqId & ": " & e.msg
+        "Error in processRequest for " & reqTypeName & ": " & e.msg
       )
 
-  try:
-    handleRes(res, request)
-  except Exception as e:
-    error "Unexpected exception in handleRes", error = e.msg
+  # The request becomes its own reply; the poller frees it once the host is done with it.
+  setReply(request, res)
+  enqueueReply(ctx[].outbound, request)
 
 proc freeLib[T](ctx: ptr FFIContext[T]) {.gcsafe.} =
   ## Releases the library object the ctor stored in ctx.myLib. Only owned libs
@@ -157,21 +214,17 @@ const RecycledReason =
   "FFI context was recycled before this request ran; the caller is gone"
 
 proc rejectQueuedRequests[T](ctx: ptr FFIContext[T]) =
-  ## Fails every queued request instead of dispatching it. A request that a
-  ## destroyed context left behind still carries that host's `userData`, which
-  ## the host has freed; running it would answer a dead callback, and running it
-  ## after the slot is reused would run it against the library of the next owner.
+  ## Fails every queued request instead of dispatching it: running one after the
+  ## slot is reused would run it against the library of the next owner.
   var request = ctx.reqQueueBank.mergeQueues()
   while not request.isNil():
-    let nextRequest = request[].next # read before handleRes frees it
+    let nextRequest = request[].next # read before the reply queue relinks it
     if request[].generation != ctx.currentGeneration():
-      deleteRequest(request)
+      ctx[].outbound.retireRequest(request)
       request = nextRequest
       continue
-    try:
-      handleRes(Result[seq[byte], string].err(RecycledReason), request)
-    except Exception as e:
-      error "rejecting a queued request raised", error = e.msg
+    setReply(request, Result[seq[byte], string].err(RecycledReason))
+    enqueueReply(ctx[].outbound, request)
     request = nextRequest
 
 type TeardownOutcome = enum
@@ -214,15 +267,16 @@ proc drainOngoing(ongoing: ptr seq[Future[void]]): Future[bool] {.async.} =
 
 proc resetForNextOwner[T](ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]) =
   freeLib(ctx)
-  # The owner's poller gets `RET_CLOSED`; what it did not collect is dropped.
-  closeOutbound(ctx[].outbound, ctx.currentGeneration())
-  dropQueuedEvents(ctx[].outbound, ctx[].eventQueue)
   # A reused slot skips initContextResources, so the handle ids of the old owner
   # would otherwise resolve for the next one.
   ctx[].handles.releaseAll()
   # Same reason: the sticky overflow flag would reject every request of the next owner, ctor included.
   ctx.eventQueueStuck.store(false)
   rejectQueuedRequests(ctx)
+  # The owner's poller gets `RET_CLOSED`; what it did not collect is dropped, the
+  # rejections above included, so the next owner never sees a message of this one.
+  closeOutbound(ctx[].outbound, ctx.currentGeneration())
+  dropQueuedMessages(ctx[].outbound, ctx[].eventQueue)
   ongoing[].setLen(0)
 
 proc finishRecycle[T](ctx: ptr FFIContext[T], failure: RecycleFailure) =
@@ -236,9 +290,8 @@ proc finishRecycle[T](ctx: ptr FFIContext[T], failure: RecycleFailure) =
   if outcome != RecycleFailure.None:
     ctx.recycleFailure.store(outcome)
     ctx.lifecycle.store(CtxLifecycle.RecycleFailed)
-    error "context quarantined; the pool slot and its threads leak, the " &
-      "library stays alive and its callbacks can still fire",
-      reason = outcome.reason(), cause = $outcome
+    error "context quarantined; the pool slot and its threads leak, and the " &
+      "library stays alive", reason = outcome.reason(), cause = $outcome
     closeOutbound(ctx[].outbound, ctx.currentGeneration())
   let fireRes = ctx.recycleDoneSignal.fireSync()
   if fireRes.isErr():
@@ -256,8 +309,7 @@ proc recycleContext[T](
     ctx.finishRecycle(failure)
 
   if not await drainOngoing(ongoing):
-    # A handler that still runs answers a callback carrying userData the host
-    # frees as soon as teardown reports success.
+    # A handler that still runs must not find its library freed under it.
     error "recycle drain timed out; the teardown never ran",
       inFlight = ongoing[].len, timeoutMs = RecycleTimeoutMs
     failure = RecycleFailure.DrainTimeout
@@ -342,8 +394,8 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
           # Tick per dispatch so a backlog can't flatline the heartbeat mid-drain.
           ctx.proveAlive()
           if request[].generation != ctx.currentGeneration():
-            # A past owner submitted this; its callback carries userData that host frees once its recycle returns ok, so drop it unanswered.
-            deleteRequest(request)
+            # A past owner submitted this, and nobody polls for that owner any more.
+            ctx[].outbound.retireRequest(request)
             request = nextRequest
             continue
           if ctx.myLib.isNil():

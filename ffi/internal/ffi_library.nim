@@ -195,6 +195,40 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
     )
   )
 
+  # {libraryName}_static_ctx: `{.ffiStatic.}` replies arrive on the static context,
+  # so the host needs its token to poll it.
+  let staticCtxName = libraryName & "_static_ctx"
+  let staticCtxBody = quote:
+    when declared(initializeLibrary):
+      initializeLibrary()
+    let `ctxIdent` = `poolIdent`.staticFFIContext().valueOr:
+      setLastError("static ctx: " & error)
+      return FFICtxToken(nil)
+    return `ctxIdent`.ffiToken()
+
+  stmts.add(
+    newProc(
+      name = ident(staticCtxName),
+      params = @[ident("FFICtxToken")],
+      body = staticCtxBody,
+      pragmas = cdeclExportPragma,
+    )
+  )
+
+  # {libraryName}_last_error
+  let lastErrorName = libraryName & "_last_error"
+  let lastErrorBody = quote:
+    return lastError()
+
+  stmts.add(
+    newProc(
+      name = ident(lastErrorName),
+      params = @[ident("cstring")],
+      body = lastErrorBody,
+      pragmas = cdeclExportPragma,
+    )
+  )
+
   # {libraryName}_shutdown
   let shutdownName = libraryName & "_shutdown"
   let shutdownBody = quote:

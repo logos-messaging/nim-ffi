@@ -57,13 +57,11 @@ suite "thread destruction":
     gHookOutcome.store(HookNotRun)
     let ctx = HookLibFFIPool.createFFIContext().get()
 
-    setupCallbackData(armed)
     var rb = cborEncode(HooklibArmReq())
-    check hooklib_arm(
-      ctx.ffiToken(), testCallback, addr armed, encodedPtr(rb), rb.len.csize_t
-    ) == RET_OK
-    waitCallback(armed)
-    check armed.retCode == RET_OK
+    var reqId: uint64
+    check hooklib_arm(ctx.ffiToken(), encodedPtr(rb), rb.len.csize_t, addr reqId) ==
+      RET_OK
+    check pollReply(ctx, reqId).retCode == RET_OK
 
     # The last live context: recycling it joins its threads, which runs the hook.
     check HookLibFFIPool.recycleFFIContext(ctx).isOk()

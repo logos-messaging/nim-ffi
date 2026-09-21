@@ -120,6 +120,21 @@ int main() {
     ctx.reset();
     std::cout << "[8] context closed: ok=" << closedOk.load() << "\n";
 
+    // A static proc needs no context: its reply arrives on the library's static
+    // context, which has a pump of its own. `shutdown` stops that pump, then
+    // every context the library still holds.
+    auto libVersion = MyTimerCtx::lib_version();
+    if (libVersion.isErr()) {
+        std::cerr << "Error: " << libVersion.error() << "\n";
+        return 1;
+    }
+    std::cout << "[9] static lib_version: " << libVersion.value() << "\n";
+    auto down = MyTimerCtx::shutdown();
+    if (down.isErr()) {
+        std::cerr << "Error: " << down.error() << "\n";
+        return 1;
+    }
+
     std::cout << "\nDone.\n";
     return 0;
 }

@@ -18,12 +18,32 @@ All notable changes to this project are documented in this file.
   compilation.
 - A context runs one thread. The event thread is gone; the FFI thread's heartbeat
   is checked inside `poll`, on the host's thread.
-- Result callbacks are unchanged in this step.
+- **Breaking:** replies are pulled too. Every export loses `callback` and
+  `user_data` and gains `uint64_t* req_id_out`: a request returns once it is
+  queued, and its result arrives from `<lib>_poll` as a `REPLY` carrying that id.
+  A refused request returns a code (`RET_INVALID_CTX`, `RET_QUEUE_FULL`,
+  `RET_TOO_LARGE`, `RET_ERR`) and its text is in the new `<lib>_last_error()`.
+  The library now calls no host function pointer at all, so host code can no
+  longer block the FFI thread. The generated bindings keep their call shapes; the
+  C binding adds a blocking `<lib>_ctx_<proc>_sync`, and its asynchronous wrapper
+  yields the request id so a host can match a stale warning to its call.
+- **Breaking:** the constructor is `<lib>_create(req, len, &ctx, &req_id)`. It
+  hands the context out at once, and whether construction worked is a reply on
+  it. A host that gets a failed reply destroys the context, which closes the leak
+  of a claimed pool slot behind a constructor that failed on the FFI thread.
+- `{.ffiStatic.}` replies arrive on the static context; the new
+  `<lib>_static_ctx()` returns its handle.
+- The stale warning is a message, `NIMFFI_MSG_STALE_WARN`, with at most one
+  pending per request. Replies are never dropped; `-d:ffiMaxOutstandingRequests`
+  (16384) bounds a host that submits and never polls.
 
 ### Removed
 - `<lib>_add_event_listener`, `<lib>_remove_event_listener`, the listener
   registry, `EventEnvelope`, the `"not_responding"` / `"responding"` events and
   `-d:ffiMaxEventNameBytes`.
+- `FFICallBack`, `RET_MISSING_CALLBACK` and `RET_STALE_WARN` (their numbers, 2 and
+  3, are not reused), `foreignThreadGc`, and `{.ffiRaw.}`: a raw export was the
+  `(ctx, callback, userData)` signature itself.
 
 ### Added
 - `ffi/ffi_wake.nim`: a level-triggered wake signal whose handle a host can wait

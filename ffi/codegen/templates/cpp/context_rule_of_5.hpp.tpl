@@ -16,13 +16,7 @@
         }
         // A listener may destroy its own context: that runs on the pump thread,
         // which cannot join itself and owns its own reference to `pump_`.
-        const bool onPump = std::this_thread::get_id() == pumpThread_.get_id();
-        pump_->stop(onPump);
-        if (onPump) {
-            pumpThread_.detach();
-        } else if (pumpThread_.joinable()) {
-            pumpThread_.join();
-        }
+        pump_->stop();
     }
 
     {{CTX}}(const {{CTX}}&) = delete;

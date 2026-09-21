@@ -4,7 +4,7 @@
 
 import std/[atomics, locks, monotimes, times]
 import chronos/timer
-import ./ffi_context, ./ffi_msg, ./ffi_wake, ./ret_codes
+import ./ffi_context, ./ffi_msg, ./ffi_wake, ./ffi_thread_request, ./ret_codes
 
 const
   WatchSliceMs = 1000 ## A blocked poll still looks at the heartbeat this often.
@@ -23,6 +23,7 @@ proc fill(
     outb: var FFIOutbound,
     kind: uint32,
     seq: uint64 = 0,
+    id: uint64 = 0,
     nameId: uint64 = 0,
     aux: uint64 = 0,
     retCode: cint = RET_OK,
@@ -39,7 +40,7 @@ proc fill(
     structSize: uint32(sizeof(NimFfiMsg)),
     kind: kind,
     seq: msgSeq,
-    id: 0,
+    id: id,
     nameId: nameId,
     aux: aux,
     retCode: int32(retCode),
@@ -106,6 +107,85 @@ proc checkLiveness[T](
     return true
   return false
 
+proc releaseHeld(outb: var FFIOutbound) =
+  ## Ends the host's use of the message it last polled.
+  if outb.queueLive:
+    releaseHeldEvent(outb.held)
+  if not outb.heldReply.isNil():
+    outb.retireRequest(outb.heldReply)
+    outb.heldReply = nil
+
+proc hasMessage[T](ctx: ptr FFIContext[T]): bool =
+  let outb = addr ctx[].outbound
+  if outb.queueLive and ctx[].eventQueue.headSeq() != 0:
+    return true
+  withLock outb.lock:
+    return not outb.replyHead.isNil() or not outb.staleHead.isNil()
+
+proc takeMessage[T](ctx: ptr FFIContext[T], msg: ptr ptr NimFfiMsg): bool =
+  ## Hands out the oldest message of the three queues, so the host sees the
+  ## order the library produced and no kind can starve another.
+  let outb = addr ctx[].outbound
+  var eventSeq = 0'u64
+  if outb.queueLive:
+    eventSeq = ctx[].eventQueue.headSeq()
+
+  var
+    reply: ptr FFIThreadRequest = nil
+    staleId, staleSeq: uint64
+    staleMs: int64
+    gotStale = false
+  withLock outb.lock:
+    var replySeq = 0'u64
+    if not outb.replyHead.isNil():
+      replySeq = outb.replyHead[].seq
+    var staleHeadSeq = 0'u64
+    if not outb.staleHead.isNil():
+      staleHeadSeq = outb.staleHead[].staleSeq
+
+    # The event queue has one consumer, this thread, so its head cannot move under us.
+    var oldest = eventSeq
+    if replySeq != 0 and (oldest == 0 or replySeq < oldest):
+      oldest = replySeq
+    if staleHeadSeq != 0 and (oldest == 0 or staleHeadSeq < oldest):
+      oldest = staleHeadSeq
+    if oldest == 0:
+      return false
+    if oldest == replySeq:
+      reply = outb[].popReply()
+    elif oldest == staleHeadSeq:
+      gotStale = outb[].popStaleWarn(staleId, staleSeq, staleMs)
+
+  if not reply.isNil():
+    outb.heldReply = reply
+    fill(
+      msg,
+      outb[],
+      MsgReply,
+      seq = reply[].seq,
+      id = reply[].reqId,
+      retCode = reply[].retCode,
+      payload = reply[].data,
+      len = reply[].dataLen,
+    )
+    return true
+  if gotStale:
+    fill(msg, outb[], MsgStaleWarn, seq = staleSeq, id = staleId, aux = uint64(staleMs))
+    return true
+  if ctx[].eventQueue.popEventInto(outb.held):
+    let ev = outb.held.event
+    fill(
+      msg,
+      outb[],
+      MsgEvent,
+      seq = ev.seq,
+      nameId = ev.nameId,
+      payload = ev.data,
+      len = ev.dataLen,
+    )
+    return true
+  return false
+
 proc pollContext*[T](
     ctx: ptr FFIContext[T], generation: uint, timeoutMs: int, msg: ptr ptr NimFfiMsg
 ): cint {.raises: [], gcsafe.} =
@@ -119,15 +199,19 @@ proc pollContext*[T](
     return RET_ERR
 
   let outb = addr ctx[].outbound
-  # One consumer. A second one is turned away, not parked behind a poll that may wait forever.
+  # One consumer. A second one is turned away, not parked behind a poll that may
+  # wait forever. Teardown takes the same lock, but only to drop the queues and
+  # never waits on anything, so a poller whose context is ending waits it out
+  # rather than reporting another poller that is not there.
   if not outb.pollLock.tryAcquire():
-    return RET_BUSY
+    if outb.closedGeneration.load() != generation and ctx.generation.load() == generation:
+      return RET_BUSY
+    outb.pollLock.acquire()
   defer:
     outb.pollLock.release()
 
   outb.polledGeneration.store(generation)
-  if outb.queueLive:
-    releaseHeldEvent(outb.held)
+  releaseHeld(outb[])
 
   let start = getMonoTime()
   var entered = false
@@ -143,20 +227,10 @@ proc pollContext*[T](
     if checkLiveness(ctx, generation, msg):
       return RET_OK
 
-    if outb.queueLive and ctx[].eventQueue.popEventInto(outb.held):
-      let ev = outb.held.event
-      fill(
-        msg,
-        outb[],
-        MsgEvent,
-        seq = ev.seq,
-        nameId = ev.nameId,
-        payload = ev.data,
-        len = ev.dataLen,
-      )
+    if takeMessage(ctx, msg):
       return RET_OK
 
-    # After the queue, so the events of a teardown still arrive.
+    # After the queues, so the messages of a teardown still arrive.
     if outb.closedGeneration.load() == generation:
       fillClosed(msg, ctx)
       return RET_CLOSED
@@ -164,8 +238,8 @@ proc pollContext*[T](
     # Disarm, then look again: a producer that saw the wake armed did not fire.
     outb.wakeArmed.store(false)
     outb.wake.clear()
-    if (outb.queueLive and ctx[].eventQueue.headSeq() != 0) or
-        outb.closedGeneration.load() == generation or ctx.generation.load() != generation:
+    if hasMessage(ctx) or outb.closedGeneration.load() == generation or
+        ctx.generation.load() != generation:
       continue
 
     var slice = WatchSliceMs
