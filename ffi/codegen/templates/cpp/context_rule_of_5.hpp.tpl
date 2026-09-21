@@ -9,8 +9,19 @@
     // context.
     ~{{CTX}}() {
         if (ptr_) {
+            // Before the pump stops: the teardown may still emit events, and the
+            // poll the pump is blocked in wakes with NIMFFI_RET_CLOSED.
             {{LIB}}_destroy(ptr_);
             ptr_ = nullptr;
+        }
+        // A listener may destroy its own context: that runs on the pump thread,
+        // which cannot join itself and owns its own reference to `pump_`.
+        const bool onPump = std::this_thread::get_id() == pumpThread_.get_id();
+        pump_->stop(onPump);
+        if (onPump) {
+            pumpThread_.detach();
+        } else if (pumpThread_.joinable()) {
+            pumpThread_.join();
         }
     }
 

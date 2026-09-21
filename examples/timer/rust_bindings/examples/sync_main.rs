@@ -15,10 +15,17 @@ fn main() -> Result<(), String> {
         Duration::from_secs(5),
     )?;
 
-    // Closure runs on the lib's dispatch thread; forward to `main` via mpsc and recv_timeout below.
+    // Closure runs on the ctx's pump thread; forward to `main` via mpsc and recv_timeout below.
     let (tx, rx) = mpsc::channel::<EchoEvent>();
     let typed_handle = ctx.add_on_echo_fired_listener(move |evt: &EchoEvent| {
         let _ = tx.send(evt.clone());
+    });
+
+    // Liveness and the end of the context arrive through the same pump.
+    ctx.add_not_responding_listener(|reason| eprintln!("my_timer is not responding (reason {reason})"));
+    let (closed_tx, closed_rx) = mpsc::channel::<(bool, String)>();
+    ctx.add_closed_listener(move |ok, reason| {
+        let _ = closed_tx.send((ok, reason.to_string()));
     });
 
     ctx.echo(EchoRequest { message: "sync-event-demo".into(), delay_ms: 1 })?;
@@ -29,5 +36,12 @@ fn main() -> Result<(), String> {
     }
 
     ctx.remove_event_listener(typed_handle);
+
+    // Dropping the ctx destroys it and joins the pump, so `Closed` has been delivered by then.
+    drop(ctx);
+    match closed_rx.try_recv() {
+        Ok((ok, reason)) => println!("closed: ok={ok} reason={reason:?}"),
+        Err(e) => return Err(format!("closed never arrived: {}", e)),
+    }
     Ok(())
 }

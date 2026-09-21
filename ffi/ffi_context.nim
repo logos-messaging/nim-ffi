@@ -7,12 +7,13 @@ import chronicles, chronos, chronos/threadsync, results
 import
   ./ffi_types,
   ./ffi_events,
+  ./ffi_outbound,
   ./ffi_handles,
   ./ffi_thread_request,
   ./ffi_request_queue,
   ./cbor_serial
 
-export ffi_events, ffi_handles
+export ffi_events, ffi_outbound, ffi_handles
 export ffi_request_queue.RequestQueueDepth
 
 type FFICtxToken* = distinct pointer
@@ -76,26 +77,19 @@ type FFIContext*[T] = object
     # at the default fallback of the FFI thread. For a `ref` type that fallback
     # is nil.
   ffiThread: Thread[(ptr FFIContext[T])]
-  eventThread: Thread[(ptr FFIContext[T])]
   reqQueueBank: RequestQueueBank
   reqSignal: ThreadSignalPtr
-  stopSignal: ThreadSignalPtr
   threadExitSignal: ThreadSignalPtr
-  eventQueueSignal: ThreadSignalPtr
-  eventThreadExitSignal: ThreadSignalPtr
   userData*: pointer
-  eventRegistry*: FFIEventRegistry
   handles*: FFIHandleRegistry
   eventQueue*: EventQueue
+  outbound*: FFIOutbound
   ffiHeartbeat*: Atomic[int64]
   eventQueueStuck*: Atomic[bool]
-  ffiThreadExited*: Atomic[bool]
-    # set once FFI thread (incl. async {.ffiDtor.}) is done; event thread drains until then
   running: Atomic[bool]
   staleWarnInterval*: Duration
 
 var onFFIThread* {.threadvar.}: bool
-var onEventThread* {.threadvar.}: bool
 
 const RecycleTimeoutMs* {.intdefine: "ffiRecycleTimeoutMs".} = 1500
   ## Bounds one drain round of the recycle handler. The handler runs at most two
@@ -113,7 +107,6 @@ const
     ## Caller-side bound for synchronous recycle: both drain rounds, the teardown
     ## hook and slack, so it only fires when the worker itself is wedged. The
     ## generated C destructor blocks its caller this long — 15 s by default.
-  EventThreadTickInterval* = 1.seconds
   FFIHeartbeatStartDelay* = 10.seconds
   FFIHeartbeatStaleThreshold* = 1.seconds
 
@@ -168,15 +161,17 @@ proc registerCloseDispatcherHook() =
   ## Call first thing in a thread body, before any library can register its own hook.
   onThreadDestruction(closeDispatcherHook)
 
-include ./event_thread
 include ./ffi_thread
 
 proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Mirror of `initContextResources`. Threads MUST be joined, and only their owner may call it.
   deinitRequestQueue(ctx[].reqQueueBank)
-  deinitEventRegistry(ctx[].eventRegistry)
   deinitHandleRegistry(ctx[].handles)
-  deinitEventQueue(ctx[].eventQueue)
+  # A host thread can still be in `poll`: the outbound outlives this, the queue does not.
+  withLock ctx[].outbound.pollLock:
+    ctx[].outbound.queueLive = false
+    deinitEventQueue(ctx[].eventQueue)
+    deinitHeldEvent(ctx[].outbound.held)
   ok()
 
 proc drainSignal(sig: ThreadSignalPtr) =
@@ -198,32 +193,16 @@ template newSignalOrErr(field: untyped, name: string) =
       return err("couldn't create ThreadSignalPtr: " & name & ": " & $error)
 
 proc startContextThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  ## Brings up the FFI and event thread pair of a slot whose resources are live.
+  ## Brings up the FFI thread of a slot whose resources are live.
   drainSignal(ctx.reqSignal)
-  drainSignal(ctx.stopSignal)
-  drainSignal(ctx.eventQueueSignal)
   drainSignal(ctx.threadExitSignal)
-  drainSignal(ctx.eventThreadExitSignal)
 
-  ctx.ffiThreadExited.store(false)
   ctx.running.store(true)
 
   try:
     createThread(ctx.ffiThread, ffiThreadBody[T], ctx)
   except ValueError, ResourceExhaustedError:
     return err("failed to create the FFI thread: " & getCurrentExceptionMsg())
-
-  try:
-    createThread(ctx.eventThread, eventThreadBody[T], ctx)
-  except ValueError, ResourceExhaustedError:
-    # Join ffiThread before the caller cleans up state it is waiting on.
-    ctx.running.store(false)
-    let fireRes = ctx.reqSignal.fireSync()
-    if fireRes.isErr():
-      error "failed to signal ffiThread during event-thread cleanup",
-        error = fireRes.error
-    joinThread(ctx.ffiThread)
-    return err("failed to create the event thread: " & getCurrentExceptionMsg())
 
   ok()
 
@@ -234,14 +213,17 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ctx.lifecycle.store(CtxLifecycle.Active)
   ctx.recycleFailure.store(RecycleFailure.None)
   ctx.recycleAbandoned.store(false)
+  # First, and outside the cleanup below: the cleanup takes its lock.
+  ?initOutbound(ctx[].outbound)
   initRequestQueue(ctx[].reqQueueBank)
-  initEventRegistry(ctx[].eventRegistry)
   initHandleRegistry(ctx[].handles)
-  initEventQueue(ctx[].eventQueue)
+  withLock ctx[].outbound.pollLock:
+    initEventQueue(ctx[].eventQueue)
+    initHeldEvent(ctx[].outbound.held)
+    ctx[].outbound.queueLive = true
   ctx.ffiHeartbeat.store(0)
   ctx.libReady.store(false)
   ctx.eventQueueStuck.store(false)
-  ctx.ffiThreadExited.store(false)
   ctx.staleWarnInterval = StaleWarnInterval
 
   var success = false
@@ -253,10 +235,7 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
           error = error
 
   newSignalOrErr(ctx.reqSignal, "reqSignal")
-  newSignalOrErr(ctx.stopSignal, "stopSignal")
   newSignalOrErr(ctx.threadExitSignal, "threadExitSignal")
-  newSignalOrErr(ctx.eventQueueSignal, "eventQueueSignal")
-  newSignalOrErr(ctx.eventThreadExitSignal, "eventThreadExitSignal")
   newSignalOrErr(ctx.recycleDoneSignal, "recycleDoneSignal")
 
   ?ctx.startContextThreads()
@@ -281,12 +260,8 @@ proc waitExitOrErr(
   ok()
 
 proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
-  # Skip onNotResponding on error: it runs the listeners here, and a stuck one blocks the stop.
   ctx.running.store(false)
   ?ctx.reqSignal.fireOrErr("reqSignal")
-  ?ctx.stopSignal.fireOrErr("stopSignal")
-  ctx.eventQueueSignal.fireOrErr("eventQueueSignal").isOkOr:
-    error "failed to signal eventQueueSignal in signalStop", error = error
   ok()
 
 proc tryClaim*[T](ctx: ptr FFIContext[T]): bool =
@@ -386,6 +361,4 @@ proc stopAndJoinThreads*[T](
 
   ?ctx.threadExitSignal.waitExitOrErr("FFI thread", timeout)
   joinThread(ctx.ffiThread)
-  ?ctx.eventThreadExitSignal.waitExitOrErr("event thread", timeout)
-  joinThread(ctx.eventThread)
   ok()

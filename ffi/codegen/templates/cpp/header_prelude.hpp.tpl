@@ -13,9 +13,12 @@
 #endif
 #include <string>
 #include <cstdint>
+#include <atomic>
 #include <chrono>
 #include <charconv>
+#include <map>
 #include <mutex>
+#include <thread>
 #include <condition_variable>
 #include <memory>
 #include <functional>

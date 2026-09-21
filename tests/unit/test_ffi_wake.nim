@@ -5,59 +5,7 @@ import std/[monotimes, os, times]
 import unittest2
 import results
 import ffi/ffi_wake
-
-when defined(linux) or defined(android):
-  import std/[posix, epoll]
-
-  proc hostSeesReady(handle: int, timeoutMs: int): bool =
-    let ep = epoll_create1(0)
-    doAssert ep != -1
-    defer:
-      discard posix.close(ep)
-    var ev = EpollEvent(events: EPOLLIN)
-    doAssert epoll_ctl(ep, EPOLL_CTL_ADD, cint(handle), addr ev) == 0
-    var got: EpollEvent
-    return epoll_wait(ep, addr got, 1, cint(timeoutMs)) == 1
-
-elif defined(windows):
-  import std/winlean
-
-  proc hostSeesReady(handle: int, timeoutMs: int): bool =
-    var handles: WOHandleArray
-    handles[0] = cast[Handle](handle)
-    let res = waitForMultipleObjects(1, addr handles, 0, int32(timeoutMs))
-    return res == WAIT_OBJECT_0
-
-else:
-  import std/[posix, kqueue]
-
-  proc parentKqueueSeesReady(handle: int, timeoutMs: int): bool =
-    let parent = kqueue()
-    doAssert parent != -1
-    defer:
-      discard posix.close(parent)
-    var change = KEvent(ident: uint(handle), filter: EVFILT_READ, flags: EV_ADD)
-    var got: KEvent
-    var ts = Timespec(
-      tv_sec: posix.Time(timeoutMs div 1000), tv_nsec: (timeoutMs mod 1000) * 1_000_000
-    )
-    return kevent(parent, addr change, 1, addr got, 1, addr ts) == 1
-
-  proc selectSeesReady(handle: int, timeoutMs: int): bool =
-    var readSet: TFdSet
-    FD_ZERO(readSet)
-    FD_SET(cint(handle), readSet)
-    var tv = Timeval(
-      tv_sec: posix.Time(timeoutMs div 1000),
-      tv_usec: Suseconds((timeoutMs mod 1000) * 1000),
-    )
-    return select(cint(handle + 1), addr readSet, nil, nil, addr tv) == 1
-
-  proc hostSeesReady(handle: int, timeoutMs: int): bool =
-    let viaKqueue = parentKqueueSeesReady(handle, timeoutMs)
-    let viaSelect = selectSeesReady(handle, timeoutMs)
-    doAssert viaKqueue == viaSelect, "parent kqueue and select disagree"
-    return viaKqueue
+import ./host_wait
 
 proc elapsedMs(start: MonoTime): int =
   return int((getMonoTime() - start).inMilliseconds)
@@ -170,3 +118,30 @@ suite "wake signal":
     check elapsedMs(start) < 5000
     joinThread(th)
     check w.waitFor(0)
+
+suite "host handle":
+  test "the host's copy follows the signal and may be closed at any time":
+    var w: WakeSignal
+    check w.init().isOk()
+    defer:
+      w.close()
+    let copy = w.hostHandle()
+    check copy != WakeNoHandle
+    check copy != w.handle()
+    check not hostSeesReady(copy, 0)
+
+    w.fire()
+    check hostSeesReady(copy, 0)
+    w.clear()
+    check not hostSeesReady(copy, 0)
+
+    closeHostHandle(copy)
+    w.fire()
+    check w.waitFor(0)
+    let second = w.hostHandle()
+    check hostSeesReady(second, 0)
+    closeHostHandle(second)
+
+  test "an uninitialised signal has no host handle":
+    var w: WakeSignal
+    check w.hostHandle() == WakeNoHandle

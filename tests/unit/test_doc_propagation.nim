@@ -96,10 +96,10 @@ suite "doc comments reach the C header":
     check "/**\n * Echoes `req` back.\n * Second line.\n */\nstatic inline int widget_ctx_echo(" in
       header
 
-  test "the listener registration carries the event's doc":
+  test "the event's constant and its handler entry carry the event's doc":
     let withEvents = generateCLibHeader(procs, types, "widget", events)
-    check "/** " & EventDoc &
-      " */\nstatic inline uint64_t widget_ctx_add_on_echoed_listener(" in withEvents
+    check "/** " & EventDoc & " */\n#define WIDGET_EVT_ON_ECHOED " in withEvents
+    check "    /** " & EventDoc & " */\n    void (*on_echoed)(" in withEvents
 
   test "an undocumented registry leaks no doc text":
     checkNoDocText(generateCLibHeader(undocumented, types, "widget"))

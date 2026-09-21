@@ -5,7 +5,11 @@ codegen is usable from a real C++ consumer. They drive the `my_timer` example
 through its auto-generated `my_timer.hpp` bindings (constructor, sync method,
 async methods, complex types with optional fields, multiple contexts, error
 propagation, async pipelines, short-lived-thread stress, concurrent hammer)
-and assert the round-tripped values. The `CrossLibrary` test additionally
+and assert the round-tripped values. The event cases cover the per-context pump
+thread that takes the library's messages out of `my_timer_poll`: ordered, typed
+delivery, a listener that removes itself, adds another listener, calls back
+into its context or destroys it, teardown while events are in flight, and the
+closed hook. The `CrossLibrary` test additionally
 loads `examples/echo`'s `echo.hpp` alongside the timer to prove two
 independent nim-ffi libraries coexist in one process with no symbol clash
 and no shared global state.

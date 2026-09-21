@@ -3,6 +3,7 @@
 
 import std/strutils
 import unittest2
+import ffi/ffi_msg
 import ffi/codegen/[meta, c]
 
 proc field(n, t: string): FFIFieldMeta =
@@ -115,7 +116,9 @@ suite "generateCLibHeader: ABI declarations and context API":
     check "void* timer_create(const uint8_t* req_cbor, size_t req_cbor_len," in header
     check "int timer_version(void* ctx, FFICallback callback" in header
     check "int timer_destroy(void* ctx);" in header
-    check "uint64_t timer_add_event_listener(" in header
+    check "int timer_poll(void* ctx, int32_t timeout_ms, const NimFfiMsg** msg);" in
+      header
+    check "intptr_t timer_poll_fd(void* ctx);" in header
 
   test "high-level wrappers are namespaced to avoid the raw symbols":
     check "timer_ctx_create(" in header
@@ -154,7 +157,9 @@ static inline int timer_ctx_destroy(TimerCtx* ctx) {
   test "no blocking sync-call machinery or per-call timeout survives":
     check "nimffi_wait_result" notin header
     check "NimFfiCallState" notin header
-    check "timeout_ms" notin header
+    # Only poll and the pump take a timeout; no request does.
+    check "timer_ctx_version(const TimerCtx* ctx, TimerVersionReplyFn on_reply, void* user_data) {" in
+      header
 
   test "an empty request envelope still encodes a (zero-length) map":
     check "_nimffi_empty" in header
@@ -238,51 +243,113 @@ suite "generateCLibHeader: events":
         returnTypeName: "",
       ),
     ]
-    let types = @[FFITypeMeta(name: "TickEvent", fields: @[field("count", "int")])]
+    let types = @[
+      FFITypeMeta(name: "TickEvent", fields: @[field("count", "int")]),
+      FFITypeMeta(name: "JobDone", fields: @[field("jobId", "string")]),
+    ]
     let events = @[
       FFIEventMeta(
         wireName: "on_tick",
         nimProcName: "onTick",
         libName: "timer",
         payloadTypeName: "TickEvent",
-      )
+        doc: "Fires once a second.",
+      ),
+      FFIEventMeta(
+        wireName: "job_done",
+        nimProcName: "onJobDone",
+        libName: "timer",
+        payloadTypeName: "JobDone",
+      ),
     ]
     let header = generateCLibHeader(procs, types, "timer", events)
 
-  test "a typed handler, box and trampoline are emitted per event":
-    check "TimerOnTickFn" in header
-    check "TimerOnTickBox" in header
-    check "timer_on_tick_trampoline(" in header
+  test "every event gets its name id constant, from the wire name":
+    check "#define TIMER_EVT_ON_TICK " & nameIdLiteral("on_tick") &
+      "ULL  /* \"on_tick\" */" in header
+    check "#define TIMER_EVT_ON_JOB_DONE " & nameIdLiteral("job_done") & "ULL" in header
 
-  test "the registration API uses the wire name and snake-cased proc name":
-    check "timer_ctx_add_on_tick_listener(" in header
-    check "\"on_tick\"" in header
-    check "timer_ctx_remove_event_listener(" in header
+  test "every event gets a decoder of the bare payload":
+    check "static inline int timer_decode_on_tick(const NimFfiMsg* msg, TickEvent* out) {" in
+      header
+    check "static inline int timer_decode_on_job_done(const NimFfiMsg* msg, JobDone* out) {" in
+      header
+    check "cbor_parser_init(msg->payload, msg->len, 0, &parser, &it)" in header
+    # The v0.3 `{eventType, payload}` envelope is gone.
+    check "\"payload\"" notin header
+    check "\"eventType\"" notin header
 
-  test "the context tracks listeners only when events exist":
-    check "TimerCtxListener* listeners;" in header
+  test "a decoder says who frees, and reclaims a partial decode itself":
+    check "On success the caller frees `out` with timer_free_JobDone()." in header
+    check "        timer_free_JobDone(out);\n        return -1;" in header
+    # TickEvent is all scalars: nothing to free, and no free helper to name.
+    check "timer_free_TickEvent" notin header
 
-  test "a failed teardown leaks the listener boxes instead of dangling them":
-    # A non-OK rc leaves the worker threads live, still holding each box as
-    # callback user_data, so the sweep must sit behind the rc guard.
+  test "Handlers lists every event, with its doc, then liveness and closed":
+    check(
+      """
+typedef struct {
+    /** Fires once a second. */
+    void (*on_tick)(const TickEvent* ev, void* user_data);
+    void (*on_job_done)(const JobDone* ev, void* user_data);""" in
+        header
+    )
+    check "    void (*not_responding)(uint64_t reason, void* user_data);" in header
+    check "    void (*responding)(void* user_data);" in header
+    check "    void (*closed)(int ret, const char* reason, void* user_data);" in header
+    check "    void* user_data;\n} TimerHandlers;" in header
+
+  test "dispatch decodes, then calls the handler, then frees":
+    check "static inline int timer_ctx_dispatch(TimerCtx* ctx, const NimFfiMsg* msg, const TimerHandlers* handlers) {" in
+      header
+    check(
+      """
+        if (msg->name_id == TIMER_EVT_ON_JOB_DONE) {
+            JobDone ev;
+            if (timer_decode_on_job_done(msg, &ev) != 0) return -1;
+            if (handlers && handlers->on_job_done) handlers->on_job_done(&ev, handlers->user_data);
+            timer_free_JobDone(&ev);
+            return 0;
+        }""" in
+        header
+    )
+    check "case NIMFFI_MSG_NOT_RESPONDING:" in header
+    check "case NIMFFI_MSG_RESPONDING:" in header
+    check "case NIMFFI_MSG_CLOSED:" in header
+
+  test "the pump and the wake handle are emitted":
+    check "static inline int timer_ctx_pump_once(TimerCtx* ctx, int32_t timeout_ms, const TimerHandlers* handlers) {" in
+      header
+    check "int rc = timer_poll(ctx->ptr, timeout_ms, &msg);" in header
+    check "static inline intptr_t timer_ctx_poll_fd(const TimerCtx* ctx) {" in header
+
+  test "the API index names the requests and every message":
+    check "/* timer API" in header
+    check " *   on_tick(const TickEvent*)  TIMER_EVT_ON_TICK" in header
+    check " *   not_responding, responding, closed" in header
+
+  test "the listener registry is gone":
+    for gone in [
+      "_add_event_listener", "_remove_event_listener", "_listener(", "TimerCtxListener",
+      "listeners_len", "TimerOnTickFn", "TimerOnTickBox", "timer_on_tick_trampoline",
+    ]:
+      check gone notin header
+
+  test "the context destructor frees nothing but the context":
     check(
       """
 static inline int timer_ctx_destroy(TimerCtx* ctx) {
     if (!ctx) return NIMFFI_RET_OK;
     int rc = NIMFFI_RET_OK;
     if (ctx->ptr) { rc = timer_destroy(ctx->ptr); ctx->ptr = NULL; }
-    if (rc == NIMFFI_RET_OK) {
-        for (size_t i = 0; i < ctx->listeners_len; i++) free(ctx->listeners[i].box);
-    }
-    free(ctx->listeners);
     free(ctx);
     return rc;
 }""" in
         header
     )
 
-suite "generateCLibHeader: no-event libraries stay lean":
-  test "a library without events has no listener bookkeeping":
+suite "generateCLibHeader: a library without events":
+  test "it still gets Handlers, dispatch, the pump and the wake handle":
     let procs = @[
       FFIProcMeta(
         procName: "timer_create",
@@ -294,8 +361,14 @@ suite "generateCLibHeader: no-event libraries stay lean":
       )
     ]
     let header = generateCLibHeader(procs, @[], "timer")
-    check "listeners_len" notin header
-    check "_add_event_listener" in header # raw ABI symbol is always declared
+    check "} TimerHandlers;" in header
+    check "    void (*closed)(int ret, const char* reason, void* user_data);" in header
+    check "timer_ctx_dispatch(" in header
+    check "timer_ctx_pump_once(" in header
+    check "timer_ctx_poll_fd(" in header
+    check "int timer_poll(void* ctx" in header
+    check "_EVT_" notin header
+    check "_add_event_listener" notin header
 
   test "a library without a dtor still reports success from ctx_destroy":
     let procs = @[
@@ -328,6 +401,14 @@ suite "shared headers: prelude and cbor split":
     check "nimffi_free_bytes" in prelude
     # Strings are a bare `const char*`: no leaf type and no free helper.
     check "NimFfiStr" notin prelude
+
+  test "the prelude declares the poll message once, from ffi_msg":
+    let prelude = generateCPreludeHeader()
+    check cMsgDecl() in prelude
+    check prelude.count("} NimFfiMsg;") == 1
+    check "#define NIMFFI_MSG_EVENT 2" in prelude
+    check "{{MSG_DECL}}" notin prelude
+    check "NimFfiMsg;" notin generateCLibHeader(@[], @[], "timer")
 
   test "the cbor header carries the leaf codecs and pulls in the prelude":
     let cbor = generateCCborHeader()

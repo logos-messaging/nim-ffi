@@ -27,7 +27,11 @@ static void sleep_ms(unsigned ms) {
  * callback are owned by the binding and valid only while the callback runs —
  * the caller never frees them; it copies out whatever it wants to keep. This
  * demo turns each async call back into a sequential step by polling a `done`
- * flag (the same pattern the typed event listener already uses). */
+ * flag.
+ *
+ * Events use no callback from the library. It queues them, and the host takes
+ * them out with my_timer_ctx_pump_once() on a thread of its choice, here main:
+ * the handlers below run inside that call. */
 
 /* Poll up to ~5s for a callback to fire. Returns false if it never did, so the
  * caller can report a stuck call instead of treating it as an empty success. */
@@ -38,14 +42,22 @@ static bool wait_done(atomic_int* done) {
     return atomic_load(done) != 0;
 }
 
-static atomic_int g_echo_count = 0;
-static char g_echo_message[256];
+typedef struct {
+    int hits;
+    long long echo_count;
+    char message[256];
+} EchoSink;
 
-static void on_echo_fired(const EchoEvent* evt, void* user_data) {
+static void on_echo_fired(const EchoEvent* ev, void* user_data) {
+    EchoSink* sink = (EchoSink*)user_data;
+    sink->hits++;
+    sink->echo_count = (long long)ev->echoCount;
+    snprintf(sink->message, sizeof(sink->message), "%s", ev->message ? ev->message : "");
+}
+
+static void on_not_responding(uint64_t reason, void* user_data) {
     (void)user_data;
-    atomic_store(&g_echo_count, (int)evt->echoCount);
-    snprintf(g_echo_message, sizeof(g_echo_message), "%s",
-             evt->message ? evt->message : "");
+    fprintf(stderr, "library not responding (reason %llu)\n", (unsigned long long)reason);
 }
 
 typedef struct {
@@ -212,18 +224,32 @@ int main(void) {
            "priority=%d\n",
            w.text_a, w.num_a, w.num_b, w.flag);
 
-    uint64_t handle =
-        my_timer_ctx_add_on_echo_fired_listener(ctx, on_echo_fired, NULL);
-    EchoRequest evt_req = {"event-demo", 1};
-    memset(&w, 0, sizeof(w));
-    my_timer_ctx_echo(ctx, &evt_req, on_echo, &w);
-    wait_done(&w.done);
-    /* The event fires from the library's dispatch thread; give it a moment. */
-    sleep_ms(500);
-    printf("[6] typed event onEchoFired: message=%s, echoCount=%d\n",
-           g_echo_message, atomic_load(&g_echo_count));
+    /* Everything the library can send is an entry of MyTimerHandlers; a NULL
+     * entry ignores that message. */
+    EchoSink sink;
+    memset(&sink, 0, sizeof(sink));
+    MyTimerHandlers handlers;
+    memset(&handlers, 0, sizeof(handlers));
+    handlers.on_echo_fired = on_echo_fired;
+    handlers.not_responding = on_not_responding;
+    handlers.user_data = &sink;
 
-    my_timer_ctx_remove_event_listener(ctx, handle);
+    /* Steps 3 to 5 fired events nobody took out yet: drop them, without waiting. */
+    while (my_timer_ctx_pump_once(ctx, 0, NULL) == NIMFFI_RET_OK) {
+    }
+
+    EchoRequest evt_req = {"event-demo", 1};
+    RUN(my_timer_ctx_echo(ctx, &evt_req, on_echo, &w), w);
+    /* Each pump waits up to 100ms for one message and dispatches it. */
+    for (int i = 0; i < 50 && sink.hits == 0; i++) {
+        int rc = my_timer_ctx_pump_once(ctx, 100, &handlers);
+        if (rc != NIMFFI_RET_OK && rc != NIMFFI_RET_TIMEOUT) {
+            fprintf(stderr, "Error: pump returned %d\n", rc);
+            break;
+        }
+    }
+    printf("[6] typed event onEchoFired: message=%s, echoCount=%lld\n", sink.message,
+           sink.echo_count);
 
     my_timer_ctx_destroy(ctx);
     printf("\nDone.\n");

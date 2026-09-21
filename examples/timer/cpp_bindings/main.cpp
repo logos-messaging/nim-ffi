@@ -1,9 +1,7 @@
 #include "my_timer.hpp"
 #include <atomic>
-#include <chrono>
 #include <future>
 #include <iostream>
-#include <thread>
 
 // The generated bindings never throw: every call returns a Result<T>. We
 // branch on isErr() and read value()/error() instead of using try/catch.
@@ -92,9 +90,9 @@ int main() {
               << ", priority=" << static_cast<int>(scheduleRes->priority) << "\n";
 
     // Each `{.ffiEvent.}` declared on the Nim side gets a typed
-    // registration method — `addOnEchoFiredListener(handler)` here.
-    // Subscribe to each event separately; handlers fire from the lib's
-    // dispatch thread, so synchronise via std::promise / atomics.
+    // registration method — `addOnEchoFiredListener(handler)` here. The
+    // context's pump thread takes the events out of `my_timer_poll` and calls
+    // the handlers, so synchronise via std::promise / atomics.
     std::promise<EchoEvent> echoEvtPromise;
     auto echoEvtFuture = echoEvtPromise.get_future();
     const auto typedHandle = ctx->addOnEchoFiredListener(
@@ -106,12 +104,21 @@ int main() {
               << ", echoCount=" << evt.echoCount << "\n";
 
     // Drop the typed listener — no handler fires for the follow-up echo.
-    // Sleep briefly to give the lib thread time to settle before we tear
-    // the ctx down.
     ctx->removeEventListener(typedHandle);
     ctx->echo(EchoRequest{"event-demo-after-remove", 1});
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
     std::cout << "[7] after removeEventListener: typed listener removed\n";
+
+    // The liveness and closed hooks are listeners too. The closed hook is the
+    // last call a context makes; the destructor joins the pump, so it has run
+    // by the time `reset` returns.
+    ctx->addNotRespondingListener([](std::uint64_t reason) {
+        std::cerr << "context stopped answering, reason=" << reason << "\n";
+    });
+    std::atomic<bool> closedOk{false};
+    ctx->addClosedListener(
+        [&](bool ok, const std::string&) { closedOk.store(ok); });
+    ctx.reset();
+    std::cout << "[8] context closed: ok=" << closedOk.load() << "\n";
 
     std::cout << "\nDone.\n";
     return 0;

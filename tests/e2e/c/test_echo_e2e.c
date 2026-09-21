@@ -72,6 +72,14 @@ static void test_version(EchoCtx* ctx) {
     assert(strcmp(w.text_a, "nim-echo v0.1.0") == 0);
 }
 
+/* A library without events still has the pump: liveness and `closed` use it. */
+static void test_pump_without_events(EchoCtx* ctx) {
+    EchoHandlers handlers;
+    memset(&handlers, 0, sizeof(handlers));
+    assert(echo_ctx_pump_once(ctx, 0, &handlers) == NIMFFI_RET_TIMEOUT);
+    assert(echo_ctx_pump_once(ctx, 20, NULL) == NIMFFI_RET_TIMEOUT);
+}
+
 /* A host can hand back a nil or stale handle as its very first call, before
    any ctx exists and so before the Nim runtime is up. The guard's error string
    is a Nim allocation, so it must initialize the library first. */
@@ -114,6 +122,7 @@ int main(void) {
     test_shout(ctx);
     test_shout_too_long(ctx);
     test_version(ctx);
+    test_pump_without_events(ctx);
     assert(echo_ctx_destroy(ctx) == NIMFFI_RET_OK);
     printf("all C echo e2e checks passed\n");
     return 0;

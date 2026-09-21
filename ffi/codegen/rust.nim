@@ -1,7 +1,14 @@
 ## Rust binding generator: emits a complete Rust crate using CBOR (ciborium).
 
 import std/strutils
-import ./meta, ./string_helpers, ./types_ir, ./consts, ./build_paths, ../ret_codes
+import
+  ./meta,
+  ./string_helpers,
+  ./types_ir,
+  ./consts,
+  ./build_paths,
+  ../ret_codes,
+  ../ffi_msg
 
 ## Wire-format Rust type for any Nim `ptr T`/`pointer`; fixed 64-bit for a
 ## host-independent CBOR payload size (mirrors CppPtrType).
@@ -177,10 +184,28 @@ pub use types::*;
 pub use api::*;
 """
 
+const PollDoc =
+  """Take the context's next message, waiting up to `timeout_ms` (0 never blocks,
+negative waits until a message or the end of the context). One consumer per
+context: a second concurrent poll gets NIMFFI_RET_BUSY.
+`msg` and its payload belong to the library and stay valid until the next poll
+on the same context.
+Returns NIMFFI_RET_OK, NIMFFI_RET_TIMEOUT, NIMFFI_RET_CLOSED (`msg` holds the
+CLOSED message), NIMFFI_RET_INVALID_CTX, NIMFFI_RET_BUSY or NIMFFI_RET_ERR."""
+
+const PollFdDoc =
+  """A wake handle the caller owns and closes: an epoll fd on Linux, a kqueue fd
+on macOS/BSD, an Event HANDLE on Windows; -1 on failure. It is ready while a
+message waits or the context is closed: wait on it, then poll with a timeout of
+0 until NIMFFI_RET_TIMEOUT."""
+
 proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
   ## Generates ffi.rs with extern "C" declarations; each proc takes one CBOR
   ## buffer (ptr+len) as its request payload.
   var lines: seq[string] = @[]
+  # The whole ABI is declared here; the wrapper in api.rs does not use all of it.
+  lines.add("#![allow(dead_code)]")
+  lines.add("")
   lines.add("use std::os::raw::{c_char, c_int, c_void};")
   lines.add("")
   lines.add("pub type FFICallback = unsafe extern \"C\" fn(")
@@ -205,6 +230,11 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
       if parts.len > 0:
         linkLibName = parts[0]
 
+  lines.add(
+    "// What `$1_poll` hands out, emitted from ffi/ffi_msg.nim." % [linkLibName]
+  )
+  lines.add(rustMsgDecl())
+  lines.add("")
   lines.add("#[link(name = \"$1\")]" % [linkLibName])
   lines.add("extern \"C\" {")
 
@@ -231,15 +261,13 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
       params.add("ctx: *mut c_void")
       lines.add("    pub fn $1($2) -> c_int;" % [p.procName, params.join(", ")])
 
-  # Listener-registration ABI, always present in the dylib.
+  lines.add(renderMemberDocComment(PollDoc))
   lines.add(
-    "    pub fn $1_add_event_listener(ctx: *mut c_void, event_name: *const c_char, callback: FFICallback, user_data: *mut c_void) -> u64;" %
+    "    pub fn $1_poll(ctx: *mut c_void, timeout_ms: i32, msg: *mut *const NimFfiMsg) -> c_int;" %
       [linkLibName]
   )
-  lines.add(
-    "    pub fn $1_remove_event_listener(ctx: *mut c_void, listener_id: u64) -> c_int;" %
-      [linkLibName]
-  )
+  lines.add(renderMemberDocComment(PollFdDoc))
+  lines.add("    pub fn $1_poll_fd(ctx: *mut c_void) -> isize;" % [linkLibName])
   lines.add(renderMemberDocComment(ShutdownDoc))
   lines.add("    pub fn $1_shutdown() -> c_int;" % [linkLibName])
 
@@ -326,6 +354,253 @@ proc generateTypesRs*(
 
   return lines.join("\n")
 
+const PumpSliceMs = 250 ## A waiting pump looks at its stop flag this often.
+
+func evConstName(libName: string, ev: FFIEventMeta): string =
+  return
+    libName.toUpperAscii() & "_EVT_" & camelToSnakeCase(ev.nimProcName).toUpperAscii()
+
+proc generateMessages(events: seq[FFIEventMeta], libName, msgTypeName: string): string =
+  ## The one place that lists what the library sends: a name id per event, the
+  ## message enum and its decoder.
+  var lines: seq[string] = @[]
+  if events.len > 0:
+    lines.add("// `NimFfiMsg.name_id` of each event: FNV-1a 64 of its wire name.")
+  for ev in events:
+    lines.add(
+      "pub const $1: u64 = $2; // \"$3\"" %
+        [evConstName(libName, ev), nameIdLiteral(ev.wireName), ev.wireName]
+    )
+  lines.add(
+    "pub use super::ffi::{NIMFFI_NOT_RESPONDING_EVENT_QUEUE_FULL, NIMFFI_NOT_RESPONDING_HEARTBEAT};"
+  )
+  lines.add("")
+
+  lines.add(
+    "/// Everything `$1` sends to the host: its events, the liveness reports" % [
+      libName
+    ]
+  )
+  lines.add("/// and the end of the context. The pump thread of a context decodes each")
+  lines.add("/// message into one of these before a listener runs.")
+  lines.add("#[derive(Debug, Clone)]")
+  lines.add("pub enum $1 {" % [msgTypeName])
+  for ev in events:
+    lines.add(renderMemberDocComment(ev.doc))
+    lines.add(
+      "    $1($2)," % [capitalizeFirstLetter(ev.nimProcName), ev.payloadTypeName]
+    )
+  lines.add(
+    "    /// The library stopped making progress. `reason` is a `NIMFFI_NOT_RESPONDING_*`:"
+  )
+  lines.add(
+    "    /// the FFI thread stalled, or the event queue overflowed and requests are"
+  )
+  lines.add("    /// refused from now on.")
+  lines.add("    NotResponding { reason: u64 },")
+  lines.add("    /// The FFI thread's heartbeat resumed.")
+  lines.add("    Responding,")
+  lines.add(
+    "    /// The context is gone; always the last message. `ok` is false when the"
+  )
+  lines.add(
+    "    /// library could not recycle the context, and `reason` then says why."
+  )
+  lines.add("    Closed { ok: bool, reason: String },")
+  lines.add(
+    "    /// Not sent by the library: a message this binding could not decode, such"
+  )
+  lines.add("    /// as an event of a newer library.")
+  lines.add("    Undecodable { kind: u32, name_id: u64, error: String },")
+  lines.add("}")
+  lines.add("")
+
+  # The message belongs to the library until the next poll, so this copies everything out.
+  lines.add("unsafe fn decode_message(msg: &ffi::NimFfiMsg) -> $1 {" % [msgTypeName])
+  lines.add("    let bytes: &[u8] = if msg.payload.is_null() || msg.len == 0 {")
+  lines.add("        &[]")
+  lines.add("    } else {")
+  lines.add("        slice::from_raw_parts(msg.payload, msg.len)")
+  lines.add("    };")
+  lines.add("    let decoded = match msg.kind {")
+  lines.add("        ffi::NIMFFI_MSG_EVENT => match msg.name_id {")
+  for ev in events:
+    lines.add(
+      "            $1 => decode_cbor(bytes).map($2::$3)," %
+        [evConstName(libName, ev), msgTypeName, capitalizeFirstLetter(ev.nimProcName)]
+    )
+  lines.add("            _ => Err(\"unknown event\".to_string()),")
+  lines.add("        },")
+  lines.add(
+    "        ffi::NIMFFI_MSG_NOT_RESPONDING => Ok($1::NotResponding { reason: msg.aux })," %
+      [msgTypeName]
+  )
+  lines.add("        ffi::NIMFFI_MSG_RESPONDING => Ok($1::Responding)," % [msgTypeName])
+  lines.add("        ffi::NIMFFI_MSG_CLOSED => Ok($1::Closed {" % [msgTypeName])
+  lines.add("            ok: msg.ret_code == NIMFFI_RET_OK,")
+  lines.add("            reason: String::from_utf8_lossy(bytes).into_owned(),")
+  lines.add("        }),")
+  lines.add("        _ => Err(\"unknown message kind\".to_string()),")
+  lines.add("    };")
+  lines.add("    decoded.unwrap_or_else(|error| $1::Undecodable {" % [msgTypeName])
+  lines.add("        kind: msg.kind,")
+  lines.add("        name_id: msg.name_id,")
+  lines.add("        error,")
+  lines.add("    })")
+  lines.add("}")
+  lines.add("")
+  return lines.join("\n")
+
+# $1 lib name, $2 message enum, $3 poll slice in ms.
+const PumpTemplate = """type Handler = Arc<dyn Fn(&$2) + Send + Sync>;
+
+/// Returned by every `add_*_listener`; pass it to `remove_event_listener`.
+#[derive(Debug, Clone, Copy)]
+pub struct ListenerHandle { pub id: u64 }
+
+// What a context shares with its pump thread.
+struct Inner {
+    ptr: *mut c_void,
+    listeners: Mutex<Vec<(u64, Handler)>>,
+    next_id: AtomicU64,
+    stop: AtomicBool,
+}
+
+// SAFETY: `ptr` is a token the library validates on every call, never
+// dereferenced here. `$1_poll` admits one consumer per context and the pump
+// thread is the only poller; everything else in `Inner` is already Sync.
+unsafe impl Send for Inner {}
+unsafe impl Sync for Inner {}
+
+impl Inner {
+    // Handlers run with the lock released, so a panic cannot poison it; recover anyway.
+    fn lock(&self) -> MutexGuard<'_, Vec<(u64, Handler)>> {
+        self.listeners.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn add(&self, handler: Handler) -> ListenerHandle {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.lock().push((id, handler));
+        ListenerHandle { id }
+    }
+
+    fn remove(&self, id: u64) -> bool {
+        let mut listeners = self.lock();
+        let before = listeners.len();
+        listeners.retain(|(lid, _)| *lid != id);
+        listeners.len() != before
+    }
+
+    fn dispatch(&self, message: &$2) {
+        // Cloned out so a handler may add or remove listeners.
+        let handlers: Vec<Handler> = self.lock().iter().map(|(_, h)| h.clone()).collect();
+        for handler in handlers {
+            // A panicking handler must not end the pump; the panic hook already reported it.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(message)));
+        }
+    }
+}
+
+// The context's only poller: takes each message out, decodes it and runs the listeners.
+fn pump_loop(inner: Arc<Inner>) {
+    loop {
+        // The library owns the message; it is valid until the next poll.
+        let mut msg: *const ffi::NimFfiMsg = std::ptr::null();
+        // Once asked to stop, only take what already waits: a teardown's last messages.
+        let stopping = inner.stop.load(Ordering::Acquire);
+        let timeout_ms = if stopping { 0 } else { $3 };
+        let ret = unsafe { ffi::$1_poll(inner.ptr, timeout_ms, &mut msg) };
+        match ret {
+            NIMFFI_RET_OK | NIMFFI_RET_CLOSED if !msg.is_null() => {
+                let message = unsafe { decode_message(&*msg) };
+                inner.dispatch(&message);
+                if ret == NIMFFI_RET_CLOSED {
+                    return;
+                }
+                continue;
+            }
+            NIMFFI_RET_TIMEOUT => {}
+            NIMFFI_RET_INVALID_CTX => {
+                // The context ended between two polls, so its CLOSED message was never seen.
+                inner.dispatch(&$2::Closed { ok: true, reason: String::new() });
+                return;
+            }
+            // NIMFFI_RET_BUSY, NIMFFI_RET_ERR: try again, without spinning.
+            _ => std::thread::sleep(Duration::from_millis(10)),
+        }
+        if stopping {
+            return;
+        }
+    }
+}
+"""
+
+# $1 lib name.
+const StartTemplate =
+  """    fn start(ptr: *mut c_void, timeout: Duration) -> Result<Self, String> {
+        let inner = Arc::new(Inner {
+            ptr,
+            listeners: Mutex::new(Vec::new()),
+            next_id: AtomicU64::new(1),
+            stop: AtomicBool::new(false),
+        });
+        // Built first: if the thread cannot start, dropping it destroys the context.
+        let mut ctx = Self { ptr, timeout, inner: inner.clone(), pump: None };
+        let pump = std::thread::Builder::new()
+            .name("$1-pump".into())
+            .spawn(move || pump_loop(inner))
+            .map_err(|e| e.to_string())?;
+        ctx.pump = Some(pump);
+        Ok(ctx)
+    }
+"""
+
+# $1 message enum.
+const ListenersTemplate =
+  """    /// Register a listener for `NotResponding`; it receives the reason.
+    pub fn add_not_responding_listener<F>(&self, handler: F) -> ListenerHandle
+    where F: Fn(u64) + Send + Sync + 'static,
+    {
+        self.inner.add(Arc::new(move |m: &$1| {
+            if let $1::NotResponding { reason } = m { handler(*reason) }
+        }))
+    }
+
+    /// Register a listener for `Responding`.
+    pub fn add_responding_listener<F>(&self, handler: F) -> ListenerHandle
+    where F: Fn() + Send + Sync + 'static,
+    {
+        self.inner.add(Arc::new(move |m: &$1| {
+            if let $1::Responding = m { handler() }
+        }))
+    }
+
+    /// Register a listener for `Closed`; it receives `ok` and `reason`.
+    pub fn add_closed_listener<F>(&self, handler: F) -> ListenerHandle
+    where F: Fn(bool, &str) + Send + Sync + 'static,
+    {
+        self.inner.add(Arc::new(move |m: &$1| {
+            if let $1::Closed { ok, reason } = m { handler(*ok, reason) }
+        }))
+    }
+
+    /// Register a listener that sees every message the library sends.
+    pub fn add_message_listener<F>(&self, handler: F) -> ListenerHandle
+    where F: Fn(&$1) + Send + Sync + 'static,
+    {
+        self.inner.add(Arc::new(handler))
+    }
+
+    /// Remove a previously-registered listener by handle. Returns true
+    /// if the listener existed and was removed; false otherwise.
+    /// Listeners run on the context's pump thread, one message at a time, and may
+    /// call this for any listener: a dispatch in flight still runs the handlers it
+    /// took, so a removed handler can run once more.
+    pub fn remove_event_listener(&self, handle: ListenerHandle) -> bool {
+        self.inner.remove(handle.id)
+    }
+"""
+
 proc generateApiRs*(
     procs: seq[FFIProcMeta], libName: string, events: seq[FFIEventMeta] = @[]
 ): string =
@@ -344,9 +619,15 @@ proc generateApiRs*(
     libTypeName = capitalizeFirstLetter(libName)
 
   let ctxTypeName = libTypeName & "Ctx"
+  let msgTypeName = libTypeName & "Message"
+  # Only a context made by a ctor has messages to take out; the static one emits none.
+  let hasPump = ctors.len > 0
 
   lines.add("use std::os::raw::{c_char, c_int, c_void};")
   lines.add("use std::slice;")
+  if hasPump:
+    lines.add("use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};")
+    lines.add("use std::sync::{Arc, Mutex, MutexGuard};")
   lines.add("use std::time::Duration;")
   lines.add("use serde::de::DeserializeOwned;")
   lines.add("use serde::Serialize;")
@@ -491,47 +772,17 @@ proc generateApiRs*(
   lines.add("}")
   lines.add("")
 
-  # Per-listener handler boxes + extern "C" trampolines: the Box is kept alive in `listeners`, its raw pointer is the per-event `user_data`.
-  if events.len > 0:
-    for ev in events:
-      let handlerStruct = capitalizeFirstLetter(ev.nimProcName) & "Handler"
-      let trampolineName = camelToSnakeCase(ev.nimProcName) & "_trampoline"
-      lines.add("struct $1 {" % [handlerStruct])
-      lines.add("    f: Box<dyn Fn(&$1) + Send + Sync>," % [ev.payloadTypeName])
-      lines.add("}")
-      lines.add("")
-      lines.add("unsafe extern \"C\" fn $1(" % [trampolineName])
-      lines.add("    ret: c_int, msg: *const c_char, len: usize, ud: *mut c_void,")
-      lines.add(") {")
-      lines.add("    if ud.is_null() || ret != 0 || msg.is_null() || len == 0 {")
-      lines.add("        return;")
-      lines.add("    }")
-      lines.add("    let h = &*(ud as *const $1);" % [handlerStruct])
-      lines.add("    let bytes = slice::from_raw_parts(msg as *const u8, len);")
-      lines.add("    #[derive(serde::Deserialize)]")
-      lines.add("    struct Envelope { payload: $1 }" % [ev.payloadTypeName])
-      lines.add(
-        "    if let Ok(env) = ciborium::de::from_reader::<Envelope, _>(bytes) {"
-      )
-      lines.add("        (h.f)(&env.payload);")
-      lines.add("    }")
-      lines.add("}")
-      lines.add("")
-
-    # Public handle returned by every add_…_listener call.
-    lines.add("#[derive(Debug, Clone, Copy)]")
-    lines.add("pub struct ListenerHandle { pub id: u64 }")
-    lines.add("")
+  if hasPump:
+    lines.add(generateMessages(events, libName, msgTypeName))
+    lines.add(PumpTemplate % [libName, msgTypeName, $PumpSliceMs])
 
   lines.add("/// High-level context for `$1`." % [libTypeName])
   lines.add("pub struct $1 {" % [ctxTypeName])
   lines.add("    ptr: *mut c_void,")
   lines.add("    timeout: Duration,")
-  if events.len > 0:
-    # Keeps each handler box alive while its listener id is live on the Nim side.
-    lines.add(
-      "    listeners: std::sync::Mutex<std::collections::HashMap<u64, Box<dyn std::any::Any + Send>>>,"
-    )
+  if hasPump:
+    lines.add("    inner: Arc<Inner>,")
+    lines.add("    pump: Option<std::thread::JoinHandle<()>>,")
   lines.add("}")
   lines.add("")
   # SAFETY block applies to both impls below.
@@ -557,14 +808,28 @@ proc generateApiRs*(
   lines.add("")
 
   # Drop tears down the Nim runtime when the ctx goes out of scope; without it, forgetting the ctx leaks the entire runtime (FFI thread, watchdog, chronos).
-  if dtorProcName.len > 0:
+  if dtorProcName.len > 0 or hasPump:
     lines.add("impl Drop for $1 {" % [ctxTypeName])
     lines.add("    fn drop(&mut self) {")
-    lines.add("        if !self.ptr.is_null() {")
-    lines.add("            unsafe { ffi::$1(self.ptr); }" % [dtorProcName])
-    lines.add("            self.ptr = std::ptr::null_mut();")
-    lines.add("        }")
-    # `listeners` drops after this body; the dylib has joined its threads by then, so no callback is mid-flight against the raw pointers we handed it.
+    if dtorProcName.len > 0:
+      if hasPump:
+        lines.add(
+          "        // Before the pump stops: the teardown may still send events, and it wakes a blocked poll."
+        )
+      lines.add("        if !self.ptr.is_null() {")
+      lines.add("            unsafe { ffi::$1(self.ptr); }" % [dtorProcName])
+      lines.add("            self.ptr = std::ptr::null_mut();")
+      lines.add("        }")
+    if hasPump:
+      lines.add("        self.inner.stop.store(true, Ordering::Release);")
+      lines.add("        if let Some(pump) = self.pump.take() {")
+      lines.add(
+        "            // A listener that drops the context runs on the pump: it cannot join itself."
+      )
+      lines.add("            if pump.thread().id() != std::thread::current().id() {")
+      lines.add("                let _ = pump.join();")
+      lines.add("            }")
+      lines.add("        }")
     lines.add("    }")
     lines.add("}")
     lines.add("")
@@ -614,12 +879,7 @@ proc generateApiRs*(
     lines.add(
       "        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;"
     )
-    if events.len > 0:
-      lines.add(
-        "        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })"
-      )
-    else:
-      lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout })")
+    lines.add("        Self::start(addr as *mut c_void, timeout)")
     lines.add("    }")
     lines.add("")
 
@@ -641,41 +901,14 @@ proc generateApiRs*(
     lines.add(
       "        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;"
     )
-    if events.len > 0:
-      lines.add(
-        "        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })"
-      )
-    else:
-      lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout })")
+    lines.add("        Self::start(addr as *mut c_void, timeout)")
     lines.add("    }")
     lines.add("")
 
-  if events.len > 0:
-    # Shared by every public `add_*_listener`: caller owns the concrete-typed box, erased to `dyn Any + Send` only on hand-off.
-    lines.add("    fn add_listener_inner(")
-    lines.add("        &self,")
-    lines.add("        event_name: *const c_char,")
-    lines.add("        callback: ffi::FFICallback,")
-    lines.add("        raw: *mut c_void,")
-    lines.add("        owned: Box<dyn std::any::Any + Send>,")
-    lines.add("    ) -> ListenerHandle {")
-    lines.add("        let id = unsafe {")
-    lines.add(
-      "            ffi::$1_add_event_listener(self.ptr, event_name, callback, raw)" %
-        [libName]
-    )
-    lines.add("        };")
-    lines.add("        if id != 0 {")
-    lines.add("            self.listeners.lock().unwrap().insert(id, owned);")
-    lines.add("        }")
-    lines.add("        ListenerHandle { id }")
-    lines.add("    }")
-    lines.add("")
-
+  if hasPump:
+    lines.add(StartTemplate % [libName])
     for ev in events:
       let methodName = "add_" & camelToSnakeCase(ev.nimProcName) & "_listener"
-      let handlerStruct = capitalizeFirstLetter(ev.nimProcName) & "Handler"
-      let trampolineName = camelToSnakeCase(ev.nimProcName) & "_trampoline"
       lines.add(renderMemberDocComment(ev.doc))
       lines.add(
         "    /// Register a typed listener for `$1`. The returned handle can be" %
@@ -685,37 +918,15 @@ proc generateApiRs*(
       lines.add("    pub fn $1<F>(&self, handler: F) -> ListenerHandle" % [methodName])
       lines.add("    where F: Fn(&$1) + Send + Sync + 'static," % [ev.payloadTypeName])
       lines.add("    {")
+      lines.add("        self.inner.add(Arc::new(move |m: &$1| {" % [msgTypeName])
       lines.add(
-        "        let owned: Box<$1> = Box::new($1 { f: Box::new(handler) });" %
-          [handlerStruct]
+        "            if let $1::$2(payload) = m { handler(payload) }" %
+          [msgTypeName, capitalizeFirstLetter(ev.nimProcName)]
       )
-      lines.add(
-        "        let raw = &*owned as *const $1 as *mut c_void;" % [handlerStruct]
-      )
-      lines.add(
-        "        self.add_listener_inner(b\"$1\\0\".as_ptr() as *const c_char, $2, raw, owned)" %
-          [ev.wireName, trampolineName]
-      )
+      lines.add("        }))")
       lines.add("    }")
       lines.add("")
-
-    # Remove by handle; drops the Box after the C ABI confirms unregistration.
-    lines.add("    /// Remove a previously-registered listener by handle. Returns true")
-    lines.add("    /// if the listener existed and was removed; false otherwise.")
-    lines.add(renderMemberDocComment(RemoveListenerBoxDoc))
-    lines.add(
-      "    pub fn remove_event_listener(&self, handle: ListenerHandle) -> bool {"
-    )
-    lines.add("        if handle.id == 0 { return false; }")
-    lines.add("        let rc = unsafe {")
-    lines.add(
-      "            ffi::$1_remove_event_listener(self.ptr, handle.id)" % [libName]
-    )
-    lines.add("        };")
-    lines.add("        self.listeners.lock().unwrap().remove(&handle.id);")
-    lines.add("        rc == 0")
-    lines.add("    }")
-    lines.add("")
+    lines.add(ListenersTemplate % [msgTypeName])
 
   # A static is an associated fn: no `&self` to read `timeout` from, so it takes one.
   for m in classified.replyProcs():

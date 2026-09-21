@@ -22,7 +22,7 @@ const
   wakeWinEvent = defined(windows)
 
 when wakeEventFd:
-  import std/[posix, oserrors, monotimes]
+  import std/[posix, epoll, oserrors, monotimes]
 
   proc eventfd(initval: cuint, flags: cint): cint {.importc, header: "<sys/eventfd.h>".}
 
@@ -118,8 +118,8 @@ proc close*(w: var WakeSignal) =
     discard closeHandle(w.event)
 
 proc handle*(w: WakeSignal): int =
-  ## The fd, or the Event `HANDLE` on Windows, for the host's own wait call. The
-  ## host must only wait on it: never read, write or close it.
+  ## The library's own fd, or Event `HANDLE` on Windows. Never give it to the host:
+  ## that is what `hostHandle` is for.
   if not w.ready:
     return WakeNoHandle
   when wakeEventFd:
@@ -128,6 +128,37 @@ proc handle*(w: WakeSignal): int =
     return int(w.kq)
   elif wakeWinEvent:
     return cast[int](w.event)
+
+proc hostHandle*(w: WakeSignal): int {.raises: [].} =
+  ## A copy the host owns and closes (`close`, or `CloseHandle` on Windows). It can
+  ## only be waited on, so a host that closes or leaks it cannot make `fire` write
+  ## into a descriptor number the host has since reused. `WakeNoHandle` on failure.
+  if not w.ready:
+    return WakeNoHandle
+  when wakeEventFd:
+    # An epoll descriptor is ready while the eventfd it watches is, and has no
+    # read or write of its own.
+    let ep = epoll_create1(O_CLOEXEC)
+    if ep == -1:
+      return WakeNoHandle
+    var ev = EpollEvent(events: EPOLLIN)
+    if epoll_ctl(ep, EPOLL_CTL_ADD, w.efd, addr ev) == -1:
+      discard posix.close(ep)
+      return WakeNoHandle
+    return int(ep)
+  elif wakeKqueue:
+    let copy = posix.dup(w.kq)
+    if copy == -1:
+      return WakeNoHandle
+    discard fcntl(copy, F_SETFD, FD_CLOEXEC)
+    return int(copy)
+  elif wakeWinEvent:
+    var copy: Handle
+    let self = getCurrentProcess()
+    # SYNCHRONIZE only: the copy can be waited on, not set or reset.
+    if duplicateHandle(self, w.event, self, addr copy, SYNCHRONIZE, 0, 0) == 0:
+      return WakeNoHandle
+    return cast[int](copy)
 
 proc fire*(w: var WakeSignal) {.raises: [].} =
   ## Any thread. Firing an already fired signal changes nothing.

@@ -16,11 +16,17 @@
 #  define NOMINMAX
 #  include <windows.h>
 static inline void sleep_ms(unsigned ms) { Sleep(ms); }
+static inline long long now_ms(void) { return (long long)GetTickCount64(); }
 #else
 #  include <time.h>
 static inline void sleep_ms(unsigned ms) {
     struct timespec t = {(time_t)(ms / 1000), (long)(ms % 1000) * 1000 * 1000};
     nanosleep(&t, NULL);
+}
+static inline long long now_ms(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (long long)t.tv_sec * 1000 + t.tv_nsec / (1000 * 1000);
 }
 #endif
 

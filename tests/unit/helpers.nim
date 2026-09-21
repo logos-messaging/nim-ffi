@@ -122,6 +122,37 @@ proc okString*(d: var CallbackData): string =
   cborDecode(d.payload(), string).valueOr:
     ""
 
+type PolledMsg* = object
+  ## One `poll` result, with the payload copied out: the library's copy dies at the next poll.
+  ret*: cint
+  kind*: uint32
+  seq*: uint64
+  nameId*: uint64
+  aux*: uint64
+  retCode*: int32
+  payload*: seq[byte]
+
+proc pollMsg*[T](
+    ctx: ptr FFIContext[T], generation: uint, timeoutMs = 5000
+): PolledMsg =
+  var msg: ptr NimFfiMsg
+  let ret = pollContext(ctx, generation, timeoutMs, addr msg)
+  var polled = PolledMsg(ret: ret)
+  if msg.isNil():
+    return polled
+  polled.kind = msg.kind
+  polled.seq = msg.seq
+  polled.nameId = msg.nameId
+  polled.aux = msg.aux
+  polled.retCode = msg.retCode
+  polled.payload = newSeq[byte](int(msg.len))
+  if msg.len > 0:
+    copyMem(addr polled.payload[0], msg.payload, int(msg.len))
+  return polled
+
+proc pollMsg*[T](ctx: ptr FFIContext[T], timeoutMs = 5000): PolledMsg =
+  return pollMsg(ctx, ctx.currentGeneration(), timeoutMs)
+
 proc watchdogBody(args: (int, cstring)) {.thread.} =
   os.sleep(args[0])
   echo "watchdog: ", args[1]

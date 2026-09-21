@@ -26,7 +26,10 @@ typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_dat
  * ~5s while a handler is still running (with `msg`/`len` carrying the elapsed
  * milliseconds as decimal text), then still ends with a terminal RET_OK/RET_ERR.
  * A caller that only wants the final answer must ignore it, not treat it as an
- * error. */
+ * error.
+ *
+ * NIMFFI_RET_TIMEOUT, _CLOSED and _BUSY come from <lib>_poll() only; see its
+ * comment in <lib>.h. */
 {{RET_CODES}}
 
 /* ── leaf encoders ─────────────────────────────────────────────────────── */

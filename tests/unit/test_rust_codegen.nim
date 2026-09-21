@@ -95,3 +95,59 @@ suite "generateTypesRs: seq[byte] rides as a CBOR byte string":
     ]
     check not needsSerdeBytes(plain, @[])
     check "serde_bytes" notin generateCargoToml("lib", needsSerdeBytes(plain, @[]))
+
+suite "events arrive through <lib>_poll":
+  setup:
+    let procs = @[
+      FFIProcMeta(
+        procName: "lib_create", libName: "lib", kind: FFIKind.CTOR, libTypeName: "Lib"
+      ),
+      FFIProcMeta(
+        procName: "lib_destroy", libName: "lib", kind: FFIKind.DTOR, libTypeName: "Lib"
+      ),
+    ]
+    let events = @[
+      FFIEventMeta(
+        wireName: "on_echo_fired",
+        nimProcName: "onEchoFired",
+        libName: "lib",
+        payloadTypeName: "EchoEvent",
+        doc: "Fired once the reply is ready.",
+      )
+    ]
+    let ffiRs = generateFFIRs(procs)
+    let apiRs = generateApiRs(procs, "lib", events)
+
+  test "ffi.rs declares poll and the message, not the listener registry":
+    check "pub fn lib_poll(ctx: *mut c_void, timeout_ms: i32, msg: *mut *const NimFfiMsg) -> c_int;" in
+      ffiRs
+    check "pub fn lib_poll_fd(ctx: *mut c_void) -> isize;" in ffiRs
+    check "pub struct NimFfiMsg {" in ffiRs
+    check "_event_listener" notin ffiRs
+
+  test "every event has a name id, a message variant and a typed listener":
+    check "pub const LIB_EVT_ON_ECHO_FIRED: u64 = 0xcdfdf536356b2a2b;" in apiRs
+    check "    /// Fired once the reply is ready.\n    OnEchoFired(EchoEvent)," in apiRs
+    check "LIB_EVT_ON_ECHO_FIRED => decode_cbor(bytes).map(LibMessage::OnEchoFired)," in
+      apiRs
+    check "pub fn add_on_echo_fired_listener<F>(&self, handler: F) -> ListenerHandle" in
+      apiRs
+    check "struct Envelope" notin apiRs
+
+  test "liveness and the end of the context have listeners too":
+    check "NotResponding { reason: u64 }," in apiRs
+    check "Closed { ok: bool, reason: String }," in apiRs
+    for name in ["not_responding", "responding", "closed", "message"]:
+      check ("pub fn add_" & name & "_listener<F>") in apiRs
+
+  test "a library without a ctor gets no pump":
+    let staticOnly = @[
+      FFIProcMeta(
+        procName: "lib_version",
+        libName: "lib",
+        kind: FFIKind.STATIC,
+        libTypeName: "Lib",
+        returnTypeName: "string",
+      )
+    ]
+    check "pump_loop" notin generateApiRs(staticOnly, "lib")

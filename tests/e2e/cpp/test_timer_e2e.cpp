@@ -20,6 +20,7 @@
 #include <chrono>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -380,11 +381,9 @@ TEST(TimerE2E, ThreadedHammer) {
 
 
 // Library-initiated events flow through `MyTimerCtx::addOnEchoFiredListener`:
-// the listener registers a CBOR-decoding trampoline inside the lib's
-// registry, and every successful `echo()` triggers it. The promise here
-// is fulfilled from the FFI thread; we wait synchronously for it before
-// destroying the context (the dtor tears down the FFI thread and any
-// further events).
+// the context's pump thread takes each event out of `my_timer_poll`, decodes
+// its CBOR payload and calls the listeners. The promise here is fulfilled from
+// that pump thread; we wait for it before destroying the context.
 TEST(TimerE2E, TypedEventFiresAfterEcho) {
     auto ctx = makeCtx("events");
 
@@ -443,7 +442,7 @@ TEST(TimerE2E, RemoveEventListenerStopsDelivery) {
 
     ctx->echo(EchoRequest{"before-remove", 1});
 
-    // Give the FFI thread a beat to deliver the first event to both
+    // Give the pump thread a beat to deliver the first event to both
     // listeners before we yank one of them out.
     for (int i = 0; i < 200 && (removedHits.load() == 0 || keptHits.load() == 0); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -461,6 +460,212 @@ TEST(TimerE2E, RemoveEventListenerStopsDelivery) {
     }
     EXPECT_EQ(keptHits.load(), 2);
     EXPECT_EQ(removedHits.load(), 1) << "removed listener fired after removeEventListener";
+}
+
+// One pump thread per context: events come out in the order the library
+// produced them, each decoded into its own payload type.
+TEST(TimerE2E, EventsArriveInOrderWithTypedPayloads) {
+    auto ctx = makeCtx("ordered-events");
+    constexpr int kEchoes = 20;
+
+    std::mutex mtx;
+    std::vector<EchoEvent> echoes;
+    std::promise<void> allEchoes;
+    std::promise<OnJobScheduledPayload> jobPromise;
+    auto jobFuture = jobPromise.get_future();
+
+    ctx->addOnEchoFiredListener([&](const EchoEvent& evt) {
+        std::lock_guard<std::mutex> lock(mtx);
+        echoes.push_back(evt);
+        if (echoes.size() == kEchoes) allEchoes.set_value();
+    });
+    ctx->addOnJobScheduledListener(
+        [&](const OnJobScheduledPayload& evt) { jobPromise.set_value(evt); });
+
+    for (int i = 0; i < kEchoes; ++i) {
+        mustOk(ctx->echo(EchoRequest{"m" + std::to_string(i), 0}));
+    }
+    const auto sched = mustOk(ctx->schedule(JobSpec{"rollup", {}, JobPriority::jpNormal},
+                                            RetryPolicy{1, 10, {}},
+                                            ScheduleConfig{0, 0, std::nullopt}));
+
+    ASSERT_EQ(allEchoes.get_future().wait_for(std::chrono::seconds(5)),
+              std::future_status::ready);
+    ASSERT_EQ(jobFuture.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+
+    std::lock_guard<std::mutex> lock(mtx);
+    for (int i = 0; i < kEchoes; ++i) {
+        EXPECT_EQ(echoes[i].message, "m" + std::to_string(i));
+        EXPECT_EQ(echoes[i].echoCount, 1);
+    }
+    const auto job = jobFuture.get();
+    EXPECT_EQ(job.jobId, sched.jobId);
+    EXPECT_EQ(job.willRunCount, sched.willRunCount);
+}
+
+// A listener runs with the listener table unlocked, so it may remove itself.
+TEST(TimerE2E, HandlerRemovesItself) {
+    auto ctx = makeCtx("self-remove");
+
+    std::atomic<int> onceHits{0};
+    std::atomic<int> keptHits{0};
+    std::atomic<bool> removed{false};
+    MyTimerCtx::ListenerHandle self;
+    std::promise<void> handleReady;
+    auto handleReadyFuture = handleReady.get_future().share();
+
+    self = ctx->addOnEchoFiredListener([&](const EchoEvent&) {
+        handleReadyFuture.wait();
+        onceHits.fetch_add(1);
+        removed.store(ctx->removeEventListener(self));
+    });
+    handleReady.set_value();
+    ctx->addOnEchoFiredListener([&](const EchoEvent&) { keptHits.fetch_add(1); });
+
+    for (int i = 0; i < 3; ++i) mustOk(ctx->echo(EchoRequest{"x", 0}));
+
+    for (int i = 0; i < 400 && keptHits.load() < 3; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    EXPECT_EQ(keptHits.load(), 3);
+    EXPECT_EQ(onceHits.load(), 1);
+    EXPECT_TRUE(removed.load());
+}
+
+// A listener added from inside a listener starts with the next event.
+TEST(TimerE2E, HandlerAddsAnotherListener) {
+    auto ctx = makeCtx("add-in-handler");
+
+    std::atomic<int> outerHits{0};
+    std::mutex mtx;
+    std::vector<std::string> innerSeen;
+
+    ctx->addOnEchoFiredListener([&](const EchoEvent&) {
+        if (outerHits.fetch_add(1) != 0) return;
+        const auto inner = ctx->addOnEchoFiredListener([&](const EchoEvent& evt) {
+            std::lock_guard<std::mutex> lock(mtx);
+            innerSeen.push_back(evt.message);
+        });
+        if (inner.id == 0) outerHits.store(-1000);
+    });
+
+    mustOk(ctx->echo(EchoRequest{"first", 0}));
+    mustOk(ctx->echo(EchoRequest{"second", 0}));
+
+    for (int i = 0; i < 400; ++i) {
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            if (!innerSeen.empty() && outerHits.load() >= 2) break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    EXPECT_EQ(outerHits.load(), 2);
+    std::lock_guard<std::mutex> lock(mtx);
+    ASSERT_EQ(innerSeen.size(), 1u);
+    EXPECT_EQ(innerSeen[0], "second");
+}
+
+// A listener may call back into its own context: it runs on the pump thread,
+// not on the library's FFI thread.
+TEST(TimerE2E, HandlerCallsBackIntoTheContext) {
+    auto ctx = makeCtx("reentrant");
+
+    std::promise<Result<std::string>> versionPromise;
+    auto versionFuture = versionPromise.get_future();
+    std::atomic<bool> first{true};
+    ctx->addOnEchoFiredListener([&](const EchoEvent&) {
+        if (first.exchange(false)) versionPromise.set_value(ctx->version());
+    });
+
+    mustOk(ctx->echo(EchoRequest{"x", 0}));
+    ASSERT_EQ(versionFuture.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(mustOk(versionFuture.get()), TIMER_VERSION);
+}
+
+// Tearing a context down while its pump is still delivering must neither crash
+// nor hang, and no listener may run once the destructor returned.
+TEST(TimerE2E, DestroyWhileEventsInFlight) {
+    for (int round = 0; round < 10; ++round) {
+        auto ctx = makeCtx("in-flight-" + std::to_string(round));
+        auto alive = std::make_shared<std::atomic<bool>>(true);
+        auto lateHits = std::make_shared<std::atomic<int>>(0);
+
+        ctx->addOnEchoFiredListener([alive, lateHits](const EchoEvent&) {
+            if (!alive->load()) lateHits->fetch_add(1);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        });
+
+        for (int i = 0; i < 25; ++i) mustOk(ctx->echo(EchoRequest{"burst", 0}));
+        ctx.reset();
+        alive->store(false);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        EXPECT_EQ(lateHits->load(), 0);
+    }
+}
+
+// The closed hook is the last thing a context's listeners hear, exactly once.
+TEST(TimerE2E, ClosedListenerFiresOnceOnDestroy) {
+    auto ctx = makeCtx("closed-hook");
+
+    std::atomic<int> closedHits{0};
+    std::atomic<bool> closedOk{false};
+    std::string closedReason = "unset";
+    ctx->addClosedListener([&](bool ok, const std::string& reason) {
+        closedOk.store(ok);
+        closedReason = reason;
+        closedHits.fetch_add(1);
+    });
+    const auto quiet = ctx->addNotRespondingListener([](std::uint64_t) {});
+    EXPECT_NE(quiet.id, 0u);
+    EXPECT_TRUE(ctx->removeEventListener(quiet));
+
+    mustOk(ctx->echo(EchoRequest{"x", 0}));
+    ctx.reset(); // joins the pump, so the hook has run by now
+
+    EXPECT_EQ(closedHits.load(), 1);
+    EXPECT_TRUE(closedOk.load());
+    EXPECT_EQ(closedReason, "");
+}
+
+// A listener may destroy its own context: the destructor then runs on the pump
+// thread, which detaches instead of joining itself.
+TEST(TimerE2E, HandlerDestroysItsContext) {
+    auto ctx = makeCtx("self-destroy");
+
+    std::promise<void> echoReturned;
+    auto echoReturnedFuture = echoReturned.get_future().share();
+    std::promise<void> destroyed;
+    std::atomic<int> laterHits{0};
+    ctx->addOnEchoFiredListener([&](const EchoEvent&) {
+        // The event is fired before the reply: let the caller leave `echo` first.
+        echoReturnedFuture.wait();
+        ctx.reset();
+        destroyed.set_value();
+    });
+    ctx->addOnEchoFiredListener([&](const EchoEvent&) { laterHits.fetch_add(1); });
+
+    mustOk(ctx->echo(EchoRequest{"bye", 0}));
+    echoReturned.set_value();
+
+    ASSERT_EQ(destroyed.get_future().wait_for(std::chrono::seconds(10)),
+              std::future_status::ready);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT_EQ(laterHits.load(), 0);
+}
+
+// echo declares no event; it still has a pump, so the liveness and closed hooks work.
+TEST(TimerE2E, EventlessLibraryStillReportsClosed) {
+    auto ctx = mustOk(EchoCtx::create(EchoConfig{"NO-EVENTS"}));
+
+    std::atomic<int> closedHits{0};
+    const auto handle = ctx->addClosedListener(
+        [&](bool, const std::string&) { closedHits.fetch_add(1); });
+    EXPECT_NE(handle.id, 0u);
+
+    EXPECT_EQ(mustOk(ctx->shout(ShoutRequest{"a"})).prefix, "NO-EVENTS");
+    ctx.reset();
+    EXPECT_EQ(closedHits.load(), 1);
 }
 
 // Cross-language byte-string contract: the generated C++ codec must round-trip

@@ -256,16 +256,39 @@ int echo_lib_version(FFICallback callback, void* user_data, const uint8_t* req_c
 int echo_shout_anon(FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 /** Releases the echo context. */
 int echo_destroy(void* ctx);
-uint64_t echo_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
 /**
- * Unregister a listener by id.
- * A call from another thread returns after the last delivery to that listener,
- * so its user data is then safe to free.
- * A call from inside a listener callback returns at once, and the dispatch in
- * flight can still deliver to a listener that you remove that way. Keep the user
- * data of that listener alive until the dispatch ends.
+ * Take the next message of `ctx` out of the library: an event, a liveness report
+ * or the end of the context. `*msg` is set to a message the library owns, or to NULL.
+ * `timeout_ms` 0 never blocks; a negative value waits until a message arrives or
+ * the context closes.
+ * Returns NIMFFI_RET_OK (`*msg` is set), NIMFFI_RET_TIMEOUT (nothing arrived in
+ * time), NIMFFI_RET_CLOSED (the context was destroyed or recycled; `*msg` is a
+ * NIMFFI_MSG_CLOSED whose ret_code is NIMFFI_RET_OK, or NIMFFI_RET_ERR with UTF-8
+ * text in the payload saying why), NIMFFI_RET_INVALID_CTX (`ctx` is NULL, forged
+ * or already destroyed), NIMFFI_RET_BUSY (another thread is inside poll on this
+ * context) or NIMFFI_RET_ERR (`msg` is NULL).
+ * Lifetime: the message and its payload belong to the library and stay valid until the next
+ * poll on the same context, whatever that poll returns. Never free it, and decode
+ * it before polling again.
+ * Single consumer: one thread at a time polls a context. Any host thread will do;
+ * it needs no setup.
  */
-int echo_remove_event_listener(void* ctx, uint64_t listener_id);
+int echo_poll(void* ctx, int32_t timeout_ms, const NimFfiMsg** msg);
+/**
+ * A handle to wait on instead of blocking in poll, for a host with an event loop
+ * of its own. It is ready while a message waits or the context is closed.
+ * Linux: an epoll fd. macOS/BSD: a kqueue fd. Wait until it is readable with
+ * poll(2), select(2) or the host's own epoll/kqueue; never read from it.
+ * Windows: an Event HANDLE (cast the returned value) that can only be waited on,
+ * with WaitForSingleObject or WaitForMultipleObjects.
+ * Once it is ready, poll with a timeout of 0 until NIMFFI_RET_TIMEOUT.
+ * A stalled FFI thread is only noticed inside poll, so the handle does not become
+ * ready for it: a host that wants NIMFFI_MSG_NOT_RESPONDING also polls about once
+ * a second.
+ * Returns -1 on failure. Each call returns a new handle, which the caller owns
+ * and closes with close(), or CloseHandle on Windows.
+ */
+intptr_t echo_poll_fd(void* ctx);
 /**
  * Stop every context the library still holds and join their threads.
  * Call it before the process exits when a context is still alive, or when a
@@ -288,8 +311,22 @@ static inline CborError echo_decv_ShoutResponse(CborValue* it, void* v) { return
 static inline CborError echo_decv_Str(CborValue* it, void* v) { return nimffi_dec_str(it, (const char**)v); }
 
 /* ============================================================ */
-/* High-level context wrapper                                   */
+/* echo API                                                     */
 /* ============================================================ */
+/* Context: echo_ctx_create(), echo_ctx_destroy().
+ *
+ * Requests. The reply arrives once, through the callback given to the
+ * call, on the library's FFI thread:
+ *   echo_ctx_shout()
+ *   echo_ctx_version()
+ *   echo_static_lib_version()
+ *   echo_static_shout_anon()
+ *
+ * Messages from the library. The binding starts no thread: the host takes
+ * them out with echo_ctx_pump_once(), which calls the matching
+ * entry of EchoHandlers on the calling thread:
+ *   not_responding, responding, closed
+ */
 typedef struct {
     void* ptr;
 } EchoCtx;
@@ -373,6 +410,69 @@ static inline int echo_ctx_destroy(EchoCtx* ctx) {
     if (ctx->ptr) { rc = echo_destroy(ctx->ptr); ctx->ptr = NULL; }
     free(ctx);
     return rc;
+}
+
+/* Everything echo can send. A NULL entry means "ignore". Each
+ * handler runs on the thread that pumps; what it is handed belongs to the
+ * binding and is valid only until it returns. */
+typedef struct {
+    /* `reason` is a NIMFFI_NOT_RESPONDING_*: the FFI thread stalled, or the event
+     * queue overflowed and requests are refused from now on. */
+    void (*not_responding)(uint64_t reason, void* user_data);
+    /* The FFI thread's heartbeat resumed. */
+    void (*responding)(void* user_data);
+    /* The context is gone. `ret` is NIMFFI_RET_OK, or NIMFFI_RET_ERR with `reason`
+     * (a NUL-terminated copy, NULL when none) saying why it was quarantined. */
+    void (*closed)(int ret, const char* reason, void* user_data);
+    void* user_data;
+} EchoHandlers;
+
+/* Decodes `msg` fully, then calls its handler, then frees what it decoded.
+ * Returns 0, also for an event this header does not know, or -1 on a decode
+ * error or an unknown message kind. */
+static inline int echo_ctx_dispatch(EchoCtx* ctx, const NimFfiMsg* msg, const EchoHandlers* handlers) {
+    (void)ctx;
+    if (!msg) return -1;
+    switch (msg->kind) {
+    case NIMFFI_MSG_EVENT:
+        return 0;
+    case NIMFFI_MSG_NOT_RESPONDING:
+        if (handlers && handlers->not_responding) handlers->not_responding(msg->aux, handlers->user_data);
+        return 0;
+    case NIMFFI_MSG_RESPONDING:
+        if (handlers && handlers->responding) handlers->responding(handlers->user_data);
+        return 0;
+    case NIMFFI_MSG_CLOSED: {
+        if (!handlers || !handlers->closed) return 0;
+        char* reason = NULL;
+        if (msg->len > 0) reason = nimffi_dup_cstr_n((const char*)msg->payload, msg->len);
+        handlers->closed((int)msg->ret_code, reason, handlers->user_data);
+        free(reason);
+        return 0;
+    }
+    default:
+        return -1;
+    }
+}
+
+/* One echo_poll() and the dispatch of what it returned.
+ * Returns the poll code (NIMFFI_RET_OK, _TIMEOUT, _CLOSED after the `closed`
+ * handler ran, _INVALID_CTX, _BUSY, _ERR), or -1 when the message did not
+ * dispatch. `ctx` must stay alive for the whole call: stop pumping before
+ * echo_ctx_destroy(). */
+static inline int echo_ctx_pump_once(EchoCtx* ctx, int32_t timeout_ms, const EchoHandlers* handlers) {
+    if (!ctx) return NIMFFI_RET_INVALID_CTX;
+    const NimFfiMsg* msg = NULL;
+    int rc = echo_poll(ctx->ptr, timeout_ms, &msg);
+    if (rc != NIMFFI_RET_OK && rc != NIMFFI_RET_CLOSED) return rc;
+    if (echo_ctx_dispatch(ctx, msg, handlers) != 0) return -1;
+    return rc;
+}
+
+/* See echo_poll_fd(): the caller owns and closes the handle. */
+static inline intptr_t echo_ctx_poll_fd(const EchoCtx* ctx) {
+    if (!ctx) return -1;
+    return echo_poll_fd(ctx->ptr);
 }
 
 typedef void (*EchoShoutReplyFn)(int err_code, const ShoutResponse* reply, const char* err_msg, void* user_data);
