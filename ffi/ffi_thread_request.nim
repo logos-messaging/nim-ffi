@@ -7,54 +7,48 @@ import results
 import chronos
 import ./ffi_types, ./alloc, ./cbor_serial
 
-const EmptyErrorMarker = "unknown error"
-  ## RET_ERR fallback message; keeps the callback msg ptr non-nil.
-
 const MaxRequestPayloadBytes* {.intdefine: "ffiMaxRequestPayloadBytes".} =
   8 * 1024 * 1024
   ## Largest CBOR `data` a submit accepts. Override with
   ## `-d:ffiMaxRequestPayloadBytes=<n>`.
 
 type FFIThreadRequest* = object
-  callback*: FFICallBack
-  userData*: pointer
-  reqId*: cstring ## Req type name used to look up the handler.
-  data*: ptr UncheckedArray[byte] ## Owned, CBOR-encoded request payload.
+  reqId*: uint64 ## What the host got at submit; its reply carries the same id.
+  reqTypeName*: cstring ## Req type name used to look up the handler.
+  data*: ptr UncheckedArray[byte]
+    ## Owned. The CBOR-encoded request, then, once answered, the reply bytes.
   dataLen*: int
   next*: ptr FFIThreadRequest
     ## Intrusive queue link; request doubles as its own node so enqueue needs no
-    ## ORC-heap alloc.
-  responded*: bool
-    ## De-dupes the callback across timeout/completion; both on FFI thread, no race.
+    ## ORC-heap alloc. Links the request queue, then the reply queue.
   generation*: uint
     ## Claim the submitter resolved its context under; the FFI thread drops the request when the slot has since changed owner.
+  retCode*: cint ## Set with the reply.
+  seq*: uint64 ## Place of the reply among the context's messages.
+  staleNext*: ptr FFIThreadRequest
+  staleQueued*: bool
+    ## A stale warning waits for the poller. One per request: a newer one overwrites it.
+  staleElapsedMs*: int64
+  staleSeq*: uint64
 
 proc deleteRequest*(request: ptr FFIThreadRequest) =
   if request.isNil():
     return
   if not request[].data.isNil:
     c_free(request[].data)
-  if not request[].reqId.isNil:
-    c_free(cast[pointer](request[].reqId))
+  if not request[].reqTypeName.isNil:
+    c_free(cast[pointer](request[].reqTypeName))
   c_free(request)
 
-proc allocBaseRequest(
-    callback: FFICallBack, userData: pointer, reqId: cstring
-): ptr FFIThreadRequest =
+proc allocBaseRequest(reqTypeName: cstring): ptr FFIThreadRequest =
   ## c_malloc the envelope and set routing fields; payload set by a helper below.
   ## Nil when the allocation fails; every caller passes that nil on, and
   ## `sendRequestToFFIThread` turns it into an error for the host.
   var ret = cast[ptr FFIThreadRequest](c_malloc(csize_t(sizeof(FFIThreadRequest))))
   if ret.isNil():
     return nil
-  ret[].callback = callback
-  ret[].userData = userData
-  ret[].reqId = reqId.alloc()
-  ret[].data = nil
-  ret[].dataLen = 0
-  ret[].next = nil
-  ret[].responded = false
-  ret[].generation = 0
+  zeroMem(ret, sizeof(FFIThreadRequest))
+  ret[].reqTypeName = reqTypeName.alloc()
   return ret
 
 proc copySharedPayload(req: ptr FFIThreadRequest, data: ptr byte, dataLen: int): bool =
@@ -82,16 +76,11 @@ proc adoptOwnedSharedPayload(
     c_free(data)
 
 proc initFromPtr*(
-    T: typedesc[FFIThreadRequest],
-    callback: FFICallBack,
-    userData: pointer,
-    reqId: cstring,
-    data: ptr byte,
-    dataLen: int,
+    T: typedesc[FFIThreadRequest], reqTypeName: cstring, data: ptr byte, dataLen: int
 ): ptr type T =
   ## Copies raw ptr+len into a fresh buffer owned by the returned request.
   ## Nil when an allocation fails.
-  var ret = allocBaseRequest(callback, userData, reqId)
+  var ret = allocBaseRequest(reqTypeName)
   if ret.isNil():
     return nil
   if not copySharedPayload(ret, data, dataLen):
@@ -100,11 +89,7 @@ proc initFromPtr*(
   return ret
 
 proc init*(
-    T: typedesc[FFIThreadRequest],
-    callback: FFICallBack,
-    userData: pointer,
-    reqId: cstring,
-    data: openArray[byte],
+    T: typedesc[FFIThreadRequest], reqTypeName: cstring, data: openArray[byte]
 ): ptr type T =
   ## Like `initFromPtr` but from a Nim openArray.
   let dataPtr =
@@ -112,20 +97,18 @@ proc init*(
       cast[ptr byte](unsafeAddr data[0])
     else:
       nil
-  initFromPtr(T, callback, userData, reqId, dataPtr, data.len)
+  initFromPtr(T, reqTypeName, dataPtr, data.len)
 
 proc initFromOwnedShared*(
     T: typedesc[FFIThreadRequest],
-    callback: FFICallBack,
-    userData: pointer,
-    reqId: cstring,
+    reqTypeName: cstring,
     data: ptr UncheckedArray[byte],
     dataLen: int,
 ): ptr type T =
   ## Adopts an already-c_malloc'd buffer (no copy); `deleteRequest` c_frees it.
   ## Pass `(nil, 0)` for an empty payload. Nil when the allocation fails, in which
   ## case it frees the adopted buffer: nobody else owns it any more.
-  var ret = allocBaseRequest(callback, userData, reqId)
+  var ret = allocBaseRequest(reqTypeName)
   if ret.isNil():
     if not data.isNil():
       c_free(data)
@@ -133,55 +116,44 @@ proc initFromOwnedShared*(
   adoptOwnedSharedPayload(ret, data, dataLen)
   return ret
 
-proc fireCallback*(res: Result[seq[byte], string], request: ptr FFIThreadRequest) =
-  ## Answers the foreign callback at most once (timeout and completion both call
-  ## it). Does NOT free the request; `handleRes` does.
-  if request[].responded:
-    return
-  request[].responded = true
-  if res.isErr():
-    foreignThreadGc:
-      let msg = if res.error.len > 0: res.error else: EmptyErrorMarker
-      request[].callback(
-        RET_ERR, unsafeAddr msg[0], cast[csize_t](msg.len), request[].userData
-      )
-    return
+proc setReply*(
+    request: ptr FFIThreadRequest, res: Result[seq[byte], string]
+) {.raises: [].} =
+  ## Swaps the request bytes for the reply: the CBOR value, or the UTF-8 error
+  ## text. c_malloc'd because the poller is a host thread. When that allocation
+  ## fails the reply is a RET_ERR without text.
+  if not request[].data.isNil():
+    c_free(request[].data)
+  request[].data = nil
+  request[].dataLen = 0
 
-  foreignThreadGc:
-    let bytes = res.get()
-    if bytes.len > 0:
-      request[].callback(
-        RET_OK,
-        cast[ptr cchar](unsafeAddr bytes[0]),
-        cast[csize_t](bytes.len),
-        request[].userData,
-      )
+  var src: pointer = nil
+  var n = 0
+  # A reply always carries a value; CBOR null marks "no value".
+  var noValue = CborNullByte
+  if res.isOk():
+    request[].retCode = RET_OK
+    n = res.value.len
+    if n > 0:
+      src = unsafeAddr res.value[0]
     else:
-      # Always hand the callback a real buffer; CBOR null marks "no value".
-      var sentinel = CborNullByte
-      request[].callback(
-        RET_OK, cast[ptr cchar](addr sentinel), 1.csize_t, request[].userData
-      )
-
-proc fireStaleWarn*(request: ptr FFIThreadRequest, elapsedMs: int64) =
-  ## In-flight ping; leaves `responded` unset and may fire many times — the
-  ## terminal RET_OK/RET_ERR is still owed.
-  if request[].responded:
+      src = addr noValue
+      n = 1
+  else:
+    request[].retCode = RET_ERR
+    n = res.error.len
+    if n > 0:
+      src = unsafeAddr res.error[0]
+  if n == 0:
     return
-  foreignThreadGc:
-    let msg = $elapsedMs
-    request[].callback(
-      RET_STALE_WARN,
-      cast[ptr cchar](unsafeAddr msg[0]),
-      cast[csize_t](msg.len),
-      request[].userData,
-    )
 
-proc handleRes*(res: Result[seq[byte], string], request: ptr FFIThreadRequest) =
-  ## Terminal step: delivers the response and frees the request exactly once.
-  defer:
-    deleteRequest(request)
-  fireCallback(res, request)
+  let buf = cast[ptr UncheckedArray[byte]](c_malloc(csize_t(n)))
+  if buf.isNil():
+    request[].retCode = RET_ERR
+    return
+  copyMem(buf, src, n)
+  request[].data = buf
+  request[].dataLen = n
 
-proc nilProcess*(reqId: cstring): Future[Result[seq[byte], string]] {.async.} =
-  return err("This request type is not implemented: " & $reqId)
+proc nilProcess*(reqTypeName: cstring): Future[Result[seq[byte], string]] {.async.} =
+  return err("This request type is not implemented: " & $reqTypeName)

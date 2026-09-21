@@ -27,7 +27,40 @@
 
 #include <gtest/gtest.h>
 
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#elif defined(__linux__)
+#include <fstream>
+#endif
+
 namespace {
+
+// Threads of this process, or -1 where there is no cheap way to count them.
+int threadCount() {
+#if defined(__APPLE__)
+    thread_act_array_t threads = nullptr;
+    mach_msg_type_number_t count = 0;
+    if (task_threads(mach_task_self(), &threads, &count) != KERN_SUCCESS) return -1;
+    for (mach_msg_type_number_t i = 0; i < count; ++i)
+        mach_port_deallocate(mach_task_self(), threads[i]);
+    vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(threads),
+                  count * sizeof(thread_act_t));
+    return static_cast<int>(count);
+#elif defined(__linux__)
+    std::ifstream status("/proc/self/status");
+    std::string key;
+    while (status >> key) {
+        if (key == "Threads:") {
+            int n = -1;
+            status >> n;
+            return n;
+        }
+    }
+    return -1;
+#else
+    return -1;
+#endif
+}
 
 // Unwrap a Result<T> in a single-threaded test context. On error it records a
 // non-fatal gtest failure and returns a default-constructed T so the caller
@@ -633,25 +666,32 @@ TEST(TimerE2E, ClosedListenerFiresOnceOnDestroy) {
 TEST(TimerE2E, HandlerDestroysItsContext) {
     auto ctx = makeCtx("self-destroy");
 
-    std::promise<void> echoReturned;
-    auto echoReturnedFuture = echoReturned.get_future().share();
+    std::promise<void> echoSubmitted;
+    auto echoSubmittedFuture = echoSubmitted.get_future().share();
     std::promise<void> destroyed;
     std::atomic<int> laterHits{0};
     ctx->addOnEchoFiredListener([&](const EchoEvent&) {
-        // The event is fired before the reply: let the caller leave `echo` first.
-        echoReturnedFuture.wait();
+        // Let the caller leave `echoAsync` first. It must not wait for the reply
+        // itself: replies come out of this very thread.
+        echoSubmittedFuture.wait();
         ctx.reset();
         destroyed.set_value();
     });
     ctx->addOnEchoFiredListener([&](const EchoEvent&) { laterHits.fetch_add(1); });
 
-    mustOk(ctx->echo(EchoRequest{"bye", 0}));
-    echoReturned.set_value();
+    auto echoFuture = ctx->echoAsync(EchoRequest{"bye", 0});
+    echoSubmitted.set_value();
 
     ASSERT_EQ(destroyed.get_future().wait_for(std::chrono::seconds(10)),
               std::future_status::ready);
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     EXPECT_EQ(laterHits.load(), 0);
+
+    // The echo's reply was behind the event: the context closed before it came out.
+    ASSERT_EQ(echoFuture.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    const auto echo = echoFuture.get();
+    ASSERT_TRUE(echo.isErr());
+    EXPECT_NE(echo.error().find("context closed"), std::string::npos) << echo.error();
 }
 
 // echo declares no event; it still has a dispatch thread, so the liveness and closed hooks work.
@@ -666,6 +706,230 @@ TEST(TimerE2E, EventlessLibraryStillReportsClosed) {
     EXPECT_EQ(mustOk(ctx->shout(ShoutRequest{"a"})).prefix, "NO-EVENTS");
     ctx.reset();
     EXPECT_EQ(closedHits.load(), 1);
+}
+
+// ── Replies through the dispatch thread ──────────────────────────────────────────────────
+
+// A blocking call made inside a listener runs on the dispatch thread, the only one
+// that can take its reply out: the call polls in place. The echo it makes fires
+// the event again, which is delivered while that call is still waiting.
+TEST(TimerE2E, BlockingCallsInsideAListenerPollInPlace) {
+    auto ctx = makeCtx("inline-poll");
+
+    struct Seen {
+        Result<std::string> version;
+        Result<EchoResponse> echo;
+        Result<std::string> libVersion;
+        int nestedEvents;
+    };
+    std::promise<Seen> seenPromise;
+    auto seenFuture = seenPromise.get_future();
+    std::atomic<int> depth{0};
+    std::atomic<int> nested{0};
+    ctx->addOnEchoFiredListener([&](const EchoEvent&) {
+        if (depth.fetch_add(1) != 0) {
+            nested.fetch_add(1);
+            return;
+        }
+        auto version = ctx->version();
+        auto echo = ctx->echo(EchoRequest{"from-listener", 5});
+        auto libVersion = MyTimerCtx::lib_version();
+        seenPromise.set_value(Seen{std::move(version), std::move(echo),
+                                   std::move(libVersion), nested.load()});
+    });
+
+    mustOk(ctx->echo(EchoRequest{"outer", 0}));
+    ASSERT_EQ(seenFuture.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    auto seen = seenFuture.get();
+    EXPECT_EQ(mustOk(std::move(seen.version)), TIMER_VERSION);
+    EXPECT_EQ(mustOk(std::move(seen.echo)).echoed, "from-listener");
+    EXPECT_EQ(mustOk(std::move(seen.libVersion)), "nim-timer v0.1.0");
+    EXPECT_EQ(seen.nestedEvents, 1) << "the nested echo's event was not delivered in place";
+
+    // The dispatch thread is back to normal afterwards.
+    EXPECT_EQ(mustOk(ctx->echo(EchoRequest{"after", 0})).echoed, "after");
+}
+
+// A blocking call inside a listener still honours the context's timeout.
+TEST(TimerE2E, BlockingCallInsideAListenerTimesOut) {
+    auto ctx = mustOk(MyTimerCtx::create(TimerConfig{"inline-timeout"},
+                                         std::chrono::milliseconds(100)));
+
+    std::promise<Result<EchoResponse>> slowPromise;
+    auto slowFuture = slowPromise.get_future();
+    std::atomic<bool> first{true};
+    ctx->addOnEchoFiredListener([&](const EchoEvent&) {
+        if (first.exchange(false)) slowPromise.set_value(ctx->echo(EchoRequest{"slow", 600}));
+    });
+
+    mustOk(ctx->echo(EchoRequest{"go", 0}));
+    ASSERT_EQ(slowFuture.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    const auto slow = slowFuture.get();
+    ASSERT_TRUE(slow.isErr());
+    EXPECT_NE(slow.error().find("timed out"), std::string::npos) << slow.error();
+    EXPECT_EQ(mustOk(ctx->version()), TIMER_VERSION);
+}
+
+// Every *Async call is one waiter in the dispatch thread, not one thread.
+TEST(TimerE2E, ManyConcurrentAsyncCallsShareTheDispatchThread) {
+    constexpr int kCalls = 300;
+    auto ctx = makeCtx("many-async");
+    mustOk(ctx->echo(EchoRequest{"warm-up", 0}));
+
+    const int before = threadCount();
+    std::vector<std::future<Result<EchoResponse>>> futs;
+    futs.reserve(kCalls);
+    for (int i = 0; i < kCalls; ++i) {
+        futs.push_back(ctx->echoAsync(EchoRequest{"m" + std::to_string(i), 150}));
+    }
+    const int during = threadCount();
+
+    for (int i = 0; i < kCalls; ++i) {
+        const auto resp = mustOk(futs[i].get());
+        EXPECT_EQ(resp.echoed, "m" + std::to_string(i));
+        EXPECT_EQ(resp.timerName, "many-async");
+    }
+    if (before >= 0) {
+        EXPECT_LE(during, before) << kCalls << " calls in flight started threads";
+    }
+}
+
+// Futures taken from many threads at once resolve to their own replies.
+TEST(TimerE2E, AsyncCallsFromManyThreadsResolveToTheirOwnReply) {
+    constexpr int kThreads = 8;
+    constexpr int kPerThread = 100;
+    auto ctx = makeCtx("async-mt");
+
+    std::vector<std::thread> workers;
+    std::atomic<int> errors{0};
+    for (int t = 0; t < kThreads; ++t) {
+        workers.emplace_back([&, t] {
+            std::vector<std::future<Result<EchoResponse>>> futs;
+            futs.reserve(kPerThread);
+            for (int i = 0; i < kPerThread; ++i) {
+                futs.push_back(ctx->echoAsync(
+                    EchoRequest{std::to_string(t) + ":" + std::to_string(i), i % 3}));
+            }
+            for (int i = 0; i < kPerThread; ++i) {
+                const auto r = futs[i].get();
+                if (r.isErr() || r->echoed != std::to_string(t) + ":" + std::to_string(i))
+                    ++errors;
+            }
+        });
+    }
+    for (auto& w : workers) w.join();
+    EXPECT_EQ(errors.load(), 0);
+}
+
+// A call that timed out gave its waiter up: the reply that arrives later is
+// dropped, and the context keeps working.
+TEST(TimerE2E, TimedOutCallLeavesTheContextUsable) {
+    auto ctx = mustOk(MyTimerCtx::create(TimerConfig{"timeouts"},
+                                         std::chrono::milliseconds(100)));
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto slow = ctx->echo(EchoRequest{"slow", 400});
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+    ASSERT_TRUE(slow.isErr());
+    EXPECT_EQ(slow.error(), "FFI call timed out after 100ms");
+    EXPECT_LT(elapsed, 390) << "the call waited for the reply instead of timing out";
+
+    EXPECT_EQ(mustOk(ctx->echo(EchoRequest{"quick", 0})).echoed, "quick");
+
+    // The late reply of "slow" lands here and must not be taken for another call's.
+    std::this_thread::sleep_for(std::chrono::milliseconds(450));
+    for (int i = 0; i < 5; ++i) {
+        const auto r = mustOk(ctx->echo(EchoRequest{"after-" + std::to_string(i), 0}));
+        EXPECT_EQ(r.echoed, "after-" + std::to_string(i));
+    }
+}
+
+// Nobody waits on a future's deadline but the dispatch thread, which fails it in time.
+TEST(TimerE2E, AsyncCallTimesOutInsteadOfHanging) {
+    auto ctx = mustOk(MyTimerCtx::create(TimerConfig{"async-timeout"},
+                                         std::chrono::milliseconds(100)));
+
+    auto slowFut = ctx->echoAsync(EchoRequest{"slow", 1500});
+    ASSERT_EQ(slowFut.wait_for(std::chrono::milliseconds(1200)), std::future_status::ready)
+        << "the future outlived its timeout";
+    const auto slow = slowFut.get();
+    ASSERT_TRUE(slow.isErr());
+    EXPECT_EQ(slow.error(), "FFI call timed out after 100ms");
+
+    EXPECT_EQ(mustOk(ctx->echoAsync(EchoRequest{"quick", 0}).get()).echoed, "quick");
+}
+
+// Destroying a context fails the calls still waiting for their reply; a reply
+// that made it out before the context closed is still delivered.
+TEST(TimerE2E, DestroyFailsTheCallsInFlight) {
+    auto ctx = makeCtx("destroy-in-flight");
+
+    std::vector<std::future<Result<EchoResponse>>> futs;
+    for (int i = 0; i < 8; ++i) {
+        futs.push_back(ctx->echoAsync(EchoRequest{"pending", 1000}));
+    }
+    ctx.reset();
+
+    for (auto& fut : futs) {
+        ASSERT_EQ(fut.wait_for(std::chrono::seconds(0)), std::future_status::ready)
+            << "a future survived its context";
+        const auto r = fut.get();
+        if (r.isErr()) {
+            EXPECT_NE(r.error().find("context closed"), std::string::npos) << r.error();
+        } else {
+            EXPECT_EQ(r->echoed, "pending");
+        }
+    }
+}
+
+// A request the library refuses at the door claims no context: well past the
+// pool's 32 slots, a create still works.
+TEST(TimerE2E, RefusedCreateLeaksNoContext) {
+    const TimerConfig tooLarge{std::string(9 * 1024 * 1024, 'x')};
+    for (int i = 0; i < 34; ++i) {
+        const auto res = MyTimerCtx::create(tooLarge);
+        ASSERT_TRUE(res.isErr()) << "round " << i;
+        EXPECT_FALSE(res.error().empty());
+    }
+    auto asyncRes = MyTimerCtx::createAsync(tooLarge).get();
+    EXPECT_TRUE(asyncRes.isErr());
+
+    auto ctx = makeCtx("after-refusals");
+    EXPECT_EQ(mustOk(ctx->version()), TIMER_VERSION);
+}
+
+// Contexts come and go well past the pool's 32 slots, through both creates.
+TEST(TimerE2E, CreateDestroyLoopReusesThePool) {
+    for (int i = 0; i < 40; ++i) {
+        auto ctx = (i & 1) ? mustOk(MyTimerCtx::createAsync(TimerConfig{"loop"}).get())
+                           : makeCtx("loop");
+        ASSERT_TRUE(ctx) << "round " << i;
+        EXPECT_EQ(mustOk(ctx->version()), TIMER_VERSION);
+    }
+}
+
+TEST(TimerE2E, CreateAsyncBuildsAWorkingContext) {
+    auto f1 = MyTimerCtx::createAsync(TimerConfig{"async-1"});
+    auto f2 = MyTimerCtx::createAsync(TimerConfig{"async-2"});
+    auto c2 = mustOk(f2.get());
+    auto c1 = mustOk(f1.get());
+    ASSERT_TRUE(c1 && c2);
+    EXPECT_EQ(mustOk(c1->echo(EchoRequest{"x", 0})).timerName, "async-1");
+    EXPECT_EQ(mustOk(c2->echo(EchoRequest{"x", 0})).timerName, "async-2");
+}
+
+// shutdown stops the static dispatch thread before the library; a later static call
+// starts a new static context and a new dispatch thread for it.
+TEST(TimerE2E, ShutdownStopsTheStaticDispatcherAndStaticCallsStartOver) {
+    EXPECT_EQ(mustOk(EchoCtx::lib_version()), "nim-echo v0.1.0");
+    const auto down = EchoCtx::shutdown();
+    EXPECT_TRUE(down.isOk()) << down.error();
+    EXPECT_EQ(mustOk(EchoCtx::lib_version()), "nim-echo v0.1.0");
+    EXPECT_EQ(mustOk(EchoCtx::shout_anonAsync(ShoutRequest{"again"}).get()).shouted, "AGAIN");
+
+    auto ctx = mustOk(EchoCtx::create(EchoConfig{"AFTER-SHUTDOWN"}));
+    EXPECT_EQ(mustOk(ctx->shout(ShoutRequest{"a"})).prefix, "AFTER-SHUTDOWN");
 }
 
 // Cross-language byte-string contract: the generated C++ codec must round-trip

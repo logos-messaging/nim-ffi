@@ -9,12 +9,14 @@ type NimFfiMsg* {.bycopy.} = object
   structSize*: uint32 ## `sizeof(NimFfiMsg)` of the library; fields are only appended.
   kind*: uint32
   seq*: uint64 ## Production order within the context.
-  id*: uint64
+  id*: uint64 ## Reply, StaleWarn: the request id. Otherwise 0.
   nameId*: uint64 ## Event: `nameId` of its wire name. Otherwise 0.
-  aux*: uint64 ## NotResponding: a `NotRespondingReason*`. Otherwise 0.
-  retCode*: int32
+  aux*: uint64
+    ## StaleWarn: milliseconds in flight. NotResponding: a `NotResponding*` reason. Otherwise 0.
+  retCode*: int32 ## Reply, Closed: RET_OK or RET_ERR. Otherwise 0.
   flags*: uint32
-  payload*: pointer ## The bare CBOR value. Never nil, even when `len` is 0.
+  payload*: pointer
+    ## The bare CBOR value; the UTF-8 error text of a RET_ERR. Never nil, even when `len` is 0.
   len*: csize_t
 
 type MsgKind* = object
@@ -23,12 +25,24 @@ type MsgKind* = object
   doc*: string
 
 const
+  MsgReply* = 1'u32
   MsgEvent* = 2'u32
+  MsgStaleWarn* = 3'u32
   MsgNotResponding* = 5'u32
   MsgResponding* = 6'u32
   MsgClosed* = 7'u32
 
 const MsgKinds* = [
+  MsgKind(
+    name: "REPLY",
+    value: MsgReply,
+    doc: "id is the request; ret_code OK: payload is its CBOR, ERR: UTF-8 text",
+  ),
+  MsgKind(
+    name: "STALE_WARN",
+    value: MsgStaleWarn,
+    doc: "request id is still running after aux ms; its REPLY still comes",
+  ),
   MsgKind(name: "EVENT", value: MsgEvent, doc: "name_id names it; payload is its CBOR"),
   MsgKind(
     name: "NOT_RESPONDING",
@@ -65,8 +79,9 @@ func cMsgDecl*(): string =
     "  uint32_t struct_size;   /* sizeof(NimFfiMsg) of the library; fields are only appended */",
     "  uint32_t kind;          /* NIMFFI_MSG_* */",
     "  uint64_t seq;           /* production order within the context */",
-    "  uint64_t id;", "  uint64_t name_id;       /* EVENT: which one. Otherwise 0 */",
-    "  uint64_t aux;", "  int32_t  ret_code;", "  uint32_t flags;",
+    "  uint64_t id;            /* REPLY, STALE_WARN: the request id. Otherwise 0 */",
+    "  uint64_t name_id;       /* EVENT: which one. Otherwise 0 */", "  uint64_t aux;",
+    "  int32_t  ret_code;", "  uint32_t flags;",
     "  const uint8_t* payload; /* bare CBOR value; never NULL */", "  size_t   len;",
     "} NimFfiMsg;", "",
   ]

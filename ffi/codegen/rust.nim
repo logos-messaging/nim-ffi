@@ -101,7 +101,7 @@ func needsSerdeBytes*(types: seq[FFITypeMeta], procs: seq[FFIProcMeta]): bool =
   false
 
 proc generateCargoToml*(libName: string, needsBytes = false): string =
-  # flume: callback channel (recv_timeout + recv_async), default-features off. tokio: only the async timeout.
+  # flume: the channel a reply waits in (recv_timeout + recv_async), default-features off. tokio: only the async timeout.
   # Add serde_bytes only when a `seq[byte]` goes on the wire as a CBOR byte string.
   let serdeBytesDep = if needsBytes: "\nserde_bytes = \"0.11\"" else: ""
   return
@@ -199,6 +199,14 @@ on macOS/BSD, an Event HANDLE on Windows; -1 on failure. It is ready while a
 message waits or the context is closed: wait on it, then poll with a timeout of
 0 until NIMFFI_RET_TIMEOUT."""
 
+const StaticCtxDoc =
+  """The token of the static context, where the reply of every static request
+arrives; poll it like any other context. Null on failure."""
+
+const LastErrorDoc =
+  """Why the calling thread's last request was refused. Never null, empty when
+nothing was refused; valid until the thread's next refusal."""
+
 proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
   ## Generates ffi.rs with extern "C" declarations; each proc takes one CBOR
   ## buffer (ptr+len) as its request payload.
@@ -207,13 +215,6 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
   lines.add("#![allow(dead_code)]")
   lines.add("")
   lines.add("use std::os::raw::{c_char, c_int, c_void};")
-  lines.add("")
-  lines.add("pub type FFICallback = unsafe extern \"C\" fn(")
-  lines.add("    ret: c_int,")
-  lines.add("    msg: *const c_char,")
-  lines.add("    len: usize,")
-  lines.add("    user_data: *mut c_void,")
-  lines.add(");")
   lines.add("")
 
   var libNames: seq[string] = @[]
@@ -235,6 +236,11 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
   )
   lines.add(rustMsgDecl())
   lines.add("")
+  lines.add("// A request returns once it is queued. NIMFFI_RET_OK promises one")
+  lines.add(
+    "// NIMFFI_MSG_REPLY whose `id` is `*req_id_out`; any other return means no"
+  )
+  lines.add("// reply will come, and `$1_last_error` says why." % [linkLibName])
   lines.add("#[link(name = \"$1\")]" % [linkLibName])
   lines.add("extern \"C\" {")
 
@@ -245,21 +251,19 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
     of FFIKind.FFI, FFIKind.STATIC:
       if not p.isStatic():
         params.add("ctx: *mut c_void")
-      params.add("callback: FFICallback")
-      params.add("user_data: *mut c_void")
       params.add("req_cbor: *const u8")
       params.add("req_cbor_len: usize")
-      lines.add("    pub fn $1($2) -> c_int;" % [p.procName, params.join(", ")])
+      params.add("req_id_out: *mut u64")
     of FFIKind.CTOR:
-      # Ctor: no ctx; returns the freshly-allocated handle.
+      # The token comes back at once so the host can poll it; the reply says
+      # whether construction worked.
       params.add("req_cbor: *const u8")
       params.add("req_cbor_len: usize")
-      params.add("callback: FFICallback")
-      params.add("user_data: *mut c_void")
-      lines.add("    pub fn $1($2) -> *mut c_void;" % [p.procName, params.join(", ")])
+      params.add("ctx_out: *mut *mut c_void")
+      params.add("req_id_out: *mut u64")
     of FFIKind.DTOR:
       params.add("ctx: *mut c_void")
-      lines.add("    pub fn $1($2) -> c_int;" % [p.procName, params.join(", ")])
+    lines.add("    pub fn $1($2) -> c_int;" % [p.procName, params.join(", ")])
 
   lines.add(renderMemberDocComment(PollDoc))
   lines.add(
@@ -268,6 +272,10 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
   )
   lines.add(renderMemberDocComment(PollFdDoc))
   lines.add("    pub fn $1_poll_fd(ctx: *mut c_void) -> isize;" % [linkLibName])
+  lines.add(renderMemberDocComment(StaticCtxDoc))
+  lines.add("    pub fn $1_static_ctx() -> *mut c_void;" % [linkLibName])
+  lines.add(renderMemberDocComment(LastErrorDoc))
+  lines.add("    pub fn $1_last_error() -> *const c_char;" % [linkLibName])
   lines.add(renderMemberDocComment(ShutdownDoc))
   lines.add("    pub fn $1_shutdown() -> c_int;" % [linkLibName])
 
@@ -377,14 +385,18 @@ proc generateMessages(events: seq[FFIEventMeta], libName, msgTypeName: string): 
   lines.add("")
 
   lines.add(
-    "/// Everything `$1` sends to the host: its events, the liveness reports" % [
-      libName
-    ]
+    "/// Everything `$1` sends to the host besides replies: its events, the" % [libName]
   )
   lines.add(
-    "/// and the end of the context. The dispatch thread of a context decodes each"
+    "/// progress and liveness reports and the end of the context. The dispatch thread"
   )
-  lines.add("/// message into one of these before a listener runs.")
+  lines.add(
+    "/// of a context decodes each message into one of these before a listener runs."
+  )
+  lines.add(
+    "/// A reply is not listed: it goes to the call that waits for it, which decodes"
+  )
+  lines.add("/// it into that call's return type.")
   lines.add("#[derive(Debug, Clone)]")
   lines.add("pub enum $1 {" % [msgTypeName])
   for ev in events:
@@ -392,6 +404,11 @@ proc generateMessages(events: seq[FFIEventMeta], libName, msgTypeName: string): 
     lines.add(
       "    $1($2)," % [capitalizeFirstLetter(ev.nimProcName), ev.payloadTypeName]
     )
+  lines.add(
+    "    /// Request `req_id` has been running for `elapsed_ms`. Not a reply: the"
+  )
+  lines.add("    /// request still runs and its call still returns.")
+  lines.add("    StaleWarn { req_id: u64, elapsed_ms: u64 },")
   lines.add(
     "    /// The library stopped making progress. `reason` is a `NIMFFI_NOT_RESPONDING_*`:"
   )
@@ -406,7 +423,10 @@ proc generateMessages(events: seq[FFIEventMeta], libName, msgTypeName: string): 
     "    /// The context is gone; always the last message. `ok` is false when the"
   )
   lines.add(
-    "    /// library could not recycle the context, and `reason` then says why."
+    "    /// library could not recycle the context, and `reason` then says why. Every"
+  )
+  lines.add(
+    "    /// call still waiting for its reply has failed by the time a listener sees it."
   )
   lines.add("    Closed { ok: bool, reason: String },")
   lines.add(
@@ -418,12 +438,16 @@ proc generateMessages(events: seq[FFIEventMeta], libName, msgTypeName: string): 
   lines.add("")
 
   # The message belongs to the library until the next poll, so this copies everything out.
-  lines.add("unsafe fn decode_message(msg: &ffi::NimFfiMsg) -> $1 {" % [msgTypeName])
-  lines.add("    let bytes: &[u8] = if msg.payload.is_null() || msg.len == 0 {")
+  lines.add("unsafe fn payload_bytes(msg: &ffi::NimFfiMsg) -> &[u8] {")
+  lines.add("    if msg.payload.is_null() || msg.len == 0 {")
   lines.add("        &[]")
   lines.add("    } else {")
   lines.add("        slice::from_raw_parts(msg.payload, msg.len)")
-  lines.add("    };")
+  lines.add("    }")
+  lines.add("}")
+  lines.add("")
+  lines.add("unsafe fn decode_message(msg: &ffi::NimFfiMsg) -> $1 {" % [msgTypeName])
+  lines.add("    let bytes = payload_bytes(msg);")
   lines.add("    let decoded = match msg.kind {")
   lines.add("        ffi::NIMFFI_MSG_EVENT => match msg.name_id {")
   for ev in events:
@@ -433,6 +457,10 @@ proc generateMessages(events: seq[FFIEventMeta], libName, msgTypeName: string): 
     )
   lines.add("            _ => Err(\"unknown event\".to_string()),")
   lines.add("        },")
+  lines.add("        ffi::NIMFFI_MSG_STALE_WARN => Ok($1::StaleWarn {" % [msgTypeName])
+  lines.add("            req_id: msg.id,")
+  lines.add("            elapsed_ms: msg.aux,")
+  lines.add("        }),")
   lines.add(
     "        ffi::NIMFFI_MSG_NOT_RESPONDING => Ok($1::NotResponding { reason: msg.aux })," %
       [msgTypeName]
@@ -454,7 +482,12 @@ proc generateMessages(events: seq[FFIEventMeta], libName, msgTypeName: string): 
   return lines.join("\n")
 
 # $1 lib name, $2 message enum, $3 poll slice in ms.
-const DispatcherTemplate = """type Handler = Arc<dyn Fn(&$2) + Send + Sync>;
+const DispatcherTemplate =
+  """// A reply: the CBOR of the return value, or the library's error text.
+type FFIResult = Result<Vec<u8>, String>;
+type Handler = Arc<dyn Fn(&$2) + Send + Sync>;
+
+const CONTEXT_CLOSED: &str = "context closed before the reply arrived";
 
 /// Returned by every `add_*_listener`; pass it to `remove_event_listener`.
 #[derive(Debug, Clone, Copy)]
@@ -464,30 +497,61 @@ pub struct ListenerHandle { pub id: u64 }
 struct Inner {
     ptr: *mut c_void,
     listeners: Mutex<Vec<(u64, Handler)>>,
+    // The calls that wait for a reply, by request id.
+    waiters: Mutex<HashMap<u64, flume::Sender<FFIResult>>>,
     next_id: AtomicU64,
     stop: AtomicBool,
+    // Written under the `waiters` lock: no reply can be delivered any more.
+    ended: AtomicBool,
+    dispatch_thread: OnceLock<ThreadId>,
 }
 
 // SAFETY: `ptr` is a token the library validates on every call, never
-// dereferenced here. `$1_poll` admits one consumer per context and the dispatch thread
-// thread is the only poller; everything else in `Inner` is already Sync.
+// dereferenced here. `$1_poll` admits one consumer per context and only the
+// dispatch thread polls; everything else in `Inner` is already Sync.
 unsafe impl Send for Inner {}
 unsafe impl Sync for Inner {}
 
+// No lock here is held while foreign code of the host runs, so a panic cannot poison one; recover anyway.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+// Why the library refused a request. `$1_last_error` is per thread: call this
+// on the refused thread, before its next request.
+fn last_error(ret: c_int) -> String {
+    let text = unsafe { CStr::from_ptr(ffi::$1_last_error()) }.to_string_lossy().into_owned();
+    if text.is_empty() { format!("request refused (NIMFFI_RET {ret})") } else { text }
+}
+
+fn spawn_dispatcher(name: &str, inner: Arc<Inner>) -> Result<JoinHandle<()>, String> {
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || dispatch_loop(inner))
+        .map_err(|e| e.to_string())
+}
+
 impl Inner {
-    // Handlers run with the lock released, so a panic cannot poison it; recover anyway.
-    fn lock(&self) -> MutexGuard<'_, Vec<(u64, Handler)>> {
-        self.listeners.lock().unwrap_or_else(|e| e.into_inner())
+    fn new(ptr: *mut c_void) -> Self {
+        Inner {
+            ptr,
+            listeners: Mutex::new(Vec::new()),
+            waiters: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+            stop: AtomicBool::new(false),
+            ended: AtomicBool::new(false),
+            dispatch_thread: OnceLock::new(),
+        }
     }
 
     fn add(&self, handler: Handler) -> ListenerHandle {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.lock().push((id, handler));
+        lock(&self.listeners).push((id, handler));
         ListenerHandle { id }
     }
 
     fn remove(&self, id: u64) -> bool {
-        let mut listeners = self.lock();
+        let mut listeners = lock(&self.listeners);
         let before = listeners.len();
         listeners.retain(|(lid, _)| *lid != id);
         listeners.len() != before
@@ -495,43 +559,200 @@ impl Inner {
 
     fn dispatch(&self, message: &$2) {
         // Cloned out so a handler may add or remove listeners.
-        let handlers: Vec<Handler> = self.lock().iter().map(|(_, h)| h.clone()).collect();
+        let handlers: Vec<Handler> = lock(&self.listeners).iter().map(|(_, h)| h.clone()).collect();
         for handler in handlers {
             // A panicking handler must not end the dispatch thread; the panic hook already reported it.
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(message)));
         }
     }
+
+    // Sends a request with `send(ctx, req_id_out)` and registers the waiter of its reply.
+    fn submit<F>(&self, send: F) -> Result<(u64, flume::Receiver<FFIResult>), String>
+    where
+        F: FnOnce(*mut c_void, *mut u64) -> c_int,
+    {
+        let (tx, rx) = flume::bounded::<FFIResult>(1);
+        let mut req_id: u64 = 0;
+        // Held across the call: the dispatch thread can poll the reply before the call
+        // returns, and takes this lock before it looks the waiter up.
+        let mut waiters = lock(&self.waiters);
+        let ret = send(self.ptr, &mut req_id);
+        if ret != NIMFFI_RET_OK {
+            // Refused: no reply will come, so nothing is registered.
+            return Err(last_error(ret));
+        }
+        if self.ended.load(Ordering::Acquire) {
+            return Err(CONTEXT_CLOSED.into());
+        }
+        waiters.insert(req_id, tx);
+        Ok((req_id, rx))
+    }
+
+    // Hands a reply to its waiter. One without a waiter is dropped: its call timed out.
+    unsafe fn complete(&self, msg: &ffi::NimFfiMsg) {
+        let waiter = lock(&self.waiters).remove(&msg.id);
+        if let Some(tx) = waiter {
+            let bytes = payload_bytes(msg);
+            let reply = if msg.ret_code == NIMFFI_RET_OK {
+                Ok(bytes.to_vec())
+            } else {
+                // Lossy: the text comes from a Nim `string`, so invalid UTF-8 is a library bug.
+                Err(String::from_utf8_lossy(bytes).into_owned())
+            };
+            // The call may have gone away meanwhile (a dropped future).
+            let _ = tx.send(reply);
+        }
+    }
+
+    // No reply can arrive any more: dropping a sender fails its call with CONTEXT_CLOSED.
+    fn fail_waiters(&self) {
+        let mut waiters = lock(&self.waiters);
+        self.ended.store(true, Ordering::Release);
+        waiters.clear();
+    }
+
+    // Forgets the waiter so a late reply is dropped; a reply that raced the timeout still counts.
+    fn timed_out(&self, req_id: u64, rx: &flume::Receiver<FFIResult>, timeout: Duration) -> FFIResult {
+        lock(&self.waiters).remove(&req_id);
+        rx.try_recv().unwrap_or_else(|_| Err(format!("timed out after {:?}", timeout)))
+    }
+
+    fn wait(&self, req_id: u64, rx: &flume::Receiver<FFIResult>, timeout: Duration) -> FFIResult {
+        if self.dispatch_thread.get() == Some(&std::thread::current().id()) {
+            return self.wait_on_dispatch_thread(req_id, rx, timeout);
+        }
+        match rx.recv_timeout(timeout) {
+            Ok(reply) => reply,
+            Err(flume::RecvTimeoutError::Timeout) => self.timed_out(req_id, rx, timeout),
+            Err(flume::RecvTimeoutError::Disconnected) => Err(CONTEXT_CLOSED.into()),
+        }
+    }
+
+    // A blocking call made by a listener runs on the dispatch thread, the only one
+    // that can deliver its reply: keep dispatching here until that reply arrives.
+    fn wait_on_dispatch_thread(&self, req_id: u64, rx: &flume::Receiver<FFIResult>, timeout: Duration) -> FFIResult {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match rx.try_recv() {
+                Ok(reply) => return reply,
+                Err(flume::TryRecvError::Disconnected) => return Err(CONTEXT_CLOSED.into()),
+                Err(flume::TryRecvError::Empty) => {}
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return self.timed_out(req_id, rx, timeout);
+            }
+            let slice_ms = left.as_millis().clamp(1, $3) as i32;
+            dispatch_step(self, slice_ms);
+        }
+    }
+
+    // The `.await` of an `_async` call. It must not run on the dispatch thread (inside
+    // a listener): nothing would dispatch the reply, and the call would time out.
+    async fn wait_async(&self, req_id: u64, rx: flume::Receiver<FFIResult>, timeout: Duration) -> FFIResult {
+        match tokio::time::timeout(timeout, rx.recv_async()).await {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(_)) => Err(CONTEXT_CLOSED.into()),
+            Err(_) => self.timed_out(req_id, &rx, timeout),
+        }
+    }
 }
 
-// The context's only poller: takes each message out, decodes it and runs the listeners.
+enum Step { Message, Idle, Ended }
+
+// One poll: a reply goes to its waiter, anything else to the listeners.
+fn dispatch_step(inner: &Inner, timeout_ms: i32) -> Step {
+    if inner.ended.load(Ordering::Acquire) {
+        return Step::Ended;
+    }
+    // The library owns the message; it is valid until the next poll.
+    let mut msg: *const ffi::NimFfiMsg = std::ptr::null();
+    let ret = unsafe { ffi::$1_poll(inner.ptr, timeout_ms, &mut msg) };
+    match ret {
+        NIMFFI_RET_OK | NIMFFI_RET_CLOSED if !msg.is_null() => {
+            let msg = unsafe { &*msg };
+            if msg.kind == ffi::NIMFFI_MSG_REPLY {
+                unsafe { inner.complete(msg) };
+                return Step::Message;
+            }
+            // Decoded before a listener runs: a listener's blocking call polls again.
+            let message = unsafe { decode_message(msg) };
+            if ret == NIMFFI_RET_CLOSED {
+                inner.fail_waiters();
+            }
+            inner.dispatch(&message);
+            if ret == NIMFFI_RET_CLOSED { Step::Ended } else { Step::Message }
+        }
+        NIMFFI_RET_TIMEOUT => Step::Idle,
+        NIMFFI_RET_INVALID_CTX => {
+            // The context ended between two polls, so its CLOSED message was never seen.
+            inner.fail_waiters();
+            inner.dispatch(&$2::Closed { ok: true, reason: String::new() });
+            Step::Ended
+        }
+        // NIMFFI_RET_BUSY, NIMFFI_RET_ERR: try again, without spinning.
+        _ => {
+            std::thread::sleep(Duration::from_millis(10));
+            Step::Idle
+        }
+    }
+}
+
+// The context's only poller.
 fn dispatch_loop(inner: Arc<Inner>) {
+    let _ = inner.dispatch_thread.set(std::thread::current().id());
     loop {
-        // The library owns the message; it is valid until the next poll.
-        let mut msg: *const ffi::NimFfiMsg = std::ptr::null();
         // Once asked to stop, only take what already waits: a teardown's last messages.
         let stopping = inner.stop.load(Ordering::Acquire);
         let timeout_ms = if stopping { 0 } else { $3 };
-        let ret = unsafe { ffi::$1_poll(inner.ptr, timeout_ms, &mut msg) };
-        match ret {
-            NIMFFI_RET_OK | NIMFFI_RET_CLOSED if !msg.is_null() => {
-                let message = unsafe { decode_message(&*msg) };
-                inner.dispatch(&message);
-                if ret == NIMFFI_RET_CLOSED {
-                    return;
+        match dispatch_step(&inner, timeout_ms) {
+            Step::Message => {}
+            Step::Idle => {
+                if stopping {
+                    break;
                 }
-                continue;
             }
-            NIMFFI_RET_TIMEOUT => {}
-            NIMFFI_RET_INVALID_CTX => {
-                // The context ended between two polls, so its CLOSED message was never seen.
-                inner.dispatch(&$2::Closed { ok: true, reason: String::new() });
-                return;
-            }
-            // NIMFFI_RET_BUSY, NIMFFI_RET_ERR: try again, without spinning.
-            _ => std::thread::sleep(Duration::from_millis(10)),
+            Step::Ended => break,
         }
-        if stopping {
-            return;
+    }
+    // Nobody delivers a reply from here on.
+    inner.fail_waiters();
+}
+"""
+
+# $1 lib name.
+const StaticDispatcherTemplate = """struct StaticDispatcher {
+    inner: Arc<Inner>,
+    thread: JoinHandle<()>,
+}
+
+// The reply of a static request arrives on the library's static context: one
+// dispatch thread per process, started by the first static call and stopped by `shutdown`.
+// Its thread does not keep the process alive.
+static STATIC_DISPATCHER: Mutex<Option<StaticDispatcher>> = Mutex::new(None);
+
+fn static_inner() -> Result<Arc<Inner>, String> {
+    let mut slot = lock(&STATIC_DISPATCHER);
+    if let Some(dispatcher) = slot.as_ref() {
+        if !dispatcher.inner.ended.load(Ordering::Acquire) {
+            return Ok(dispatcher.inner.clone());
+        }
+    }
+    let ptr = unsafe { ffi::$1_static_ctx() };
+    if ptr.is_null() {
+        return Err(last_error(NIMFFI_RET_ERR));
+    }
+    let inner = Arc::new(Inner::new(ptr));
+    let thread = spawn_dispatcher("$1-static-dispatch", inner.clone())?;
+    *slot = Some(StaticDispatcher { inner: inner.clone(), thread });
+    Ok(inner)
+}
+
+fn stop_static_dispatcher(slot: &mut Option<StaticDispatcher>) {
+    if let Some(dispatcher) = slot.take() {
+        dispatcher.inner.stop.store(true, Ordering::Release);
+        if dispatcher.thread.thread().id() != std::thread::current().id() {
+            let _ = dispatcher.thread.join();
         }
     }
 }
@@ -539,27 +760,43 @@ fn dispatch_loop(inner: Arc<Inner>) {
 
 # $1 lib name.
 const StartTemplate =
-  """    fn start(ptr: *mut c_void, timeout: Duration) -> Result<Self, String> {
-        let inner = Arc::new(Inner {
-            ptr,
-            listeners: Mutex::new(Vec::new()),
-            next_id: AtomicU64::new(1),
-            stop: AtomicBool::new(false),
-        });
-        // Built first: if the thread cannot start, dropping it destroys the context.
+  """    // `submit` is the ctor export. The waiter of its reply is registered before
+    // the dispatch thread starts, so the dispatch thread cannot see the reply first.
+    fn start(
+        req_bytes: &[u8],
+        timeout: Duration,
+        submit: unsafe extern "C" fn(*const u8, usize, *mut *mut c_void, *mut u64) -> c_int,
+    ) -> Result<(Self, u64, flume::Receiver<FFIResult>), String> {
+        let mut ptr: *mut c_void = std::ptr::null_mut();
+        let mut req_id: u64 = 0;
+        let ret = unsafe { submit(req_bytes.as_ptr(), req_bytes.len(), &mut ptr, &mut req_id) };
+        if ret != NIMFFI_RET_OK || ptr.is_null() {
+            // Nothing was claimed, so there is nothing to destroy.
+            return Err(last_error(ret));
+        }
+        let inner = Arc::new(Inner::new(ptr));
+        let (tx, rx) = flume::bounded::<FFIResult>(1);
+        lock(&inner.waiters).insert(req_id, tx);
+        // Built before the thread: from here on, an early return drops it, which destroys the context.
         let mut ctx = Self { ptr, timeout, inner: inner.clone(), dispatcher: None };
-        let dispatcher = std::thread::Builder::new()
-            .name("$1-dispatch".into())
-            .spawn(move || dispatch_loop(inner))
-            .map_err(|e| e.to_string())?;
-        ctx.dispatcher = Some(dispatcher);
-        Ok(ctx)
+        ctx.dispatcher = Some(spawn_dispatcher("$1-dispatch", inner)?);
+        Ok((ctx, req_id, rx))
     }
 """
 
 # $1 message enum.
 const ListenersTemplate =
-  """    /// Register a listener for `NotResponding`; it receives the reason.
+  """    /// Register a listener for `StaleWarn`; it receives the request id and the
+    /// milliseconds the request has been running.
+    pub fn add_stale_warn_listener<F>(&self, handler: F) -> ListenerHandle
+    where F: Fn(u64, u64) + Send + Sync + 'static,
+    {
+        self.inner.add(Arc::new(move |m: &$1| {
+            if let $1::StaleWarn { req_id, elapsed_ms } = m { handler(*req_id, *elapsed_ms) }
+        }))
+    }
+
+    /// Register a listener for `NotResponding`; it receives the reason.
     pub fn add_not_responding_listener<F>(&self, handler: F) -> ListenerHandle
     where F: Fn(u64) + Send + Sync + 'static,
     {
@@ -622,15 +859,22 @@ proc generateApiRs*(
 
   let ctxTypeName = libTypeName & "Ctx"
   let msgTypeName = libTypeName & "Message"
-  # Only a context made by a ctor has messages to take out; the static one emits none.
-  let hasDispatcher = ctors.len > 0
+  # Only a context made by a ctor has listeners; the static one just delivers replies.
+  let hasCtor = ctors.len > 0
+  let hasStatics = classified.statics.len > 0
 
-  lines.add("use std::os::raw::{c_char, c_int, c_void};")
+  if not hasCtor:
+    # No context to hang the listeners on, so that half of the dispatch loop goes unused.
+    lines.add("#![allow(dead_code)]")
+    lines.add("")
+  lines.add("use std::collections::HashMap;")
+  lines.add("use std::ffi::CStr;")
+  lines.add("use std::os::raw::{c_int, c_void};")
   lines.add("use std::slice;")
-  if hasDispatcher:
-    lines.add("use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};")
-    lines.add("use std::sync::{Arc, Mutex, MutexGuard};")
-  lines.add("use std::time::Duration;")
+  lines.add("use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};")
+  lines.add("use std::sync::{Arc, Mutex, MutexGuard, OnceLock};")
+  lines.add("use std::thread::{JoinHandle, ThreadId};")
+  lines.add("use std::time::{Duration, Instant};")
   lines.add("use serde::de::DeserializeOwned;")
   lines.add("use serde::Serialize;")
   lines.add("use super::ffi;")
@@ -649,172 +893,74 @@ proc generateApiRs*(
   lines.add("    ciborium::de::from_reader(bytes).map_err(|e| e.to_string())")
   lines.add("}")
   lines.add("")
-
-  # FFI trampoline: user_data owns a Box<flume::Sender>; a late callback sends into a closed receiver, which is harmless.
-  lines.add("type FFIResult = Result<Vec<u8>, String>;")
-  lines.add("type FFISender = flume::Sender<FFIResult>;")
-  lines.add("")
-  lines.add("// Reconstruct the (ret, msg, len) tuple delivered by the C callback")
-  lines.add(
-    "// into a Result<Vec<u8>, String>: payload on success, UTF-8 message on error."
-  )
-  lines.add(
-    "// `from_utf8_lossy` accepts non-UTF-8 error bytes by inserting U+FFFD; the"
-  )
-  lines.add(
-    "// alternative would be to dispatch a separate Err for invalid UTF-8, but the"
-  )
-  lines.add("// codegen contract is that Nim handlers emit `string` error payloads, so")
-  lines.add("// invalid UTF-8 here would be a Nim-side bug.")
-  lines.add(
-    "unsafe fn ffi_payload(ret: c_int, msg: *const c_char, len: usize) -> FFIResult {"
-  )
-  lines.add("    let bytes = if msg.is_null() || len == 0 {")
-  lines.add("        Vec::new()")
-  lines.add("    } else {")
-  lines.add("        slice::from_raw_parts(msg as *const u8, len).to_vec()")
-  lines.add("    };")
-  lines.add("    if ret == NIMFFI_RET_OK { Ok(bytes) }")
-  lines.add("    else        { Err(String::from_utf8_lossy(&bytes).into_owned()) }")
-  lines.add("}")
-  lines.add("")
-  lines.add("// nim-ffi result-callback status codes, emitted from ffi/ret_codes.nim.")
+  lines.add("// nim-ffi status codes, emitted from ffi/ret_codes.nim.")
   lines.add(rustRetCodeConsts())
   lines.add("")
-  lines.add("unsafe extern \"C\" fn on_result(")
-  lines.add("    ret: c_int,")
-  lines.add("    msg: *const c_char,")
-  lines.add("    len: usize,")
-  lines.add("    user_data: *mut c_void,")
-  lines.add(") {")
-  lines.add(
-    "    // NIMFFI_RET_STALE_WARN (3) is a non-terminal progress ping: the request"
-  )
-  lines.add(
-    "    // is still running. This wrapper only delivers the final result, so ignore"
-  )
-  lines.add(
-    "    // it WITHOUT reclaiming the box — a terminal callback still owns the Sender."
-  )
-  lines.add("    if ret == NIMFFI_RET_STALE_WARN { return; }")
-  lines.add("")
-  lines.add("    // Take ownership of the boxed Sender — dropping it at end of scope")
-  lines.add("    // releases the only outstanding handle.")
-  lines.add("    let tx = Box::from_raw(user_data as *mut FFISender);")
-  lines.add("")
-  lines.add(
-    "    // `tx.send` returns Err only if the awaiting future was dropped (and with it"
-  )
-  lines.add(
-    "    // the Receiver): e.g. tokio::time::timeout elapsed, a tokio::select! branch"
-  )
-  lines.add(
-    "    // lost the race, or the future was dropped before being awaited. This cannot"
-  )
-  lines.add("    // happen with the crate's own examples but may occur in arbitrary")
-  lines.add("    // downstream consumers, so we discard the Err safely.")
-  lines.add(
-    "    // Given that this is invoked from a Nim thread, we can't propagate the error by panicking or"
-  )
-  lines.add(
-    "    // returning a Result. Furthermore, an API dev may intentionally set a timeout in the await,"
-  )
-  lines.add(
-    "    // in which case is also fine to discard the send error in this case because the API user will"
-  )
-  lines.add("    // handle the timeout expiry in their own code.")
-  lines.add(
-    "    // The important part is to ensure that the callback doesn't panic or block indefinitely if the"
-  )
-  lines.add("    // receiver is gone.")
-  lines.add("    let _ = tx.send(ffi_payload(ret, msg, len));")
-  lines.add("}")
-  lines.add("")
-  lines.add("fn ffi_call_sync<F>(timeout: Duration, f: F) -> FFIResult")
-  lines.add("where")
-  lines.add("    F: FnOnce(ffi::FFICallback, *mut c_void) -> c_int,")
-  lines.add("{")
-  lines.add("    let (tx, rx) = flume::bounded::<FFIResult>(1);")
-  lines.add("    let raw = Box::into_raw(Box::new(tx)) as *mut c_void;")
-  lines.add("    let ret = f(on_result, raw);")
-  lines.add("    if ret == NIMFFI_RET_MISSING_CALLBACK {")
-  lines.add("        // Callback will never fire; reclaim the box to avoid a leak.")
-  lines.add("        drop(unsafe { Box::from_raw(raw as *mut FFISender) });")
-  lines.add("        return Err(\"RET_MISSING_CALLBACK (internal error)\".into());")
-  lines.add("    }")
-  lines.add("    match rx.recv_timeout(timeout) {")
-  lines.add("        Ok(payload) => payload,")
-  lines.add("        Err(flume::RecvTimeoutError::Timeout) =>")
-  lines.add("            Err(format!(\"timed out after {:?}\", timeout)),")
-  lines.add("        Err(flume::RecvTimeoutError::Disconnected) =>")
-  lines.add(
-    "            Err(\"callback channel disconnected before delivery\".into()),"
-  )
-  lines.add("    }")
-  lines.add("}")
-  lines.add("")
-  lines.add("async fn ffi_call_async<F>(timeout: Duration, f: F) -> FFIResult")
-  lines.add("where")
-  lines.add("    F: FnOnce(ffi::FFICallback, *mut c_void) -> c_int,")
-  lines.add("{")
-  lines.add("    let (tx, rx) = flume::bounded::<FFIResult>(1);")
-  lines.add("    let raw = Box::into_raw(Box::new(tx)) as *mut c_void;")
-  lines.add("    let ret = f(on_result, raw);")
-  lines.add("    if ret == NIMFFI_RET_MISSING_CALLBACK {")
-  lines.add("        drop(unsafe { Box::from_raw(raw as *mut FFISender) });")
-  lines.add("        return Err(\"RET_MISSING_CALLBACK (internal error)\".into());")
-  lines.add("    }")
-  lines.add("    match tokio::time::timeout(timeout, rx.recv_async()).await {")
-  lines.add("        Ok(Ok(payload)) => payload,")
-  lines.add(
-    "        Ok(Err(_)) => Err(\"callback channel disconnected before delivery\".into()),"
-  )
-  lines.add("        Err(_) => Err(format!(\"timed out after {:?}\", timeout)),")
-  lines.add("    }")
-  lines.add("}")
-  lines.add("")
 
-  if hasDispatcher:
-    lines.add(generateMessages(events, libName, msgTypeName))
-    lines.add(DispatcherTemplate % [libName, msgTypeName, $DispatchSliceMs])
+  lines.add(generateMessages(events, libName, msgTypeName))
+  lines.add(DispatcherTemplate % [libName, msgTypeName, $DispatchSliceMs])
+  if hasStatics:
+    lines.add(StaticDispatcherTemplate % [libName])
 
   lines.add("/// High-level context for `$1`." % [libTypeName])
+  lines.add("///")
+  lines.add(
+    "/// Every request has a blocking method and an `_async` one. Both send the request,"
+  )
+  lines.add(
+    "/// then wait for its reply, which the context's dispatch thread takes out of"
+  )
+  lines.add(
+    "/// `$1_poll`; `Err` carries the library's error text, the reason a request was" %
+      [libName]
+  )
+  lines.add("/// refused, a timeout, or the end of the context.")
+  lines.add("///")
+  lines.add(
+    "/// Listeners run on the dispatch thread. One may make a blocking call on its own"
+  )
+  lines.add(
+    "/// context: the call runs the dispatch loop itself until its reply arrives, so other"
+  )
+  lines.add(
+    "/// listeners can run meanwhile. It must not block on an `_async` call: nothing"
+  )
+  lines.add(
+    "/// dispatches the reply while the dispatch thread is parked, so the call times out."
+  )
   lines.add("pub struct $1 {" % [ctxTypeName])
   lines.add("    ptr: *mut c_void,")
   lines.add("    timeout: Duration,")
-  if hasDispatcher:
+  if hasCtor:
     lines.add("    inner: Arc<Inner>,")
-    lines.add("    dispatcher: Option<std::thread::JoinHandle<()>>,")
+    lines.add("    dispatcher: Option<JoinHandle<()>>,")
   lines.add("}")
   lines.add("")
   # SAFETY block applies to both impls below.
   lines.add(
-    "// SAFETY: The `ptr` field points to an FFIContext owned by the Nim runtime."
+    "// SAFETY: `ptr` is a token the library validates on every call; it is never"
   )
-  lines.add("// Every call through the generated FFI proc goes through")
+  lines.add("// dereferenced here. A request export only checks the token and puts the")
   lines.add(
-    "// `sendRequestToFFIThread` on the Nim side, which only enqueues the request"
-  )
-  lines.add("// onto a mutex-guarded MPSC queue (sound from any number of threads) and")
-  lines.add(
-    "// wakes the single FFI thread that dispatches every handler. The context is"
+    "// request on a lock-guarded queue, which is sound from any number of threads;"
   )
   lines.add(
-    "// thus never mutated non-atomically from the caller's thread. The Nim-side"
+    "// the library's single FFI thread runs every handler. Replies and events come"
   )
-  lines.add("// reentrancy guard (`onFFIThread` threadvar) prevents handlers from")
-  lines.add("// re-entering the dispatcher. These invariants make it sound to mark the")
-  lines.add("// wrapper as Send + Sync.")
+  lines.add(
+    "// back through the dispatch thread alone, and the waiter table and the listeners"
+  )
+  lines.add("// it shares with the callers are behind mutexes.")
   lines.add("unsafe impl Send for $1 {}" % [ctxTypeName])
   lines.add("unsafe impl Sync for $1 {}" % [ctxTypeName])
   lines.add("")
 
   # Drop tears down the Nim runtime when the ctx goes out of scope; without it, forgetting the ctx leaks the entire runtime (FFI thread, watchdog, chronos).
-  if dtorProcName.len > 0 or hasDispatcher:
+  if dtorProcName.len > 0 or hasCtor:
     lines.add("impl Drop for $1 {" % [ctxTypeName])
     lines.add("    fn drop(&mut self) {")
     if dtorProcName.len > 0:
-      if hasDispatcher:
+      if hasCtor:
         lines.add(
           "        // Before the dispatch loop stops: the teardown may still send events, and it wakes a blocked poll."
         )
@@ -822,7 +968,7 @@ proc generateApiRs*(
       lines.add("            unsafe { ffi::$1(self.ptr); }" % [dtorProcName])
       lines.add("            self.ptr = std::ptr::null_mut();")
       lines.add("        }")
-    if hasDispatcher:
+    if hasCtor:
       lines.add("        self.inner.stop.store(true, Ordering::Release);")
       lines.add("        if let Some(dispatcher) = self.dispatcher.take() {")
       lines.add(
@@ -866,24 +1012,20 @@ proc generateApiRs*(
       else:
         reqName & " {}"
 
+    # The ctor's reply only says whether construction worked.
     lines.add(renderMemberDocComment(ctor.doc))
     lines.add("    pub fn create($1) -> Result<Self, String> {" % [ctorParamsStr])
     lines.add("        let req = $1;" % [reqLit])
     lines.add("        let req_bytes = encode_cbor(&req)?;")
-    # Ctor also fires the callback carrying the payload, so discard the synchronous *mut c_void and yield RET_OK to wait on the callback.
-    lines.add("        let raw_bytes = ffi_call_sync(timeout, |cb, ud| unsafe {")
     lines.add(
-      "            let _ = ffi::$1(req_bytes.as_ptr(), req_bytes.len(), cb, ud);" %
+      "        let (ctx, req_id, rx) = Self::start(&req_bytes, timeout, ffi::$1)?;" %
         [ctor.procName]
     )
-    lines.add("            0")
-    lines.add("        })?;")
-    # Ctor success payload is a CBOR text string holding the ctx address.
-    lines.add("        let addr_str: String = decode_cbor(&raw_bytes)?;")
     lines.add(
-      "        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;"
+      "        // An error reply or a timeout drops `ctx`, which destroys the context."
     )
-    lines.add("        Self::start(addr as *mut c_void, timeout)")
+    lines.add("        ctx.inner.wait(req_id, &rx, timeout)?;")
+    lines.add("        Ok(ctx)")
     lines.add("    }")
     lines.add("")
 
@@ -893,23 +1035,19 @@ proc generateApiRs*(
     )
     lines.add("        let req = $1;" % [reqLit])
     lines.add("        let req_bytes = encode_cbor(&req)?;")
-    # See `create`: discard the ctor's synchronous return; the callback delivers the ctx address.
-    lines.add("        let raw_bytes = ffi_call_async(timeout, move |cb, ud| unsafe {")
     lines.add(
-      "            let _ = ffi::$1(req_bytes.as_ptr(), req_bytes.len(), cb, ud);" %
+      "        let (ctx, req_id, rx) = Self::start(&req_bytes, timeout, ffi::$1)?;" %
         [ctor.procName]
     )
-    lines.add("            0")
-    lines.add("        }).await?;")
-    lines.add("        let addr_str: String = decode_cbor(&raw_bytes)?;")
     lines.add(
-      "        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;"
+      "        // An error reply or a timeout drops `ctx`, which destroys the context."
     )
-    lines.add("        Self::start(addr as *mut c_void, timeout)")
+    lines.add("        ctx.inner.wait_async(req_id, rx, timeout).await?;")
+    lines.add("        Ok(ctx)")
     lines.add("    }")
     lines.add("")
 
-  if hasDispatcher:
+  if hasCtor:
     lines.add(StartTemplate % [libName])
     for ev in events:
       let methodName = "add_" & camelToSnakeCase(ev.nimProcName) & "_listener"
@@ -967,56 +1105,63 @@ proc generateApiRs*(
         reqName & " {}"
 
     let retTypeForApi = if m.returnRidesAsPtr(): RustPtrType else: retRustType
-    let timeoutExpr = if isStatic: "timeout" else: "self.timeout"
-    let ctxArg = if isStatic: "" else: "self.ptr, "
+    var timeoutExpr = "self.timeout"
+    var innerExpr = "self.inner"
+    # The static export takes no ctx: its replies arrive on the static context.
+    var submitCall =
+      "|ctx, req_id| unsafe { ffi::$1(ctx, req_bytes.as_ptr(), req_bytes.len(), req_id) }" %
+      [m.procName]
+    if isStatic:
+      timeoutExpr = "timeout"
+      innerExpr = "inner"
+      submitCall =
+        "|_, req_id| unsafe { ffi::$1(req_bytes.as_ptr(), req_bytes.len(), req_id) }" %
+        [m.procName]
 
-    lines.add(renderMemberDocComment(m.doc))
-    lines.add(
-      "    pub fn $1($2) -> Result<$3, String> {" %
-        [methodName, paramsStr, retTypeForApi]
-    )
-    lines.add("        let req = $1;" % [reqLit])
-    lines.add("        let req_bytes = encode_cbor(&req)?;")
-    lines.add(
-      "        let raw_bytes = ffi_call_sync($1, |cb, ud| unsafe {" % [timeoutExpr]
-    )
-    lines.add(
-      "            ffi::$1($2cb, ud, req_bytes.as_ptr(), req_bytes.len())" %
-        [m.procName, ctxArg]
-    )
-    lines.add("        })?;")
-    lines.add("        decode_cbor::<$1>(&raw_bytes)" % [retTypeForApi])
-    lines.add("    }")
-    lines.add("")
-
-    # async method: ptr cast to usize (Copy + Send) keeps the move closure and returned future Send for multi-threaded tokio runtimes.
-    lines.add(renderMemberDocComment(m.doc))
-    lines.add(
-      "    pub async fn $1_async($2) -> Result<$3, String> {" %
-        [methodName, paramsStr, retTypeForApi]
-    )
-    lines.add("        let req = $1;" % [reqLit])
-    lines.add("        let req_bytes = encode_cbor(&req)?;")
-    if not isStatic:
-      lines.add("        let ptr = self.ptr as usize;")
-    lines.add(
-      "        let raw_bytes = ffi_call_async($1, move |cb, ud| unsafe {" % [
-        timeoutExpr
-      ]
-    )
-    lines.add(
-      "            ffi::$1($2cb, ud, req_bytes.as_ptr(), req_bytes.len())" %
-        [m.procName, if isStatic: "" else: "ptr as *mut c_void, "]
-    )
-    lines.add("        }).await?;")
-    lines.add("        decode_cbor::<$1>(&raw_bytes)" % [retTypeForApi])
-    lines.add("    }")
-    lines.add("")
+    for isAsync in [false, true]:
+      lines.add(renderMemberDocComment(m.doc))
+      if isAsync:
+        lines.add(
+          "    pub async fn $1_async($2) -> Result<$3, String> {" %
+            [methodName, paramsStr, retTypeForApi]
+        )
+      else:
+        lines.add(
+          "    pub fn $1($2) -> Result<$3, String> {" %
+            [methodName, paramsStr, retTypeForApi]
+        )
+      lines.add("        let req = $1;" % [reqLit])
+      lines.add("        let req_bytes = encode_cbor(&req)?;")
+      if isStatic:
+        lines.add("        let inner = static_inner()?;")
+      lines.add("        let (req_id, rx) = $1.submit(" % [innerExpr])
+      lines.add("            $1," % [submitCall])
+      lines.add("        )?;")
+      if isAsync:
+        lines.add(
+          "        let raw_bytes = $1.wait_async(req_id, rx, $2).await?;" %
+            [innerExpr, timeoutExpr]
+        )
+      else:
+        lines.add(
+          "        let raw_bytes = $1.wait(req_id, &rx, $2)?;" % [
+            innerExpr, timeoutExpr
+          ]
+        )
+      lines.add("        decode_cbor::<$1>(&raw_bytes)" % [retTypeForApi])
+      lines.add("    }")
+      lines.add("")
 
   # An associated fn, not a method: a host calls it with no context left to call it on.
   lines.add(renderMemberDocComment(ShutdownDoc))
   lines.add("    /// This wrapper reports that as true.")
   lines.add("    pub fn shutdown() -> bool {")
+  if hasStatics:
+    lines.add(
+      "        // Held across the shutdown, so no static call starts a dispatch thread on a context about to go."
+    )
+    lines.add("        let mut static_dispatcher = lock(&STATIC_DISPATCHER);")
+    lines.add("        stop_static_dispatcher(&mut static_dispatcher);")
   lines.add("        unsafe { ffi::$1_shutdown() == 0 }" % [libName])
   lines.add("    }")
   lines.add("")

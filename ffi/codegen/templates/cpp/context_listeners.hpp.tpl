@@ -1,3 +1,8 @@
+    /// Request `reqId` is still running after `elapsedMs`; its reply still comes.
+    ListenerHandle addStaleWarnListener(std::function<void(std::uint64_t reqId, std::uint64_t elapsedMs)> handler) {
+        return ListenerHandle{dispatcher_->add(NIMFFI_MSG_STALE_WARN, 0, std::move(handler))};
+    }
+
     /// The context stopped answering. `reason` is NIMFFI_NOT_RESPONDING_HEARTBEAT
     /// (the FFI thread's heartbeat stalled) or NIMFFI_NOT_RESPONDING_EVENT_QUEUE_FULL
     /// (the event queue overflowed; requests are refused until the context is recycled).
@@ -11,9 +16,9 @@
     }
 
     /// The context is gone: the last call any listener of this context receives,
-    /// exactly once. `ok` is false when the library gave the context up, and
-    /// `reason` then says why. Not called when a listener destroys the context
-    /// from the dispatch thread.
+    /// exactly once. Every call still waiting for its reply has failed by then.
+    /// `ok` is false when the library gave the context up, and `reason` then says
+    /// why. Not called when a listener destroys the context from the dispatch thread.
     ListenerHandle addClosedListener(std::function<void(bool ok, const std::string& reason)> handler) {
         return ListenerHandle{dispatcher_->add(NIMFFI_MSG_CLOSED, 0, std::move(handler))};
     }

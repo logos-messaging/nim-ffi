@@ -1,8 +1,11 @@
-use std::os::raw::{c_char, c_int, c_void};
+use std::collections::HashMap;
+use std::ffi::CStr;
+use std::os::raw::{c_int, c_void};
 use std::slice;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::thread::{JoinHandle, ThreadId};
+use std::time::{Duration, Instant};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use super::ffi;
@@ -18,34 +21,11 @@ fn decode_cbor<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
     ciborium::de::from_reader(bytes).map_err(|e| e.to_string())
 }
 
-type FFIResult = Result<Vec<u8>, String>;
-type FFISender = flume::Sender<FFIResult>;
-
-// Reconstruct the (ret, msg, len) tuple delivered by the C callback
-// into a Result<Vec<u8>, String>: payload on success, UTF-8 message on error.
-// `from_utf8_lossy` accepts non-UTF-8 error bytes by inserting U+FFFD; the
-// alternative would be to dispatch a separate Err for invalid UTF-8, but the
-// codegen contract is that Nim handlers emit `string` error payloads, so
-// invalid UTF-8 here would be a Nim-side bug.
-unsafe fn ffi_payload(ret: c_int, msg: *const c_char, len: usize) -> FFIResult {
-    let bytes = if msg.is_null() || len == 0 {
-        Vec::new()
-    } else {
-        slice::from_raw_parts(msg as *const u8, len).to_vec()
-    };
-    if ret == NIMFFI_RET_OK { Ok(bytes) }
-    else        { Err(String::from_utf8_lossy(&bytes).into_owned()) }
-}
-
-// nim-ffi result-callback status codes, emitted from ffi/ret_codes.nim.
+// nim-ffi status codes, emitted from ffi/ret_codes.nim.
 #[allow(dead_code)]
 const NIMFFI_RET_OK: c_int = 0;
 #[allow(dead_code)]
 const NIMFFI_RET_ERR: c_int = 1;
-#[allow(dead_code)]
-const NIMFFI_RET_MISSING_CALLBACK: c_int = 2;
-#[allow(dead_code)]
-const NIMFFI_RET_STALE_WARN: c_int = 3;
 #[allow(dead_code)]
 const NIMFFI_RET_TIMEOUT: c_int = 4;
 #[allow(dead_code)]
@@ -54,83 +34,21 @@ const NIMFFI_RET_CLOSED: c_int = 5;
 const NIMFFI_RET_INVALID_CTX: c_int = 6;
 #[allow(dead_code)]
 const NIMFFI_RET_BUSY: c_int = 7;
-
-unsafe extern "C" fn on_result(
-    ret: c_int,
-    msg: *const c_char,
-    len: usize,
-    user_data: *mut c_void,
-) {
-    // NIMFFI_RET_STALE_WARN (3) is a non-terminal progress ping: the request
-    // is still running. This wrapper only delivers the final result, so ignore
-    // it WITHOUT reclaiming the box — a terminal callback still owns the Sender.
-    if ret == NIMFFI_RET_STALE_WARN { return; }
-
-    // Take ownership of the boxed Sender — dropping it at end of scope
-    // releases the only outstanding handle.
-    let tx = Box::from_raw(user_data as *mut FFISender);
-
-    // `tx.send` returns Err only if the awaiting future was dropped (and with it
-    // the Receiver): e.g. tokio::time::timeout elapsed, a tokio::select! branch
-    // lost the race, or the future was dropped before being awaited. This cannot
-    // happen with the crate's own examples but may occur in arbitrary
-    // downstream consumers, so we discard the Err safely.
-    // Given that this is invoked from a Nim thread, we can't propagate the error by panicking or
-    // returning a Result. Furthermore, an API dev may intentionally set a timeout in the await,
-    // in which case is also fine to discard the send error in this case because the API user will
-    // handle the timeout expiry in their own code.
-    // The important part is to ensure that the callback doesn't panic or block indefinitely if the
-    // receiver is gone.
-    let _ = tx.send(ffi_payload(ret, msg, len));
-}
-
-fn ffi_call_sync<F>(timeout: Duration, f: F) -> FFIResult
-where
-    F: FnOnce(ffi::FFICallback, *mut c_void) -> c_int,
-{
-    let (tx, rx) = flume::bounded::<FFIResult>(1);
-    let raw = Box::into_raw(Box::new(tx)) as *mut c_void;
-    let ret = f(on_result, raw);
-    if ret == NIMFFI_RET_MISSING_CALLBACK {
-        // Callback will never fire; reclaim the box to avoid a leak.
-        drop(unsafe { Box::from_raw(raw as *mut FFISender) });
-        return Err("RET_MISSING_CALLBACK (internal error)".into());
-    }
-    match rx.recv_timeout(timeout) {
-        Ok(payload) => payload,
-        Err(flume::RecvTimeoutError::Timeout) =>
-            Err(format!("timed out after {:?}", timeout)),
-        Err(flume::RecvTimeoutError::Disconnected) =>
-            Err("callback channel disconnected before delivery".into()),
-    }
-}
-
-async fn ffi_call_async<F>(timeout: Duration, f: F) -> FFIResult
-where
-    F: FnOnce(ffi::FFICallback, *mut c_void) -> c_int,
-{
-    let (tx, rx) = flume::bounded::<FFIResult>(1);
-    let raw = Box::into_raw(Box::new(tx)) as *mut c_void;
-    let ret = f(on_result, raw);
-    if ret == NIMFFI_RET_MISSING_CALLBACK {
-        drop(unsafe { Box::from_raw(raw as *mut FFISender) });
-        return Err("RET_MISSING_CALLBACK (internal error)".into());
-    }
-    match tokio::time::timeout(timeout, rx.recv_async()).await {
-        Ok(Ok(payload)) => payload,
-        Ok(Err(_)) => Err("callback channel disconnected before delivery".into()),
-        Err(_) => Err(format!("timed out after {:?}", timeout)),
-    }
-}
+#[allow(dead_code)]
+const NIMFFI_RET_QUEUE_FULL: c_int = 8;
+#[allow(dead_code)]
+const NIMFFI_RET_TOO_LARGE: c_int = 9;
 
 // `NimFfiMsg.name_id` of each event: FNV-1a 64 of its wire name.
 pub const MY_TIMER_EVT_ON_ECHO_FIRED: u64 = 0xcdfdf536356b2a2b; // "on_echo_fired"
 pub const MY_TIMER_EVT_ON_JOB_SCHEDULED: u64 = 0xd6ac432a40b9a85c; // "on_job_scheduled"
 pub use super::ffi::{NIMFFI_NOT_RESPONDING_EVENT_QUEUE_FULL, NIMFFI_NOT_RESPONDING_HEARTBEAT};
 
-/// Everything `my_timer` sends to the host: its events, the liveness reports
-/// and the end of the context. The dispatch thread of a context decodes each
-/// message into one of these before a listener runs.
+/// Everything `my_timer` sends to the host besides replies: its events, the
+/// progress and liveness reports and the end of the context. The dispatch thread
+/// of a context decodes each message into one of these before a listener runs.
+/// A reply is not listed: it goes to the call that waits for it, which decodes
+/// it into that call's return type.
 #[derive(Debug, Clone)]
 pub enum MyTimerMessage {
     /// Fired by `myTimerEcho` once the reply is ready.
@@ -138,6 +56,9 @@ pub enum MyTimerMessage {
     /// Fired by `myTimerSchedule`. Its two params ride the wire as a synthesised
     /// `OnJobScheduledPayload` envelope, so the foreign side decodes one typed value.
     OnJobScheduled(OnJobScheduledPayload),
+    /// Request `req_id` has been running for `elapsed_ms`. Not a reply: the
+    /// request still runs and its call still returns.
+    StaleWarn { req_id: u64, elapsed_ms: u64 },
     /// The library stopped making progress. `reason` is a `NIMFFI_NOT_RESPONDING_*`:
     /// the FFI thread stalled, or the event queue overflowed and requests are
     /// refused from now on.
@@ -145,25 +66,34 @@ pub enum MyTimerMessage {
     /// The FFI thread's heartbeat resumed.
     Responding,
     /// The context is gone; always the last message. `ok` is false when the
-    /// library could not recycle the context, and `reason` then says why.
+    /// library could not recycle the context, and `reason` then says why. Every
+    /// call still waiting for its reply has failed by the time a listener sees it.
     Closed { ok: bool, reason: String },
     /// Not sent by the library: a message this binding could not decode, such
     /// as an event of a newer library.
     Undecodable { kind: u32, name_id: u64, error: String },
 }
 
-unsafe fn decode_message(msg: &ffi::NimFfiMsg) -> MyTimerMessage {
-    let bytes: &[u8] = if msg.payload.is_null() || msg.len == 0 {
+unsafe fn payload_bytes(msg: &ffi::NimFfiMsg) -> &[u8] {
+    if msg.payload.is_null() || msg.len == 0 {
         &[]
     } else {
         slice::from_raw_parts(msg.payload, msg.len)
-    };
+    }
+}
+
+unsafe fn decode_message(msg: &ffi::NimFfiMsg) -> MyTimerMessage {
+    let bytes = payload_bytes(msg);
     let decoded = match msg.kind {
         ffi::NIMFFI_MSG_EVENT => match msg.name_id {
             MY_TIMER_EVT_ON_ECHO_FIRED => decode_cbor(bytes).map(MyTimerMessage::OnEchoFired),
             MY_TIMER_EVT_ON_JOB_SCHEDULED => decode_cbor(bytes).map(MyTimerMessage::OnJobScheduled),
             _ => Err("unknown event".to_string()),
         },
+        ffi::NIMFFI_MSG_STALE_WARN => Ok(MyTimerMessage::StaleWarn {
+            req_id: msg.id,
+            elapsed_ms: msg.aux,
+        }),
         ffi::NIMFFI_MSG_NOT_RESPONDING => Ok(MyTimerMessage::NotResponding { reason: msg.aux }),
         ffi::NIMFFI_MSG_RESPONDING => Ok(MyTimerMessage::Responding),
         ffi::NIMFFI_MSG_CLOSED => Ok(MyTimerMessage::Closed {
@@ -179,7 +109,11 @@ unsafe fn decode_message(msg: &ffi::NimFfiMsg) -> MyTimerMessage {
     })
 }
 
+// A reply: the CBOR of the return value, or the library's error text.
+type FFIResult = Result<Vec<u8>, String>;
 type Handler = Arc<dyn Fn(&MyTimerMessage) + Send + Sync>;
+
+const CONTEXT_CLOSED: &str = "context closed before the reply arrived";
 
 /// Returned by every `add_*_listener`; pass it to `remove_event_listener`.
 #[derive(Debug, Clone, Copy)]
@@ -189,30 +123,61 @@ pub struct ListenerHandle { pub id: u64 }
 struct Inner {
     ptr: *mut c_void,
     listeners: Mutex<Vec<(u64, Handler)>>,
+    // The calls that wait for a reply, by request id.
+    waiters: Mutex<HashMap<u64, flume::Sender<FFIResult>>>,
     next_id: AtomicU64,
     stop: AtomicBool,
+    // Written under the `waiters` lock: no reply can be delivered any more.
+    ended: AtomicBool,
+    dispatch_thread: OnceLock<ThreadId>,
 }
 
 // SAFETY: `ptr` is a token the library validates on every call, never
-// dereferenced here. `my_timer_poll` admits one consumer per context and the dispatch thread
-// thread is the only poller; everything else in `Inner` is already Sync.
+// dereferenced here. `my_timer_poll` admits one consumer per context and only the
+// dispatch thread polls; everything else in `Inner` is already Sync.
 unsafe impl Send for Inner {}
 unsafe impl Sync for Inner {}
 
+// No lock here is held while foreign code of the host runs, so a panic cannot poison one; recover anyway.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+// Why the library refused a request. `my_timer_last_error` is per thread: call this
+// on the refused thread, before its next request.
+fn last_error(ret: c_int) -> String {
+    let text = unsafe { CStr::from_ptr(ffi::my_timer_last_error()) }.to_string_lossy().into_owned();
+    if text.is_empty() { format!("request refused (NIMFFI_RET {ret})") } else { text }
+}
+
+fn spawn_dispatcher(name: &str, inner: Arc<Inner>) -> Result<JoinHandle<()>, String> {
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || dispatch_loop(inner))
+        .map_err(|e| e.to_string())
+}
+
 impl Inner {
-    // Handlers run with the lock released, so a panic cannot poison it; recover anyway.
-    fn lock(&self) -> MutexGuard<'_, Vec<(u64, Handler)>> {
-        self.listeners.lock().unwrap_or_else(|e| e.into_inner())
+    fn new(ptr: *mut c_void) -> Self {
+        Inner {
+            ptr,
+            listeners: Mutex::new(Vec::new()),
+            waiters: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+            stop: AtomicBool::new(false),
+            ended: AtomicBool::new(false),
+            dispatch_thread: OnceLock::new(),
+        }
     }
 
     fn add(&self, handler: Handler) -> ListenerHandle {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.lock().push((id, handler));
+        lock(&self.listeners).push((id, handler));
         ListenerHandle { id }
     }
 
     fn remove(&self, id: u64) -> bool {
-        let mut listeners = self.lock();
+        let mut listeners = lock(&self.listeners);
         let before = listeners.len();
         listeners.retain(|(lid, _)| *lid != id);
         listeners.len() != before
@@ -220,64 +185,226 @@ impl Inner {
 
     fn dispatch(&self, message: &MyTimerMessage) {
         // Cloned out so a handler may add or remove listeners.
-        let handlers: Vec<Handler> = self.lock().iter().map(|(_, h)| h.clone()).collect();
+        let handlers: Vec<Handler> = lock(&self.listeners).iter().map(|(_, h)| h.clone()).collect();
         for handler in handlers {
             // A panicking handler must not end the dispatch thread; the panic hook already reported it.
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(message)));
         }
     }
+
+    // Sends a request with `send(ctx, req_id_out)` and registers the waiter of its reply.
+    fn submit<F>(&self, send: F) -> Result<(u64, flume::Receiver<FFIResult>), String>
+    where
+        F: FnOnce(*mut c_void, *mut u64) -> c_int,
+    {
+        let (tx, rx) = flume::bounded::<FFIResult>(1);
+        let mut req_id: u64 = 0;
+        // Held across the call: the dispatch thread can poll the reply before the call
+        // returns, and takes this lock before it looks the waiter up.
+        let mut waiters = lock(&self.waiters);
+        let ret = send(self.ptr, &mut req_id);
+        if ret != NIMFFI_RET_OK {
+            // Refused: no reply will come, so nothing is registered.
+            return Err(last_error(ret));
+        }
+        if self.ended.load(Ordering::Acquire) {
+            return Err(CONTEXT_CLOSED.into());
+        }
+        waiters.insert(req_id, tx);
+        Ok((req_id, rx))
+    }
+
+    // Hands a reply to its waiter. One without a waiter is dropped: its call timed out.
+    unsafe fn complete(&self, msg: &ffi::NimFfiMsg) {
+        let waiter = lock(&self.waiters).remove(&msg.id);
+        if let Some(tx) = waiter {
+            let bytes = payload_bytes(msg);
+            let reply = if msg.ret_code == NIMFFI_RET_OK {
+                Ok(bytes.to_vec())
+            } else {
+                // Lossy: the text comes from a Nim `string`, so invalid UTF-8 is a library bug.
+                Err(String::from_utf8_lossy(bytes).into_owned())
+            };
+            // The call may have gone away meanwhile (a dropped future).
+            let _ = tx.send(reply);
+        }
+    }
+
+    // No reply can arrive any more: dropping a sender fails its call with CONTEXT_CLOSED.
+    fn fail_waiters(&self) {
+        let mut waiters = lock(&self.waiters);
+        self.ended.store(true, Ordering::Release);
+        waiters.clear();
+    }
+
+    // Forgets the waiter so a late reply is dropped; a reply that raced the timeout still counts.
+    fn timed_out(&self, req_id: u64, rx: &flume::Receiver<FFIResult>, timeout: Duration) -> FFIResult {
+        lock(&self.waiters).remove(&req_id);
+        rx.try_recv().unwrap_or_else(|_| Err(format!("timed out after {:?}", timeout)))
+    }
+
+    fn wait(&self, req_id: u64, rx: &flume::Receiver<FFIResult>, timeout: Duration) -> FFIResult {
+        if self.dispatch_thread.get() == Some(&std::thread::current().id()) {
+            return self.wait_on_dispatch_thread(req_id, rx, timeout);
+        }
+        match rx.recv_timeout(timeout) {
+            Ok(reply) => reply,
+            Err(flume::RecvTimeoutError::Timeout) => self.timed_out(req_id, rx, timeout),
+            Err(flume::RecvTimeoutError::Disconnected) => Err(CONTEXT_CLOSED.into()),
+        }
+    }
+
+    // A blocking call made by a listener runs on the dispatch thread, the only one
+    // that can deliver its reply: keep dispatching here until that reply arrives.
+    fn wait_on_dispatch_thread(&self, req_id: u64, rx: &flume::Receiver<FFIResult>, timeout: Duration) -> FFIResult {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match rx.try_recv() {
+                Ok(reply) => return reply,
+                Err(flume::TryRecvError::Disconnected) => return Err(CONTEXT_CLOSED.into()),
+                Err(flume::TryRecvError::Empty) => {}
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return self.timed_out(req_id, rx, timeout);
+            }
+            let slice_ms = left.as_millis().clamp(1, 250) as i32;
+            dispatch_step(self, slice_ms);
+        }
+    }
+
+    // The `.await` of an `_async` call. It must not run on the dispatch thread (inside
+    // a listener): nothing would dispatch the reply, and the call would time out.
+    async fn wait_async(&self, req_id: u64, rx: flume::Receiver<FFIResult>, timeout: Duration) -> FFIResult {
+        match tokio::time::timeout(timeout, rx.recv_async()).await {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(_)) => Err(CONTEXT_CLOSED.into()),
+            Err(_) => self.timed_out(req_id, &rx, timeout),
+        }
+    }
 }
 
-// The context's only poller: takes each message out, decodes it and runs the listeners.
+enum Step { Message, Idle, Ended }
+
+// One poll: a reply goes to its waiter, anything else to the listeners.
+fn dispatch_step(inner: &Inner, timeout_ms: i32) -> Step {
+    if inner.ended.load(Ordering::Acquire) {
+        return Step::Ended;
+    }
+    // The library owns the message; it is valid until the next poll.
+    let mut msg: *const ffi::NimFfiMsg = std::ptr::null();
+    let ret = unsafe { ffi::my_timer_poll(inner.ptr, timeout_ms, &mut msg) };
+    match ret {
+        NIMFFI_RET_OK | NIMFFI_RET_CLOSED if !msg.is_null() => {
+            let msg = unsafe { &*msg };
+            if msg.kind == ffi::NIMFFI_MSG_REPLY {
+                unsafe { inner.complete(msg) };
+                return Step::Message;
+            }
+            // Decoded before a listener runs: a listener's blocking call polls again.
+            let message = unsafe { decode_message(msg) };
+            if ret == NIMFFI_RET_CLOSED {
+                inner.fail_waiters();
+            }
+            inner.dispatch(&message);
+            if ret == NIMFFI_RET_CLOSED { Step::Ended } else { Step::Message }
+        }
+        NIMFFI_RET_TIMEOUT => Step::Idle,
+        NIMFFI_RET_INVALID_CTX => {
+            // The context ended between two polls, so its CLOSED message was never seen.
+            inner.fail_waiters();
+            inner.dispatch(&MyTimerMessage::Closed { ok: true, reason: String::new() });
+            Step::Ended
+        }
+        // NIMFFI_RET_BUSY, NIMFFI_RET_ERR: try again, without spinning.
+        _ => {
+            std::thread::sleep(Duration::from_millis(10));
+            Step::Idle
+        }
+    }
+}
+
+// The context's only poller.
 fn dispatch_loop(inner: Arc<Inner>) {
+    let _ = inner.dispatch_thread.set(std::thread::current().id());
     loop {
-        // The library owns the message; it is valid until the next poll.
-        let mut msg: *const ffi::NimFfiMsg = std::ptr::null();
         // Once asked to stop, only take what already waits: a teardown's last messages.
         let stopping = inner.stop.load(Ordering::Acquire);
         let timeout_ms = if stopping { 0 } else { 250 };
-        let ret = unsafe { ffi::my_timer_poll(inner.ptr, timeout_ms, &mut msg) };
-        match ret {
-            NIMFFI_RET_OK | NIMFFI_RET_CLOSED if !msg.is_null() => {
-                let message = unsafe { decode_message(&*msg) };
-                inner.dispatch(&message);
-                if ret == NIMFFI_RET_CLOSED {
-                    return;
+        match dispatch_step(&inner, timeout_ms) {
+            Step::Message => {}
+            Step::Idle => {
+                if stopping {
+                    break;
                 }
-                continue;
             }
-            NIMFFI_RET_TIMEOUT => {}
-            NIMFFI_RET_INVALID_CTX => {
-                // The context ended between two polls, so its CLOSED message was never seen.
-                inner.dispatch(&MyTimerMessage::Closed { ok: true, reason: String::new() });
-                return;
-            }
-            // NIMFFI_RET_BUSY, NIMFFI_RET_ERR: try again, without spinning.
-            _ => std::thread::sleep(Duration::from_millis(10)),
+            Step::Ended => break,
         }
-        if stopping {
-            return;
+    }
+    // Nobody delivers a reply from here on.
+    inner.fail_waiters();
+}
+
+struct StaticDispatcher {
+    inner: Arc<Inner>,
+    thread: JoinHandle<()>,
+}
+
+// The reply of a static request arrives on the library's static context: one
+// dispatch thread per process, started by the first static call and stopped by `shutdown`.
+// Its thread does not keep the process alive.
+static STATIC_DISPATCHER: Mutex<Option<StaticDispatcher>> = Mutex::new(None);
+
+fn static_inner() -> Result<Arc<Inner>, String> {
+    let mut slot = lock(&STATIC_DISPATCHER);
+    if let Some(dispatcher) = slot.as_ref() {
+        if !dispatcher.inner.ended.load(Ordering::Acquire) {
+            return Ok(dispatcher.inner.clone());
+        }
+    }
+    let ptr = unsafe { ffi::my_timer_static_ctx() };
+    if ptr.is_null() {
+        return Err(last_error(NIMFFI_RET_ERR));
+    }
+    let inner = Arc::new(Inner::new(ptr));
+    let thread = spawn_dispatcher("my_timer-static-dispatch", inner.clone())?;
+    *slot = Some(StaticDispatcher { inner: inner.clone(), thread });
+    Ok(inner)
+}
+
+fn stop_static_dispatcher(slot: &mut Option<StaticDispatcher>) {
+    if let Some(dispatcher) = slot.take() {
+        dispatcher.inner.stop.store(true, Ordering::Release);
+        if dispatcher.thread.thread().id() != std::thread::current().id() {
+            let _ = dispatcher.thread.join();
         }
     }
 }
 
 /// High-level context for `MyTimer`.
+///
+/// Every request has a blocking method and an `_async` one. Both send the request,
+/// then wait for its reply, which the context's dispatch thread takes out of
+/// `my_timer_poll`; `Err` carries the library's error text, the reason a request was
+/// refused, a timeout, or the end of the context.
+///
+/// Listeners run on the dispatch thread. One may make a blocking call on its own
+/// context: the call runs the dispatch loop itself until its reply arrives, so other
+/// listeners can run meanwhile. It must not block on an `_async` call: nothing
+/// dispatches the reply while the dispatch thread is parked, so the call times out.
 pub struct MyTimerCtx {
     ptr: *mut c_void,
     timeout: Duration,
     inner: Arc<Inner>,
-    dispatcher: Option<std::thread::JoinHandle<()>>,
+    dispatcher: Option<JoinHandle<()>>,
 }
 
-// SAFETY: The `ptr` field points to an FFIContext owned by the Nim runtime.
-// Every call through the generated FFI proc goes through
-// `sendRequestToFFIThread` on the Nim side, which only enqueues the request
-// onto a mutex-guarded MPSC queue (sound from any number of threads) and
-// wakes the single FFI thread that dispatches every handler. The context is
-// thus never mutated non-atomically from the caller's thread. The Nim-side
-// reentrancy guard (`onFFIThread` threadvar) prevents handlers from
-// re-entering the dispatcher. These invariants make it sound to mark the
-// wrapper as Send + Sync.
+// SAFETY: `ptr` is a token the library validates on every call; it is never
+// dereferenced here. A request export only checks the token and puts the
+// request on a lock-guarded queue, which is sound from any number of threads;
+// the library's single FFI thread runs every handler. Replies and events come
+// back through the dispatch thread alone, and the waiter table and the listeners
+// it shares with the callers are behind mutexes.
 unsafe impl Send for MyTimerCtx {}
 unsafe impl Sync for MyTimerCtx {}
 
@@ -303,43 +430,43 @@ impl MyTimerCtx {
     pub fn create(config: TimerConfig, timeout: Duration) -> Result<Self, String> {
         let req = MyTimerCreateCtorReq { config };
         let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_sync(timeout, |cb, ud| unsafe {
-            let _ = ffi::my_timer_create(req_bytes.as_ptr(), req_bytes.len(), cb, ud);
-            0
-        })?;
-        let addr_str: String = decode_cbor(&raw_bytes)?;
-        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
-        Self::start(addr as *mut c_void, timeout)
+        let (ctx, req_id, rx) = Self::start(&req_bytes, timeout, ffi::my_timer_create)?;
+        // An error reply or a timeout drops `ctx`, which destroys the context.
+        ctx.inner.wait(req_id, &rx, timeout)?;
+        Ok(ctx)
     }
 
     /// Creates the FFIContext + MyTimer; async via chronos.
     pub async fn new_async(config: TimerConfig, timeout: Duration) -> Result<Self, String> {
         let req = MyTimerCreateCtorReq { config };
         let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_async(timeout, move |cb, ud| unsafe {
-            let _ = ffi::my_timer_create(req_bytes.as_ptr(), req_bytes.len(), cb, ud);
-            0
-        }).await?;
-        let addr_str: String = decode_cbor(&raw_bytes)?;
-        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
-        Self::start(addr as *mut c_void, timeout)
+        let (ctx, req_id, rx) = Self::start(&req_bytes, timeout, ffi::my_timer_create)?;
+        // An error reply or a timeout drops `ctx`, which destroys the context.
+        ctx.inner.wait_async(req_id, rx, timeout).await?;
+        Ok(ctx)
     }
 
-    fn start(ptr: *mut c_void, timeout: Duration) -> Result<Self, String> {
-        let inner = Arc::new(Inner {
-            ptr,
-            listeners: Mutex::new(Vec::new()),
-            next_id: AtomicU64::new(1),
-            stop: AtomicBool::new(false),
-        });
-        // Built first: if the thread cannot start, dropping it destroys the context.
+    // `submit` is the ctor export. The waiter of its reply is registered before
+    // the dispatch thread starts, so the dispatch thread cannot see the reply first.
+    fn start(
+        req_bytes: &[u8],
+        timeout: Duration,
+        submit: unsafe extern "C" fn(*const u8, usize, *mut *mut c_void, *mut u64) -> c_int,
+    ) -> Result<(Self, u64, flume::Receiver<FFIResult>), String> {
+        let mut ptr: *mut c_void = std::ptr::null_mut();
+        let mut req_id: u64 = 0;
+        let ret = unsafe { submit(req_bytes.as_ptr(), req_bytes.len(), &mut ptr, &mut req_id) };
+        if ret != NIMFFI_RET_OK || ptr.is_null() {
+            // Nothing was claimed, so there is nothing to destroy.
+            return Err(last_error(ret));
+        }
+        let inner = Arc::new(Inner::new(ptr));
+        let (tx, rx) = flume::bounded::<FFIResult>(1);
+        lock(&inner.waiters).insert(req_id, tx);
+        // Built before the thread: from here on, an early return drops it, which destroys the context.
         let mut ctx = Self { ptr, timeout, inner: inner.clone(), dispatcher: None };
-        let dispatcher = std::thread::Builder::new()
-            .name("my_timer-dispatch".into())
-            .spawn(move || dispatch_loop(inner))
-            .map_err(|e| e.to_string())?;
-        ctx.dispatcher = Some(dispatcher);
-        Ok(ctx)
+        ctx.dispatcher = Some(spawn_dispatcher("my_timer-dispatch", inner)?);
+        Ok((ctx, req_id, rx))
     }
 
     /// Fired by `myTimerEcho` once the reply is ready.
@@ -362,6 +489,16 @@ impl MyTimerCtx {
     {
         self.inner.add(Arc::new(move |m: &MyTimerMessage| {
             if let MyTimerMessage::OnJobScheduled(payload) = m { handler(payload) }
+        }))
+    }
+
+    /// Register a listener for `StaleWarn`; it receives the request id and the
+    /// milliseconds the request has been running.
+    pub fn add_stale_warn_listener<F>(&self, handler: F) -> ListenerHandle
+    where F: Fn(u64, u64) + Send + Sync + 'static,
+    {
+        self.inner.add(Arc::new(move |m: &MyTimerMessage| {
+            if let MyTimerMessage::StaleWarn { req_id, elapsed_ms } = m { handler(*req_id, *elapsed_ms) }
         }))
     }
 
@@ -412,9 +549,10 @@ impl MyTimerCtx {
     pub fn echo(&self, req: EchoRequest) -> Result<EchoResponse, String> {
         let req = MyTimerEchoReq { req };
         let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
-            ffi::my_timer_echo(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        })?;
+        let (req_id, rx) = self.inner.submit(
+            |ctx, req_id| unsafe { ffi::my_timer_echo(ctx, req_bytes.as_ptr(), req_bytes.len(), req_id) },
+        )?;
+        let raw_bytes = self.inner.wait(req_id, &rx, self.timeout)?;
         decode_cbor::<EchoResponse>(&raw_bytes)
     }
 
@@ -422,10 +560,10 @@ impl MyTimerCtx {
     pub async fn echo_async(&self, req: EchoRequest) -> Result<EchoResponse, String> {
         let req = MyTimerEchoReq { req };
         let req_bytes = encode_cbor(&req)?;
-        let ptr = self.ptr as usize;
-        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
-            ffi::my_timer_echo(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        }).await?;
+        let (req_id, rx) = self.inner.submit(
+            |ctx, req_id| unsafe { ffi::my_timer_echo(ctx, req_bytes.as_ptr(), req_bytes.len(), req_id) },
+        )?;
+        let raw_bytes = self.inner.wait_async(req_id, rx, self.timeout).await?;
         decode_cbor::<EchoResponse>(&raw_bytes)
     }
 
@@ -433,9 +571,10 @@ impl MyTimerCtx {
     pub fn version(&self) -> Result<String, String> {
         let req = MyTimerVersionReq {};
         let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
-            ffi::my_timer_version(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        })?;
+        let (req_id, rx) = self.inner.submit(
+            |ctx, req_id| unsafe { ffi::my_timer_version(ctx, req_bytes.as_ptr(), req_bytes.len(), req_id) },
+        )?;
+        let raw_bytes = self.inner.wait(req_id, &rx, self.timeout)?;
         decode_cbor::<String>(&raw_bytes)
     }
 
@@ -443,29 +582,30 @@ impl MyTimerCtx {
     pub async fn version_async(&self) -> Result<String, String> {
         let req = MyTimerVersionReq {};
         let req_bytes = encode_cbor(&req)?;
-        let ptr = self.ptr as usize;
-        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
-            ffi::my_timer_version(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        }).await?;
+        let (req_id, rx) = self.inner.submit(
+            |ctx, req_id| unsafe { ffi::my_timer_version(ctx, req_bytes.as_ptr(), req_bytes.len(), req_id) },
+        )?;
+        let raw_bytes = self.inner.wait_async(req_id, rx, self.timeout).await?;
         decode_cbor::<String>(&raw_bytes)
     }
 
     pub fn complex(&self, req: ComplexRequest) -> Result<ComplexResponse, String> {
         let req = MyTimerComplexReq { req };
         let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
-            ffi::my_timer_complex(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        })?;
+        let (req_id, rx) = self.inner.submit(
+            |ctx, req_id| unsafe { ffi::my_timer_complex(ctx, req_bytes.as_ptr(), req_bytes.len(), req_id) },
+        )?;
+        let raw_bytes = self.inner.wait(req_id, &rx, self.timeout)?;
         decode_cbor::<ComplexResponse>(&raw_bytes)
     }
 
     pub async fn complex_async(&self, req: ComplexRequest) -> Result<ComplexResponse, String> {
         let req = MyTimerComplexReq { req };
         let req_bytes = encode_cbor(&req)?;
-        let ptr = self.ptr as usize;
-        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
-            ffi::my_timer_complex(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        }).await?;
+        let (req_id, rx) = self.inner.submit(
+            |ctx, req_id| unsafe { ffi::my_timer_complex(ctx, req_bytes.as_ptr(), req_bytes.len(), req_id) },
+        )?;
+        let raw_bytes = self.inner.wait_async(req_id, rx, self.timeout).await?;
         decode_cbor::<ComplexResponse>(&raw_bytes)
     }
 
@@ -473,9 +613,10 @@ impl MyTimerCtx {
     pub fn schedule(&self, job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig) -> Result<ScheduleResult, String> {
         let req = MyTimerScheduleReq { job, retry, schedule };
         let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
-            ffi::my_timer_schedule(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        })?;
+        let (req_id, rx) = self.inner.submit(
+            |ctx, req_id| unsafe { ffi::my_timer_schedule(ctx, req_bytes.as_ptr(), req_bytes.len(), req_id) },
+        )?;
+        let raw_bytes = self.inner.wait(req_id, &rx, self.timeout)?;
         decode_cbor::<ScheduleResult>(&raw_bytes)
     }
 
@@ -483,28 +624,32 @@ impl MyTimerCtx {
     pub async fn schedule_async(&self, job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig) -> Result<ScheduleResult, String> {
         let req = MyTimerScheduleReq { job, retry, schedule };
         let req_bytes = encode_cbor(&req)?;
-        let ptr = self.ptr as usize;
-        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
-            ffi::my_timer_schedule(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        }).await?;
+        let (req_id, rx) = self.inner.submit(
+            |ctx, req_id| unsafe { ffi::my_timer_schedule(ctx, req_bytes.as_ptr(), req_bytes.len(), req_id) },
+        )?;
+        let raw_bytes = self.inner.wait_async(req_id, rx, self.timeout).await?;
         decode_cbor::<ScheduleResult>(&raw_bytes)
     }
 
     pub fn lib_version(timeout: Duration) -> Result<String, String> {
         let req = MyTimerLibVersionReq {};
         let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_sync(timeout, |cb, ud| unsafe {
-            ffi::my_timer_lib_version(cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        })?;
+        let inner = static_inner()?;
+        let (req_id, rx) = inner.submit(
+            |_, req_id| unsafe { ffi::my_timer_lib_version(req_bytes.as_ptr(), req_bytes.len(), req_id) },
+        )?;
+        let raw_bytes = inner.wait(req_id, &rx, timeout)?;
         decode_cbor::<String>(&raw_bytes)
     }
 
     pub async fn lib_version_async(timeout: Duration) -> Result<String, String> {
         let req = MyTimerLibVersionReq {};
         let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_async(timeout, move |cb, ud| unsafe {
-            ffi::my_timer_lib_version(cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        }).await?;
+        let inner = static_inner()?;
+        let (req_id, rx) = inner.submit(
+            |_, req_id| unsafe { ffi::my_timer_lib_version(req_bytes.as_ptr(), req_bytes.len(), req_id) },
+        )?;
+        let raw_bytes = inner.wait_async(req_id, rx, timeout).await?;
         decode_cbor::<String>(&raw_bytes)
     }
 
@@ -514,6 +659,9 @@ impl MyTimerCtx {
     /// Returns 0 when every context stopped, 1 when one was left running.
     /// This wrapper reports that as true.
     pub fn shutdown() -> bool {
+        // Held across the shutdown, so no static call starts a dispatch thread on a context about to go.
+        let mut static_dispatcher = lock(&STATIC_DISPATCHER);
+        stop_static_dispatcher(&mut static_dispatcher);
         unsafe { ffi::my_timer_shutdown() == 0 }
     }
 

@@ -136,24 +136,13 @@ suite "FFIContextPool":
 
   test "requests are processed via pool context":
     var pool: FFIContextPool[TestLib]
-    var d: CallbackData
-    initCallbackData(d)
-    defer:
-      deinitCallbackData(d)
-
     let ctx = pool.createFFIContext().valueOr:
       assert false, "createFFIContext(pool) failed: " & $error
       return
     defer:
       discard pool.destroyFFIContext(ctx)
 
-    check sendRequestToFFIThread(
-      ctx, PingRequest.ffiNewReq(testCallback, addr d, "pool".cstring)
-    )
-      .isOk()
-    waitCallback(d)
-    check d.retCode == RET_OK
-    check cborDecode(payload(d), string).value == "pong:pool"
+    check call(ctx, PingRequest.ffiNewReq("pool".cstring)).okString() == "pong:pool"
 
 suite "createFFIContext / destroyFFIContext":
   test "create and destroy succeeds":
@@ -178,12 +167,7 @@ suite "destroyFFIContext does not hang":
       check false
       return
 
-    var d: CallbackData
-    initCallbackData(d)
-    defer:
-      deinitCallbackData(d)
-
-    check sendRequestToFFIThread(ctx, SlowRequest.ffiNewReq(testCallback, addr d)).isOk()
+    check sendRequestToFFIThread(ctx, SlowRequest.ffiNewReq()).isOk()
 
     let t0 = Moment.now()
     check pool.destroyFFIContext(ctx).isOk()
@@ -196,11 +180,7 @@ suite "destroyFFIContext does not hang when event loop is blocked":
       check false
       return
 
-    let d = createShared(CallbackData)
-    initCallbackData(d[])
-
-    check sendRequestToFFIThread(ctx, SyncBlockingRequest.ffiNewReq(testCallback, d))
-      .isOk()
+    check sendRequestToFFIThread(ctx, SyncBlockingRequest.ffiNewReq()).isOk()
 
     discard gSyncBlockStarted.recv()
 
@@ -208,10 +188,9 @@ suite "destroyFFIContext does not hang when event loop is blocked":
     check pool.destroyFFIContext(ctx).isErr()
     check (Moment.now() - t0) < 3.seconds
 
-    waitCallback(d[])
+    # `pool` is a local: the leaked thread must be done with it before the test returns.
+    check waitReplyQueued(ctx, 10_000)
     os.sleep(200)
-    deinitCallbackData(d[])
-    freeShared(d)
 
 suite "destroyFFIContext refc workaround":
   test "destroy after heavy ref-allocation workload returns promptly":
@@ -220,29 +199,14 @@ suite "destroyFFIContext refc workaround":
       check false
       return
 
-    var d: CallbackData
-    initCallbackData(d)
-    defer:
-      deinitCallbackData(d)
-
-    check sendRequestToFFIThread(
-      ctx, HeavyRefAllocRequest.ffiNewReq(testCallback, addr d)
-    )
-      .isOk()
-    waitCallback(d)
-    check d.retCode == RET_OK
+    check call(ctx, HeavyRefAllocRequest.ffiNewReq(), 30_000).okString() == "heavy-done"
 
     let t0 = Moment.now()
     check pool.destroyFFIContext(ctx).isOk()
     check (Moment.now() - t0) < 3.seconds
 
 suite "sendRequestToFFIThread":
-  test "successful request triggers RET_OK callback":
-    var d: CallbackData
-    initCallbackData(d)
-    defer:
-      deinitCallbackData(d)
-
+  test "a successful request gets a RET_OK reply carrying its id":
     var pool: FFIContextPool[TestLib]
     let ctx = pool.createFFIContext().valueOr:
       check false
@@ -250,20 +214,19 @@ suite "sendRequestToFFIThread":
     defer:
       discard pool.destroyFFIContext(ctx)
 
-    check sendRequestToFFIThread(
-      ctx, PingRequest.ffiNewReq(testCallback, addr d, "hello".cstring)
-    )
-      .isOk()
-    waitCallback(d)
-    check d.retCode == RET_OK
-    check cborDecode(payload(d), string).value == "pong:hello"
+    let reqId = sendRequestToFFIThread(ctx, PingRequest.ffiNewReq("hello".cstring)).valueOr:
+      check false
+      return
+    check reqId != 0
+    let reply = nextMsg(ctx)
+    check reply.ret == RET_OK
+    check reply.kind == MsgReply
+    check reply.id == reqId
+    check reply.okString() == "pong:hello"
+    # Exactly one reply per accepted request.
+    check nextMsg(ctx, 100).ret == RET_TIMEOUT
 
-  test "failing request triggers RET_ERR callback":
-    var d: CallbackData
-    initCallbackData(d)
-    defer:
-      deinitCallbackData(d)
-
+  test "a failing request gets a RET_ERR reply whose payload is the error text":
     var pool: FFIContextPool[TestLib]
     let ctx = pool.createFFIContext().valueOr:
       check false
@@ -271,20 +234,15 @@ suite "sendRequestToFFIThread":
     defer:
       discard pool.destroyFFIContext(ctx)
 
-    check sendRequestToFFIThread(ctx, FailRequest.ffiNewReq(testCallback, addr d)).isOk()
-    waitCallback(d)
-    check d.retCode == RET_ERR
-    check rawText(d) == "intentional failure"
+    let reply = call(ctx, FailRequest.ffiNewReq())
+    check reply.ret == RET_OK
+    check reply.retCode == RET_ERR
+    check reply.text() == "intentional failure"
 
   test "seq[byte] result rides as a CBOR byte string, not raw bytes":
     # A `seq[byte]` return must be CBOR, the same as every other reply. The C,
     # C++ and Rust decoders call `nimffi_dec_bytes` on the payload. They reject
     # a raw reply with the error "value encoded in non-canonical form".
-    var d: CallbackData
-    initCallbackData(d)
-    defer:
-      deinitCallbackData(d)
-
     var pool: FFIContextPool[TestLib]
     let ctx = pool.createFFIContext().valueOr:
       check false
@@ -292,11 +250,9 @@ suite "sendRequestToFFIThread":
     defer:
       discard pool.destroyFFIContext(ctx)
 
-    check sendRequestToFFIThread(ctx, BytesReplyRequest.ffiNewReq(testCallback, addr d))
-      .isOk()
-    waitCallback(d)
-    check d.retCode == RET_OK
-    let reply = payload(d)
+    let got = call(ctx, BytesReplyRequest.ffiNewReq())
+    check got.retCode == RET_OK
+    let reply = got.payload
     # The wire contract is a CBOR byte-string header (major type 2, 0x40..0x5b),
     # and then the 4 payload bytes.
     check reply.len == 5
@@ -304,11 +260,6 @@ suite "sendRequestToFFIThread":
     check cborDecode(reply, seq[byte]).value == @[0xDE'u8, 0xAD'u8, 0xBE'u8, 0xEF'u8]
 
   test "empty seq[byte] result rides as an empty CBOR byte string":
-    var d: CallbackData
-    initCallbackData(d)
-    defer:
-      deinitCallbackData(d)
-
     var pool: FFIContextPool[TestLib]
     let ctx = pool.createFFIContext().valueOr:
       check false
@@ -316,22 +267,13 @@ suite "sendRequestToFFIThread":
     defer:
       discard pool.destroyFFIContext(ctx)
 
-    check sendRequestToFFIThread(
-      ctx, EmptyBytesReplyRequest.ffiNewReq(testCallback, addr d)
-    )
-      .isOk()
-    waitCallback(d)
-    check d.retCode == RET_OK
-    let reply = payload(d)
+    let got = call(ctx, EmptyBytesReplyRequest.ffiNewReq())
+    check got.retCode == RET_OK
+    let reply = got.payload
     check reply == @[0x40'u8] # byte string, length 0
     check cborDecode(reply, seq[byte]).value.len == 0
 
-  test "empty ok response delivers empty message":
-    var d: CallbackData
-    initCallbackData(d)
-    defer:
-      deinitCallbackData(d)
-
+  test "an empty ok string is still a CBOR value, never an empty payload":
     var pool: FFIContextPool[TestLib]
     let ctx = pool.createFFIContext().valueOr:
       check false
@@ -339,11 +281,10 @@ suite "sendRequestToFFIThread":
     defer:
       discard pool.destroyFFIContext(ctx)
 
-    check sendRequestToFFIThread(ctx, EmptyOkRequest.ffiNewReq(testCallback, addr d))
-      .isOk()
-    waitCallback(d)
-    check d.retCode == RET_OK
-    check cborDecode(payload(d), string).value == ""
+    let reply = call(ctx, EmptyOkRequest.ffiNewReq())
+    check reply.retCode == RET_OK
+    check reply.payload == @[0x60'u8] # text string, length 0
+    check reply.okString() == ""
 
   test "sequential requests are all processed":
     var pool: FFIContextPool[TestLib]
@@ -353,18 +294,13 @@ suite "sendRequestToFFIThread":
     defer:
       discard pool.destroyFFIContext(ctx)
 
+    var lastId = 0'u64
     for i in 1 .. 5:
-      var d: CallbackData
-      initCallbackData(d)
       let msg = "msg" & $i
-      check sendRequestToFFIThread(
-        ctx, PingRequest.ffiNewReq(testCallback, addr d, msg.cstring)
-      )
-        .isOk()
-      waitCallback(d)
-      deinitCallbackData(d)
-      check d.retCode == RET_OK
-      check cborDecode(payload(d), string).value == "pong:" & msg
+      let reply = call(ctx, PingRequest.ffiNewReq(msg.cstring))
+      check reply.okString() == "pong:" & msg
+      check reply.id > lastId
+      lastId = reply.id
 
 type SimpleLib = object
   value: int
@@ -382,29 +318,37 @@ proc testlib_create*(
 ): Future[Result[SimpleLib, string]] {.ffiCtor.} =
   return ok(SimpleLib(value: config.initialValue))
 
-proc ctorAddrFromCbor(bytes: seq[byte]): uint =
-  let addrStr = cborDecode(bytes, string).valueOr:
-    return 0
-  cast[uint](parseBiggestUInt(addrStr))
+proc createSimpleCtx(initialValue: int): ptr FFIContext[SimpleLib] =
+  ## The ctor hands the token back at once; its outcome is a reply on the new context.
+  var cfg =
+    cborEncode(TestlibCreateCtorReq(config: SimpleConfig(initialValue: initialValue)))
+  var token: FFICtxToken
+  var reqId: uint64
+  if testlib_create(encodedPtr(cfg), cfg.len.csize_t, addr token, addr reqId) != RET_OK:
+    return nil
+  let ctx = SimpleLibFFIPool.resolveCtx(token)
+  if ctx.isNil() or pollReply(ctx, reqId).retCode != RET_OK:
+    return nil
+  return ctx
 
 suite "ffiCtor macro":
-  test "creates context and returns pointer via callback":
-    var d: CallbackData
-    initCallbackData(d)
-    defer:
-      deinitCallbackData(d)
-
+  test "returns the token at once and the outcome as a reply on the new context":
     var cfg = cborEncode(TestlibCreateCtorReq(config: SimpleConfig(initialValue: 42)))
-    let ret = testlib_create(encodedPtr(cfg), cfg.len.csize_t, testCallback, addr d)
+    var token: FFICtxToken
+    var reqId: uint64
+    check testlib_create(encodedPtr(cfg), cfg.len.csize_t, addr token, addr reqId) ==
+      RET_OK
+    check not token.isNil()
+    check reqId != 0
 
-    check not ret.isNil()
-
-    waitCallback(d)
-    check d.retCode == RET_OK
-
-    let ctxAddr = ctorAddrFromCbor(payload(d))
-    check ctxAddr != 0
-    let ctx = SimpleLibFFIPool.resolveCtx(cast[FFICtxToken](ctxAddr))
+    let ctx = SimpleLibFFIPool.resolveCtx(token)
+    check not ctx.isNil()
+    let reply = nextMsg(ctx)
+    check reply.kind == MsgReply
+    check reply.id == reqId
+    check reply.retCode == RET_OK
+    # The token already came back through `ctx_out`; the reply carries no value.
+    check reply.payload == @[CborNullByte]
 
     check not ctx[].myLib.isNil
     check ctx[].myLib[].value == 42
@@ -420,84 +364,36 @@ proc testlib_send*(
   return ok("echo:" & cfg.message & ":" & $lib.value)
 
 suite "simplified .ffi. macro":
-  test "sends request and gets serialized response via callback":
-    var ctorD: CallbackData
-    initCallbackData(ctorD)
-    defer:
-      deinitCallbackData(ctorD)
-
-    var cfg = cborEncode(TestlibCreateCtorReq(config: SimpleConfig(initialValue: 7)))
-    let ctorRet =
-      testlib_create(encodedPtr(cfg), cfg.len.csize_t, testCallback, addr ctorD)
-    check not ctorRet.isNil()
-
-    waitCallback(ctorD)
-    check ctorD.retCode == RET_OK
-
-    let ctxAddr = ctorAddrFromCbor(payload(ctorD))
-    check ctxAddr != 0
-    let ctx = SimpleLibFFIPool.resolveCtx(cast[FFICtxToken](ctxAddr))
+  test "sends request and gets the serialized response as a reply":
+    let ctx = createSimpleCtx(7)
+    check not ctx.isNil()
     defer:
       check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
 
-    var d: CallbackData
-    initCallbackData(d)
-    defer:
-      deinitCallbackData(d)
-
     var reqBytes = cborEncode(TestlibSendReq(cfg: SendConfig(message: "hello")))
-    let ret = testlib_send(
-      ctx.ffiToken(), testCallback, addr d, encodedPtr(reqBytes), reqBytes.len.csize_t
-    )
-    check ret == RET_OK
-
-    waitCallback(d)
-    check d.retCode == RET_OK
-
-    check cborDecode(payload(d), string).value == "echo:hello:7"
+    var reqId: uint64
+    check testlib_send(
+      ctx.ffiToken(), encodedPtr(reqBytes), reqBytes.len.csize_t, addr reqId
+    ) == RET_OK
+    check pollReply(ctx, reqId).okString() == "echo:hello:7"
 
 proc testlib_version*(lib: SimpleLib): Future[Result[string, string]] {.ffi.} =
   return ok("v" & $lib.value)
 
 suite "sync-body .ffi. is dispatched on FFI thread":
   ## All `.ffi.` procs go through the FFI thread, even sync bodies (PR #23).
-  test "sync body still produces correct payload via callback":
-    var ctorD: CallbackData
-    initCallbackData(ctorD)
-    defer:
-      deinitCallbackData(ctorD)
-
-    var cfg = cborEncode(TestlibCreateCtorReq(config: SimpleConfig(initialValue: 3)))
-    let ctorRet =
-      testlib_create(encodedPtr(cfg), cfg.len.csize_t, testCallback, addr ctorD)
-    check not ctorRet.isNil()
-
-    waitCallback(ctorD)
-    check ctorD.retCode == RET_OK
-
-    let ctxAddr = ctorAddrFromCbor(payload(ctorD))
-    check ctxAddr != 0
-    let ctx = SimpleLibFFIPool.resolveCtx(cast[FFICtxToken](ctxAddr))
+  test "sync body still produces the correct reply payload":
+    let ctx = createSimpleCtx(3)
+    check not ctx.isNil()
     defer:
       check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
 
-    var d2: CallbackData
-    initCallbackData(d2)
-    defer:
-      deinitCallbackData(d2)
-
     var emptyBytes = cborEncode(TestlibVersionReq())
-    let ret = testlib_version(
-      ctx.ffiToken(),
-      testCallback,
-      addr d2,
-      encodedPtr(emptyBytes),
-      emptyBytes.len.csize_t,
-    )
-    check ret == RET_OK
-    waitCallback(d2)
-    check d2.retCode == RET_OK
-    check cborDecode(payload(d2), string).value == "v3"
+    var reqId: uint64
+    check testlib_version(
+      ctx.ffiToken(), encodedPtr(emptyBytes), emptyBytes.len.csize_t, addr reqId
+    ) == RET_OK
+    check pollReply(ctx, reqId).okString() == "v3"
 
 suite "Nim-native .ffi. / .ffiCtor. API":
   test "user proc names retain their declared Future[Result[T,string]] shape":
@@ -529,43 +425,26 @@ proc testlib_record_tid*(
 
 suite "sync-body .ffi. runs on FFI thread (PR #23 regression)":
   test "handler thread id differs from caller's":
-    var ctorD: CallbackData
-    initCallbackData(ctorD)
-    defer:
-      deinitCallbackData(ctorD)
-
-    var cfg = cborEncode(TestlibCreateCtorReq(config: SimpleConfig(initialValue: 0)))
-    let ctorRet =
-      testlib_create(encodedPtr(cfg), cfg.len.csize_t, testCallback, addr ctorD)
-    check not ctorRet.isNil()
-    waitCallback(ctorD)
-    check ctorD.retCode == RET_OK
-    let ctxAddr = ctorAddrFromCbor(payload(ctorD))
-    check ctxAddr != 0
-    let ctx = SimpleLibFFIPool.resolveCtx(cast[FFICtxToken](ctxAddr))
+    let ctx = createSimpleCtx(0)
+    check not ctx.isNil()
     defer:
       check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
 
     gRecordedHandlerTid.store(0)
     let callerTid = getThreadId()
 
-    var d: CallbackData
-    initCallbackData(d)
-    defer:
-      deinitCallbackData(d)
-
     var reqBytes = cborEncode(TestlibRecordTidReq(req: RecordTidReq(dummy: 1)))
-    let ret = testlib_record_tid(
-      ctx.ffiToken(), testCallback, addr d, encodedPtr(reqBytes), reqBytes.len.csize_t
-    )
-    check ret == RET_OK
-    waitCallback(d)
-    check d.retCode == RET_OK
+    var reqId: uint64
+    check testlib_record_tid(
+      ctx.ffiToken(), encodedPtr(reqBytes), reqBytes.len.csize_t, addr reqId
+    ) == RET_OK
+    let reply = pollReply(ctx, reqId)
+    check reply.retCode == RET_OK
 
     let handlerTid = gRecordedHandlerTid.load()
     check handlerTid != 0
     check handlerTid != callerTid
-    check cborDecode(payload(d), int).value == handlerTid
+    check cborDecode(reply.payload, int).value == handlerTid
 
 # Reentrancy guard: a handler re-dispatching gets an Err, not a deadlock.
 var gReentrantNestedRes: Channel[string]
@@ -574,13 +453,7 @@ gReentrantNestedRes.open()
 registerReqFFI(ReentrantTriggerReq, lib: ptr TestLib):
   proc(ctxAddr: int): Future[Result[string, string]] {.async.} =
     let ctx = cast[ptr FFIContext[TestLib]](cast[uint](ctxAddr))
-    var nestedD: CallbackData
-    initCallbackData(nestedD)
-    defer:
-      deinitCallbackData(nestedD)
-    let res = sendRequestToFFIThread(
-      ctx, PingRequest.ffiNewReq(testCallback, addr nestedD, "x".cstring)
-    )
+    let res = sendRequestToFFIThread(ctx, PingRequest.ffiNewReq("x".cstring))
     if res.isErr():
       try:
         gReentrantNestedRes.send("err:" & res.error)
@@ -602,26 +475,17 @@ suite "reentrancy guard (PR #23 review, item 6)":
     defer:
       discard pool.destroyFFIContext(ctx)
 
-    var d: CallbackData
-    initCallbackData(d)
-    defer:
-      deinitCallbackData(d)
-
     let ctxAddrInt = cast[int](cast[uint](ctx))
-    check sendRequestToFFIThread(
-      ctx, ReentrantTriggerReq.ffiNewReq(testCallback, addr d, ctxAddrInt)
-    )
-      .isOk()
-
-    waitCallback(d)
-    check d.retCode == RET_OK
-    check cborDecode(payload(d), string).value == "guard-fired"
+    check call(ctx, ReentrantTriggerReq.ffiNewReq(ctxAddrInt)).okString() ==
+      "guard-fired"
 
     let nestedMsg = gReentrantNestedRes.recv()
     check nestedMsg.startsWith("err:")
     check "reentrant ffi call" in nestedMsg
+    # The refused nested request produced no reply of its own.
+    check nextMsg(ctx, 100).ret == RET_TIMEOUT
 
-# RET_STALE_WARN pings every ctx.staleWarnInterval, then one terminal result.
+# A `MsgStaleWarn` every ctx.staleWarnInterval, then the one reply.
 type StaleConfig {.ffi.} = object
   dummy: int
 
@@ -631,98 +495,42 @@ proc testlib_slow_stale*(
   await sleepAsync(350.milliseconds)
   return ok("slow-stale-done")
 
-proc createSimpleCtx(): ptr FFIContext[SimpleLib] =
-  var ctorD: CallbackData
-  initCallbackData(ctorD)
-  defer:
-    deinitCallbackData(ctorD)
-  var cfg = cborEncode(TestlibCreateCtorReq(config: SimpleConfig(initialValue: 1)))
-  let ctorRet =
-    testlib_create(encodedPtr(cfg), cfg.len.csize_t, testCallback, addr ctorD)
-  if ctorRet.isNil():
-    return nil
-  waitCallback(ctorD)
-  if ctorD.retCode != RET_OK:
-    return nil
-  let ctxAddr = ctorAddrFromCbor(payload(ctorD))
-  if ctxAddr == 0:
-    return nil
-  SimpleLibFFIPool.resolveCtx(cast[FFICtxToken](ctxAddr))
-
-## Keeps stale pings apart from the one terminal answer so a test can assert both.
-type StaleData = object
-  lock: Lock
-  cond: Cond
-  staleCount: int
-  lastElapsed: string
-  terminalDone: bool
-  terminalRet: cint
-  terminalBytes: seq[byte]
-
-proc initStaleData(d: var StaleData) =
-  d.lock.initLock()
-  d.cond.initCond()
-
-proc deinitStaleData(d: var StaleData) =
-  d.cond.deinitCond()
-  d.lock.deinitLock()
-
-proc staleCallback(
-    retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
-) {.cdecl, gcsafe, raises: [].} =
-  let d = cast[ptr StaleData](userData)
-  let n = int(len)
-  acquire(d[].lock)
-  if retCode == RET_STALE_WARN:
-    var s = newString(n)
-    if n > 0 and not msg.isNil:
-      copyMem(addr s[0], msg, n)
-    inc d[].staleCount
-    d[].lastElapsed = s
-  else:
-    var b = newSeq[byte](n)
-    if n > 0 and not msg.isNil:
-      copyMem(addr b[0], msg, n)
-    d[].terminalRet = retCode
-    d[].terminalBytes = b
-    d[].terminalDone = true
-    signal(d[].cond)
-  release(d[].lock)
-
-proc waitTerminal(d: var StaleData) =
-  acquire(d.lock)
-  while not d.terminalDone:
-    wait(d.cond, d.lock)
-  release(d.lock)
-
-suite "non-terminal RET_STALE_WARN progress signal":
-  test "a slow handler pings the caller, then delivers one terminal RET_OK":
-    let ctx = createSimpleCtx()
+suite "stale warnings are messages, not replies":
+  test "a slow handler warns the host that polls, then delivers one reply":
+    let ctx = createSimpleCtx(1)
     check not ctx.isNil()
     defer:
       check SimpleLibFFIPool.destroyFFIContext(ctx).isOk()
 
     ctx.staleWarnInterval = 80.milliseconds
 
-    var d: StaleData
-    initStaleData(d)
-    defer:
-      deinitStaleData(d)
-
     var reqBytes = cborEncode(TestlibSlowStaleReq(cfg: StaleConfig(dummy: 0)))
-    let ret = testlib_slow_stale(
-      ctx.ffiToken(), staleCallback, addr d, encodedPtr(reqBytes), reqBytes.len.csize_t
-    )
-    check ret == RET_OK
+    var reqId: uint64
+    check testlib_slow_stale(
+      ctx.ffiToken(), encodedPtr(reqBytes), reqBytes.len.csize_t, addr reqId
+    ) == RET_OK
 
-    waitTerminal(d)
+    # This host polls at once, so each warning is collected before the next is due.
+    var staleCount = 0
+    var lastElapsed = 0'u64
+    var reply: PolledMsg
+    while true:
+      let got = pollMsg(ctx)
+      check got.ret == RET_OK
+      if got.ret != RET_OK:
+        break
+      check got.id == reqId
+      if got.kind == MsgReply:
+        reply = got
+        break
+      check got.kind == MsgStaleWarn
+      staleCount.inc()
+      check got.aux > lastElapsed
+      lastElapsed = got.aux
 
-    check d.staleCount >= 2
-    check parseInt(d.lastElapsed) == d.staleCount * 80
+    check staleCount >= 2
+    check lastElapsed == uint64(staleCount * 80)
+    check reply.okString() == "slow-stale-done"
 
-    check d.terminalRet == RET_OK
-    check cborDecode(d.terminalBytes, string).value == "slow-stale-done"
-
-    let staleAtTerminal = d.staleCount
-    os.sleep(200)
-    check d.staleCount == staleAtTerminal
+    # Nothing follows the reply.
+    check pollMsg(ctx, 200).ret == RET_TIMEOUT

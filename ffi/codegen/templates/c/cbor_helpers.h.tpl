@@ -1,35 +1,29 @@
 #ifndef NIM_FFI_CBOR_HELPERS_H_INCLUDED
 #define NIM_FFI_CBOR_HELPERS_H_INCLUDED
-/* Leaf CBOR codecs (scalars, text strings, byte strings) plus the buffer
- * drivers. The per-struct / per-container codecs in the library header call
- * into these by name (C has no overloading, so each leaf gets a distinct
- * nimffi_enc_* / nimffi_dec_* symbol). Guarded so two nim-ffi headers can
- * share a translation unit. */
+/* Leaf CBOR codecs (scalars, text strings, byte strings), the buffer drivers,
+ * and what every library's wrapper shares: the reader of a reply and the table
+ * of the requests waiting for one. The per-struct / per-container codecs in
+ * the library header call into the leaves by name (C has no overloading, so
+ * each leaf gets a distinct nimffi_enc_* / nimffi_dec_* symbol). Guarded so two
+ * nim-ffi headers can share a translation unit. */
 #include "nim_ffi_prelude.h"
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Result delivery callback exported by the Nim dylib: `ret` is 0 on success
- * (then `msg`/`len` carry the CBOR response) or non-zero on failure (then
- * `msg`/`len` carry the error text, which is NOT NUL-terminated). */
-typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_data);
-
-/* Return / callback status codes. NIMFFI_RET_OK (0) is success; any non-zero
- * value handed to a result callback's `err_code` (or returned by a submit call)
- * is a failure. NIMFFI_RET_MISSING_CALLBACK is a special case from the Nim
- * dispatcher: the callback will never fire, so the request path must report the
- * failure itself.
+/* Status codes. A request export returns NIMFFI_RET_OK once the request is
+ * queued: exactly one NIMFFI_MSG_REPLY will then carry its id, unless the
+ * context closes first. Any other return means the request was refused and no
+ * reply will come: NIMFFI_RET_ERR, _INVALID_CTX, _QUEUE_FULL or _TOO_LARGE,
+ * with the text in <lib>_last_error().
  *
- * NIMFFI_RET_STALE_WARN is the one NON-terminal code: nim-ffi delivers it every
- * ~5s while a handler is still running (with `msg`/`len` carrying the elapsed
- * milliseconds as decimal text), then still ends with a terminal RET_OK/RET_ERR.
- * A caller that only wants the final answer must ignore it, not treat it as an
- * error.
+ * A reply's `ret_code` is NIMFFI_RET_OK (the payload is the CBOR return value)
+ * or NIMFFI_RET_ERR (the payload is UTF-8 error text).
  *
- * NIMFFI_RET_TIMEOUT, _CLOSED and _BUSY come from <lib>_poll() only; see its
- * comment in <lib>.h. */
+ * NIMFFI_RET_TIMEOUT, _CLOSED and _BUSY come from <lib>_poll(), and so from
+ * the dispatch loop and the `_sync` helpers built on it; see its comment in <lib>.h. */
 {{RET_CODES}}
 
 /* ── leaf encoders ─────────────────────────────────────────────────────── */
@@ -270,7 +264,7 @@ static inline char* nimffi_dup_cstr(const char* s) {
 }
 
 /* NUL-terminated copy of a length-delimited (not NUL-terminated) byte run,
- * for turning the FFICallback's raw error `msg`/`len` into a C string; NULL if
+ * for turning the error text of a message's payload into a C string; NULL if
  * it can't. */
 static inline char* nimffi_dup_cstr_n(const char* s, size_t n) {
     if (n == SIZE_MAX) {
@@ -343,6 +337,157 @@ static inline int nimffi_decode_from_buf(
     }
     return 0;
 }
+
+/* ── replies ───────────────────────────────────────────────────────────── */
+/* Reads the status of a NIMFFI_MSG_REPLY. Returns NIMFFI_RET_OK;
+ * NIMFFI_RET_ERR with the library's error text in `*err`; or -1 when `msg` is
+ * not a reply. `*err` is a NUL-terminated copy the caller frees; `err` may be
+ * NULL. */
+static inline int nimffi_reply_status(const NimFfiMsg* msg, char** err) {
+    if (err) *err = NULL;
+    if (!msg || msg->kind != NIMFFI_MSG_REPLY) {
+        if (err) *err = nimffi_dup_cstr("not a reply");
+        return -1;
+    }
+    if (msg->ret_code != NIMFFI_RET_OK) {
+        if (err) *err = nimffi_dup_cstr_n((const char*)msg->payload, msg->len);
+        return NIMFFI_RET_ERR;
+    }
+    return NIMFFI_RET_OK;
+}
+
+/* nimffi_reply_status(), then the payload decoded into `out` with `fn`; -1
+ * also when it does not decode. */
+static inline int nimffi_decode_reply(
+        const NimFfiMsg* msg, nimffi_dec_fn fn, void* out, char** err) {
+    if (!out) {
+        if (err) *err = nimffi_dup_cstr("out is NULL");
+        return -1;
+    }
+    int rc = nimffi_reply_status(msg, err);
+    if (rc != NIMFFI_RET_OK) {
+        return rc;
+    }
+    return nimffi_decode_from_buf(fn, msg->payload, msg->len, out, err);
+}
+
+/* ── requests waiting for their reply ──────────────────────────────────── */
+/* The library calls nothing back: the binding remembers who asked, and the
+ * dispatch of a NIMFFI_MSG_REPLY looks the request id up here. Not locked: a
+ * table belongs to the one thread that submits and dispatches its context. */
+
+/* Any typed reply callback; cast back to its own type before it is called. */
+typedef void (*nimffi_generic_fn)(void);
+
+/* Settles one request. `msg` is its reply, or NULL when the context closed
+ * before it was answered. */
+typedef void (*nimffi_settle_fn)(
+        const NimFfiMsg* msg, nimffi_generic_fn on_reply, void* user_data);
+
+typedef struct {
+    uint64_t req_id;
+    nimffi_settle_fn settle;
+    nimffi_generic_fn on_reply;
+    void* user_data;
+} NimFfiPendingEntry;
+
+typedef struct {
+    NimFfiPendingEntry* items;
+    size_t len;
+    size_t cap;
+} NimFfiPending;
+
+/* Where a `_sync` helper waits for its reply. */
+typedef struct {
+    bool done;
+    int ret;
+    void* out;
+    char** err;
+} NimFfiSyncSlot;
+
+/* Settles a `_sync` slot whose context closed before the reply. */
+static inline void nimffi_sync_slot_closed(NimFfiSyncSlot* slot) {
+    slot->ret = NIMFFI_RET_CLOSED;
+    if (slot->err) *slot->err = nimffi_dup_cstr("context closed");
+    slot->done = true;
+}
+
+/* Makes room for one more entry. Called before the submit, so that a request
+ * the library accepted can always be recorded. Returns 0, or -1 when out of
+ * memory. */
+static inline int nimffi_pending_reserve(NimFfiPending* p) {
+    if (p->len < p->cap) {
+        return 0;
+    }
+    size_t cap = p->cap ? p->cap * 2 : 8;
+    NimFfiPendingEntry* grown =
+        (NimFfiPendingEntry*)realloc(p->items, cap * sizeof(NimFfiPendingEntry));
+    if (!grown) {
+        return -1;
+    }
+    p->items = grown;
+    p->cap = cap;
+    return 0;
+}
+
+/* After nimffi_pending_reserve(): cannot fail. */
+static inline void nimffi_pending_add(NimFfiPending* p, NimFfiPendingEntry entry) {
+    p->items[p->len++] = entry;
+}
+
+/* Removes the entry of `req_id` into `*out`. False for an id nobody waits for:
+ * an abandoned request, or one another binding submitted. */
+static inline bool nimffi_pending_take(
+        NimFfiPending* p, uint64_t req_id, NimFfiPendingEntry* out) {
+    for (size_t i = 0; i < p->len; i++) {
+        if (p->items[i].req_id == req_id) {
+            *out = p->items[i];
+            p->items[i] = p->items[--p->len];
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Forgets `req_id`: its late reply is then dropped instead of settled. */
+static inline void nimffi_pending_abandon(NimFfiPending* p, uint64_t req_id) {
+    NimFfiPendingEntry dropped;
+    (void)nimffi_pending_take(p, req_id, &dropped);
+}
+
+/* The context closed: no reply will come, so every waiting request is settled
+ * without one. The table is detached first because a callback may submit. */
+static inline void nimffi_pending_close(NimFfiPending* p) {
+    NimFfiPendingEntry* items = p->items;
+    size_t len = p->len;
+    p->items = NULL;
+    p->len = 0;
+    p->cap = 0;
+    for (size_t i = 0; i < len; i++) {
+        items[i].settle(NULL, items[i].on_reply, items[i].user_data);
+    }
+    free(items);
+}
+
+/* Milliseconds of a clock that only moves forward, for the `_sync` timeouts. */
+static inline int64_t nimffi_now_ms(void) {
+#if defined(_WIN32)
+    /* The CRT's clock() counts wall time since the process started. */
+    return (int64_t)clock() * 1000 / CLOCKS_PER_SEC;
+#else
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (int64_t)t.tv_sec * 1000 + (int64_t)(t.tv_nsec / (1000 * 1000));
+#endif
+}
+
+/* One definition per program for an object a header defines: the table of the
+ * static context must be the same in every translation unit. */
+#if defined(_WIN32)
+#  define NIMFFI_SHARED __declspec(selectany)
+#else
+#  define NIMFFI_SHARED __attribute__((weak))
+#endif
 
 #ifdef __cplusplus
 }

@@ -14,7 +14,6 @@ import
 ## Fixed 64-bit wire type for any Nim `ptr T` / `pointer`.
 const CppPtrType* = "uint64_t"
 
-## Trailing param of every call that can't inherit a ctx's `timeout_`.
 const PollDoc =
   """Take the next message of `ctx` out, waiting up to `timeout_ms` (0 never
 blocks, negative waits until a message or the end of the context).
@@ -33,16 +32,45 @@ on Linux, a kqueue fd on macOS/BSD, an Event HANDLE on Windows, -1 on failure.
 The caller owns it and closes it. Wait on it, then poll with a timeout of 0
 until NIMFFI_RET_TIMEOUT."""
 
+const RequestsDoc =
+  """A request returns as soon as it is queued. NIMFFI_RET_OK promises exactly one
+NIMFFI_MSG_REPLY out of `<lib>_poll` whose `id` is `*req_id_out`, unless the
+context closes first; the reply can be polled before the request call returns.
+Any other return means no reply will come; `<lib>_last_error` says why.
+A reply's `ret_code` is NIMFFI_RET_OK and its payload the CBOR return value, or
+NIMFFI_RET_ERR and its payload UTF-8 error text.
+The constructor sets `*ctx_out` at once, so it can be polled; whether the
+construction worked is the reply `*req_id_out` on it. After a NIMFFI_RET_ERR
+reply the context is still claimed and must be destroyed.
+The context class below does all of this: one typed method per request."""
+
+const StaticCtxDoc =
+  """The context the replies of the static procs arrive on; NULL on failure."""
+
+const LastErrorDoc =
+  """Why the last request of the calling thread was refused. Never NULL."""
+
+## Trailing param of every call that can't inherit a ctx's `timeout_`.
+const ListenerRulesDoc =
+  """    // Listeners run on the dispatch thread, in the order they were added. One may add
+    // or remove listeners, destroy the context, or make a blocking call on this
+    // context: the call then polls in place, so other listeners can run before it
+    // returns. It must never wait on a future of this context (`xAsync().get()`):
+    // only the dispatch thread, which it is blocking, can fulfil that future."""
+
 const CppTimeoutParam = "std::chrono::milliseconds timeout = std::chrono::seconds{30}"
 
 const
   HeaderPreludeTpl = staticRead("templates/cpp/header_prelude.hpp.tpl")
   ResultTpl = staticRead("templates/cpp/result.hpp.tpl")
   CborHelpersTpl = staticRead("templates/cpp/cbor_helpers.hpp.tpl")
-  SyncCallHelperTpl = staticRead("templates/cpp/sync_call_helper.hpp.tpl")
   MsgTpl = staticRead("templates/cpp/msg.hpp.tpl")
   DispatcherTpl = staticRead("templates/cpp/dispatcher.hpp.tpl")
+  ContextCreateTpl = staticRead("templates/cpp/context_create.hpp.tpl")
+  ContextCreateAsyncTpl = staticRead("templates/cpp/context_create_async.hpp.tpl")
   ContextRuleOf5Tpl = staticRead("templates/cpp/context_rule_of_5.hpp.tpl")
+  ContextShutdownTpl = staticRead("templates/cpp/context_shutdown.hpp.tpl")
+  ContextStaticTpl = staticRead("templates/cpp/context_static.hpp.tpl")
   ContextListenersTpl = staticRead("templates/cpp/context_listeners.hpp.tpl")
   CMakeListsTpl = staticRead("templates/cpp/CMakeLists.txt.tpl")
   FindRepoRootTpl = staticRead("templates/find_repo_root.cmake.part")
@@ -176,10 +204,11 @@ proc emitListenerApi(
     "    // ── Messages from the library ───────────────────────────"
   )
   lines.add(
-    "    // Everything $1 sends comes out of $1_poll on this context's dispatch thread," %
+    "    // Everything $1 sends comes out of $1_poll on this context's dispatch thread:" %
       [libName]
   )
-  lines.add("    // which calls the listeners below, in the order they were added:")
+  lines.add("    //   NIMFFI_MSG_REPLY           -> the method that made the request")
+  lines.add("    //   NIMFFI_MSG_STALE_WARN      -> addStaleWarnListener")
   for ev in events:
     lines.add(
       "    //   event \"$1\" ($2)  -> $3" %
@@ -188,10 +217,7 @@ proc emitListenerApi(
   lines.add("    //   NIMFFI_MSG_NOT_RESPONDING  -> addNotRespondingListener")
   lines.add("    //   NIMFFI_MSG_RESPONDING      -> addRespondingListener")
   lines.add("    //   NIMFFI_MSG_CLOSED          -> addClosedListener")
-  lines.add(
-    "    // A listener may call back into this context, add or remove listeners, or"
-  )
-  lines.add("    // destroy the context.")
+  lines.add(ListenerRulesDoc)
   lines.add("    struct ListenerHandle { std::uint64_t id = 0; };")
   lines.add("")
   for ev in events:
@@ -329,30 +355,32 @@ proc generateCppHeader*(
   lines.add("// ============================================================")
   lines.add("")
   lines.add("extern \"C\" {")
-  lines.add(
-    "typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_data);"
-  )
+  lines.add(renderBlockDocComment(RequestsDoc))
   lines.add("")
   for p in procs:
     lines.add(renderBlockDocComment(p.doc))
     case p.kind
     of FFIKind.FFI:
       lines.add(
-        "int $1(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);" %
+        "int $1(void* ctx, const uint8_t* req_cbor, size_t req_cbor_len, uint64_t* req_id_out);" %
           [p.procName]
       )
     of FFIKind.STATIC:
       lines.add(
-        "int $1(FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);" %
+        "int $1(const uint8_t* req_cbor, size_t req_cbor_len, uint64_t* req_id_out);" %
           [p.procName]
       )
     of FFIKind.CTOR:
       lines.add(
-        "void* $1(const uint8_t* req_cbor, size_t req_cbor_len, FFICallback callback, void* user_data);" %
+        "int $1(const uint8_t* req_cbor, size_t req_cbor_len, void** ctx_out, uint64_t* req_id_out);" %
           [p.procName]
       )
     of FFIKind.DTOR:
       lines.add("int $1(void* ctx);" % [p.procName])
+  lines.add(renderBlockDocComment(StaticCtxDoc))
+  lines.add("void* $1_static_ctx(void);" % [libName])
+  lines.add(renderBlockDocComment(LastErrorDoc))
+  lines.add("const char* $1_last_error(void);" % [libName])
   lines.add(renderBlockDocComment(PollDoc))
   lines.add(
     "int $1_poll(void* ctx, int32_t timeout_ms, const NimFfiMsg** msg);" % [libName]
@@ -363,8 +391,6 @@ proc generateCppHeader*(
   lines.add("int $1_shutdown(void);" % [libName])
   lines.add("} // extern \"C\"")
   lines.add("")
-
-  lines.add(SyncCallHelperTpl)
 
   lines.add(DispatcherTpl)
 
@@ -397,80 +423,17 @@ proc generateCppHeader*(
       else:
         CppTimeoutParam
 
-    let reqInit = cppBracedInit(reqName, epNames)
-
-    # `create` yields the ctx via the callback's CBOR address (sync void* return discarded), owned as a unique_ptr since the class forbids copy/move.
-    let createRet = "Result<std::unique_ptr<$1>>" % [ctxTypeName]
+    let ctorSubst = [
+      ("{{CTX}}", ctxTypeName),
+      ("{{LIB}}", libName),
+      ("{{CREATE}}", ctor.procName),
+      ("{{PARAMS}}", ctorParamsWithTimeout),
+      ("{{REQ_INIT}}", cppBracedInit(reqName, epNames)),
+    ]
     lines.add(renderMemberDocComment(ctor.doc))
-    lines.add("    static $1 create($2) {" % [createRet, ctorParamsWithTimeout])
-    lines.add("        const auto ffi_req_ = $1;" % [reqInit])
-    lines.add("        auto ffi_enc_ = encodeCborFFI(ffi_req_);")
-    lines.add(
-      "        if (ffi_enc_.isErr()) return $1::err(ffi_enc_.error());" % [createRet]
-    )
-    lines.add("        const auto& ffi_req_bytes_ = ffi_enc_.value();")
-    lines.add("        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {")
-    lines.add(
-      "            (void)$1(ffi_req_bytes_.data(), ffi_req_bytes_.size(), cb, ud);" %
-        [ctor.procName]
-    )
-    lines.add("            return 0;")
-    lines.add("        }, timeout);")
-    lines.add(
-      "        if (ffi_raw_.isErr()) return $1::err(ffi_raw_.error());" % [createRet]
-    )
-    lines.add("        auto ffi_addr_ = decodeCborFFI<std::string>(ffi_raw_.value());")
-    lines.add(
-      "        if (ffi_addr_.isErr()) return $1::err(ffi_addr_.error());" % [createRet]
-    )
-    lines.add("        const auto& addr_str = ffi_addr_.value();")
-    # from_chars (not stoull) so a bad payload is an err() Result, not a throw.
-    lines.add("        std::uint64_t addr = 0;")
-    lines.add("        const char* addr_begin = addr_str.data();")
-    lines.add("        const char* addr_end = addr_begin + addr_str.size();")
-    lines.add("        const auto fc_ = std::from_chars(addr_begin, addr_end, addr);")
-    lines.add("        if (fc_.ec != std::errc() || fc_.ptr != addr_end) {")
-    lines.add(
-      "            return $1::err(\"FFI create returned non-numeric address: \" + addr_str);" %
-        [createRet]
-    )
-    lines.add("        }")
-    # `new` (not make_unique) so the ctor can stay private.
-    lines.add(
-      "        auto ffi_ctx_ = std::unique_ptr<$1>(new $1(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout));" %
-        [ctxTypeName]
-    )
-    lines.add("        if (!ffi_ctx_->dispatchThread_.joinable()) {")
-    lines.add(
-      "            return $1::err(\"could not start the event dispatch thread\");" %
-        [createRet]
-    )
-    lines.add("        }")
-    lines.add("        return $1::ok(std::move(ffi_ctx_));" % [createRet])
-    lines.add("    }")
-    lines.add("")
-
-    let captureList =
-      if epNames.len > 0:
-        epNames.join(", ") & ", timeout"
-      else:
-        "timeout"
-    let callList =
-      if epNames.len > 0:
-        epNames.join(", ") & ", timeout"
-      else:
-        "timeout"
+    lines.add(ContextCreateTpl.multiReplace(ctorSubst))
     lines.add(renderMemberDocComment(ctor.doc))
-    lines.add(
-      "    static std::future<Result<std::unique_ptr<$1>>> createAsync($2) {" %
-        [ctxTypeName, ctorParamsWithTimeout]
-    )
-    lines.add(
-      "        return std::async(std::launch::async, [$1]() { return create($2); });" %
-        [captureList, callList]
-    )
-    lines.add("    }")
-    lines.add("")
+    lines.add(ContextCreateAsyncTpl.multiReplace(ctorSubst))
 
   lines.add(
     ContextRuleOf5Tpl.multiReplace(("{{CTX}}", ctxTypeName), ("{{LIB}}", libName))
@@ -499,7 +462,6 @@ proc generateCppHeader*(
           nimTypeToCpp(ep.typeName)
       methParams.add("const $1& $2" % [cppType, ep.name])
       methParamNames.add(ep.name)
-    let methParamNamesStr = methParamNames.join(", ")
     let methParamsStr =
       if not isStatic:
         methParams.join(", ")
@@ -511,75 +473,69 @@ proc generateCppHeader*(
     let reqInit = cppBracedInit(reqName, methParamNames)
 
     let methRet = "Result<$1>" % [retCppType]
-    lines.add(renderMemberDocComment(m.doc))
-    let decl = if isStatic: "    static $1 $2($3) {" else: "    $1 $2($3) const {"
-    lines.add(decl % [methRet, methodName, methParamsStr])
-    lines.add("        const auto ffi_req_ = $1;" % [reqInit])
-    lines.add("        auto ffi_enc_ = encodeCborFFI(ffi_req_);")
-    lines.add(
-      "        if (ffi_enc_.isErr()) return $1::err(ffi_enc_.error());" % [methRet]
-    )
-    lines.add("        const auto& ffi_req_bytes_ = ffi_enc_.value();")
-    lines.add("        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {")
     let ctxArg = if isStatic: "" else: "ptr_, "
-    lines.add(
-      "            return $1($2cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());" %
-        [m.procName, ctxArg]
-    )
-    lines.add("        }, $1);" % [if isStatic: "timeout" else: "timeout_"])
-    lines.add(
-      "        if (ffi_raw_.isErr()) return $1::err(ffi_raw_.error());" % [methRet]
-    )
-    lines.add("        return decodeCborFFI<$1>(ffi_raw_.value());" % [retCppType])
-    lines.add("    }")
-    lines.add("")
-
-    # A method calls `this->methodName(...)` so a same-named param can't shadow
-    # the call target; a static has no `this` and forwards its own `timeout`.
-    let staticArgs =
-      if methParamNames.len > 0:
-        methParamNamesStr & ", timeout"
-      else:
-        "timeout"
-    let asyncArgs = if isStatic: staticArgs else: methParamNamesStr
-    let asyncCapture =
-      if isStatic:
-        staticArgs
-      elif methParamNamesStr.len > 0:
-        "this, " & methParamNamesStr
-      else:
-        "this"
+    let timeoutArg = if isStatic: "timeout" else: "timeout_"
+    let syncDecl = if isStatic: "    static $1 $2($3) {" else: "    $1 $2($3) const {"
     let asyncDecl =
       if isStatic:
         "    static std::future<$1> $2Async($3) {"
       else:
         "    std::future<$1> $2Async($3) const {"
-    lines.add(renderMemberDocComment(m.doc))
-    lines.add(asyncDecl % [methRet, methodName, methParamsStr])
-    lines.add(
-      "        return std::async(std::launch::async, [$1]() { return $2$3($4); });" %
-        [asyncCapture, (if isStatic: "" else: "this->"), methodName, asyncArgs]
-    )
-    lines.add("    }")
-    lines.add("")
+
+    # The blocking and the future flavour differ in how a failure is returned
+    # and in which dispatch entry point waits for the reply.
+    for isAsync in [false, true]:
+      var errFmt = "return $1::err($2);"
+      if isAsync:
+        errFmt = "return NimFfiDispatcher::ready($1::err($2));"
+      lines.add(renderMemberDocComment(m.doc))
+      lines.add(
+        (if isAsync: asyncDecl else: syncDecl) % [methRet, methodName, methParamsStr]
+      )
+      lines.add("        const auto ffi_req_ = $1;" % [reqInit])
+      lines.add("        auto ffi_enc_ = encodeCborFFI(ffi_req_);")
+      lines.add(
+        "        if (ffi_enc_.isErr()) " & errFmt % [methRet, "ffi_enc_.error()"]
+      )
+      lines.add("        const auto& ffi_req_bytes_ = ffi_enc_.value();")
+      var dispatcherExpr = "dispatcher_"
+      if isStatic:
+        lines.add("        auto ffi_dispatcher_ = staticDispatcher_();")
+        lines.add(
+          "        if (ffi_dispatcher_.isErr()) " &
+            errFmt % [methRet, "ffi_dispatcher_.error()"]
+        )
+        dispatcherExpr = "ffi_dispatcher_.value()"
+      lines.add(
+        "        return $1->$2<$3>([&](std::uint64_t* ffi_id_) {" %
+          [dispatcherExpr, (if isAsync: "callAsync" else: "call"), retCppType]
+      )
+      lines.add(
+        "            return $1($2ffi_req_bytes_.data(), ffi_req_bytes_.size(), ffi_id_);" %
+          [m.procName, ctxArg]
+      )
+      lines.add("        }, $1);" % [timeoutArg])
+      lines.add("    }")
+      lines.add("")
+
+  lines.add(renderMemberDocComment(ShutdownDoc))
+  lines.add(ContextShutdownTpl.replace("{{LIB}}", libName))
 
   lines.add("private:")
   emitEventDecoder(lines, events)
   lines.add("")
+  lines.add(ContextStaticTpl.replace("{{LIB}}", libName))
   lines.add("    void* ptr_;")
   lines.add("    std::chrono::milliseconds timeout_;")
   # Shared with the dispatch thread, which outlives `this` when a listener destroys the context.
   lines.add("    std::shared_ptr<NimFfiDispatcher> dispatcher_;")
-  lines.add("    std::thread dispatchThread_;")
+  # `create` starts the dispatch thread, once the waiter of the constructor's reply is in place.
   lines.add("    explicit $1(void* p, std::chrono::milliseconds t)" % [ctxTypeName])
+  lines.add("        : ptr_(p), timeout_(t),")
   lines.add(
-    "        : ptr_(p), timeout_(t), dispatcher_(std::make_shared<NimFfiDispatcher>()) {"
-  )
-  lines.add(
-    "        dispatchThread_ = NimFfiDispatcher::start(dispatcher_, &$1_poll, ptr_, &$2::dispatchEvent_);" %
+    "          dispatcher_(std::make_shared<NimFfiDispatcher>(&$1_poll, &$1_last_error, p, &$2::dispatchEvent_)) {}" %
       [libName, ctxTypeName]
   )
-  lines.add("    }")
   lines.add("};")
   lines.add("")
 

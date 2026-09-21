@@ -2,19 +2,12 @@ import std/[atomics, os, strutils]
 import unittest2
 import results
 import ffi
+import ./helpers
 
 type TestLib = object
 
 var gHandlerEntered: Atomic[bool]
 var gHandlerRelease: Atomic[bool]
-var gAnswered: Atomic[int]
-
-proc countingCallback(
-    retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
-) {.cdecl, gcsafe, raises: [].} =
-  if retCode == RET_STALE_WARN:
-    return
-  discard gAnswered.fetchAdd(1)
 
 template spinUntil(cond: untyped): bool =
   block:
@@ -37,7 +30,7 @@ registerReqFFI(EchoRequest, lib: ptr TestLib):
     return ok(message)
 
 proc echoReq(payload: string): ptr FFIThreadRequest =
-  EchoRequest.ffiNewReq(countingCallback, nil, payload)
+  EchoRequest.ffiNewReq(payload)
 
 suite "request ingress limits":
   test "a full ingress queue rejects the submit, and drains back to accepting":
@@ -49,19 +42,27 @@ suite "request ingress limits":
       gHandlerRelease.store(true)
       discard pool.destroyFFIContext(ctx)
 
-    check sendRequestToFFIThread(ctx, BlockRequest.ffiNewReq(countingCallback, nil))
-      .isOk()
+    check sendRequestToFFIThread(ctx, BlockRequest.ffiNewReq()).isOk()
     check spinUntil(gHandlerEntered.load())
 
     for _ in 0 ..< RequestQueueDepth:
       check sendRequestToFFIThread(ctx, echoReq("queued")).isOk()
 
-    let rejected = sendRequestToFFIThread(ctx, echoReq("one too many"))
-    check rejected.isErr() and "request queue full" in rejected.error
+    var refusedId = 0'u64
+    check submitRequest(
+      ctx, echoReq("one too many"), ctx.currentGeneration(), addr refusedId
+    ) == RET_QUEUE_FULL
+    check "request queue full" in $lastError()
+    check refusedId == 0
 
     gHandlerRelease.store(true)
-    check spinUntil(gAnswered.load() == RequestQueueDepth + 1)
-    check sendRequestToFFIThread(ctx, echoReq("after the drain")).isOk()
+    # One reply per accepted request, none for the refused one.
+    for _ in 0 ..< RequestQueueDepth + 1:
+      let reply = nextMsg(ctx)
+      check reply.kind == MsgReply
+      check reply.retCode == RET_OK
+    check nextMsg(ctx, 100).ret == RET_TIMEOUT
+    check call(ctx, echoReq("after the drain")).okString() == "after the drain"
 
   test "a payload over the cap is rejected at the submit":
     var pool: FFIContextPool[TestLib]
@@ -71,9 +72,15 @@ suite "request ingress limits":
     defer:
       discard pool.destroyFFIContext(ctx)
 
-    let oversized =
-      sendRequestToFFIThread(ctx, echoReq(repeat('x', MaxRequestPayloadBytes + 1)))
-    check oversized.isErr() and
-      "exceeds the " & $MaxRequestPayloadBytes & " byte cap" in oversized.error
+    var refusedId = 0'u64
+    check submitRequest(
+      ctx,
+      echoReq(repeat('x', MaxRequestPayloadBytes + 1)),
+      ctx.currentGeneration(),
+      addr refusedId,
+    ) == RET_TOO_LARGE
+    check refusedId == 0
+    check "exceeds the " & $MaxRequestPayloadBytes & " byte cap" in $lastError()
+    check nextMsg(ctx, 100).ret == RET_TIMEOUT
 
-    check sendRequestToFFIThread(ctx, echoReq("small")).isOk()
+    check call(ctx, echoReq("small")).okString() == "small"

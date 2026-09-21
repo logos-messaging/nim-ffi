@@ -22,12 +22,9 @@ registerReqFFI(BurstEmit, lib: ptr TestCloseLib):
     return ok("bursted")
 
 proc emit(ctx: ptr FFIContext[TestCloseLib], count: int) =
-  setupCallbackData(rsp)
-  doAssert sendRequestToFFIThread(
-    ctx, BurstEmit.ffiNewReq(testCallback, addr rsp, count)
-  )
-    .isOk()
-  waitCallback(rsp)
+  ## Never polls: a blocked poller may own the context. The reply is queued after the events.
+  doAssert sendRequestToFFIThread(ctx, BurstEmit.ffiNewReq(count)).isOk()
+  doAssert waitReplyQueued(ctx)
 
 type BlockedPoll = object
   ctx: ptr FFIContext[TestCloseLib]
@@ -97,8 +94,10 @@ suite "the next owner of a slot":
     let got = pollMsg(second)
     check got.ret == RET_OK
     check cborDecode(got.payload, LatchPayload).value.iter == 0
+    check pollMsg(second).kind == MsgReply
+    check pollMsg(second, 0).ret == RET_TIMEOUT
 
-  test "events still queued at a destroy are delivered before RET_CLOSED":
+  test "events and replies still queued at a destroy are delivered before RET_CLOSED":
     var pool: FFIContextPool[TestCloseLib]
     let ctx = pool.createFFIContext().valueOr:
       check false
@@ -109,6 +108,7 @@ suite "the next owner of a slot":
     check ctx.stopAndJoinThreads().isOk()
     for _ in 0 ..< 3:
       check pollMsg(ctx, generation, 0).kind == MsgEvent
+    check pollMsg(ctx, generation, 0).kind == MsgReply
     check pollMsg(ctx, generation, 0).ret == RET_CLOSED
     # The thread is joined already, so free the slot's resources directly.
     check ctx.deinitContextResources().isOk()

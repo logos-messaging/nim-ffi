@@ -11,9 +11,10 @@ import
   ./ffi_handles,
   ./ffi_thread_request,
   ./ffi_request_queue,
+  ./ffi_last_error,
   ./cbor_serial
 
-export ffi_events, ffi_outbound, ffi_handles
+export ffi_events, ffi_outbound, ffi_handles, ffi_last_error
 export ffi_request_queue.RequestQueueDepth
 
 type FFICtxToken* = distinct pointer
@@ -80,7 +81,8 @@ type FFIContext*[T] = object
   reqQueueBank: RequestQueueBank
   reqSignal: ThreadSignalPtr
   threadExitSignal: ThreadSignalPtr
-  userData*: pointer
+  nextReqId: Atomic[uint64]
+    # Never reset: a late reply must not carry an id the next owner of the slot also issued.
   handles*: FFIHandleRegistry
   eventQueue*: EventQueue
   outbound*: FFIOutbound
@@ -113,7 +115,7 @@ const
   FFIHeartbeatStaleThreshold* = 1.seconds
 
 const StaleWarnIntervalMs* {.intdefine: "ffiStaleWarnIntervalMs".} = 5000
-  ## `RET_STALE_WARN` cadence; handlers are never timed out.
+  ## Cadence of the stale-warning message; handlers are never timed out.
 const StaleWarnInterval* = StaleWarnIntervalMs.milliseconds
 
 type FFITeardownProc*[T] = proc(lib: ptr T): Future[void] {.async.}
@@ -355,7 +357,7 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   if ctx.lifecycle.load() == CtxLifecycle.RecycleFailed:
     return err(
       "requestRecycle: " & ctx.recycleFailure.load().reason() &
-        "; the library and the pool slot leak, and callbacks can still fire"
+        "; the library and the pool slot leak, and its messages can still arrive"
     )
 
   if not ctx.awaitClaimReleased(claimed):

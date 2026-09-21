@@ -59,7 +59,7 @@ suite "enums in the C header":
     check "    Color color;" in header
 
   test "an enum param passes by value":
-    check "int enumlib_ctx_paint(const EnumLibCtx* ctx, Color color," in header
+    check "int enumlib_ctx_paint(EnumLibCtx* ctx, Color color," in header
     check "const Color* color" notin header
 
 suite "enums in the C++ header":
@@ -137,5 +137,5 @@ suite "{.ffi.} enum end-to-end generation":
     check "case LEVEL_L_LOW: return cbor_encode_text_stringz(e, \"low\");" in header
 
   test "an enum return reaches the host through the reply callback":
-    check "(*EnumLibPickReplyFn)(int err_code, const Color* reply," in header
-    check "int enumlib_ctx_pick(const EnumLibCtx* ctx, Level level," in header
+    check "(*EnumLibPickReplyFn)(int ret, const Color* reply," in header
+    check "int enumlib_ctx_pick(EnumLibCtx* ctx, Level level," in header

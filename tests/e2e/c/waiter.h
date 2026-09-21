@@ -1,54 +1,23 @@
 #ifndef NIM_FFI_E2E_WAITER_H_INCLUDED
 #define NIM_FFI_E2E_WAITER_H_INCLUDED
-/* Turns an async binding call into a sequential check. Include after the generated binding header, which defines the request/reply types. */
+/* Turns an asynchronous binding call into a sequential check. Include after the generated binding header, which defines the request/reply types. */
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 
-#if defined(__STDC_NO_ATOMICS__)
-#  error "C11 atomics required (or provide a mutex/condvar fallback)"
-#endif
-#include <stdatomic.h>
+/* Long enough for a loaded CI machine; a healthy run never gets near it. */
+#define WAIT_LIMIT_MS 5000
 
-#if defined(_WIN32)
-/* Keep windows.h from defining min/max and the bulk of the SDK macro surface. */
-#  define WIN32_LEAN_AND_MEAN
-#  define NOMINMAX
-#  include <windows.h>
-static inline void sleep_ms(unsigned ms) { Sleep(ms); }
-static inline long long now_ms(void) { return (long long)GetTickCount64(); }
-#else
-#  include <time.h>
-static inline void sleep_ms(unsigned ms) {
-    struct timespec t = {(time_t)(ms / 1000), (long)(ms % 1000) * 1000 * 1000};
-    nanosleep(&t, NULL);
-}
-static inline long long now_ms(void) {
-    struct timespec t;
-    clock_gettime(CLOCK_MONOTONIC, &t);
-    return (long long)t.tv_sec * 1000 + t.tv_nsec / (1000 * 1000);
-}
-#endif
-
-/* Acquiring `done` publishes the fields the callback wrote first; a plain `volatile` orders nothing and TSan calls the read a race. */
-static inline void wait_done(atomic_int* done) {
-    for (int i = 0; i < 500 && !atomic_load_explicit(done, memory_order_acquire); i++) {
-        sleep_ms(10);
-    }
-    assert(atomic_load_explicit(done, memory_order_acquire));
-}
-
-/* `ctx` is void* because each library has its own context type. */
+/* Callbacks run inside the dispatch loop, on the thread that waits: plain fields, no atomics. */
 typedef struct {
-    atomic_int done;
-    int err_code;
-    void* ctx;
+    int done;
+    int ret;
     char err[256];
 } CreateWaiter;
 
 typedef struct {
-    atomic_int done;
-    int err_code;
+    int done;
+    int ret;
     char err[256];
     char text_a[256];
     char text_b[256];
@@ -57,18 +26,35 @@ typedef struct {
     int flag;
 } ReplyWaiter;
 
-/* Copies the error out, then publishes `done` with release so wait_done sees every field. */
-static inline void waiter_settle(atomic_int* done, char* err, size_t cap, const char* err_msg) {
+static inline void waiter_settle(int* done, char* err, size_t cap, const char* err_msg) {
     if (err_msg) {
         snprintf(err, cap, "%s", err_msg);
     }
-    atomic_store_explicit(done, 1, memory_order_release);
+    (*done)++;
 }
 
-/* Shared terminal callback for any proc returning a bare string. */
-static inline void on_str(int err_code, const char* const* reply, const char* err_msg, void* user_data) {
+/* Dispatches with `dispatcher_call` (an expression returning the dispatch loop’s code) until `done`
+ * is set. A -1 is a message that did not dispatch, which no test here expects. */
+#define WAIT_DONE(done, dispatcher_call)                                        \
+    do {                                                                  \
+        int64_t wait_deadline_ = nimffi_now_ms() + WAIT_LIMIT_MS;         \
+        while (!(done) && nimffi_now_ms() < wait_deadline_) {             \
+            int wait_rc_ = (dispatcher_call);                                   \
+            assert(wait_rc_ == NIMFFI_RET_OK || wait_rc_ == NIMFFI_RET_TIMEOUT); \
+        }                                                                 \
+        assert(done);                                                     \
+    } while (0)
+
+static inline void on_created(int ret, const char* err_msg, void* user_data) {
+    CreateWaiter* w = (CreateWaiter*)user_data;
+    w->ret = ret;
+    waiter_settle(&w->done, w->err, sizeof(w->err), err_msg);
+}
+
+/* Shared reply callback for any proc returning a bare string. */
+static inline void on_str(int ret, const char* const* reply, const char* err_msg, void* user_data) {
     ReplyWaiter* w = (ReplyWaiter*)user_data;
-    w->err_code = err_code;
+    w->ret = ret;
     if (reply && *reply) {
         snprintf(w->text_a, sizeof(w->text_a), "%s", *reply);
     }

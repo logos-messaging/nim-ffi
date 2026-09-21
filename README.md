@@ -78,7 +78,7 @@ The generated C export names are the snake_case form of the proc names, e.g.
 | `{.ffiStatic.}` | proc | Exposes a context-independent proc: no library param, and its wrapper takes no ctx — see below. |
 | `{.ffiCtor.}` | proc | The constructor. Returns `Future[Result[LibType, string]]`; creates the FFI context. |
 | `{.ffiDtor.}` | proc | The destructor. Exactly one param `(x: LibType)`; tears the context down. Must cancel and await everything it spawned — see [the teardown contract](#the-teardown-contract). |
-| `{.ffiEvent[: "wire_name"].}` | proc (empty body) | A library-initiated callback. Call the proc from any `{.ffi.}` handler to fire it. The wire name is optional — see below. |
+| `{.ffiEvent[: "wire_name"].}` | proc (empty body) | A library-initiated message. Call the proc from any `{.ffi.}` handler to fire it. The wire name is optional — see below. |
 | `{.ffiHandle.}` | `ref object` | Marks a type as an opaque handle: it stays server-side and crosses the wire as a `uint64` id. |
 | `{.ffiConst.}` | `const` | Re-emits the value as a native constant in every generated binding — see below. |
 | `genBindings()` | call | Emits the bindings. Must be the **last** FFI call in the compilation root. |
@@ -193,9 +193,10 @@ exports. In C++ and Rust a static is an associated function on the ctx type
 
 The handler still needs an FFI thread, so it runs on the library's **static
 context**: created on the first `{.ffiStatic.}` call, then alive for the rest of
-the process — no ctx owns it, so nothing tears its thread pair down, and it holds
+the process — no ctx owns it, so nothing tears its thread down, and it holds
 one of the pool's slots. It has no `myLib`, which is why a static proc cannot
-take the library value.
+take the library value. Its replies are polled from `<lib>_static_ctx()`; the
+generated bindings do that for you.
 
 There is no foreign teardown for it. From Nim, `destroyStaticFFIContext(pool)`
 stops the thread pair and frees the slot; it is only sound once nothing will call
@@ -223,7 +224,7 @@ unsafe to reuse and **quarantines** it:
 | `<lib>_ctx_destroy` | `RET_OK` | `RET_ERR` |
 | The library object | freed | kept alive — orphaned work may still hold pointers into it |
 | The pool slot | back in the pool | claimed for the life of the process |
-| In-flight callbacks | done before the destroy returned | can still fire, so keep their `userData` alive |
+| Messages | `poll` returns `RET_CLOSED` | `poll` returns `RET_CLOSED` with the reason; replies of handlers that still run are delivered first |
 
 Quarantine costs one of the 32 slots permanently, so a library that habitually
 overruns its teardown will exhaust the pool. `FFIContextPool.quarantinedSlots()`
@@ -246,33 +247,53 @@ repeat that cleanup yourself. Its slot is quarantined all the same, because
 nothing freed the library object: later calls on that handle fail, and the slot
 is gone from the pool's 32.
 
-### The result callback contract
+### Requests and replies
 
-Each request carries a result callback. It receives one of these status codes
-(`ret` / `err_code`):
+A request returns as soon as it is queued, with the id its reply will carry:
 
-| Code | Value | Terminal? | Meaning |
-| --- | --- | --- | --- |
-| `RET_OK` | 0 | yes | Success; the payload carries the encoded result. |
-| `RET_ERR` | 1 | yes | Failure; the payload carries the UTF-8 error string. |
-| `RET_MISSING_CALLBACK` | 2 | — | No callback was passed; the request path reports this itself. |
-| `RET_STALE_WARN` | 3 | **no** | Progress ping — the handler is still running. |
+```c
+int <lib>_<proc>(void* ctx, const uint8_t* req, size_t len, uint64_t* req_id_out);
+int <lib>_create(const uint8_t* req, size_t len, void** ctx_out, uint64_t* req_id_out);
+const char* <lib>_last_error(void);
+```
 
-**nim-ffi never times a handler out.** A slow request runs to its natural
-`RET_OK` / `RET_ERR`; it is never cancelled (a hard-cancel mid-call into the
-underlying library can leave it half-applied). Instead, while a handler is still
-in flight the callback receives a **non-terminal** `RET_STALE_WARN` every 5s
-(Android's ANR interval; override at build time with
-`-d:ffiStaleWarnIntervalMs=<ms>`), with the payload carrying the elapsed
-milliseconds as a decimal string. The dev decides what to do with a slow request
-— keep waiting, surface a spinner, tear the context down — nim-ffi does not
-decide for them.
+`RET_OK` promises exactly one `NIMFFI_MSG_REPLY` from [`<lib>_poll`](#receiving-messages-lib_poll)
+whose `id` is `*req_id_out`, unless the context closes first. Any other code means
+no reply comes, and `<lib>_last_error()` gives the reason as text (thread-local,
+never NULL):
 
-`RET_STALE_WARN` may fire any number of times and is **always** followed by
-exactly one terminal `RET_OK` / `RET_ERR`. A caller that only wants the final
-answer must ignore it (do not treat a non-zero code as an error without checking
-for `RET_STALE_WARN` first). The generated higher-level typed wrappers currently
-ignore it; the progress signal is delivered at the raw result-callback boundary.
+| Code | Value | Meaning |
+| --- | --- | --- |
+| `RET_OK` | 0 | Queued; the reply will come. |
+| `RET_ERR` | 1 | Bad argument, undecodable request, or a context that is being recycled. |
+| `RET_INVALID_CTX` | 6 | `ctx` is nil, forged, or names a past owner of the pool slot. |
+| `RET_QUEUE_FULL` | 8 | The request queue is full, or too many replies wait for the host to poll them (`-d:ffiMaxOutstandingRequests`, 16384). |
+| `RET_TOO_LARGE` | 9 | The request is over `-d:ffiMaxRequestPayloadBytes`. |
+
+A reply's `ret_code` is `RET_OK` with the CBOR of the return value as payload, or
+`RET_ERR` with the error string as UTF-8 text. Replies are never dropped: events
+have a bounded queue of their own, so a burst of events cannot push a reply out.
+
+The constructor hands the context out at once, in `*ctx_out`, so the host can
+poll it; whether construction worked is a reply on that context. When that reply
+is `RET_ERR` the host destroys the context. A `{.ffiStatic.}` proc has no context:
+its replies arrive on the library's static one, whose handle is
+`<lib>_static_ctx()`.
+
+**nim-ffi never times a handler out.** A slow request runs to its natural reply;
+it is never cancelled (a hard-cancel mid-call into the underlying library can
+leave it half-applied). Instead, while a handler is still in flight `poll`
+delivers a `NIMFFI_MSG_STALE_WARN` for it every 5s (Android's ANR interval;
+override with `-d:ffiStaleWarnIntervalMs=<ms>`), with `id` the request and `aux`
+the milliseconds it has run. It is not a reply: the reply still comes. At most one
+warning waits per request, so a host that polls slowly finds the latest figure,
+not a backlog. The dev decides what to do with a slow request — keep waiting,
+surface a spinner, tear the context down — nim-ffi does not decide for them.
+
+The generated bindings hide all of this: C++ and Rust keep `ctx.echo(req)` and
+`ctx.echoAsync(req)` on top of their dispatch thread, and C offers both
+`<lib>_ctx_<proc>(ctx, ..., on_reply, user_data)`, answered from
+`<lib>_ctx_dispatch_next`, and a blocking `<lib>_ctx_<proc>_sync(...)`.
 
 ### Events
 
@@ -296,11 +317,11 @@ The wire name is **optional**: when omitted it is derived from the proc name
 export symbol. Pass a string literal (`{.ffiEvent: "custom_name".}`) only when
 you need a name that differs from the proc.
 
-### Receiving events: `<lib>_poll`
+### Receiving messages: `<lib>_poll`
 
-The library never calls into the host to deliver an event. Events go into a
-bounded queue inside the context, and the host takes them out, one at a time, on
-a thread of its own choosing:
+The library never calls into the host. Replies, events and liveness reports go
+into queues inside the context, and the host takes them out, one at a time, on a
+thread of its own choosing:
 
 ```c
 int      <lib>_poll(void* ctx, int32_t timeout_ms, const NimFfiMsg** msg);
@@ -321,6 +342,8 @@ or the context ends.
 
 | `msg.kind` | Carries |
 | --- | --- |
+| `NIMFFI_MSG_REPLY` | `id` is the request; `ret_code` and `payload` are its result. |
+| `NIMFFI_MSG_STALE_WARN` | `id` is a request still running after `aux` milliseconds. |
 | `NIMFFI_MSG_EVENT` | `name_id` says which event, `payload` is the CBOR of its payload. |
 | `NIMFFI_MSG_NOT_RESPONDING` | `aux` is the reason: the FFI thread's heartbeat stalled, or the event queue overflowed. |
 | `NIMFFI_MSG_RESPONDING` | The heartbeat resumed. |
@@ -332,7 +355,8 @@ or the context ends.
 - An event is named by a number, not a string: `name_id` is the FNV-1a 64 hash
   of the wire name. The generated bindings carry one constant per event, and two
   names that collide stop the compilation.
-- Messages arrive in the order the library produced them.
+- Messages arrive in the order the library produced them, across replies and
+  events, so no kind can starve another.
 - Liveness is checked inside `poll`, on the host's thread, so a wedged FFI thread
   is reported while the host polls, with no watchdog thread in the library.
 - When the event queue overflows (`-d:ffiEventQueueCapacity`, 1024) the host has
