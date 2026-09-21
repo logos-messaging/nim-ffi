@@ -213,13 +213,21 @@ proc freeLib[T](ctx: ptr FFIContext[T]) {.gcsafe.} =
 const RecycledReason =
   "FFI context was recycled before this request ran; the caller is gone"
 
-proc rejectQueuedRequests[T](ctx: ptr FFIContext[T]) =
-  ## Fails every queued request instead of dispatching it: running one after the
-  ## slot is reused would run it against the library of the next owner.
+proc rejectQueuedRequests[T](ctx: ptr FFIContext[T], ownerGen: uint) =
+  ## Fails every queued request of `ownerGen` instead of dispatching it: running
+  ## one after the slot is reused would run it against the library of the next
+  ## owner. A request stamped with a later claim belongs to the owner that has
+  ## just taken this slot, so it goes back on the queue to be served.
   var request = ctx.reqQueueBank.mergeQueues()
   while not request.isNil():
     let nextRequest = request[].next # read before the reply queue relinks it
-    if request[].generation != ctx.currentGeneration():
+    if request[].generation > ownerGen:
+      request[].next = nil
+      if ctx.reqQueueBank.pushRequest(request) != QueueFull:
+        request = nextRequest
+        continue
+    elif request[].generation < ownerGen:
+      # An owner older than the one being recycled: its caller is long gone.
       ctx[].outbound.retireRequest(request)
       request = nextRequest
       continue
@@ -272,7 +280,8 @@ proc resetForNextOwner[T](ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]
   ctx[].handles.releaseAll()
   # Same reason: the sticky overflow flag would reject every request of the next owner, ctor included.
   ctx.eventQueueStuck.store(false)
-  rejectQueuedRequests(ctx)
+  # Still claimed by the owner being recycled, so its own requests are the ones to fail.
+  rejectQueuedRequests(ctx, ctx.currentGeneration())
   # The owner's poller gets `RET_CLOSED`; what it did not collect is dropped, the
   # rejections above included, so the next owner never sees a message of this one.
   closeOutbound(ctx[].outbound, ctx.currentGeneration())
@@ -416,9 +425,12 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
         continue
 
       # A submit that read `Active` just before the recycle can still land here.
-      # Fail it rather than run it against the library of the next owner.
+      # Fail it rather than run it against the library of the next owner. Read the
+      # claim first: a slot handed to a new owner between these two loads must not
+      # have that owner's first request answered as if it were the old one's.
+      let ownerGen = ctx.currentGeneration()
       if ctx.lifecycle.load() != CtxLifecycle.Active:
-        rejectQueuedRequests(ctx)
+        rejectQueuedRequests(ctx, ownerGen)
         discard await ctx.reqSignal.wait().withTimeout(chronos.milliseconds(100))
         continue
 
