@@ -9,7 +9,8 @@ import
   ./types_ir,
   ./consts,
   ./build_paths,
-  ../ret_codes
+  ../ret_codes,
+  ../ffi_msg
 
 ## Fixed 64-bit wire type for any Nim `ptr T`/`pointer` (mirrors CppPtrType).
 const CPtrType* = "uint64_t"
@@ -399,83 +400,263 @@ proc buildReqParams(
       assigns.add("    ffi_req." & ep.name & " = *" & ep.name & ";")
   return (params, assigns)
 
-proc evNames(
-    libType, libName: string, ev: FFIEventMeta
-): tuple[fnType, boxType, tramp, regName: string] =
-  let pascal = capitalizeFirstLetter(ev.nimProcName)
-  let snake = camelToSnakeCase(ev.nimProcName)
-  return (
-    libType & pascal & "Fn",
-    libType & pascal & "Box",
-    libName & "_" & snake & "_trampoline",
-    libName & "_ctx_add_" & snake & "_listener",
-  )
+const
+  PollDoc =
+    """Take the next message of `ctx` out of the library: an event, a liveness report
+or the end of the context. `*msg` is set to a message the library owns, or to NULL.
+`timeout_ms` 0 never blocks; a negative value waits until a message arrives or
+the context closes.
+Returns NIMFFI_RET_OK (`*msg` is set), NIMFFI_RET_TIMEOUT (nothing arrived in
+time), NIMFFI_RET_CLOSED (the context was destroyed or recycled; `*msg` is a
+NIMFFI_MSG_CLOSED whose ret_code is NIMFFI_RET_OK, or NIMFFI_RET_ERR with UTF-8
+text in the payload saying why), NIMFFI_RET_INVALID_CTX (`ctx` is NULL, forged
+or already destroyed), NIMFFI_RET_BUSY (another thread is inside poll on this
+context) or NIMFFI_RET_ERR (`msg` is NULL).
+Lifetime: the message and its payload belong to the library and stay valid until the next
+poll on the same context, whatever that poll returns. Never free it, and decode
+it before polling again.
+Single consumer: one thread at a time polls a context. Any host thread will do;
+it needs no setup."""
 
-proc emitEventMachinery(
+  PollFdDoc =
+    """A handle to wait on instead of blocking in poll, for a host with an event loop
+of its own. It is ready while a message waits or the context is closed.
+Linux: an epoll fd. macOS/BSD: a kqueue fd. Wait until it is readable with
+poll(2), select(2) or the host's own epoll/kqueue; never read from it.
+Windows: an Event HANDLE (cast the returned value) that can only be waited on,
+with WaitForSingleObject or WaitForMultipleObjects.
+Once it is ready, poll with a timeout of 0 until NIMFFI_RET_TIMEOUT.
+A stalled FFI thread is only noticed inside poll, so the handle does not become
+ready for it: a host that wants NIMFFI_MSG_NOT_RESPONDING also polls about once
+a second.
+Returns -1 on failure. Each call returns a new handle, which the caller owns
+and closes with close(), or CloseHandle on Windows."""
+
+func evSnake(ev: FFIEventMeta): string =
+  return camelToSnakeCase(ev.nimProcName)
+
+func evConstName(libName: string, ev: FFIEventMeta): string =
+  return libName.toUpperAscii() & "_EVT_" & evSnake(ev).toUpperAscii()
+
+func evDecodeName(libName: string, ev: FFIEventMeta): string =
+  return libName & "_decode_" & evSnake(ev)
+
+proc emitApiIndex(
     lines: var seq[string],
-    reg: CTypeReg,
-    libType, libName: string,
+    ctxType, libType, libName: string,
+    replyProcs: seq[FFIProcMeta],
     events: seq[FFIEventMeta],
 ) =
-  if events.len == 0:
-    return
-  lines.add("/* Event listener machinery */")
+  lines.add("/* ============================================================ */")
+  lines.add("/* " & alignLeft(libName & " API", 60) & " */")
+  lines.add("/* ============================================================ */")
+  lines.add("/* Context: " & libName & "_ctx_create(), " & libName & "_ctx_destroy().")
+  lines.add(" *")
+  lines.add(" * Requests. The reply arrives once, through the callback given to the")
+  lines.add(" * call, on the library's FFI thread:")
+  for m in replyProcs:
+    let stripped = stripLibPrefix(m.procName, libName)
+    var name = libName & "_ctx_" & stripped
+    if m.isStatic():
+      name = libName & "_static_" & stripped
+    lines.add(" *   " & name & "()")
+  lines.add(" *")
+  lines.add(
+    " * Messages from the library. The binding starts no thread: the host takes"
+  )
+  lines.add(
+    " * them out with " & libName & "_ctx_dispatch_next(), which calls the matching"
+  )
+  lines.add(" * entry of " & libType & "Handlers on the calling thread:")
   for ev in events:
-    let n = evNames(libType, libName, ev)
+    lines.add(
+      " *   " & evSnake(ev) & "(const " & ev.payloadTypeName & "*)  " &
+        evConstName(libName, ev)
+    )
+  lines.add(" *   not_responding, responding, closed")
+  lines.add(" */")
+  lines.add("typedef struct {")
+  lines.add("    void* ptr;")
+  lines.add("} " & ctxType & ";")
+  lines.add("")
+
+proc emitEventDecoders(
+    lines: var seq[string], reg: CTypeReg, libName: string, events: seq[FFIEventMeta]
+) =
+  ## Per event: the name id constant and a decoder of the bare payload.
+  for ev in events:
+    let constName = evConstName(libName, ev)
     let payC = ev.payloadTypeName
-    let payFree = freeStmt(reg, payC, "payload")
+    let ownsHeap = freeStmt(reg, payC, "*out").len > 0
+    let freeFn = libName & "_free_" & payC
+    lines.add(renderBlockDocComment(ev.doc))
     lines.add(
-      "typedef void (*" & n.fnType & ")(const " & payC & "* evt, void* user_data);"
+      "#define " & constName & " " & nameIdLiteral(ev.wireName) & "ULL  /* \"" &
+        ev.wireName & "\" */"
     )
+    lines.add("/* Decodes the payload of a " & constName & " message.")
+    lines.add(" * Returns 0, or -1 when `msg` is not that event or does not decode.")
+    if ownsHeap:
+      lines.add(" * On success the caller frees `out` with " & freeFn & "(). */")
+    else:
+      lines.add(" * `out` owns no heap memory. */")
     lines.add(
-      "typedef struct { " & n.fnType & " fn; void* user_data; } " & n.boxType & ";"
+      "static inline int " & evDecodeName(libName, ev) & "(const NimFfiMsg* msg, " & payC &
+        "* out) {"
     )
+    lines.add("    if (!msg || !out) return -1;")
     lines.add(
-      "static void " & n.tramp & "(int ret, const char* msg, size_t len, void* ud) {"
+      "    if (msg->kind != NIMFFI_MSG_EVENT || msg->name_id != " & constName &
+        ") return -1;"
     )
-    lines.add("    if (!ud || ret != 0 || !msg || len == 0) return;")
-    lines.add("    " & n.boxType & "* box = (" & n.boxType & "*)ud;")
-    lines.add("    if (!box->fn) return;")
+    lines.add("    memset(out, 0, sizeof(*out));")
     lines.add("    CborParser parser;")
     lines.add("    CborValue it;")
     lines.add(
-      "    if (cbor_parser_init((const uint8_t*)msg, len, 0, &parser, &it) != CborNoError) return;"
+      "    if (cbor_parser_init(msg->payload, msg->len, 0, &parser, &it) != CborNoError) return -1;"
     )
-    lines.add("    if (!cbor_value_is_map(&it)) return;")
-    lines.add("    CborValue payloadField;")
-    lines.add(
-      "    if (cbor_value_map_find_value(&it, \"payload\", &payloadField) != CborNoError) return;"
-    )
-    lines.add("    " & payC & " payload;")
-    lines.add("    memset(&payload, 0, sizeof(payload));")
-    lines.add(
-      "    if (" & decFn(reg, payC) & "(&payloadField, &payload) != CborNoError) return;"
-    )
-    lines.add("    box->fn(&payload, box->user_data);")
-    if payFree.len > 0:
-      lines.add("    " & payFree)
+    lines.add("    if (" & decFn(reg, payC) & "(&it, out) != CborNoError) {")
+    # Reclaim fields a partial decode allocated (out is zeroed).
+    if ownsHeap:
+      lines.add("        " & freeFn & "(out);")
+    lines.add("        return -1;")
+    lines.add("    }")
+    lines.add("    return 0;")
     lines.add("}")
     lines.add("")
 
-proc emitContextStruct(
-    lines: var seq[string], ctxType: string, events: seq[FFIEventMeta]
+proc emitHandlers(
+    lines: var seq[string],
+    reg: CTypeReg,
+    ctxType, libType, libName: string,
+    events: seq[FFIEventMeta],
 ) =
-  lines.add("/* ============================================================ */")
-  lines.add("/* High-level context wrapper                                   */")
-  lines.add("/* ============================================================ */")
-  if events.len > 0:
-    lines.add("typedef struct {")
-    lines.add("    uint64_t id;")
-    lines.add("    void* box;")
-    lines.add("} " & ctxType & "Listener;")
-    lines.add("")
+  ## The one place that lists everything the library sends, and the loop over it.
+  let handlersType = libType & "Handlers"
+  lines.add(
+    "/* Everything " & libName & " can send. A NULL entry means \"ignore\". Each"
+  )
+  lines.add(
+    " * handler runs on the thread that dispatches; what it is handed belongs to the"
+  )
+  lines.add(" * binding and is valid only until it returns. */")
   lines.add("typedef struct {")
-  lines.add("    void* ptr;")
-  if events.len > 0:
-    lines.add("    " & ctxType & "Listener* listeners;")
-    lines.add("    size_t listeners_len;")
-    lines.add("    size_t listeners_cap;")
-  lines.add("} " & ctxType & ";")
+  for ev in events:
+    lines.add(renderBlockDocComment(ev.doc, "    "))
+    lines.add(
+      "    void (*" & evSnake(ev) & ")(const " & ev.payloadTypeName &
+        "* ev, void* user_data);"
+    )
+  lines.add(
+    "    /* `reason` is a NIMFFI_NOT_RESPONDING_*: the FFI thread stalled, or the event"
+  )
+  lines.add("     * queue overflowed and requests are refused from now on. */")
+  lines.add("    void (*not_responding)(uint64_t reason, void* user_data);")
+  lines.add("    /* The FFI thread's heartbeat resumed. */")
+  lines.add("    void (*responding)(void* user_data);")
+  lines.add(
+    "    /* The context is gone. `ret` is NIMFFI_RET_OK, or NIMFFI_RET_ERR with `reason`"
+  )
+  lines.add(
+    "     * (a NUL-terminated copy, NULL when none) saying why it was quarantined. */"
+  )
+  lines.add("    void (*closed)(int ret, const char* reason, void* user_data);")
+  lines.add("    void* user_data;")
+  lines.add("} " & handlersType & ";")
+  lines.add("")
+
+  lines.add(
+    "/* Decodes `msg` fully, then calls its handler, then frees what it decoded."
+  )
+  lines.add(
+    " * Returns 0, also for an event this header does not know, or -1 on a decode"
+  )
+  lines.add(" * error or an unknown message kind. */")
+  lines.add(
+    "static inline int " & libName & "_ctx_dispatch(" & ctxType &
+      "* ctx, const NimFfiMsg* msg, const " & handlersType & "* handlers) {"
+  )
+  lines.add("    (void)ctx;")
+  lines.add("    if (!msg) return -1;")
+  lines.add("    switch (msg->kind) {")
+  lines.add("    case NIMFFI_MSG_EVENT:")
+  for ev in events:
+    let payC = ev.payloadTypeName
+    let payFree = freeStmt(reg, payC, "ev")
+    lines.add("        if (msg->name_id == " & evConstName(libName, ev) & ") {")
+    lines.add("            " & payC & " ev;")
+    lines.add(
+      "            if (" & evDecodeName(libName, ev) & "(msg, &ev) != 0) return -1;"
+    )
+    lines.add(
+      "            if (handlers && handlers->" & evSnake(ev) & ") handlers->" &
+        evSnake(ev) & "(&ev, handlers->user_data);"
+    )
+    if payFree.len > 0:
+      lines.add("            " & payFree)
+    lines.add("            return 0;")
+    lines.add("        }")
+  lines.add("        return 0;")
+  lines.add("    case NIMFFI_MSG_NOT_RESPONDING:")
+  lines.add(
+    "        if (handlers && handlers->not_responding) handlers->not_responding(msg->aux, handlers->user_data);"
+  )
+  lines.add("        return 0;")
+  lines.add("    case NIMFFI_MSG_RESPONDING:")
+  lines.add(
+    "        if (handlers && handlers->responding) handlers->responding(handlers->user_data);"
+  )
+  lines.add("        return 0;")
+  lines.add("    case NIMFFI_MSG_CLOSED: {")
+  lines.add("        if (!handlers || !handlers->closed) return 0;")
+  lines.add("        char* reason = NULL;")
+  lines.add(
+    "        if (msg->len > 0) reason = nimffi_dup_cstr_n((const char*)msg->payload, msg->len);"
+  )
+  lines.add(
+    "        handlers->closed((int)msg->ret_code, reason, handlers->user_data);"
+  )
+  lines.add("        free(reason);")
+  lines.add("        return 0;")
+  lines.add("    }")
+  lines.add("    default:")
+  lines.add("        return -1;")
+  lines.add("    }")
+  lines.add("}")
+  lines.add("")
+
+  lines.add("/* One " & libName & "_poll() and the dispatch of what it returned.")
+  lines.add(
+    " * Returns the poll code (NIMFFI_RET_OK, _TIMEOUT, _CLOSED after the `closed`"
+  )
+  lines.add(
+    " * handler ran, _INVALID_CTX, _BUSY, _ERR), or -1 when the message did not"
+  )
+  lines.add(
+    " * dispatch. `ctx` must stay alive for the whole call: stop dispatching before"
+  )
+  lines.add(" * " & libName & "_ctx_destroy(). */")
+  lines.add(
+    "static inline int " & libName & "_ctx_dispatch_next(" & ctxType &
+      "* ctx, int32_t timeout_ms, const " & handlersType & "* handlers) {"
+  )
+  lines.add("    if (!ctx) return NIMFFI_RET_INVALID_CTX;")
+  lines.add("    const NimFfiMsg* msg = NULL;")
+  lines.add("    int rc = " & libName & "_poll(ctx->ptr, timeout_ms, &msg);")
+  lines.add("    if (rc != NIMFFI_RET_OK && rc != NIMFFI_RET_CLOSED) return rc;")
+  lines.add("    if (" & libName & "_ctx_dispatch(ctx, msg, handlers) != 0) return -1;")
+  lines.add("    return rc;")
+  lines.add("}")
+  lines.add("")
+  lines.add(
+    "/* See " & libName & "_poll_fd(): the caller owns and closes the handle. */"
+  )
+  lines.add(
+    "static inline intptr_t " & libName & "_ctx_poll_fd(const " & ctxType & "* ctx) {"
+  )
+  lines.add("    if (!ctx) return -1;")
+  lines.add("    return " & libName & "_poll_fd(ctx->ptr);")
+  lines.add("}")
   lines.add("")
 
 proc emitCallBox(lines: var seq[string], fnType, boxType: string) =
@@ -606,10 +787,7 @@ proc emitConstructors(
     lines.add("")
 
 proc emitDestructor(
-    lines: var seq[string],
-    ctxType, libName: string,
-    dtor: Option[FFIProcMeta],
-    events: seq[FFIEventMeta],
+    lines: var seq[string], ctxType, libName: string, dtor: Option[FFIProcMeta]
 ) =
   if dtor.isSome():
     lines.add(renderBlockDocComment(dtor.get().doc))
@@ -621,80 +799,8 @@ proc emitDestructor(
       "    if (ctx->ptr) { rc = " & dtor.get().procName &
         "(ctx->ptr); ctx->ptr = NULL; }"
     )
-  if events.len > 0:
-    # A failed teardown leaves the worker threads live (ffi_context.nim:
-    # stopAndJoinThreads), and they still hold each box as callback user_data.
-    # Leaking a box beats handing a running event thread a dangling pointer.
-    lines.add("    if (rc == NIMFFI_RET_OK) {")
-    lines.add(
-      "        for (size_t i = 0; i < ctx->listeners_len; i++) free(ctx->listeners[i].box);"
-    )
-    lines.add("    }")
-    lines.add("    free(ctx->listeners);")
   lines.add("    free(ctx);")
   lines.add("    return rc;")
-  lines.add("}")
-  lines.add("")
-
-proc emitListenerApi(
-    lines: var seq[string], ctxType, libType, libName: string, events: seq[FFIEventMeta]
-) =
-  if events.len == 0:
-    return
-  for ev in events:
-    let n = evNames(libType, libName, ev)
-    lines.add(renderBlockDocComment(ev.doc))
-    lines.add(
-      "static inline uint64_t " & n.regName & "(" & ctxType & "* ctx, " & n.fnType &
-        " fn, void* user_data) {"
-    )
-    lines.add(
-      "    " & n.boxType & "* box = (" & n.boxType & "*)malloc(sizeof(" & n.boxType &
-        "));"
-    )
-    lines.add("    if (!box) return 0;")
-    lines.add("    box->fn = fn;")
-    lines.add("    box->user_data = user_data;")
-    lines.add(
-      "    uint64_t id = " & libName & "_add_event_listener(ctx->ptr, \"" & ev.wireName &
-        "\", " & n.tramp & ", box);"
-    )
-    lines.add("    if (id == 0) { free(box); return 0; }")
-    lines.add("    if (ctx->listeners_len == ctx->listeners_cap) {")
-    lines.add("        size_t ncap = ctx->listeners_cap ? ctx->listeners_cap * 2 : 4;")
-    lines.add(
-      "        " & ctxType & "Listener* grown = (" & ctxType &
-        "Listener*)realloc(ctx->listeners, ncap * sizeof(" & ctxType & "Listener));"
-    )
-    lines.add(
-      "        if (!grown) { " & libName &
-        "_remove_event_listener(ctx->ptr, id); free(box); return 0; }"
-    )
-    lines.add("        ctx->listeners = grown;")
-    lines.add("        ctx->listeners_cap = ncap;")
-    lines.add("    }")
-    lines.add("    ctx->listeners[ctx->listeners_len].id = id;")
-    lines.add("    ctx->listeners[ctx->listeners_len].box = box;")
-    lines.add("    ctx->listeners_len++;")
-    lines.add("    return id;")
-    lines.add("}")
-    lines.add("")
-  lines.add(renderBlockDocComment(CtxRemoveListenerDoc))
-  lines.add(
-    "static inline bool " & libName & "_ctx_remove_event_listener(" & ctxType &
-      "* ctx, uint64_t id) {"
-  )
-  lines.add("    if (id == 0) return false;")
-  lines.add("    int rc = " & libName & "_remove_event_listener(ctx->ptr, id);")
-  lines.add("    for (size_t i = 0; i < ctx->listeners_len; i++) {")
-  lines.add("        if (ctx->listeners[i].id == id) {")
-  lines.add("            free(ctx->listeners[i].box);")
-  lines.add("            ctx->listeners[i] = ctx->listeners[ctx->listeners_len - 1];")
-  lines.add("            ctx->listeners_len--;")
-  lines.add("            break;")
-  lines.add("        }")
-  lines.add("    }")
-  lines.add("    return rc == 0;")
   lines.add("}")
   lines.add("")
 
@@ -863,8 +969,8 @@ func constDeclLines(consts: seq[FFIConstMeta]): seq[string] =
   return lines
 
 func generateCPreludeHeader*(): string =
-  ## The library-agnostic `nim_ffi_prelude.h`, emitted verbatim.
-  return HeaderPreludeTpl & "\n"
+  ## The library-agnostic `nim_ffi_prelude.h`.
+  return HeaderPreludeTpl.replace("{{MSG_DECL}}", cMsgDecl()) & "\n"
 
 func generateCCborHeader*(): string =
   ## The library-agnostic `nim_ffi_cbor.h`.
@@ -934,14 +1040,12 @@ proc generateCLibHeader*(
       )
     of FFIKind.DTOR:
       lines.add("int " & p.procName & "(void* ctx);")
+  lines.add(renderBlockDocComment(PollDoc))
   lines.add(
-    "uint64_t " & libName & "_add_event_listener(void* ctx, const char* event_name, " &
-      "FFICallback callback, void* user_data);"
+    "int " & libName & "_poll(void* ctx, int32_t timeout_ms, const NimFfiMsg** msg);"
   )
-  lines.add(renderBlockDocComment(RemoveListenerDoc))
-  lines.add(
-    "int " & libName & "_remove_event_listener(void* ctx, uint64_t listener_id);"
-  )
+  lines.add(renderBlockDocComment(PollFdDoc))
+  lines.add("intptr_t " & libName & "_poll_fd(void* ctx);")
   lines.add(renderBlockDocComment(ShutdownDoc))
   lines.add("int " & libName & "_shutdown(void);")
   lines.add("")
@@ -974,11 +1078,11 @@ proc generateCLibHeader*(
       )
   lines.add("")
 
-  emitEventMachinery(lines, reg, libType, libName, events)
-  emitContextStruct(lines, ctxType, events)
+  emitApiIndex(lines, ctxType, libType, libName, classified.replyProcs(), events)
   emitConstructors(lines, reg, ctxType, libType, libName, ctors)
-  emitDestructor(lines, ctxType, libName, classified.dtor, events)
-  emitListenerApi(lines, ctxType, libType, libName, events)
+  emitDestructor(lines, ctxType, libName, classified.dtor)
+  emitEventDecoders(lines, reg, libName, events)
+  emitHandlers(lines, reg, ctxType, libType, libName, events)
   for m in classified.replyProcs():
     emitProcWrapper(lines, reg, ctxType, libType, libName, m)
 

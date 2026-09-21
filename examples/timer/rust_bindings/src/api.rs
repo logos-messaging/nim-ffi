@@ -1,5 +1,7 @@
 use std::os::raw::{c_char, c_int, c_void};
 use std::slice;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -44,6 +46,14 @@ const NIMFFI_RET_ERR: c_int = 1;
 const NIMFFI_RET_MISSING_CALLBACK: c_int = 2;
 #[allow(dead_code)]
 const NIMFFI_RET_STALE_WARN: c_int = 3;
+#[allow(dead_code)]
+const NIMFFI_RET_TIMEOUT: c_int = 4;
+#[allow(dead_code)]
+const NIMFFI_RET_CLOSED: c_int = 5;
+#[allow(dead_code)]
+const NIMFFI_RET_INVALID_CTX: c_int = 6;
+#[allow(dead_code)]
+const NIMFFI_RET_BUSY: c_int = 7;
 
 unsafe extern "C" fn on_result(
     ret: c_int,
@@ -113,52 +123,150 @@ where
     }
 }
 
-struct OnEchoFiredHandler {
-    f: Box<dyn Fn(&EchoEvent) + Send + Sync>,
+// `NimFfiMsg.name_id` of each event: FNV-1a 64 of its wire name.
+pub const MY_TIMER_EVT_ON_ECHO_FIRED: u64 = 0xcdfdf536356b2a2b; // "on_echo_fired"
+pub const MY_TIMER_EVT_ON_JOB_SCHEDULED: u64 = 0xd6ac432a40b9a85c; // "on_job_scheduled"
+pub use super::ffi::{NIMFFI_NOT_RESPONDING_EVENT_QUEUE_FULL, NIMFFI_NOT_RESPONDING_HEARTBEAT};
+
+/// Everything `my_timer` sends to the host: its events, the liveness reports
+/// and the end of the context. The dispatch thread of a context decodes each
+/// message into one of these before a listener runs.
+#[derive(Debug, Clone)]
+pub enum MyTimerMessage {
+    /// Fired by `myTimerEcho` once the reply is ready.
+    OnEchoFired(EchoEvent),
+    /// Fired by `myTimerSchedule`. Its two params ride the wire as a synthesised
+    /// `OnJobScheduledPayload` envelope, so the foreign side decodes one typed value.
+    OnJobScheduled(OnJobScheduledPayload),
+    /// The library stopped making progress. `reason` is a `NIMFFI_NOT_RESPONDING_*`:
+    /// the FFI thread stalled, or the event queue overflowed and requests are
+    /// refused from now on.
+    NotResponding { reason: u64 },
+    /// The FFI thread's heartbeat resumed.
+    Responding,
+    /// The context is gone; always the last message. `ok` is false when the
+    /// library could not recycle the context, and `reason` then says why.
+    Closed { ok: bool, reason: String },
+    /// Not sent by the library: a message this binding could not decode, such
+    /// as an event of a newer library.
+    Undecodable { kind: u32, name_id: u64, error: String },
 }
 
-unsafe extern "C" fn on_echo_fired_trampoline(
-    ret: c_int, msg: *const c_char, len: usize, ud: *mut c_void,
-) {
-    if ud.is_null() || ret != 0 || msg.is_null() || len == 0 {
-        return;
-    }
-    let h = &*(ud as *const OnEchoFiredHandler);
-    let bytes = slice::from_raw_parts(msg as *const u8, len);
-    #[derive(serde::Deserialize)]
-    struct Envelope { payload: EchoEvent }
-    if let Ok(env) = ciborium::de::from_reader::<Envelope, _>(bytes) {
-        (h.f)(&env.payload);
-    }
+unsafe fn decode_message(msg: &ffi::NimFfiMsg) -> MyTimerMessage {
+    let bytes: &[u8] = if msg.payload.is_null() || msg.len == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(msg.payload, msg.len)
+    };
+    let decoded = match msg.kind {
+        ffi::NIMFFI_MSG_EVENT => match msg.name_id {
+            MY_TIMER_EVT_ON_ECHO_FIRED => decode_cbor(bytes).map(MyTimerMessage::OnEchoFired),
+            MY_TIMER_EVT_ON_JOB_SCHEDULED => decode_cbor(bytes).map(MyTimerMessage::OnJobScheduled),
+            _ => Err("unknown event".to_string()),
+        },
+        ffi::NIMFFI_MSG_NOT_RESPONDING => Ok(MyTimerMessage::NotResponding { reason: msg.aux }),
+        ffi::NIMFFI_MSG_RESPONDING => Ok(MyTimerMessage::Responding),
+        ffi::NIMFFI_MSG_CLOSED => Ok(MyTimerMessage::Closed {
+            ok: msg.ret_code == NIMFFI_RET_OK,
+            reason: String::from_utf8_lossy(bytes).into_owned(),
+        }),
+        _ => Err("unknown message kind".to_string()),
+    };
+    decoded.unwrap_or_else(|error| MyTimerMessage::Undecodable {
+        kind: msg.kind,
+        name_id: msg.name_id,
+        error,
+    })
 }
 
-struct OnJobScheduledHandler {
-    f: Box<dyn Fn(&OnJobScheduledPayload) + Send + Sync>,
-}
+type Handler = Arc<dyn Fn(&MyTimerMessage) + Send + Sync>;
 
-unsafe extern "C" fn on_job_scheduled_trampoline(
-    ret: c_int, msg: *const c_char, len: usize, ud: *mut c_void,
-) {
-    if ud.is_null() || ret != 0 || msg.is_null() || len == 0 {
-        return;
-    }
-    let h = &*(ud as *const OnJobScheduledHandler);
-    let bytes = slice::from_raw_parts(msg as *const u8, len);
-    #[derive(serde::Deserialize)]
-    struct Envelope { payload: OnJobScheduledPayload }
-    if let Ok(env) = ciborium::de::from_reader::<Envelope, _>(bytes) {
-        (h.f)(&env.payload);
-    }
-}
-
+/// Returned by every `add_*_listener`; pass it to `remove_event_listener`.
 #[derive(Debug, Clone, Copy)]
 pub struct ListenerHandle { pub id: u64 }
+
+// What a context shares with its dispatch thread.
+struct Inner {
+    ptr: *mut c_void,
+    listeners: Mutex<Vec<(u64, Handler)>>,
+    next_id: AtomicU64,
+    stop: AtomicBool,
+}
+
+// SAFETY: `ptr` is a token the library validates on every call, never
+// dereferenced here. `my_timer_poll` admits one consumer per context and the dispatch thread
+// thread is the only poller; everything else in `Inner` is already Sync.
+unsafe impl Send for Inner {}
+unsafe impl Sync for Inner {}
+
+impl Inner {
+    // Handlers run with the lock released, so a panic cannot poison it; recover anyway.
+    fn lock(&self) -> MutexGuard<'_, Vec<(u64, Handler)>> {
+        self.listeners.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn add(&self, handler: Handler) -> ListenerHandle {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.lock().push((id, handler));
+        ListenerHandle { id }
+    }
+
+    fn remove(&self, id: u64) -> bool {
+        let mut listeners = self.lock();
+        let before = listeners.len();
+        listeners.retain(|(lid, _)| *lid != id);
+        listeners.len() != before
+    }
+
+    fn dispatch(&self, message: &MyTimerMessage) {
+        // Cloned out so a handler may add or remove listeners.
+        let handlers: Vec<Handler> = self.lock().iter().map(|(_, h)| h.clone()).collect();
+        for handler in handlers {
+            // A panicking handler must not end the dispatch thread; the panic hook already reported it.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(message)));
+        }
+    }
+}
+
+// The context's only poller: takes each message out, decodes it and runs the listeners.
+fn dispatch_loop(inner: Arc<Inner>) {
+    loop {
+        // The library owns the message; it is valid until the next poll.
+        let mut msg: *const ffi::NimFfiMsg = std::ptr::null();
+        // Once asked to stop, only take what already waits: a teardown's last messages.
+        let stopping = inner.stop.load(Ordering::Acquire);
+        let timeout_ms = if stopping { 0 } else { 250 };
+        let ret = unsafe { ffi::my_timer_poll(inner.ptr, timeout_ms, &mut msg) };
+        match ret {
+            NIMFFI_RET_OK | NIMFFI_RET_CLOSED if !msg.is_null() => {
+                let message = unsafe { decode_message(&*msg) };
+                inner.dispatch(&message);
+                if ret == NIMFFI_RET_CLOSED {
+                    return;
+                }
+                continue;
+            }
+            NIMFFI_RET_TIMEOUT => {}
+            NIMFFI_RET_INVALID_CTX => {
+                // The context ended between two polls, so its CLOSED message was never seen.
+                inner.dispatch(&MyTimerMessage::Closed { ok: true, reason: String::new() });
+                return;
+            }
+            // NIMFFI_RET_BUSY, NIMFFI_RET_ERR: try again, without spinning.
+            _ => std::thread::sleep(Duration::from_millis(10)),
+        }
+        if stopping {
+            return;
+        }
+    }
+}
 
 /// High-level context for `MyTimer`.
 pub struct MyTimerCtx {
     ptr: *mut c_void,
     timeout: Duration,
-    listeners: std::sync::Mutex<std::collections::HashMap<u64, Box<dyn std::any::Any + Send>>>,
+    inner: Arc<Inner>,
+    dispatcher: Option<std::thread::JoinHandle<()>>,
 }
 
 // SAFETY: The `ptr` field points to an FFIContext owned by the Nim runtime.
@@ -175,9 +283,17 @@ unsafe impl Sync for MyTimerCtx {}
 
 impl Drop for MyTimerCtx {
     fn drop(&mut self) {
+        // Before the dispatch loop stops: the teardown may still send events, and it wakes a blocked poll.
         if !self.ptr.is_null() {
             unsafe { ffi::my_timer_destroy(self.ptr); }
             self.ptr = std::ptr::null_mut();
+        }
+        self.inner.stop.store(true, Ordering::Release);
+        if let Some(dispatcher) = self.dispatcher.take() {
+            // A listener that drops the context runs on the dispatch thread: it cannot join itself.
+            if dispatcher.thread().id() != std::thread::current().id() {
+                let _ = dispatcher.join();
+            }
         }
     }
 }
@@ -193,7 +309,7 @@ impl MyTimerCtx {
         })?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
         let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
-        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })
+        Self::start(addr as *mut c_void, timeout)
     }
 
     /// Creates the FFIContext + MyTimer; async via chronos.
@@ -206,23 +322,24 @@ impl MyTimerCtx {
         }).await?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
         let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
-        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })
+        Self::start(addr as *mut c_void, timeout)
     }
 
-    fn add_listener_inner(
-        &self,
-        event_name: *const c_char,
-        callback: ffi::FFICallback,
-        raw: *mut c_void,
-        owned: Box<dyn std::any::Any + Send>,
-    ) -> ListenerHandle {
-        let id = unsafe {
-            ffi::my_timer_add_event_listener(self.ptr, event_name, callback, raw)
-        };
-        if id != 0 {
-            self.listeners.lock().unwrap().insert(id, owned);
-        }
-        ListenerHandle { id }
+    fn start(ptr: *mut c_void, timeout: Duration) -> Result<Self, String> {
+        let inner = Arc::new(Inner {
+            ptr,
+            listeners: Mutex::new(Vec::new()),
+            next_id: AtomicU64::new(1),
+            stop: AtomicBool::new(false),
+        });
+        // Built first: if the thread cannot start, dropping it destroys the context.
+        let mut ctx = Self { ptr, timeout, inner: inner.clone(), dispatcher: None };
+        let dispatcher = std::thread::Builder::new()
+            .name("my_timer-dispatch".into())
+            .spawn(move || dispatch_loop(inner))
+            .map_err(|e| e.to_string())?;
+        ctx.dispatcher = Some(dispatcher);
+        Ok(ctx)
     }
 
     /// Fired by `myTimerEcho` once the reply is ready.
@@ -231,9 +348,9 @@ impl MyTimerCtx {
     pub fn add_on_echo_fired_listener<F>(&self, handler: F) -> ListenerHandle
     where F: Fn(&EchoEvent) + Send + Sync + 'static,
     {
-        let owned: Box<OnEchoFiredHandler> = Box::new(OnEchoFiredHandler { f: Box::new(handler) });
-        let raw = &*owned as *const OnEchoFiredHandler as *mut c_void;
-        self.add_listener_inner(b"on_echo_fired\0".as_ptr() as *const c_char, on_echo_fired_trampoline, raw, owned)
+        self.inner.add(Arc::new(move |m: &MyTimerMessage| {
+            if let MyTimerMessage::OnEchoFired(payload) = m { handler(payload) }
+        }))
     }
 
     /// Fired by `myTimerSchedule`. Its two params ride the wire as a synthesised
@@ -243,23 +360,52 @@ impl MyTimerCtx {
     pub fn add_on_job_scheduled_listener<F>(&self, handler: F) -> ListenerHandle
     where F: Fn(&OnJobScheduledPayload) + Send + Sync + 'static,
     {
-        let owned: Box<OnJobScheduledHandler> = Box::new(OnJobScheduledHandler { f: Box::new(handler) });
-        let raw = &*owned as *const OnJobScheduledHandler as *mut c_void;
-        self.add_listener_inner(b"on_job_scheduled\0".as_ptr() as *const c_char, on_job_scheduled_trampoline, raw, owned)
+        self.inner.add(Arc::new(move |m: &MyTimerMessage| {
+            if let MyTimerMessage::OnJobScheduled(payload) = m { handler(payload) }
+        }))
+    }
+
+    /// Register a listener for `NotResponding`; it receives the reason.
+    pub fn add_not_responding_listener<F>(&self, handler: F) -> ListenerHandle
+    where F: Fn(u64) + Send + Sync + 'static,
+    {
+        self.inner.add(Arc::new(move |m: &MyTimerMessage| {
+            if let MyTimerMessage::NotResponding { reason } = m { handler(*reason) }
+        }))
+    }
+
+    /// Register a listener for `Responding`.
+    pub fn add_responding_listener<F>(&self, handler: F) -> ListenerHandle
+    where F: Fn() + Send + Sync + 'static,
+    {
+        self.inner.add(Arc::new(move |m: &MyTimerMessage| {
+            if let MyTimerMessage::Responding = m { handler() }
+        }))
+    }
+
+    /// Register a listener for `Closed`; it receives `ok` and `reason`.
+    pub fn add_closed_listener<F>(&self, handler: F) -> ListenerHandle
+    where F: Fn(bool, &str) + Send + Sync + 'static,
+    {
+        self.inner.add(Arc::new(move |m: &MyTimerMessage| {
+            if let MyTimerMessage::Closed { ok, reason } = m { handler(*ok, reason) }
+        }))
+    }
+
+    /// Register a listener that sees every message the library sends.
+    pub fn add_message_listener<F>(&self, handler: F) -> ListenerHandle
+    where F: Fn(&MyTimerMessage) + Send + Sync + 'static,
+    {
+        self.inner.add(Arc::new(handler))
     }
 
     /// Remove a previously-registered listener by handle. Returns true
     /// if the listener existed and was removed; false otherwise.
-    /// Call it from inside a listener callback only for the listener that runs.
-    /// A remove of a different listener releases a box that the dispatch in flight can
-    /// still call.
+    /// Listeners run on the context's dispatch thread, one message at a time, and may
+    /// call this for any listener: a dispatch in flight still runs the handlers it
+    /// took, so a removed handler can run once more.
     pub fn remove_event_listener(&self, handle: ListenerHandle) -> bool {
-        if handle.id == 0 { return false; }
-        let rc = unsafe {
-            ffi::my_timer_remove_event_listener(self.ptr, handle.id)
-        };
-        self.listeners.lock().unwrap().remove(&handle.id);
-        rc == 0
+        self.inner.remove(handle.id)
     }
 
     /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.

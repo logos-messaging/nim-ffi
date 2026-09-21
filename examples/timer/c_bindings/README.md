@@ -46,7 +46,7 @@ arrives:
 static void on_echo(int err_code, const EchoResponse* reply,
                     const char* err_msg, void* user_data) {
     if (err_code != 0) { /* err_msg is set, reply is NULL */ return; }
-    printf("echoed: %s\n", reply->echoed.data);
+    printf("echoed: %s\n", reply->echoed);
 }
 ...
 my_timer_ctx_echo(ctx, &req, on_echo, /*user_data=*/NULL);
@@ -55,6 +55,31 @@ my_timer_ctx_echo(ctx, &req, on_echo, /*user_data=*/NULL);
 See `main.c` for the full pattern, including a small `wait_done()` poll helper
 that turns each async call back into a sequential step.
 
+## Events
+
+The library calls no event callback and the binding starts no thread. Events,
+liveness reports and the end of the context are queued inside the library, and
+the host takes them out on a thread of its choice:
+
+```c
+static void on_echo_fired(const EchoEvent* ev, void* user_data) {
+    printf("fired: %s\n", ev->message);
+}
+...
+MyTimerHandlers handlers = {0};          /* a NULL entry ignores that message */
+handlers.on_echo_fired = on_echo_fired;
+for (;;) {
+    int rc = my_timer_ctx_dispatch_next(ctx, /*timeout_ms=*/100, &handlers);
+    if (rc != NIMFFI_RET_OK && rc != NIMFFI_RET_TIMEOUT) break;
+}
+```
+
+`MyTimerHandlers` in `my_timer.h` lists everything the library can send. A host
+with an event loop of its own waits on `my_timer_ctx_poll_fd(ctx)` instead (an
+epoll fd on Linux, a kqueue fd on macOS/BSD, an Event `HANDLE` on Windows), then
+dispatches with a timeout of 0 until `NIMFFI_RET_TIMEOUT`, and closes the handle when
+done. Stop dispatching a context before `my_timer_ctx_destroy()`.
+
 ## Memory Ownership
 
 - Request-side strings/sequences are *borrowed* — pass a plain `const char*`
@@ -62,6 +87,9 @@ that turns each async call back into a sequential step.
 - Reply values and error strings passed into a result callback are **owned by
   the binding** and valid only for the duration of that callback. The caller
   never frees them — copy out anything you need to keep before returning.
+- An event handed to a `MyTimerHandlers` entry follows the same rule. A value
+  you decode yourself with `my_timer_decode_<event>()` is yours to release with
+  the `my_timer_free_<Type>()` helper of its type.
 - A `MyTimerCtx*` delivered to the constructor callback is the exception:
   ownership transfers to you, and you release it with `my_timer_ctx_destroy()`.
 

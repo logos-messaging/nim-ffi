@@ -150,20 +150,18 @@ suite "{.ffi.} routes on the shape of the signature":
     defer:
       discard router_destroy(ctx)
 
-    var evt: CallbackState
-    resetState(evt)
-    check router_add_event_listener(
-      ctx, "on_router_tick".cstring, recordingCallback, addr evt
-    ) != 0'u64
-
     resetState(s)
     var req = cborEncode(RouterTickReq())
     check router_tick(ctx, recordingCallback, addr s, encodedPtr(req), req.len.csize_t) ==
       RET_OK
-    check waitCalled(evt)
-    let env = cborDecode(cast[seq[byte]](evt.msg), EventEnvelope[RouterTick])
-    check env.value.eventType == "on_router_tick"
-    check env.value.payload.count == 3
+
+    var msg: ptr NimFfiMsg
+    check router_poll(ctx, 5000, addr msg) == RET_OK
+    check msg.kind == MsgEvent
+    check msg.nameId == nameId("on_router_tick")
+    var payload = newSeq[byte](int(msg.len))
+    copyMem(addr payload[0], msg.payload, int(msg.len))
+    check cborDecode(payload, RouterTick).value.count == 3
 
   test "a library receiver and no result route to the destructor":
     var s: CallbackState

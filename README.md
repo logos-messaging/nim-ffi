@@ -207,8 +207,8 @@ in the context that created it, which a static proc cannot reach.
 ### The teardown contract
 
 A `{.ffiDtor.}` must cancel **and await** everything it spawned. The pool recycles
-a context by handing its slot — including the live FFI and event thread pair and
-their chronos dispatcher — to the next owner, and the only proof that the previous
+a context by handing its slot — including the live FFI thread and its chronos
+dispatcher — to the next owner, and the only proof that the previous
 owner is gone from that thread is its teardown having run to the end. The runtime
 cannot make up for a teardown that gave up: chronos exposes no way to enumerate,
 let alone cancel, the futures of a thread outside a debug build, and a cancel is
@@ -232,12 +232,12 @@ pool-exhausted error once any slot has been quarantined.
 
 ### Process exit
 
-`<lib>_ctx_destroy` recycles: the slot's FFI and event thread pair stays up for
-the next owner. Once no context is live the pool joins that pair, so a host that
-destroys what it created leaves no thread of the library running. A finalize
-under a live thread crashes the process, which is what this avoids.
+`<lib>_ctx_destroy` recycles: the slot's FFI thread stays up for the next owner.
+Once no context is live the pool joins those threads, so a host that destroys
+what it created leaves no thread of the library running. A finalize under a live
+thread crashes the process, which is what this avoids.
 
-Two cases keep a pair alive anyway: a host that exits still owning a context, and
+Two cases keep a thread alive anyway: a host that exits still owning a context, and
 a `{.ffiStatic.}` call, whose shared context holds its slot for the life of the
 process. `<lib>_shutdown()` stops both, from `atexit` or the last line of `main`.
 It returns 0 when every context stopped, 1 when one was left running. A context
@@ -277,8 +277,8 @@ ignore it; the progress signal is delivered at the raw result-callback boundary.
 ### Events
 
 An event is a proc with an empty body annotated `{.ffiEvent.}`. You fire it by
-calling it with a typed payload from inside any `{.ffi.}` handler; the foreign
-side receives it through a registered callback.
+calling it with a typed payload from inside any `{.ffi.}` handler; the host
+receives it from `<lib>_poll`.
 
 ```nim
 type PeerConnected {.ffi.} = object
@@ -295,6 +295,60 @@ The wire name is **optional**: when omitted it is derived from the proc name
 (`onPeerConnected` → `on_peer_connected`), matching how `{.ffi.}` derives its C
 export symbol. Pass a string literal (`{.ffiEvent: "custom_name".}`) only when
 you need a name that differs from the proc.
+
+### Receiving events: `<lib>_poll`
+
+The library never calls into the host to deliver an event. Events go into a
+bounded queue inside the context, and the host takes them out, one at a time, on
+a thread of its own choosing:
+
+```c
+int      <lib>_poll(void* ctx, int32_t timeout_ms, const NimFfiMsg** msg);
+intptr_t <lib>_poll_fd(void* ctx);
+```
+
+`timeout_ms` of 0 never blocks; a negative value waits until a message arrives
+or the context ends.
+
+| `<lib>_poll` returns | Meaning |
+| --- | --- |
+| `RET_OK` | `*msg` points at the message. |
+| `RET_TIMEOUT` | Nothing arrived in time; with a timeout of 0, "empty". |
+| `RET_CLOSED` | The context was destroyed or recycled; `*msg` is a `CLOSED` message. Every later poll returns `RET_INVALID_CTX`. |
+| `RET_INVALID_CTX` | `ctx` is nil, forged, or names a past owner of the pool slot. |
+| `RET_BUSY` | Another thread is inside `poll` on this context: one consumer at a time. |
+| `RET_ERR` | `msg` is NULL. |
+
+| `msg.kind` | Carries |
+| --- | --- |
+| `NIMFFI_MSG_EVENT` | `name_id` says which event, `payload` is the CBOR of its payload. |
+| `NIMFFI_MSG_NOT_RESPONDING` | `aux` is the reason: the FFI thread's heartbeat stalled, or the event queue overflowed. |
+| `NIMFFI_MSG_RESPONDING` | The heartbeat resumed. |
+| `NIMFFI_MSG_CLOSED` | The end of the context; `ret_code` is `RET_ERR`, with the reason as text, when it was quarantined. |
+
+- The message and its payload belong to the library and stay valid until the
+  next `poll` on the same context. The host never frees them, and a library that
+  grows `NimFfiMsg` never writes past a struct an older host allocated.
+- An event is named by a number, not a string: `name_id` is the FNV-1a 64 hash
+  of the wire name. The generated bindings carry one constant per event, and two
+  names that collide stop the compilation.
+- Messages arrive in the order the library produced them.
+- Liveness is checked inside `poll`, on the host's thread, so a wedged FFI thread
+  is reported while the host polls, with no watchdog thread in the library.
+- When the event queue overflows (`-d:ffiEventQueueCapacity`, 1024) the host has
+  stopped polling: the context is marked stuck, new requests are refused until it
+  is recycled, and `poll` reports it once as `NOT_RESPONDING`.
+
+A host with its own event loop does not block in `poll`. It waits on the handle
+`<lib>_poll_fd` returns and then drains with a timeout of 0 until `RET_TIMEOUT`.
+The handle is an epoll descriptor on Linux, a kqueue descriptor on macOS and the
+BSDs, and an Event `HANDLE` on Windows. It can only be waited on, and the caller
+owns it and closes it.
+
+The generated C++ and Rust bindings run one dispatch thread per context and keep the
+`addOn<Event>Listener(closure)` shape. The C binding starts no thread:
+`<lib>_ctx_dispatch_next(ctx, timeout_ms, &handlers)` polls once and calls the
+matching typed handler on the caller's thread.
 
 ## Placement of `genBindings()`
 

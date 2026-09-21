@@ -884,16 +884,39 @@ int my_timer_complex(void* ctx, FFICallback callback, void* user_data, const uin
 int my_timer_schedule(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 /** Tears down the FFI context; blocks until FFI + watchdog threads join. */
 int my_timer_destroy(void* ctx);
-uint64_t my_timer_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
 /**
- * Unregister a listener by id.
- * A call from another thread returns after the last delivery to that listener,
- * so its user data is then safe to free.
- * A call from inside a listener callback returns at once, and the dispatch in
- * flight can still deliver to a listener that you remove that way. Keep the user
- * data of that listener alive until the dispatch ends.
+ * Take the next message of `ctx` out of the library: an event, a liveness report
+ * or the end of the context. `*msg` is set to a message the library owns, or to NULL.
+ * `timeout_ms` 0 never blocks; a negative value waits until a message arrives or
+ * the context closes.
+ * Returns NIMFFI_RET_OK (`*msg` is set), NIMFFI_RET_TIMEOUT (nothing arrived in
+ * time), NIMFFI_RET_CLOSED (the context was destroyed or recycled; `*msg` is a
+ * NIMFFI_MSG_CLOSED whose ret_code is NIMFFI_RET_OK, or NIMFFI_RET_ERR with UTF-8
+ * text in the payload saying why), NIMFFI_RET_INVALID_CTX (`ctx` is NULL, forged
+ * or already destroyed), NIMFFI_RET_BUSY (another thread is inside poll on this
+ * context) or NIMFFI_RET_ERR (`msg` is NULL).
+ * Lifetime: the message and its payload belong to the library and stay valid until the next
+ * poll on the same context, whatever that poll returns. Never free it, and decode
+ * it before polling again.
+ * Single consumer: one thread at a time polls a context. Any host thread will do;
+ * it needs no setup.
  */
-int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
+int my_timer_poll(void* ctx, int32_t timeout_ms, const NimFfiMsg** msg);
+/**
+ * A handle to wait on instead of blocking in poll, for a host with an event loop
+ * of its own. It is ready while a message waits or the context is closed.
+ * Linux: an epoll fd. macOS/BSD: a kqueue fd. Wait until it is readable with
+ * poll(2), select(2) or the host's own epoll/kqueue; never read from it.
+ * Windows: an Event HANDLE (cast the returned value) that can only be waited on,
+ * with WaitForSingleObject or WaitForMultipleObjects.
+ * Once it is ready, poll with a timeout of 0 until NIMFFI_RET_TIMEOUT.
+ * A stalled FFI thread is only noticed inside poll, so the handle does not become
+ * ready for it: a host that wants NIMFFI_MSG_NOT_RESPONDING also polls about once
+ * a second.
+ * Returns -1 on failure. Each call returns a new handle, which the caller owns
+ * and closes with close(), or CloseHandle on Windows.
+ */
+intptr_t my_timer_poll_fd(void* ctx);
 /**
  * Stop every context the library still holds and join their threads.
  * Call it before the process exits when a context is still alive, or when a
@@ -918,58 +941,28 @@ static inline CborError my_timer_decv_Str(CborValue* it, void* v) { return nimff
 static inline CborError my_timer_decv_ComplexResponse(CborValue* it, void* v) { return my_timer_dec_ComplexResponse(it, (ComplexResponse*)v); }
 static inline CborError my_timer_decv_ScheduleResult(CborValue* it, void* v) { return my_timer_dec_ScheduleResult(it, (ScheduleResult*)v); }
 
-/* Event listener machinery */
-typedef void (*MyTimerOnEchoFiredFn)(const EchoEvent* evt, void* user_data);
-typedef struct { MyTimerOnEchoFiredFn fn; void* user_data; } MyTimerOnEchoFiredBox;
-static void my_timer_on_echo_fired_trampoline(int ret, const char* msg, size_t len, void* ud) {
-    if (!ud || ret != 0 || !msg || len == 0) return;
-    MyTimerOnEchoFiredBox* box = (MyTimerOnEchoFiredBox*)ud;
-    if (!box->fn) return;
-    CborParser parser;
-    CborValue it;
-    if (cbor_parser_init((const uint8_t*)msg, len, 0, &parser, &it) != CborNoError) return;
-    if (!cbor_value_is_map(&it)) return;
-    CborValue payloadField;
-    if (cbor_value_map_find_value(&it, "payload", &payloadField) != CborNoError) return;
-    EchoEvent payload;
-    memset(&payload, 0, sizeof(payload));
-    if (my_timer_dec_EchoEvent(&payloadField, &payload) != CborNoError) return;
-    box->fn(&payload, box->user_data);
-    my_timer_free_EchoEvent(&payload);
-}
-
-typedef void (*MyTimerOnJobScheduledFn)(const OnJobScheduledPayload* evt, void* user_data);
-typedef struct { MyTimerOnJobScheduledFn fn; void* user_data; } MyTimerOnJobScheduledBox;
-static void my_timer_on_job_scheduled_trampoline(int ret, const char* msg, size_t len, void* ud) {
-    if (!ud || ret != 0 || !msg || len == 0) return;
-    MyTimerOnJobScheduledBox* box = (MyTimerOnJobScheduledBox*)ud;
-    if (!box->fn) return;
-    CborParser parser;
-    CborValue it;
-    if (cbor_parser_init((const uint8_t*)msg, len, 0, &parser, &it) != CborNoError) return;
-    if (!cbor_value_is_map(&it)) return;
-    CborValue payloadField;
-    if (cbor_value_map_find_value(&it, "payload", &payloadField) != CborNoError) return;
-    OnJobScheduledPayload payload;
-    memset(&payload, 0, sizeof(payload));
-    if (my_timer_dec_OnJobScheduledPayload(&payloadField, &payload) != CborNoError) return;
-    box->fn(&payload, box->user_data);
-    my_timer_free_OnJobScheduledPayload(&payload);
-}
-
 /* ============================================================ */
-/* High-level context wrapper                                   */
+/* my_timer API                                                 */
 /* ============================================================ */
-typedef struct {
-    uint64_t id;
-    void* box;
-} MyTimerCtxListener;
-
+/* Context: my_timer_ctx_create(), my_timer_ctx_destroy().
+ *
+ * Requests. The reply arrives once, through the callback given to the
+ * call, on the library's FFI thread:
+ *   my_timer_ctx_echo()
+ *   my_timer_ctx_version()
+ *   my_timer_ctx_complex()
+ *   my_timer_ctx_schedule()
+ *   my_timer_static_lib_version()
+ *
+ * Messages from the library. The binding starts no thread: the host takes
+ * them out with my_timer_ctx_dispatch_next(), which calls the matching
+ * entry of MyTimerHandlers on the calling thread:
+ *   on_echo_fired(const EchoEvent*)  MY_TIMER_EVT_ON_ECHO_FIRED
+ *   on_job_scheduled(const OnJobScheduledPayload*)  MY_TIMER_EVT_ON_JOB_SCHEDULED
+ *   not_responding, responding, closed
+ */
 typedef struct {
     void* ptr;
-    MyTimerCtxListener* listeners;
-    size_t listeners_len;
-    size_t listeners_cap;
 } MyTimerCtx;
 
 typedef void (*MyTimerCreateFn)(int err_code, MyTimerCtx* ctx, const char* err_msg, void* user_data);
@@ -1049,77 +1042,133 @@ static inline int my_timer_ctx_destroy(MyTimerCtx* ctx) {
     if (!ctx) return NIMFFI_RET_OK;
     int rc = NIMFFI_RET_OK;
     if (ctx->ptr) { rc = my_timer_destroy(ctx->ptr); ctx->ptr = NULL; }
-    if (rc == NIMFFI_RET_OK) {
-        for (size_t i = 0; i < ctx->listeners_len; i++) free(ctx->listeners[i].box);
-    }
-    free(ctx->listeners);
     free(ctx);
     return rc;
 }
 
 /** Fired by `myTimerEcho` once the reply is ready. */
-static inline uint64_t my_timer_ctx_add_on_echo_fired_listener(MyTimerCtx* ctx, MyTimerOnEchoFiredFn fn, void* user_data) {
-    MyTimerOnEchoFiredBox* box = (MyTimerOnEchoFiredBox*)malloc(sizeof(MyTimerOnEchoFiredBox));
-    if (!box) return 0;
-    box->fn = fn;
-    box->user_data = user_data;
-    uint64_t id = my_timer_add_event_listener(ctx->ptr, "on_echo_fired", my_timer_on_echo_fired_trampoline, box);
-    if (id == 0) { free(box); return 0; }
-    if (ctx->listeners_len == ctx->listeners_cap) {
-        size_t ncap = ctx->listeners_cap ? ctx->listeners_cap * 2 : 4;
-        MyTimerCtxListener* grown = (MyTimerCtxListener*)realloc(ctx->listeners, ncap * sizeof(MyTimerCtxListener));
-        if (!grown) { my_timer_remove_event_listener(ctx->ptr, id); free(box); return 0; }
-        ctx->listeners = grown;
-        ctx->listeners_cap = ncap;
+#define MY_TIMER_EVT_ON_ECHO_FIRED 0xcdfdf536356b2a2bULL  /* "on_echo_fired" */
+/* Decodes the payload of a MY_TIMER_EVT_ON_ECHO_FIRED message.
+ * Returns 0, or -1 when `msg` is not that event or does not decode.
+ * On success the caller frees `out` with my_timer_free_EchoEvent(). */
+static inline int my_timer_decode_on_echo_fired(const NimFfiMsg* msg, EchoEvent* out) {
+    if (!msg || !out) return -1;
+    if (msg->kind != NIMFFI_MSG_EVENT || msg->name_id != MY_TIMER_EVT_ON_ECHO_FIRED) return -1;
+    memset(out, 0, sizeof(*out));
+    CborParser parser;
+    CborValue it;
+    if (cbor_parser_init(msg->payload, msg->len, 0, &parser, &it) != CborNoError) return -1;
+    if (my_timer_dec_EchoEvent(&it, out) != CborNoError) {
+        my_timer_free_EchoEvent(out);
+        return -1;
     }
-    ctx->listeners[ctx->listeners_len].id = id;
-    ctx->listeners[ctx->listeners_len].box = box;
-    ctx->listeners_len++;
-    return id;
+    return 0;
 }
 
 /**
  * Fired by `myTimerSchedule`. Its two params ride the wire as a synthesised
  * `OnJobScheduledPayload` envelope, so the foreign side decodes one typed value.
  */
-static inline uint64_t my_timer_ctx_add_on_job_scheduled_listener(MyTimerCtx* ctx, MyTimerOnJobScheduledFn fn, void* user_data) {
-    MyTimerOnJobScheduledBox* box = (MyTimerOnJobScheduledBox*)malloc(sizeof(MyTimerOnJobScheduledBox));
-    if (!box) return 0;
-    box->fn = fn;
-    box->user_data = user_data;
-    uint64_t id = my_timer_add_event_listener(ctx->ptr, "on_job_scheduled", my_timer_on_job_scheduled_trampoline, box);
-    if (id == 0) { free(box); return 0; }
-    if (ctx->listeners_len == ctx->listeners_cap) {
-        size_t ncap = ctx->listeners_cap ? ctx->listeners_cap * 2 : 4;
-        MyTimerCtxListener* grown = (MyTimerCtxListener*)realloc(ctx->listeners, ncap * sizeof(MyTimerCtxListener));
-        if (!grown) { my_timer_remove_event_listener(ctx->ptr, id); free(box); return 0; }
-        ctx->listeners = grown;
-        ctx->listeners_cap = ncap;
+#define MY_TIMER_EVT_ON_JOB_SCHEDULED 0xd6ac432a40b9a85cULL  /* "on_job_scheduled" */
+/* Decodes the payload of a MY_TIMER_EVT_ON_JOB_SCHEDULED message.
+ * Returns 0, or -1 when `msg` is not that event or does not decode.
+ * On success the caller frees `out` with my_timer_free_OnJobScheduledPayload(). */
+static inline int my_timer_decode_on_job_scheduled(const NimFfiMsg* msg, OnJobScheduledPayload* out) {
+    if (!msg || !out) return -1;
+    if (msg->kind != NIMFFI_MSG_EVENT || msg->name_id != MY_TIMER_EVT_ON_JOB_SCHEDULED) return -1;
+    memset(out, 0, sizeof(*out));
+    CborParser parser;
+    CborValue it;
+    if (cbor_parser_init(msg->payload, msg->len, 0, &parser, &it) != CborNoError) return -1;
+    if (my_timer_dec_OnJobScheduledPayload(&it, out) != CborNoError) {
+        my_timer_free_OnJobScheduledPayload(out);
+        return -1;
     }
-    ctx->listeners[ctx->listeners_len].id = id;
-    ctx->listeners[ctx->listeners_len].box = box;
-    ctx->listeners_len++;
-    return id;
+    return 0;
 }
 
-/**
- * Unregister a listener and release the box that holds the handler.
- * Call it from inside a listener callback only for the listener that runs.
- * A remove of a different listener releases a box that the dispatch in flight can
- * still call.
- */
-static inline bool my_timer_ctx_remove_event_listener(MyTimerCtx* ctx, uint64_t id) {
-    if (id == 0) return false;
-    int rc = my_timer_remove_event_listener(ctx->ptr, id);
-    for (size_t i = 0; i < ctx->listeners_len; i++) {
-        if (ctx->listeners[i].id == id) {
-            free(ctx->listeners[i].box);
-            ctx->listeners[i] = ctx->listeners[ctx->listeners_len - 1];
-            ctx->listeners_len--;
-            break;
+/* Everything my_timer can send. A NULL entry means "ignore". Each
+ * handler runs on the thread that dispatches; what it is handed belongs to the
+ * binding and is valid only until it returns. */
+typedef struct {
+    /** Fired by `myTimerEcho` once the reply is ready. */
+    void (*on_echo_fired)(const EchoEvent* ev, void* user_data);
+    /**
+     * Fired by `myTimerSchedule`. Its two params ride the wire as a synthesised
+     * `OnJobScheduledPayload` envelope, so the foreign side decodes one typed value.
+     */
+    void (*on_job_scheduled)(const OnJobScheduledPayload* ev, void* user_data);
+    /* `reason` is a NIMFFI_NOT_RESPONDING_*: the FFI thread stalled, or the event
+     * queue overflowed and requests are refused from now on. */
+    void (*not_responding)(uint64_t reason, void* user_data);
+    /* The FFI thread's heartbeat resumed. */
+    void (*responding)(void* user_data);
+    /* The context is gone. `ret` is NIMFFI_RET_OK, or NIMFFI_RET_ERR with `reason`
+     * (a NUL-terminated copy, NULL when none) saying why it was quarantined. */
+    void (*closed)(int ret, const char* reason, void* user_data);
+    void* user_data;
+} MyTimerHandlers;
+
+/* Decodes `msg` fully, then calls its handler, then frees what it decoded.
+ * Returns 0, also for an event this header does not know, or -1 on a decode
+ * error or an unknown message kind. */
+static inline int my_timer_ctx_dispatch(MyTimerCtx* ctx, const NimFfiMsg* msg, const MyTimerHandlers* handlers) {
+    (void)ctx;
+    if (!msg) return -1;
+    switch (msg->kind) {
+    case NIMFFI_MSG_EVENT:
+        if (msg->name_id == MY_TIMER_EVT_ON_ECHO_FIRED) {
+            EchoEvent ev;
+            if (my_timer_decode_on_echo_fired(msg, &ev) != 0) return -1;
+            if (handlers && handlers->on_echo_fired) handlers->on_echo_fired(&ev, handlers->user_data);
+            my_timer_free_EchoEvent(&ev);
+            return 0;
         }
+        if (msg->name_id == MY_TIMER_EVT_ON_JOB_SCHEDULED) {
+            OnJobScheduledPayload ev;
+            if (my_timer_decode_on_job_scheduled(msg, &ev) != 0) return -1;
+            if (handlers && handlers->on_job_scheduled) handlers->on_job_scheduled(&ev, handlers->user_data);
+            my_timer_free_OnJobScheduledPayload(&ev);
+            return 0;
+        }
+        return 0;
+    case NIMFFI_MSG_NOT_RESPONDING:
+        if (handlers && handlers->not_responding) handlers->not_responding(msg->aux, handlers->user_data);
+        return 0;
+    case NIMFFI_MSG_RESPONDING:
+        if (handlers && handlers->responding) handlers->responding(handlers->user_data);
+        return 0;
+    case NIMFFI_MSG_CLOSED: {
+        if (!handlers || !handlers->closed) return 0;
+        char* reason = NULL;
+        if (msg->len > 0) reason = nimffi_dup_cstr_n((const char*)msg->payload, msg->len);
+        handlers->closed((int)msg->ret_code, reason, handlers->user_data);
+        free(reason);
+        return 0;
     }
-    return rc == 0;
+    default:
+        return -1;
+    }
+}
+
+/* One my_timer_poll() and the dispatch of what it returned.
+ * Returns the poll code (NIMFFI_RET_OK, _TIMEOUT, _CLOSED after the `closed`
+ * handler ran, _INVALID_CTX, _BUSY, _ERR), or -1 when the message did not
+ * dispatch. `ctx` must stay alive for the whole call: stop dispatching before
+ * my_timer_ctx_destroy(). */
+static inline int my_timer_ctx_dispatch_next(MyTimerCtx* ctx, int32_t timeout_ms, const MyTimerHandlers* handlers) {
+    if (!ctx) return NIMFFI_RET_INVALID_CTX;
+    const NimFfiMsg* msg = NULL;
+    int rc = my_timer_poll(ctx->ptr, timeout_ms, &msg);
+    if (rc != NIMFFI_RET_OK && rc != NIMFFI_RET_CLOSED) return rc;
+    if (my_timer_ctx_dispatch(ctx, msg, handlers) != 0) return -1;
+    return rc;
+}
+
+/* See my_timer_poll_fd(): the caller owns and closes the handle. */
+static inline intptr_t my_timer_ctx_poll_fd(const MyTimerCtx* ctx) {
+    if (!ctx) return -1;
+    return my_timer_poll_fd(ctx->ptr);
 }
 
 typedef void (*MyTimerEchoReplyFn)(int err_code, const EchoResponse* reply, const char* err_msg, void* user_data);

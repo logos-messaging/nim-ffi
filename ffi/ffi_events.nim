@@ -1,163 +1,27 @@
-## Per-context event registry + bounded SPSC queue. FFI thread enqueues, event
-## thread drains; payloads use c_malloc so they survive cross-thread heap reuse.
-
-{.pragma: callback, cdecl, raises: [], gcsafe.}
+## Per-context bounded event queue. The FFI thread enqueues and the host's poller
+## pops; payloads use c_malloc so they survive cross-thread heap reuse.
 
 import system/ansi_c
-import std/[atomics, locks, sequtils, options, tables]
+import std/[atomics, locks]
 import chronicles
-import ./ffi_types, ./cbor_serial
-
-type EventEnvelope*[T] = object ## CBOR wire shape: { eventType: tstr, payload: <T> }.
-  eventType*: string
-  payload*: T
-
-type
-  FFIEventListener* = object
-    id*: uint64
-    callback*: FFICallBack
-    userData*: pointer
-
-  FFIEventRegistry* = object
-    lock*: Lock
-    nextId*: uint64 # 0 is reserved as "invalid"; ids start at 1.
-    byEvent*: Table[string, seq[FFIEventListener]]
-    dispatchDone*: Cond
-    dispatching*: int # deliveries in flight, over every dispatching thread.
-
-var ffiInDispatch {.threadvar.}: int
-  # Dispatch depth of this thread, so a listener never waits for its own delivery.
-
-proc initEventRegistry*(reg: var FFIEventRegistry) =
-  ## Run once on the owning thread before sharing (re-initLock is UB).
-  reg.lock.initLock()
-  reg.dispatchDone.initCond()
-  reg.nextId = 0'u64
-  reg.byEvent = initTable[string, seq[FFIEventListener]]()
-  reg.dispatching = 0
-
-proc deinitEventRegistry*(reg: var FFIEventRegistry) =
-  ## Mirror of `initEventRegistry`; resets GC fields so slot reuse sees no dtor.
-  reg.dispatchDone.deinitCond()
-  reg.lock.deinitLock()
-  reg.byEvent = default(Table[string, seq[FFIEventListener]])
-  reg.nextId = 0'u64
-
-proc awaitDispatch(reg: var FFIEventRegistry) {.raises: [].} =
-  ## Call with `reg.lock` held.
-  while reg.dispatching > 0 and ffiInDispatch == 0:
-    wait(reg.dispatchDone, reg.lock)
-
-proc beginDispatch*(
-    reg: var FFIEventRegistry, eventName: string
-): seq[FFIEventListener] {.raises: [].} =
-  ## Snapshots the listeners of `eventName` and counts the delivery in. The
-  ## caller invokes the callbacks with the lock released, and pairs every call
-  ## with `endDispatch`.
-  var listeners: seq[FFIEventListener] = @[]
-  withLock reg.lock:
-    for l in reg.byEvent.getOrDefault(eventName):
-      listeners.add(l)
-    reg.dispatching.inc()
-  ffiInDispatch.inc()
-  return listeners
-
-proc endDispatch*(reg: var FFIEventRegistry) {.raises: [].} =
-  ffiInDispatch.dec()
-  withLock reg.lock:
-    reg.dispatching.dec()
-    broadcast(reg.dispatchDone)
-
-proc clearListeners*(reg: var FFIEventRegistry) {.raises: [].} =
-  ## Removes all listeners. The pool calls this when it recycles a context. The
-  ## lock stays in place, because the event thread uses it across recycles.
-  withLock reg.lock:
-    reg.byEvent.clear()
-    reg.nextId = 0'u64
-    reg.awaitDispatch()
-
-proc addEventListener*(
-    reg: var FFIEventRegistry,
-    eventName: string,
-    callback: FFICallBack,
-    userData: pointer,
-): uint64 {.raises: [].} =
-  ## Returns the listener id (>0), or 0 if `callback` is nil.
-  if callback.isNil():
-    return 0
-
-  var assigned: uint64 = 0
-
-  withLock reg.lock:
-    reg.nextId.inc()
-    assigned = reg.nextId
-    let listener =
-      FFIEventListener(id: assigned, callback: callback, userData: userData)
-    reg.byEvent.mgetOrPut(eventName, @[]).add(listener)
-  assigned
-
-proc removeEventListener*(reg: var FFIEventRegistry, id: uint64): bool {.raises: [].} =
-  ## Waits an in-flight delivery out, except for a caller inside a dispatch: that one returns first, so the `userData` it drops must outlive the dispatch.
-  if id == 0'u64:
-    return false
-
-  var removed = false
-
-  withLock reg.lock:
-    var
-      pruneKey = ""
-      prune = false
-    for key, listeners in reg.byEvent.mpairs:
-      let before = listeners.len
-      listeners.keepItIf(it.id != id)
-      if listeners.len < before:
-        removed = true
-        if listeners.len == 0:
-          pruneKey = key
-          prune = true
-        break
-    if prune:
-      reg.byEvent.del(pruneKey)
-    if removed:
-      reg.awaitDispatch()
-  removed
-
-proc removeAllEventListeners*(reg: var FFIEventRegistry) {.raises: [].} =
-  ## Does not reset the id counter.
-  withLock reg.lock:
-    reg.byEvent.clear()
-    reg.awaitDispatch()
-
-proc snapshotListeners*(
-    reg: var FFIEventRegistry, eventName: string
-): seq[FFIEventListener] {.raises: [].} =
-  ## Lock held only across the copy so re-entrant add/remove can't deadlock.
-  var listeners: seq[FFIEventListener] = @[]
-  withLock reg.lock:
-    for l in reg.byEvent.getOrDefault(eventName):
-      listeners.add(l)
-  listeners
+import ./ffi_msg, ./cbor_serial
 
 const EventQueueCapacity* {.intdefine: "ffiEventQueueCapacity".} = 1024
-  ## Sustained backlog here means a listener is wedged. Override `-d:ffiEventQueueCapacity=N`.
+  ## Sustained backlog here means the host stopped polling. Override `-d:ffiEventQueueCapacity=N`.
 
 const MaxEventPayloadBytes* {.intdefine: "ffiMaxEventPayloadBytes".} = 512
-  ## Per-slot payload slab; larger payloads take a one-off c_malloc freed on
-  ## commit. Override `-d:ffiMaxEventPayloadBytes=N`.
+  ## Per-slot payload slab; larger payloads take a one-off c_malloc freed by the
+  ## poller. Override `-d:ffiMaxEventPayloadBytes=N`.
 
-const MaxEventNameBytes* {.intdefine: "ffiMaxEventNameBytes".} = 64
-  ## Per-slot name slab (incl. NUL); longer names take the heap fallback.
-  ## Override `-d:ffiMaxEventNameBytes=N`.
-
-const emptyListenerPayload*: cstring = ""
-  ## Non-nil zero-length stand-in for empty payloads/names (nil would be UB for
+const emptyPayload*: cstring = ""
+  ## Non-nil zero-length stand-in for empty payloads (nil would be UB for
   ## consumers doing memcpy even at len 0).
 
 type
   QueuedEvent* = object
-    # `name`/`data` point into reused per-slot buffers, or a one-off c_malloc marked by `*HeapOwned` when oversize; both c_malloc'd so they outlive the FFI thread's heap.
-    name*: cstring
-    nameHeapOwned*: bool
+    # `data` points into the slot's reused slab, or a one-off c_malloc marked by `dataHeapOwned` when oversize; both c_malloc'd so they outlive the FFI thread's heap.
+    nameId*: uint64
+    seq*: uint64
     data*: ptr UncheckedArray[byte]
     dataLen*: int
     dataHeapOwned*: bool
@@ -169,12 +33,16 @@ type
     count*: int
     buf*: array[EventQueueCapacity, QueuedEvent]
     slab*: array[EventQueueCapacity, ptr UncheckedArray[byte]]
-    nameSlab*: array[EventQueueCapacity, ptr UncheckedArray[byte]]
 
-proc allocSlot(nbytes: int): ptr UncheckedArray[byte] {.raises: [].} =
-  if nbytes <= 0:
-    return nil
-  cast[ptr UncheckedArray[byte]](c_malloc(csize_t(nbytes)))
+  HeldEvent* = object
+    ## The event the poller last handed to the host. It owns its bytes, so the
+    ## ring slot is free again as soon as the event is popped.
+    event*: QueuedEvent
+    slab*: ptr UncheckedArray[byte]
+      ## Spare slab: a pop swaps it with the slot's, which moves the bytes out without a copy.
+
+proc allocSlab(): ptr UncheckedArray[byte] {.raises: [].} =
+  cast[ptr UncheckedArray[byte]](c_malloc(csize_t(MaxEventPayloadBytes)))
 
 proc initEventQueue*(q: var EventQueue) {.raises: [].} =
   q.lock.initLock()
@@ -183,128 +51,99 @@ proc initEventQueue*(q: var EventQueue) {.raises: [].} =
   q.count = 0
   for i in 0 ..< EventQueueCapacity:
     q.buf[i] = QueuedEvent()
-    q.slab[i] = allocSlot(MaxEventPayloadBytes)
-    q.nameSlab[i] = allocSlot(MaxEventNameBytes)
+    q.slab[i] = allocSlab()
 
 proc releaseEvent*(qe: QueuedEvent) {.raises: [], gcsafe.} =
-  ## Frees only heap-fallback buffers; reused slot buffers persist.
-  if qe.nameHeapOwned and not qe.name.isNil():
-    c_free(cast[pointer](qe.name))
+  ## Frees only a heap-fallback buffer; slabs persist.
   if qe.dataHeapOwned and not qe.data.isNil():
     c_free(qe.data)
 
+proc clearEventQueue*(q: var EventQueue) {.raises: [], gcsafe.} =
+  ## Drops every queued event: the next owner of a slot must not see them.
+  withLock q.lock:
+    while q.count > 0:
+      releaseEvent(q.buf[q.head])
+      q.buf[q.head] = QueuedEvent()
+      q.head = (q.head + 1) mod EventQueueCapacity
+      q.count.dec()
+    q.head = 0
+    q.tail = 0
+
 proc deinitEventQueue*(q: var EventQueue) {.raises: [].} =
   ## Both producer and consumer must have stopped.
+  clearEventQueue(q)
   for i in 0 ..< EventQueueCapacity:
-    releaseEvent(q.buf[i])
-    q.buf[i] = QueuedEvent()
     if not q.slab[i].isNil():
       c_free(q.slab[i])
       q.slab[i] = nil
-    if not q.nameSlab[i].isNil():
-      c_free(q.nameSlab[i])
-      q.nameSlab[i] = nil
-  q.head = 0
-  q.tail = 0
-  q.count = 0
   q.lock.deinitLock()
 
-proc copyIntoSlot(
-    slot: ptr UncheckedArray[byte], slotCap, nbytes: int, src: pointer
-): tuple[buf: ptr UncheckedArray[byte], heap: bool, ok: bool] {.raises: [].} =
-  ## Copies into `slot` when it fits, else a one-off c_malloc; `ok=false` only on
-  ## alloc failure.
-  if nbytes <= 0:
-    return (nil, false, true)
-  if nbytes <= slotCap and not slot.isNil():
-    copyMem(slot, src, nbytes)
-    return (slot, false, true)
-  let heapBuf = cast[ptr UncheckedArray[byte]](c_malloc(csize_t(nbytes)))
-  if heapBuf.isNil():
-    return (nil, false, false)
-  copyMem(heapBuf, src, nbytes)
-  (heapBuf, true, true)
+proc initHeldEvent*(held: var HeldEvent) {.raises: [].} =
+  held.event = QueuedEvent()
+  held.slab = allocSlab()
+
+proc releaseHeldEvent*(held: var HeldEvent) {.raises: [], gcsafe.} =
+  ## Ends the host's use of the held bytes; the spare slab stays.
+  releaseEvent(held.event)
+  held.event = QueuedEvent()
+
+proc deinitHeldEvent*(held: var HeldEvent) {.raises: [].} =
+  ## The host must be done with the message it last polled.
+  releaseHeldEvent(held)
+  if not held.slab.isNil():
+    c_free(held.slab)
+    held.slab = nil
 
 proc tryEnqueueEvent*(
-    q: var EventQueue, name: cstring, src: pointer, dataLen: int
+    q: var EventQueue, nameId, seq: uint64, src: pointer, dataLen: int
 ): bool {.raises: [], gcsafe.} =
-  ## Copies `name` (NUL included) and payload into the tail slot's reused buffers
-  ## or a heap fallback; false when the ring is full or a fallback alloc fails.
+  ## Copies the payload into the tail slot's slab, or a heap fallback when it
+  ## does not fit; false when the ring is full or the fallback alloc fails.
   withLock q.lock:
     if q.count >= EventQueueCapacity:
       return false
     let slot = q.tail
-    # Include the NUL so the stored copy stays a valid cstring.
-    let nameBytes =
-      if name.isNil():
-        0
+    var data: ptr UncheckedArray[byte] = nil
+    var heapOwned = false
+    if dataLen > 0:
+      if dataLen <= MaxEventPayloadBytes and not q.slab[slot].isNil():
+        data = q.slab[slot]
       else:
-        name.len + 1
-    let nameRes =
-      copyIntoSlot(q.nameSlab[slot], MaxEventNameBytes, nameBytes, cast[pointer](name))
-    if not nameRes.ok:
-      return false
-    let dataRes = copyIntoSlot(q.slab[slot], MaxEventPayloadBytes, dataLen, src)
-    if not dataRes.ok:
-      if nameRes.heap:
-        c_free(nameRes.buf)
-      return false
-    let nameCStr =
-      if nameRes.buf.isNil():
-        emptyListenerPayload
-      else:
-        cast[cstring](nameRes.buf)
+        data = cast[ptr UncheckedArray[byte]](c_malloc(csize_t(dataLen)))
+        if data.isNil():
+          return false
+        heapOwned = true
+      copyMem(data, src, dataLen)
     q.buf[slot] = QueuedEvent(
-      name: nameCStr,
-      nameHeapOwned: nameRes.heap,
-      data: dataRes.buf,
-      dataLen: dataLen,
-      dataHeapOwned: dataRes.heap,
+      nameId: nameId, seq: seq, data: data, dataLen: dataLen, dataHeapOwned: heapOwned
     )
     q.tail = (q.tail + 1) mod EventQueueCapacity
     q.count.inc()
-  true
+  return true
 
-proc peekEvent*(q: var EventQueue): Option[QueuedEvent] {.raises: [], gcsafe.} =
-  ## Returns the head without advancing (slot stays pinned so the producer can't
-  ## reuse it mid-read); pair each non-none peek with a `commitDequeue`.
+proc headSeq*(q: var EventQueue): uint64 {.raises: [], gcsafe.} =
+  ## `seq` of the oldest event, or 0 when the queue is empty.
   withLock q.lock:
     if q.count == 0:
-      return none(QueuedEvent)
-    return some(q.buf[q.head])
+      return 0
+    return q.buf[q.head].seq
 
-proc commitDequeue*(q: var EventQueue) {.raises: [], gcsafe.} =
-  ## Retires the dispatched head slot: frees any heap fallback and frees the slot.
+proc popEventInto*(
+    q: var EventQueue, held: var HeldEvent
+): bool {.raises: [], gcsafe.} =
+  ## Moves the oldest event into `held`, which must be released. False when empty.
   withLock q.lock:
     if q.count == 0:
-      return
-    releaseEvent(q.buf[q.head])
-    q.buf[q.head] = QueuedEvent()
+      return false
+    let slot = q.head
+    held.event = q.buf[slot]
+    if not held.event.dataHeapOwned and not held.event.data.isNil():
+      swap(q.slab[slot], held.slab)
+      held.event.data = held.slab
+    q.buf[slot] = QueuedEvent()
     q.head = (q.head + 1) mod EventQueueCapacity
     q.count.dec()
-
-proc notifyListeners*(
-    listeners: seq[FFIEventListener], retCode: cint, data: pointer, dataLen: int
-) =
-  ## Empty payloads use `emptyListenerPayload` so consumers never see a nil ptr.
-  let n = max(dataLen, 0)
-  let dataPtr =
-    if n > 0 and not data.isNil():
-      cast[ptr cchar](data)
-    else:
-      cast[ptr cchar](emptyListenerPayload)
-  for listener in listeners:
-    listener.callback(retCode, dataPtr, cast[csize_t](n), listener.userData)
-
-proc notifyListenersErr*(listeners: seq[FFIEventListener], msg: string) =
-  let p =
-    if msg.len > 0:
-      cast[pointer](unsafeAddr msg[0])
-    else:
-      cast[pointer](emptyListenerPayload)
-  notifyListeners(listeners, RET_ERR, p, msg.len)
-
-var ffiCurrentEventRegistry* {.threadvar.}: ptr FFIEventRegistry
+  return true
 
 var ffiCurrentEventQueue* {.threadvar.}: ptr EventQueue
   # Installed by the FFI thread so dispatch templates need no `ctx`.
@@ -312,31 +151,38 @@ var ffiCurrentEventQueue* {.threadvar.}: ptr EventQueue
 var ffiCurrentEventQueueStuck* {.threadvar.}: ptr Atomic[bool]
   # Sticky overflow flag; FFI request entry point reads it to reject.
 
+var ffiCurrentMsgSeq* {.threadvar.}: ptr Atomic[uint64]
+  # The context's message counter, so an event takes its place among the other messages.
+
 var ffiCurrentNotifyEventEnqueued* {.threadvar.}: proc() {.gcsafe, raises: [].}
-  # Wake hook so this module needn't depend on chronos; nil-safe.
+  # Wakes the poller; a hook so this module needn't know the wake. nil-safe.
+
+var ffiCurrentHostPolls* {.threadvar.}: proc(): bool {.gcsafe, raises: [].}
+  # Whether the owner of the context has polled at all. nil reads as yes.
 
 template enqueueOrMarkStuck(eventName: string, src: pointer, dataLen: int) =
-  ## Enqueues into the reused slot buffers; on queue-full sets the sticky stuck
-  ## flag and wakes the event thread (firing onNotResponding here would run the
-  ## listeners on the FFI thread).
+  ## On queue-full sets the sticky stuck flag; the poller reports it.
   block enqueueBlock:
     let q = ffiCurrentEventQueue
-    if q.isNil():
+    if q.isNil() or ffiCurrentMsgSeq.isNil():
       chronicles.error "event queue not set on this thread", event = eventName
       break enqueueBlock
-    if not q[].tryEnqueueEvent(cstring(eventName), src, dataLen):
-      chronicles.error "event queue full; library marked stuck",
-        event = eventName, capacity = EventQueueCapacity
-      if not ffiCurrentEventQueueStuck.isNil():
-        ffiCurrentEventQueueStuck[].store(true)
-      if not ffiCurrentNotifyEventEnqueued.isNil():
-        ffiCurrentNotifyEventEnqueued()
-      break enqueueBlock
+    let seq = ffiCurrentMsgSeq[].fetchAdd(1) + 1
+    if not q[].tryEnqueueEvent(nameId(eventName), seq, src, dataLen):
+      if not ffiCurrentHostPolls.isNil() and not ffiCurrentHostPolls():
+        # A host that never polls does not want events; do not fail its requests over them.
+        chronicles.debug "event queue full and the host never polled; event dropped",
+          event = eventName
+      # Logged once: every later event of a stuck context is dropped the same way.
+      elif not ffiCurrentEventQueueStuck.isNil() and
+          not ffiCurrentEventQueueStuck[].exchange(true):
+        chronicles.error "event queue full; library marked stuck",
+          event = eventName, capacity = EventQueueCapacity
     if not ffiCurrentNotifyEventEnqueued.isNil():
       ffiCurrentNotifyEventEnqueued()
 
 template dispatchFFIEvent*(eventName: string, body: untyped) =
-  ## `body` yields string/seq[byte]. FFI thread only: enqueues; event thread fans out.
+  ## `body` yields string/seq[byte], sent as is. FFI thread only.
   block:
     let evtName: string = eventName
     let bodyVal = body
@@ -349,13 +195,10 @@ template dispatchFFIEvent*(eventName: string, body: untyped) =
     enqueueOrMarkStuck(evtName, src, dataLen)
 
 template dispatchFFIEventCbor*(eventName: string, eventPayload: typed) =
-  ## Typed CBOR variant; param is `eventPayload` to avoid clobbering
-  ## `EventEnvelope.payload` substitution.
+  ## Sends the bare CBOR of `eventPayload`; the name travels as `nameId`.
   block:
     let evtName: string = eventName
-    let encoded = cborEncode(
-      EventEnvelope[typeof(eventPayload)](eventType: evtName, payload: eventPayload)
-    )
+    let encoded = cborEncode(eventPayload)
     let src: pointer =
       if encoded.len > 0:
         unsafeAddr encoded[0]

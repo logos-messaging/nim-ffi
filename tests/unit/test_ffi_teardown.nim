@@ -47,7 +47,6 @@ var
   gTeardownHold: Atomic[bool]
   gTeardownRan: Atomic[bool]
   gTeardownThreadId: Atomic[int]
-  gInjected: Atomic[int]
   gReplied: Atomic[bool]
 
 startWatchdog(120_000, "a recycle or a drain never returned")
@@ -109,11 +108,16 @@ proc replyCallback(
 ) {.cdecl, gcsafe, raises: [].} =
   gReplied.store(true)
 
-proc injectCallback(
-    retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
-) {.cdecl, gcsafe, raises: [].} =
-  ## The next owner registers this: a delivery here is an event of a past owner.
-  gInjected.atomicInc()
+proc orphanEventsSeenBy(ctx: ptr FFIContext[TeardownLib]): int =
+  ## What the next owner polls: an orphan event here is an event of a past owner.
+  var seen = 0
+  while true:
+    let got = pollMsg(ctx, 0)
+    if got.ret != RET_OK:
+      break
+    if got.kind == MsgEvent and got.nameId == nameId(OrphanEvent):
+      seen.inc()
+  return seen
 
 proc armIncarnation(id: int) =
   ## A dtor of an earlier incarnation may have raised the stop flag of this slot
@@ -308,22 +312,19 @@ suite "a {.ffiDtor.} cut short by TeardownTimeout":
     gTeardownHangs.store(false)
     gTeardownRan.store(false)
     armIncarnation(2)
-    gInjected.store(0)
 
     let next = createCtxWithLib()
     check not next.isNil()
     check next != gQuarantined
 
-    # Same event name as the orphan fires, on the new owner's registry.
-    check addEventListener(next[].eventRegistry, OrphanEvent, injectCallback, nil) > 0
     check callPing(next)
     # A reused slot would have served this call on the orphan's own thread.
     check gHandlerThreadId.load() != gLoopThreadId.load()
 
-    # Let the orphan fire several times against the live listener.
+    # Let the orphan fire several times while the next owner polls.
     let before = gTicks[1].load()
     check waitTicks(1, before + 3)
-    check gInjected.load() == 0
+    check orphanEventsSeenBy(next) == 0
 
     # The orphan's sentinel write must not reach the next owner's library. On a
     # reused slot `freeLib` freed that object and the next ctor is handed the same
