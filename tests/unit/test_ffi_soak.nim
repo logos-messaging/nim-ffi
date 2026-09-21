@@ -4,7 +4,8 @@
 ## nothing hangs, and a token that outlived its context is refused.
 ## Validate with NIM_FFI_SAN=tsan NIM_FFI_MM=orc.
 
-import std/[atomics, os]
+import std/[atomics, monotimes, os]
+from std/times import inMilliseconds, inNanoseconds
 import unittest2
 import results
 import ffi
@@ -179,3 +180,84 @@ suite "soak through the C exports":
       check soak_create(encodedPtr(cfg), cfg.len.csize_t, addr token, addr reqId) ==
         RET_OK
       check soak_destroy(token) == RET_OK
+
+type ChurnPoll = object
+  ctx: ptr FFIContext[SoakLib]
+  generation: uint
+  entered: Atomic[bool]
+  lastReply: Atomic[uint64]
+
+proc churnPollLoop(p: ptr ChurnPoll) =
+  p.entered.store(true)
+  while true:
+    var msg: ptr NimFfiMsg
+    let rc = pollContext(p.ctx, p.generation, 50, addr msg)
+    if rc == RET_OK and msg.kind == MsgReply:
+      p.lastReply.store(msg.id)
+    elif rc != RET_OK and rc != RET_TIMEOUT:
+      return
+
+proc churnPollBody(p: ptr ChurnPoll) {.thread.} =
+  {.cast(gcsafe).}:
+    churnPollLoop(p)
+
+var churnPool: FFIContextPool[SoakLib]
+  ## Lives for the process, like the pool a library declares: a slot keeps the
+  ## buffers it allocated until its context is destroyed, so a pool freed around
+  ## live slots is what strands them.
+
+type Worker = object
+  pool: ptr FFIContextPool[SoakLib]
+  iters: int
+  failures: Atomic[int]
+  replyNs: Atomic[int64]
+  replies: Atomic[int]
+
+proc churnLoop(w: ptr Worker) =
+  ## What a host binding does: create, poll it, use it, destroy, over and over.
+  for _ in 0 ..< w.iters:
+    let ctx = w.pool[].createFFIContext().valueOr:
+      w.failures.atomicInc()
+      return
+    var blocked = ChurnPoll(ctx: ctx, generation: ctx.currentGeneration())
+    var poller: Thread[ptr ChurnPoll]
+    createThread(poller, churnPollBody, addr blocked)
+    discard waitFlag(blocked.entered)
+    let started = getMonoTime()
+    let reqId = sendRequestToFFIThread(ctx, SoakWorkReq.ffiNewReq(1)).valueOr:
+      w.failures.atomicInc()
+      0'u64
+    if reqId != 0:
+      # The dedicated poller above owns this context, so wait for it to report.
+      while blocked.lastReply.load() != reqId and
+          (getMonoTime() - started).inMilliseconds < 5000:
+        cpuRelax()
+      discard w.replyNs.fetchAdd((getMonoTime() - started).inNanoseconds)
+      w.replies.atomicInc()
+    if w.pool[].recycleFFIContext(ctx).isErr():
+      w.failures.atomicInc()
+    joinThread(poller)
+
+proc churnBody(w: ptr Worker) {.thread.} =
+  {.cast(gcsafe).}:
+    churnLoop(w)
+
+suite "many contexts at once":
+  test "concurrent create, poll and destroy never fails a recycle":
+    const Workers = 8
+    let pool = addr churnPool
+    defer:
+      discard pool[].shutdownFFIContextPool()
+
+    var w = Worker(pool: pool, iters: 25)
+    var threads: array[Workers, Thread[ptr Worker]]
+    for i in 0 ..< Workers:
+      createThread(threads[i], churnBody, addr w)
+    for i in 0 ..< Workers:
+      joinThread(threads[i])
+    check w.failures.load() == 0
+    check w.replies.load() > 0
+    let avgMs = float(w.replyNs.load() div max(w.replies.load(), 1)) / 1e6
+    echo "churn: replies=", w.replies.load(), " avg reply=", avgMs, "ms"
+    # A reply must not wait for a poll slice to expire.
+    check avgMs < 20.0

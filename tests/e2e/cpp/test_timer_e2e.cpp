@@ -876,7 +876,11 @@ TEST(TimerE2E, DestroyFailsTheCallsInFlight) {
             << "a future survived its context";
         const auto r = fut.get();
         if (r.isErr()) {
-            EXPECT_NE(r.error().find("context closed"), std::string::npos) << r.error();
+            // Either the library answered the call as it recycled, or the binding
+            // failed it when the poll returned CLOSED. Both say the context is gone.
+            EXPECT_TRUE(r.error().find("context closed") != std::string::npos ||
+                        r.error().find("recycled") != std::string::npos)
+                << r.error();
         } else {
             EXPECT_EQ(r->echoed, "pending");
         }
