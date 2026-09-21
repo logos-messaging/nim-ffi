@@ -13,9 +13,12 @@
 #endif
 #include <string>
 #include <cstdint>
+#include <atomic>
 #include <chrono>
 #include <charconv>
+#include <map>
 #include <mutex>
+#include <thread>
 #include <condition_variable>
 #include <memory>
 #include <functional>
@@ -37,6 +40,10 @@ extern "C" {
 #define NIMFFI_RET_ERR 1
 #define NIMFFI_RET_MISSING_CALLBACK 2
 #define NIMFFI_RET_STALE_WARN 3
+#define NIMFFI_RET_TIMEOUT 4
+#define NIMFFI_RET_CLOSED 5
+#define NIMFFI_RET_INVALID_CTX 6
+#define NIMFFI_RET_BUSY 7
 #endif
 
 // ============================================================
@@ -467,6 +474,40 @@ inline CborError decode_cbor(CborValue& it, EchoShoutAnonReq& v) {
 }
 
 // ============================================================
+// Messages from the library
+// ============================================================
+// What `<lib>_poll` hands out (mirrors ffi/ffi_msg.nim and the C header).
+// Guarded so a translation unit that pulls in a second nim-ffi header, or the
+// C header, keeps a single definition.
+#ifndef NIMFFI_MSG_EVENT
+extern "C" {
+#ifndef NIMFFI_MSG_DECLARED
+#define NIMFFI_MSG_DECLARED
+typedef struct {
+  uint32_t struct_size;   /* sizeof(NimFfiMsg) of the library; fields are only appended */
+  uint32_t kind;          /* NIMFFI_MSG_* */
+  uint64_t seq;           /* production order within the context */
+  uint64_t id;
+  uint64_t name_id;       /* EVENT: which one. Otherwise 0 */
+  uint64_t aux;
+  int32_t  ret_code;
+  uint32_t flags;
+  const uint8_t* payload; /* bare CBOR value; never NULL */
+  size_t   len;
+} NimFfiMsg;
+
+#define NIMFFI_MSG_EVENT 2  /* name_id names it; payload is its CBOR */
+#define NIMFFI_MSG_NOT_RESPONDING 5  /* aux is a NIMFFI_NOT_RESPONDING_* reason */
+#define NIMFFI_MSG_RESPONDING 6  /* the FFI thread's heartbeat resumed */
+#define NIMFFI_MSG_CLOSED 7  /* the context is gone; every later poll fails */
+
+#define NIMFFI_NOT_RESPONDING_HEARTBEAT 1
+#define NIMFFI_NOT_RESPONDING_EVENT_QUEUE_FULL 2
+#endif /* NIMFFI_MSG_DECLARED */
+} // extern "C"
+#endif // NIMFFI_MSG_EVENT
+
+// ============================================================
 // C FFI declarations
 // ============================================================
 
@@ -483,16 +524,26 @@ int echo_lib_version(FFICallback callback, void* user_data, const uint8_t* req_c
 int echo_shout_anon(FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 /** Releases the echo context. */
 int echo_destroy(void* ctx);
-uint64_t echo_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
 /**
- * Unregister a listener by id.
- * A call from another thread returns after the last delivery to that listener,
- * so its user data is then safe to free.
- * A call from inside a listener callback returns at once, and the dispatch in
- * flight can still deliver to a listener that you remove that way. Keep the user
- * data of that listener alive until the dispatch ends.
+ * Take the next message of `ctx` out, waiting up to `timeout_ms` (0 never
+ * blocks, negative waits until a message or the end of the context).
+ * NIMFFI_RET_OK: `*msg` is set. The message and its payload belong to the library
+ * and stay valid until the next poll on `ctx`.
+ * NIMFFI_RET_TIMEOUT: nothing arrived in time.
+ * NIMFFI_RET_CLOSED: the context ended; `*msg` is a NIMFFI_MSG_CLOSED whose
+ * `ret_code` is NIMFFI_RET_OK, or NIMFFI_RET_ERR with the reason as UTF-8 payload.
+ * NIMFFI_RET_INVALID_CTX: `ctx` names no live context.
+ * NIMFFI_RET_BUSY: another thread is polling `ctx`; there is one consumer at a time.
+ * The context class below already polls from its dispatch thread.
  */
-int echo_remove_event_listener(void* ctx, uint64_t listener_id);
+int echo_poll(void* ctx, int32_t timeout_ms, const NimFfiMsg** msg);
+/**
+ * A handle that is ready while a message waits or `ctx` is closed: an epoll fd
+ * on Linux, a kqueue fd on macOS/BSD, an Event HANDLE on Windows, -1 on failure.
+ * The caller owns it and closes it. Wait on it, then poll with a timeout of 0
+ * until NIMFFI_RET_TIMEOUT.
+ */
+intptr_t echo_poll_fd(void* ctx);
 /**
  * Stop every context the library still holds and join their threads.
  * Call it before the process exits when a context is still alive, or when a
@@ -570,6 +621,163 @@ inline Result<std::vector<std::uint8_t>> ffi_call_(
 #endif // NIM_FFI_SYNC_CALL_HELPER_HPP_INCLUDED
 
 // ============================================================
+// Message dispatch
+// ============================================================
+// The library never calls into the host for an event. Each context owns one
+// dispatch thread that takes the messages out through `<lib>_poll` and calls the
+// listeners registered on it.
+// Guarded so two nim-ffi headers can share a translation unit.
+#ifndef NIM_FFI_DISPATCHER_HPP_INCLUDED
+#define NIM_FFI_DISPATCHER_HPP_INCLUDED
+
+class NimFfiDispatcher {
+public:
+    using PollFn = int (*)(void* ctx, std::int32_t timeout_ms, const NimFfiMsg** msg);
+    // Decodes one NIMFFI_MSG_EVENT and delivers it; generated per library.
+    using EventFn = void (*)(NimFfiDispatcher& dispatcher, const NimFfiMsg& msg);
+
+    using NotRespondingFn = std::function<void(std::uint64_t reason)>;
+    using RespondingFn = std::function<void()>;
+    using ClosedFn = std::function<void(bool ok, const std::string& reason)>;
+
+    // Returns a non-joinable thread when the thread could not be started.
+    static std::thread start(std::shared_ptr<NimFfiDispatcher> self, PollFn poll,
+                             void* ctx, EventFn onEvent) noexcept {
+        try {
+            return std::thread([self = std::move(self), poll, ctx, onEvent] {
+                self->run(poll, ctx, onEvent);
+            });
+        } catch (...) {
+            return std::thread();
+        }
+    }
+
+    // `detached`: the owner is going away on the dispatch thread itself, so no
+    // listener may run once the handler in flight returns.
+    void stop(bool detached) {
+        if (detached) detached_.store(true);
+        stop_.store(true);
+    }
+
+    // 0 when `fn` is empty.
+    template <class Fn>
+    std::uint64_t add(std::uint32_t kind, std::uint64_t nameId, Fn fn) {
+        if (!fn) return 0;
+        auto held = std::make_shared<Fn>(std::move(fn));
+        std::lock_guard<std::mutex> lock(mtx_);
+        const std::uint64_t id = nextId_++;
+        listeners_.emplace(id, Listener{kind, nameId, std::move(held)});
+        return id;
+    }
+
+    bool remove(std::uint64_t id) {
+        std::shared_ptr<void> released; // a handler's captures die outside the lock
+        std::lock_guard<std::mutex> lock(mtx_);
+        auto it = listeners_.find(id);
+        if (it == listeners_.end()) return false;
+        released = std::move(it->second.fn);
+        listeners_.erase(it);
+        return true;
+    }
+
+    // The payload is decoded in full before any handler runs: `msg` belongs to
+    // the library and a handler may end the context.
+    template <class T>
+    void deliverEvent(const NimFfiMsg& msg) {
+        using Fn = std::function<void(const T&)>;
+        const auto fns = matching<Fn>(NIMFFI_MSG_EVENT, msg.name_id);
+        if (fns.empty()) return;
+        CborParser parser;
+        CborValue it;
+        if (cbor_parser_init(msg.payload, msg.len, 0, &parser, &it) != CborNoError) return;
+        T payload{};
+        if (decode_cbor(it, payload) != CborNoError) return;
+        call(fns, payload);
+    }
+
+private:
+    struct Listener {
+        std::uint32_t kind;
+        std::uint64_t nameId;
+        std::shared_ptr<void> fn; // the std::function type that `kind`/`nameId` imply
+    };
+
+    // Copies out under the lock; the handlers then run with the lock released,
+    // so a handler may add or remove listeners.
+    template <class Fn>
+    std::vector<std::shared_ptr<Fn>> matching(std::uint32_t kind, std::uint64_t nameId) {
+        std::vector<std::shared_ptr<Fn>> fns;
+        std::lock_guard<std::mutex> lock(mtx_);
+        for (const auto& [id, l] : listeners_) {
+            if (l.kind == kind && l.nameId == nameId)
+                fns.push_back(std::static_pointer_cast<Fn>(l.fn));
+        }
+        return fns;
+    }
+
+    template <class Fn, class... Args>
+    void call(const std::vector<std::shared_ptr<Fn>>& fns, const Args&... args) {
+        for (const auto& fn : fns) {
+            if (detached_.load()) return;
+            try {
+                (*fn)(args...);
+            } catch (...) {
+                // A listener's exception must not end the dispatch thread.
+            }
+        }
+    }
+
+    void dispatch(const NimFfiMsg& msg, EventFn onEvent) {
+        switch (msg.kind) {
+        case NIMFFI_MSG_EVENT:
+            onEvent(*this, msg);
+            break;
+        case NIMFFI_MSG_NOT_RESPONDING:
+            call(matching<NotRespondingFn>(NIMFFI_MSG_NOT_RESPONDING, 0), msg.aux);
+            break;
+        case NIMFFI_MSG_RESPONDING:
+            call(matching<RespondingFn>(NIMFFI_MSG_RESPONDING, 0));
+            break;
+        default:
+            break; // a kind from a newer library
+        }
+    }
+
+    // Ends with the closed notification whatever stopped it, so a closed
+    // listener runs exactly once (never after a `stop(true)`).
+    void run(PollFn poll, void* ctx, EventFn onEvent) {
+        using namespace std::chrono_literals;
+        bool ok = true;
+        std::string reason;
+        while (!stop_.load()) {
+            const NimFfiMsg* msg = nullptr;
+            const int rc = poll(ctx, 250, &msg);
+            if (rc == NIMFFI_RET_OK && msg) {
+                dispatch(*msg, onEvent);
+            } else if (rc == NIMFFI_RET_CLOSED) {
+                ok = !msg || msg->ret_code == NIMFFI_RET_OK;
+                if (!ok && msg->payload && msg->len > 0)
+                    reason.assign(reinterpret_cast<const char*>(msg->payload), msg->len);
+                break;
+            } else if (rc == NIMFFI_RET_INVALID_CTX) {
+                break; // the context ended between two polls
+            } else if (rc != NIMFFI_RET_TIMEOUT) {
+                std::this_thread::sleep_for(10ms); // BUSY or ERR: try again
+            }
+        }
+        call(matching<ClosedFn>(NIMFFI_MSG_CLOSED, 0), ok, reason);
+    }
+
+    std::mutex mtx_;
+    std::map<std::uint64_t, Listener> listeners_; // ordered: handlers run in the order they were added
+    std::uint64_t nextId_{1};
+    std::atomic<bool> stop_{false};
+    std::atomic<bool> detached_{false};
+};
+
+#endif // NIM_FFI_DISPATCHER_HPP_INCLUDED
+
+// ============================================================
 // High-level C++ context class
 // ============================================================
 
@@ -596,7 +804,11 @@ public:
         if (fc_.ec != std::errc() || fc_.ptr != addr_end) {
             return Result<std::unique_ptr<EchoCtx>>::err("FFI create returned non-numeric address: " + addr_str);
         }
-        return Result<std::unique_ptr<EchoCtx>>::ok(std::unique_ptr<EchoCtx>(new EchoCtx(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout)));
+        auto ffi_ctx_ = std::unique_ptr<EchoCtx>(new EchoCtx(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout));
+        if (!ffi_ctx_->dispatchThread_.joinable()) {
+            return Result<std::unique_ptr<EchoCtx>>::err("could not start the event dispatch thread");
+        }
+        return Result<std::unique_ptr<EchoCtx>>::ok(std::move(ffi_ctx_));
     }
 
     /// Creates an echo context that prefixes every reply with `config.prefix`.
@@ -615,8 +827,19 @@ public:
     // context.
     ~EchoCtx() {
         if (ptr_) {
+            // Before the dispatch loop stops: the teardown may still emit events, and the
+            // poll the dispatch thread is blocked in wakes with NIMFFI_RET_CLOSED.
             echo_destroy(ptr_);
             ptr_ = nullptr;
+        }
+        // A listener may destroy its own context: that runs on the dispatch thread,
+        // which cannot join itself and owns its own reference to `dispatcher_`.
+        const bool onOwnThread = std::this_thread::get_id() == dispatchThread_.get_id();
+        dispatcher_->stop(onOwnThread);
+        if (onOwnThread) {
+            dispatchThread_.detach();
+        } else if (dispatchThread_.joinable()) {
+            dispatchThread_.join();
         }
     }
 
@@ -624,6 +847,45 @@ public:
     EchoCtx& operator=(const EchoCtx&) = delete;
     EchoCtx(EchoCtx&&) = delete;
     EchoCtx& operator=(EchoCtx&&) = delete;
+
+    // ── Messages from the library ───────────────────────────
+    // Everything echo sends comes out of echo_poll on this context's dispatch thread,
+    // which calls the listeners below, in the order they were added:
+    //   NIMFFI_MSG_NOT_RESPONDING  -> addNotRespondingListener
+    //   NIMFFI_MSG_RESPONDING      -> addRespondingListener
+    //   NIMFFI_MSG_CLOSED          -> addClosedListener
+    // A listener may call back into this context, add or remove listeners, or
+    // destroy the context.
+    struct ListenerHandle { std::uint64_t id = 0; };
+
+    /// The context stopped answering. `reason` is NIMFFI_NOT_RESPONDING_HEARTBEAT
+    /// (the FFI thread's heartbeat stalled) or NIMFFI_NOT_RESPONDING_EVENT_QUEUE_FULL
+    /// (the event queue overflowed; requests are refused until the context is recycled).
+    ListenerHandle addNotRespondingListener(std::function<void(std::uint64_t reason)> handler) {
+        return ListenerHandle{dispatcher_->add(NIMFFI_MSG_NOT_RESPONDING, 0, std::move(handler))};
+    }
+
+    /// The FFI thread's heartbeat resumed after a NIMFFI_NOT_RESPONDING_HEARTBEAT.
+    ListenerHandle addRespondingListener(std::function<void()> handler) {
+        return ListenerHandle{dispatcher_->add(NIMFFI_MSG_RESPONDING, 0, std::move(handler))};
+    }
+
+    /// The context is gone: the last call any listener of this context receives,
+    /// exactly once. `ok` is false when the library gave the context up, and
+    /// `reason` then says why. Not called when a listener destroys the context
+    /// from the dispatch thread.
+    ListenerHandle addClosedListener(std::function<void(bool ok, const std::string& reason)> handler) {
+        return ListenerHandle{dispatcher_->add(NIMFFI_MSG_CLOSED, 0, std::move(handler))};
+    }
+
+    /// Unregister any listener added above. False when the handle is unknown.
+    /// Safe from any thread, a listener included. A delivery already in flight
+    /// may still reach the removed listener once, so keep what it captures alive
+    /// until then.
+    bool removeEventListener(ListenerHandle handle) {
+        if (handle.id == 0) return false;
+        return dispatcher_->remove(handle.id);
+    }
 
     /// Upper-cases `req.text` and returns it behind the context's prefix.
     Result<ShoutResponse> shout(const ShoutRequest& req) const {
@@ -694,7 +956,14 @@ public:
     }
 
 private:
+    static void dispatchEvent_(NimFfiDispatcher&, const NimFfiMsg&) {}
+
     void* ptr_;
     std::chrono::milliseconds timeout_;
-    explicit EchoCtx(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}
+    std::shared_ptr<NimFfiDispatcher> dispatcher_;
+    std::thread dispatchThread_;
+    explicit EchoCtx(void* p, std::chrono::milliseconds t)
+        : ptr_(p), timeout_(t), dispatcher_(std::make_shared<NimFfiDispatcher>()) {
+        dispatchThread_ = NimFfiDispatcher::start(dispatcher_, &echo_poll, ptr_, &EchoCtx::dispatchEvent_);
+    }
 };

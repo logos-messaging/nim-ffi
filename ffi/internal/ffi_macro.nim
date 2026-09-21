@@ -4,6 +4,7 @@ from std/compilesettings import querySetting, SingleValueSetting
 import chronos
 import ../ffi_types
 import ../ffi_thread_request
+import ../ffi_msg
 import ../codegen/[meta, string_helpers, build_paths]
 import ./ffi_route
 import ./ffi_export
@@ -1725,6 +1726,25 @@ proc buildFFIEventProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compileTi
     pragmas = pragmas,
   )
   resultStmts.add(generated)
+
+  # The bindings list an event next to these fixed entries of what a library can send.
+  const reservedEventProcNames = ["closed", "responding", "not_responding", "user_data"]
+  if camelToSnakeCase($userProcName) in reservedEventProcNames:
+    error(
+      "`.ffiEvent.` proc " & $userProcName &
+        " takes the name of a message every library sends; rename it"
+    )
+
+  # A message names its event by `nameId`, so two names must not share one.
+  if nameId(wireName) == 0:
+    error("`.ffiEvent.` name \"" & wireName & "\" hashes to 0; pick another name")
+  for other in ffiEventRegistry:
+    if other.libName == currentLibName and other.wireName != wireName and
+        nameId(other.wireName) == nameId(wireName):
+      error(
+        "`.ffiEvent.` names \"" & wireName & "\" and \"" & other.wireName &
+          "\" share a name id; rename one of them"
+      )
 
   ffiEventRegistry.add(
     FFIEventMeta(

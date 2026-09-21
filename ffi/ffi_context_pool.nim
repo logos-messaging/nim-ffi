@@ -176,7 +176,7 @@ proc parkIdleSlots[T](pool: var FFIContextPool[T]) =
 
 proc reapIfIdle[T](pool: var FFIContextPool[T]) =
   ## The exit policy: no context live, no thread of ours for the C runtime to finalize under.
-  if onFFIThread or onEventThread:
+  if onFFIThread:
     debug "skipping the idle reap: a destroy from inside the library's own " &
       "threads would join a thread to itself"
     return

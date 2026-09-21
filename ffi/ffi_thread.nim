@@ -1,6 +1,6 @@
 ## FFI-thread body and request submission API. Included from `ffi_context.nim`.
 ## Dispatches `FFIThreadRequest`s from `reqQueueBank` and advances
-## `ctx.ffiHeartbeat` so the event thread can spot a wedged FFI thread.
+## `ctx.ffiHeartbeat` so the host's poller can spot a wedged FFI thread.
 
 ## Compile-time-populated table: request type name (cstring) -> async handler.
 ## Public because `{.ffi.}`/`registerReqFFI` expand a write to it in the caller's
@@ -222,7 +222,9 @@ proc drainOngoing(ongoing: ptr seq[Future[void]]): Future[bool] {.async.} =
 
 proc resetForNextOwner[T](ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]) =
   freeLib(ctx)
-  clearListeners(ctx[].eventRegistry)
+  # The owner's poller gets `RET_CLOSED`; what it did not collect is dropped.
+  closeOutbound(ctx[].outbound, ctx.currentGeneration())
+  dropQueuedEvents(ctx[].outbound, ctx[].eventQueue)
   # A reused slot skips initContextResources, so the handle ids of the old owner
   # would otherwise resolve for the next one.
   ctx[].handles.releaseAll()
@@ -246,6 +248,7 @@ proc finishRecycle[T](ctx: ptr FFIContext[T], failure: RecycleFailure) =
     error "context quarantined; the pool slot and its threads leak, the " &
       "library stays alive and its callbacks can still fire",
       reason = outcome.reason(), cause = $outcome
+    closeOutbound(ctx[].outbound, ctx.currentGeneration())
   let fireRes = ctx.recycleDoneSignal.fireSync()
   if fireRes.isErr():
     error "failed to fire recycleDoneSignal", err = fireRes.error
@@ -283,26 +286,32 @@ proc recycleContext[T](
   # Reset only now: the previous owner is provably done with this thread.
   resetForNextOwner(ctx, ongoing)
 
-var ffiEventQueueSignalPtr {.threadvar.}: ThreadSignalPtr
+var ffiCurrentOutbound {.threadvar.}: ptr FFIOutbound
   # Stashed so the hook has no closure env.
+var ffiCurrentGeneration {.threadvar.}: ptr Atomic[uint]
+
+proc ffiHostPollsHook(): bool {.gcsafe, raises: [].} =
+  if ffiCurrentOutbound.isNil() or ffiCurrentGeneration.isNil():
+    return true
+  return ffiCurrentOutbound[].polledGeneration.load() == ffiCurrentGeneration[].load()
 
 proc ffiNotifyEventEnqueuedHook() {.gcsafe, raises: [].} =
-  if not ffiEventQueueSignalPtr.isNil():
-    let res = ffiEventQueueSignalPtr.fireSync()
-    if res.isErr():
-      error "failed to fire eventQueueSignal after enqueue", err = res.error
+  if not ffiCurrentOutbound.isNil():
+    notifyOutbound(ffiCurrentOutbound[])
 
 proc proveAlive(ctx: ptr FFIContext) =
-  ## Advance the heartbeat the event thread polls; only movement matters, not value.
+  ## Advance the heartbeat the poller reads; only movement matters, not value.
   ctx.ffiHeartbeat.atomicInc()
 
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   registerCloseDispatcherHook()
-  ffiCurrentEventRegistry = addr ctx[].eventRegistry
   ffiCurrentEventQueue = addr ctx[].eventQueue
   ffiCurrentEventQueueStuck = addr ctx[].eventQueueStuck
-  ffiEventQueueSignalPtr = ctx.eventQueueSignal
+  ffiCurrentMsgSeq = addr ctx[].outbound.msgSeq
+  ffiCurrentOutbound = addr ctx[].outbound
+  ffiCurrentGeneration = addr ctx[].generation
   ffiCurrentNotifyEventEnqueued = ffiNotifyEventEnqueuedHook
+  ffiCurrentHostPolls = ffiHostPollsHook
   onFFIThread = true
 
   defer:
@@ -310,10 +319,8 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
     unregisterWaitedSignal(ctx.reqSignal)
     # Free handle refs on the thread that allocated them (refc heap is thread-local).
     ctx[].handles.releaseAll()
-    # Let the event thread stop draining and exit; wake it so it notices now.
-    ctx.ffiThreadExited.store(true)
-    ctx.eventQueueSignal.fireSync().isOkOr:
-      error "failed to wake event thread on FFI thread exit", err = error
+    # After the teardown, so its events still reach the poller before `RET_CLOSED`.
+    closeOutbound(ctx[].outbound, ctx.currentGeneration())
     # Unblocks destroyFFIContext's bounded wait.
     let fireRes = ctx.threadExitSignal.fireSync()
     if fireRes.isErr():

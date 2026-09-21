@@ -4,11 +4,11 @@ import
   ffi/internal/[ffi_library, ffi_macro, ffi_export],
   ffi/[
     alloc, ffi_types, ffi_events, ffi_handles, ffi_context, ffi_context_pool,
-    ffi_thread_request, cbor_serial,
+    ffi_thread_request, ffi_msg, ffi_poll, cbor_serial,
   ]
 
 export atomics, tables
 export chronos, chronicles
 export
   alloc, ffi_library, ffi_macro, ffi_export, ffi_types, ffi_events, ffi_handles,
-  ffi_context, ffi_context_pool, ffi_thread_request, cbor_serial
+  ffi_context, ffi_context_pool, ffi_thread_request, ffi_msg, ffi_poll, cbor_serial

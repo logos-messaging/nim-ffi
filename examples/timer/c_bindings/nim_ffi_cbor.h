@@ -26,11 +26,18 @@ typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_dat
  * ~5s while a handler is still running (with `msg`/`len` carrying the elapsed
  * milliseconds as decimal text), then still ends with a terminal RET_OK/RET_ERR.
  * A caller that only wants the final answer must ignore it, not treat it as an
- * error. */
+ * error.
+ *
+ * NIMFFI_RET_TIMEOUT, _CLOSED and _BUSY come from <lib>_poll() only; see its
+ * comment in <lib>.h. */
 #define NIMFFI_RET_OK 0
 #define NIMFFI_RET_ERR 1
 #define NIMFFI_RET_MISSING_CALLBACK 2
 #define NIMFFI_RET_STALE_WARN 3
+#define NIMFFI_RET_TIMEOUT 4
+#define NIMFFI_RET_CLOSED 5
+#define NIMFFI_RET_INVALID_CTX 6
+#define NIMFFI_RET_BUSY 7
 
 /* ── leaf encoders ─────────────────────────────────────────────────────── */
 static inline CborError nimffi_enc_bool(CborEncoder* e, const bool* v) {

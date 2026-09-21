@@ -40,10 +40,10 @@ jobs:
     with:
       test: >-
         test_ffi_context test_gc_compat test_serial test_ctx_validation
-        test_foreign_thread test_event_listener_reentrancy test_ffi_teardown
-        test_ffi_recycle_reset test_ffi_claim_generation test_ffi_ingress_limits
-        test_ctx_after_failed_ctor test_event_thread test_ffi_thread_destruction
-        test_ffi_pool_churn test_ffi_wake
+        test_foreign_thread test_ffi_teardown test_ffi_recycle_reset
+        test_ffi_claim_generation test_ffi_ingress_limits test_ctx_after_failed_ctor
+        test_ffi_thread_destruction test_ffi_pool_churn test_ffi_wake test_ffi_poll
+        test_ffi_poll_teardown
       oses: '["macos-15","windows-latest"]'
       nim-versions: '["stable"]'
       nimble-version: ${{ needs.versions.outputs.nimble }}

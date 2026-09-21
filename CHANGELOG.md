@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **Breaking:** events are pulled, not pushed. The library no longer calls a host
+  listener: `{.ffiEvent.}` payloads go into the context's queue and the host takes
+  them out with the new `<lib>_poll(ctx, timeout_ms, &msg)`, or waits on the handle
+  from `<lib>_poll_fd(ctx)` in its own event loop and then drains. `poll` also
+  delivers `NOT_RESPONDING` / `RESPONDING` and the `CLOSED` end of a context. The
+  generated C++ and Rust bindings keep their listener API on top of a dispatch thread;
+  the C binding gets `<lib>_ctx_dispatch_next` and a typed `<Lib>Handlers` struct.
+- **Breaking:** an event's CBOR is the bare payload. Its name travels as
+  `msg.name_id`, the FNV-1a 64 hash of the wire name; the `{eventType, payload}`
+  envelope is gone. Two event names of one library that share an id stop the
+  compilation.
+- A context runs one thread. The event thread is gone; the FFI thread's heartbeat
+  is checked inside `poll`, on the host's thread.
+- Result callbacks are unchanged in this step.
+
+### Removed
+- `<lib>_add_event_listener`, `<lib>_remove_event_listener`, the listener
+  registry, `EventEnvelope`, the `"not_responding"` / `"responding"` events and
+  `-d:ffiMaxEventNameBytes`.
+
 ### Added
 - `ffi/ffi_wake.nim`: a level-triggered wake signal whose handle a host can wait
   on, built on each OS's own primitive (eventfd on Linux, a kqueue with an

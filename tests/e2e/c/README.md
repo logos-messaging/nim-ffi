@@ -11,7 +11,8 @@ nimble test_c_e2e
 which regenerates the bindings, configures CMake, builds, and runs the test via
 `ctest`. The test program (`test_timer_e2e.c`) exercises the constructor, the
 sync and async methods, nested `seq`/`Option` payloads, multi-parameter
-requests, the error channel, and the typed event listener.
+requests, the error channel, and the events: the host takes them out with
+`my_timer_ctx_dispatch_next`, or waits on the `my_timer_ctx_poll_fd` handle first.
 
 `test_timer_e2e.c` is hand-written (it is the consumer of the bindings, not a
 generated artifact). The bindings under `examples/timer/c_bindings` are

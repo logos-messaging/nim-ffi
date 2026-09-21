@@ -9,8 +9,19 @@
     // context.
     ~{{CTX}}() {
         if (ptr_) {
+            // Before the dispatch loop stops: the teardown may still emit events, and the
+            // poll the dispatch thread is blocked in wakes with NIMFFI_RET_CLOSED.
             {{LIB}}_destroy(ptr_);
             ptr_ = nullptr;
+        }
+        // A listener may destroy its own context: that runs on the dispatch thread,
+        // which cannot join itself and owns its own reference to `dispatcher_`.
+        const bool onOwnThread = std::this_thread::get_id() == dispatchThread_.get_id();
+        dispatcher_->stop(onOwnThread);
+        if (onOwnThread) {
+            dispatchThread_.detach();
+        } else if (dispatchThread_.joinable()) {
+            dispatchThread_.join();
         }
     }
 

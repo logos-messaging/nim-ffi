@@ -8,12 +8,31 @@ import
   ./types_ir,
   ./consts,
   ./build_paths,
-  ../ret_codes
+  ../ret_codes,
+  ../ffi_msg
 
 ## Fixed 64-bit wire type for any Nim `ptr T` / `pointer`.
 const CppPtrType* = "uint64_t"
 
 ## Trailing param of every call that can't inherit a ctx's `timeout_`.
+const PollDoc =
+  """Take the next message of `ctx` out, waiting up to `timeout_ms` (0 never
+blocks, negative waits until a message or the end of the context).
+NIMFFI_RET_OK: `*msg` is set. The message and its payload belong to the library
+and stay valid until the next poll on `ctx`.
+NIMFFI_RET_TIMEOUT: nothing arrived in time.
+NIMFFI_RET_CLOSED: the context ended; `*msg` is a NIMFFI_MSG_CLOSED whose
+`ret_code` is NIMFFI_RET_OK, or NIMFFI_RET_ERR with the reason as UTF-8 payload.
+NIMFFI_RET_INVALID_CTX: `ctx` names no live context.
+NIMFFI_RET_BUSY: another thread is polling `ctx`; there is one consumer at a time.
+The context class below already polls from its dispatch thread."""
+
+const PollFdDoc =
+  """A handle that is ready while a message waits or `ctx` is closed: an epoll fd
+on Linux, a kqueue fd on macOS/BSD, an Event HANDLE on Windows, -1 on failure.
+The caller owns it and closes it. Wait on it, then poll with a timeout of 0
+until NIMFFI_RET_TIMEOUT."""
+
 const CppTimeoutParam = "std::chrono::milliseconds timeout = std::chrono::seconds{30}"
 
 const
@@ -21,7 +40,10 @@ const
   ResultTpl = staticRead("templates/cpp/result.hpp.tpl")
   CborHelpersTpl = staticRead("templates/cpp/cbor_helpers.hpp.tpl")
   SyncCallHelperTpl = staticRead("templates/cpp/sync_call_helper.hpp.tpl")
+  MsgTpl = staticRead("templates/cpp/msg.hpp.tpl")
+  DispatcherTpl = staticRead("templates/cpp/dispatcher.hpp.tpl")
   ContextRuleOf5Tpl = staticRead("templates/cpp/context_rule_of_5.hpp.tpl")
+  ContextListenersTpl = staticRead("templates/cpp/context_listeners.hpp.tpl")
   CMakeListsTpl = staticRead("templates/cpp/CMakeLists.txt.tpl")
   FindRepoRootTpl = staticRead("templates/find_repo_root.cmake.part")
 
@@ -139,91 +161,79 @@ proc cppBracedInit(structName: string, fieldNames: seq[string]): string =
   ## C++ braced-init for a Req struct, e.g. `TimerEchoReq{message, count}`.
   return structName & "{" & fieldNames.join(", ") & "}"
 
-proc emitEventDispatcher(
-    lines: var seq[string], ctxTypeName, libName: string, events: seq[FFIEventMeta]
+func eventListenerMethod(ev: FFIEventMeta): string =
+  return "addOn" & capitalizeFirstLetter(ev.nimProcName).substr(2) & "Listener"
+
+func eventNameIdConst(ev: FFIEventMeta): string =
+  return identToUpperSnake(ev.nimProcName) & "_NAME_ID"
+
+proc emitListenerApi(
+    lines: var seq[string], libName: string, events: seq[FFIEventMeta]
 ) =
-  ## Emits the public per-event `addOn<X>Listener` / `removeEventListener` API.
-  ## Callables are owned by `listeners_` (unique_ptr keyed by id); the raw
-  ## pointer is the dylib's `user_data`, stable until removal.
-  if events.len == 0:
-    return
+  ## Emits the public listener API: one name-id constant and one typed
+  ## `addOn<X>Listener` per event, then the liveness/closed hooks every library has.
   lines.add(
-    "    // ── Event listener API ──────────────────────────────────"
+    "    // ── Messages from the library ───────────────────────────"
   )
+  lines.add(
+    "    // Everything $1 sends comes out of $1_poll on this context's dispatch thread," %
+      [libName]
+  )
+  lines.add("    // which calls the listeners below, in the order they were added:")
+  for ev in events:
+    lines.add(
+      "    //   event \"$1\" ($2)  -> $3" %
+        [ev.wireName, ev.payloadTypeName, eventListenerMethod(ev)]
+    )
+  lines.add("    //   NIMFFI_MSG_NOT_RESPONDING  -> addNotRespondingListener")
+  lines.add("    //   NIMFFI_MSG_RESPONDING      -> addRespondingListener")
+  lines.add("    //   NIMFFI_MSG_CLOSED          -> addClosedListener")
+  lines.add(
+    "    // A listener may call back into this context, add or remove listeners, or"
+  )
+  lines.add("    // destroy the context.")
   lines.add("    struct ListenerHandle { std::uint64_t id = 0; };")
   lines.add("")
   for ev in events:
-    let methodName =
-      "addOn" & capitalizeFirstLetter(ev.nimProcName).substr(2) & "Listener"
+    lines.add(
+      "    /// FNV-1a 64 of \"$1\": the NimFfiMsg.name_id of this event." % [
+        ev.wireName
+      ]
+    )
+    lines.add(
+      "    static constexpr std::uint64_t $1 = $2ULL;" %
+        [eventNameIdConst(ev), nameIdLiteral(ev.wireName)]
+    )
     lines.add(renderMemberDocComment(ev.doc))
     lines.add(
       "    ListenerHandle $1(std::function<void(const $2&)> handler) {" %
-        [methodName, ev.payloadTypeName]
+        [eventListenerMethod(ev), ev.payloadTypeName]
     )
     lines.add(
-      "        auto owned = std::make_unique<TypedListener<$1>>(std::move(handler));" %
-        [ev.payloadTypeName]
+      "        return ListenerHandle{dispatcher_->add(NIMFFI_MSG_EVENT, $1, std::move(handler))};" %
+        [eventNameIdConst(ev)]
     )
-    lines.add("        auto* raw = owned.get();")
-    lines.add("        const auto id = $1_add_event_listener(" % [libName])
-    lines.add(
-      "            ptr_, \"$1\", &$2::typedTrampoline<$3>, raw);" %
-        [ev.wireName, ctxTypeName, ev.payloadTypeName]
-    )
-    lines.add("        if (id == 0) return ListenerHandle{0};")
-    lines.add("        listeners_.emplace(id, std::move(owned));")
-    lines.add("        return ListenerHandle{id};")
     lines.add("    }")
     lines.add("")
-  lines.add(renderMemberDocComment(CtxRemoveListenerDoc))
-  lines.add("    bool removeEventListener(ListenerHandle handle) {")
-  lines.add("        if (handle.id == 0) return false;")
-  lines.add(
-    "        const auto rc = $1_remove_event_listener(ptr_, handle.id);" % [libName]
-  )
-  lines.add("        listeners_.erase(handle.id);")
-  lines.add("        return rc == 0;")
-  lines.add("    }")
-  lines.add("")
+  lines.add(ContextListenersTpl)
 
-proc emitEventTrampoline(lines: var seq[string], events: seq[FFIEventMeta]) =
-  ## Private listener machinery for `emitEventDispatcher`: polymorphic
-  ## `ListenerBase`, `TypedListener<T>` and the `typedTrampoline<T>` decoder.
+proc emitEventDecoder(lines: var seq[string], events: seq[FFIEventMeta]) =
+  ## The dispatch loop's per-library half: maps a name id to the payload type to decode.
   if events.len == 0:
+    lines.add("    static void dispatchEvent_(NimFfiDispatcher&, const NimFfiMsg&) {}")
     return
-  lines.add("    struct ListenerBase {")
-  lines.add("        virtual ~ListenerBase() = default;")
-  lines.add("    };")
-  lines.add("")
-  lines.add("    template <class T>")
-  lines.add("    struct TypedListener : ListenerBase {")
-  lines.add("        std::function<void(const T&)> fn;")
   lines.add(
-    "        explicit TypedListener(std::function<void(const T&)> f) : fn(std::move(f)) {}"
+    "    static void dispatchEvent_(NimFfiDispatcher& dispatcher, const NimFfiMsg& msg) {"
   )
-  lines.add("    };")
-  lines.add("")
-  lines.add("    template <class T>")
-  lines.add(
-    "    static void typedTrampoline(int ret, const char* msg, std::size_t len, void* ud) {"
-  )
-  lines.add("        if (!ud || ret != 0 || !msg || len == 0) return;")
-  lines.add("        auto* listener = static_cast<TypedListener<T>*>(ud);")
-  lines.add("        if (!listener->fn) return;")
-  lines.add("        CborParser parser; CborValue it;")
-  lines.add(
-    "        if (cbor_parser_init(reinterpret_cast<const std::uint8_t*>(msg), len, 0, &parser, &it) != CborNoError) return;"
-  )
-  lines.add("        if (!cbor_value_is_map(&it)) return;")
-  lines.add("        CborValue payloadField;")
-  lines.add(
-    "        if (cbor_value_map_find_value(&it, \"payload\", &payloadField) != CborNoError) return;"
-  )
-  lines.add("        T payload{};")
-  lines.add("        if (decode_cbor(payloadField, payload) != CborNoError) return;")
-  lines.add("        listener->fn(payload);")
+  lines.add("        switch (msg.name_id) {")
+  for ev in events:
+    lines.add(
+      "        case $1: dispatcher.deliverEvent<$2>(msg); break;" %
+        [eventNameIdConst(ev), ev.payloadTypeName]
+    )
+  lines.add("        default: break; // an event from a newer library")
+  lines.add("        }")
   lines.add("    }")
-  lines.add("")
 
 proc generateCppHeader*(
     procs: seq[FFIProcMeta],
@@ -235,8 +245,6 @@ proc generateCppHeader*(
   var lines: seq[string] = @[]
 
   lines.add(HeaderPreludeTpl.replace("{{RET_CODES}}", cRetCodeDefines()))
-  if events.len > 0:
-    lines.add("#include <unordered_map>")
 
   lines.add(ResultTpl)
 
@@ -314,6 +322,8 @@ proc generateCppHeader*(
     emitStructCborCodec(lines, reqName, fields)
     lines.add("")
 
+  lines.add(MsgTpl.replace("{{MSG_DECL}}", cMsgDecl()))
+
   lines.add("// ============================================================")
   lines.add("// C FFI declarations")
   lines.add("// ============================================================")
@@ -343,21 +353,20 @@ proc generateCppHeader*(
       )
     of FFIKind.DTOR:
       lines.add("int $1(void* ctx);" % [p.procName])
-  # Listener-registration ABI is always exported.
+  lines.add(renderBlockDocComment(PollDoc))
   lines.add(
-    "uint64_t $1_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);" %
-      [libName]
+    "int $1_poll(void* ctx, int32_t timeout_ms, const NimFfiMsg** msg);" % [libName]
   )
-  lines.add(renderBlockDocComment(RemoveListenerDoc))
-  lines.add(
-    "int $1_remove_event_listener(void* ctx, uint64_t listener_id);" % [libName]
-  )
+  lines.add(renderBlockDocComment(PollFdDoc))
+  lines.add("intptr_t $1_poll_fd(void* ctx);" % [libName])
   lines.add(renderBlockDocComment(ShutdownDoc))
   lines.add("int $1_shutdown(void);" % [libName])
   lines.add("} // extern \"C\"")
   lines.add("")
 
   lines.add(SyncCallHelperTpl)
+
+  lines.add(DispatcherTpl)
 
   let classified = classifyProcs(procs)
   let ctors = classified.ctors
@@ -428,9 +437,16 @@ proc generateCppHeader*(
     lines.add("        }")
     # `new` (not make_unique) so the ctor can stay private.
     lines.add(
-      "        return $1::ok(std::unique_ptr<$2>(new $2(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout)));" %
-        [createRet, ctxTypeName]
+      "        auto ffi_ctx_ = std::unique_ptr<$1>(new $1(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), timeout));" %
+        [ctxTypeName]
     )
+    lines.add("        if (!ffi_ctx_->dispatchThread_.joinable()) {")
+    lines.add(
+      "            return $1::err(\"could not start the event dispatch thread\");" %
+        [createRet]
+    )
+    lines.add("        }")
+    lines.add("        return $1::ok(std::move(ffi_ctx_));" % [createRet])
     lines.add("    }")
     lines.add("")
 
@@ -460,7 +476,7 @@ proc generateCppHeader*(
     ContextRuleOf5Tpl.multiReplace(("{{CTX}}", ctxTypeName), ("{{LIB}}", libName))
   )
 
-  emitEventDispatcher(lines, ctxTypeName, libName, events)
+  emitListenerApi(lines, libName, events)
 
   # A static has no ctx to inherit `timeout_` from, so it takes its own `timeout`.
   for m in classified.replyProcs():
@@ -548,18 +564,22 @@ proc generateCppHeader*(
     lines.add("")
 
   lines.add("private:")
-  # Listener machinery must precede the `listeners_` member (its value type must be complete at declaration).
-  emitEventTrampoline(lines, events)
+  emitEventDecoder(lines, events)
+  lines.add("")
   lines.add("    void* ptr_;")
   lines.add("    std::chrono::milliseconds timeout_;")
-  if events.len > 0:
-    lines.add(
-      "    std::unordered_map<std::uint64_t, std::unique_ptr<ListenerBase>> listeners_;"
-    )
+  # Shared with the dispatch thread, which outlives `this` when a listener destroys the context.
+  lines.add("    std::shared_ptr<NimFfiDispatcher> dispatcher_;")
+  lines.add("    std::thread dispatchThread_;")
+  lines.add("    explicit $1(void* p, std::chrono::milliseconds t)" % [ctxTypeName])
   lines.add(
-    "    explicit $1(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}" %
-      [ctxTypeName]
+    "        : ptr_(p), timeout_(t), dispatcher_(std::make_shared<NimFfiDispatcher>()) {"
   )
+  lines.add(
+    "        dispatchThread_ = NimFfiDispatcher::start(dispatcher_, &$1_poll, ptr_, &$2::dispatchEvent_);" %
+      [libName, ctxTypeName]
+  )
+  lines.add("    }")
   lines.add("};")
   lines.add("")
 

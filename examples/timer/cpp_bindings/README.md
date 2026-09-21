@@ -4,7 +4,7 @@
 
 This folder contains **auto-generated C++ bindings** for the `my_timer` Nim library. It is generated from `../timer.nim` and provides:
 
-- `my_timer.hpp`: High-level C++ class (`MyTimerCtx`) wrapping the FFI interface
+- `my_timer.hpp`: High-level C++ class (`MyTimerCtx`) wrapping the FFI interface. Each context runs one dispatch thread that takes the library's messages out of `my_timer_poll` and calls the listeners (`addOn<Event>Listener`, `addNotRespondingListener`, `addRespondingListener`, `addClosedListener`)
 - `main.cpp`: Example executable demonstrating how to use the bindings
 - `CMakeLists.txt`: Build configuration that compiles the Nim library and links the C++ example
 
@@ -27,7 +27,7 @@ This command:
 cd examples/timer/cpp_bindings
 cmake -S . -B build
 cmake --build build
-./build/example
+./build/my_timer_example
 ```
 
 ## Do Not Edit
