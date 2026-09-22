@@ -44,6 +44,18 @@ const NIMFFI_RET_ERR: c_int = 1;
 const NIMFFI_RET_MISSING_CALLBACK: c_int = 2;
 #[allow(dead_code)]
 const NIMFFI_RET_STALE_WARN: c_int = 3;
+#[allow(dead_code)]
+const NIMFFI_RET_TIMEOUT: c_int = 4;
+#[allow(dead_code)]
+const NIMFFI_RET_CLOSED: c_int = 5;
+#[allow(dead_code)]
+const NIMFFI_RET_INVALID_CTX: c_int = 6;
+#[allow(dead_code)]
+const NIMFFI_RET_BUSY: c_int = 7;
+#[allow(dead_code)]
+const NIMFFI_RET_QUEUE_FULL: c_int = 8;
+#[allow(dead_code)]
+const NIMFFI_RET_TOO_LARGE: c_int = 9;
 
 unsafe extern "C" fn on_result(
     ret: c_int,
