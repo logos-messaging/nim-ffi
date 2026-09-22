@@ -28,6 +28,7 @@ const
   MsgReply* = 1'u32
   MsgEvent* = 2'u32
   MsgStaleWarn* = 3'u32
+  MsgReverseCall* = 4'u32
   MsgNotResponding* = 5'u32
   MsgResponding* = 6'u32
   MsgClosed* = 7'u32
@@ -44,6 +45,11 @@ const MsgKinds* = [
     doc: "request id is still running after aux ms; its REPLY still comes",
   ),
   MsgKind(name: "EVENT", value: MsgEvent, doc: "name_id names it; payload is its CBOR"),
+  MsgKind(
+    name: "REVERSE_CALL",
+    value: MsgReverseCall,
+    doc: "the library asks: answer id with <lib>_reverse_reply within aux ms",
+  ),
   MsgKind(
     name: "NOT_RESPONDING",
     value: MsgNotResponding,
