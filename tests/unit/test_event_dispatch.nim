@@ -215,7 +215,12 @@ suite "event thread drains queued events":
 
       let payload = @[byte 0xDE, 0xAD, 0xBE, 0xEF]
       check tryEnqueueEvent(
-        ctx[].eventQueue, cstring(QueuedEvtName), unsafeAddr payload[0], payload.len
+        ctx[].eventQueue,
+        cstring(QueuedEvtName),
+        nameId(QueuedEvtName),
+        0'u64,
+        unsafeAddr payload[0],
+        payload.len,
       )
 
       waitCallback(evt)
@@ -237,7 +242,12 @@ suite "oversize payload falls back to heap":
         payload[i] = byte(i and 0xFF)
       check payload.len > MaxEventPayloadBytes
       check tryEnqueueEvent(
-        ctx[].eventQueue, cstring(OversizeEvtName), unsafeAddr payload[0], payload.len
+        ctx[].eventQueue,
+        cstring(OversizeEvtName),
+        nameId(OversizeEvtName),
+        0'u64,
+        unsafeAddr payload[0],
+        payload.len,
       )
 
       waitCallback(evt)
@@ -258,7 +268,12 @@ suite "oversize event name falls back to heap":
 
       let payload = @[byte 0x11, 0x22, 0x33]
       check tryEnqueueEvent(
-        ctx[].eventQueue, cstring(LongEvtName), unsafeAddr payload[0], payload.len
+        ctx[].eventQueue,
+        cstring(LongEvtName),
+        nameId(LongEvtName),
+        0'u64,
+        unsafeAddr payload[0],
+        payload.len,
       )
 
       waitCallback(evt)
