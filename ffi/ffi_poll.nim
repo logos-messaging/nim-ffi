@@ -4,7 +4,8 @@
 
 import std/[atomics, locks, monotimes, times]
 import chronos/timer
-import ./ffi_context, ./ffi_msg, ./ffi_wake, ./ffi_thread_request, ./ret_codes
+import
+  ./ffi_context, ./ffi_msg, ./ffi_reverse, ./ffi_wake, ./ffi_thread_request, ./ret_codes
 
 const
   WatchSliceMs = 1000 ## A blocked poll still looks at the heartbeat this often.
@@ -116,6 +117,7 @@ proc releaseHeld(outb: var FFIOutbound) =
   ## Ends the host's use of the message it last polled.
   if outb.queueLive:
     releaseHeldEvent(outb.held)
+  outb.reverse.releaseHeld()
   if not outb.heldReply.isNil():
     outb.retireRequest(outb.heldReply)
     outb.heldReply = nil
@@ -123,6 +125,8 @@ proc releaseHeld(outb: var FFIOutbound) =
 proc hasMessage[T](ctx: ptr FFIContext[T]): bool =
   let outb = addr ctx[].outbound
   if outb.queueLive and ctx[].eventQueue.headSeq() != 0:
+    return true
+  if outb.reverse.headSeq() != 0:
     return true
   withLock outb.lock:
     return not outb.replyHead.isNil() or not outb.staleHead.isNil()
@@ -134,6 +138,7 @@ proc takeMessage[T](ctx: ptr FFIContext[T], msg: ptr ptr NimFfiMsg): bool =
   var eventSeq = 0'u64
   if outb.queueLive:
     eventSeq = ctx[].eventQueue.headSeq()
+  let reverseSeq = outb.reverse.headSeq()
 
   var
     reply: ptr FFIThreadRequest = nil
@@ -154,6 +159,8 @@ proc takeMessage[T](ctx: ptr FFIContext[T], msg: ptr ptr NimFfiMsg): bool =
       oldest = replySeq
     if staleHeadSeq != 0 and (oldest == 0 or staleHeadSeq < oldest):
       oldest = staleHeadSeq
+    if reverseSeq != 0 and (oldest == 0 or reverseSeq < oldest):
+      oldest = reverseSeq
     if oldest == 0:
       return false
     if oldest == replySeq:
@@ -184,6 +191,23 @@ proc takeMessage[T](ctx: ptr FFIContext[T], msg: ptr ptr NimFfiMsg): bool =
       kindDetail = uint64(staleMs),
     )
     return true
+  if reverseSeq != 0:
+    let inv = outb.reverse.popForHost()
+    if not inv.isNil():
+      outb.reverse.held = inv
+      let leftMs = (inv[].deadline - getMonoTime()).inMilliseconds
+      fill(
+        msg,
+        outb[],
+        MsgReverseCall,
+        seq = inv[].seq,
+        id = inv[].callId,
+        nameId = inv[].nameId,
+        kindDetail = uint64(max(leftMs, 0)),
+        payload = inv[].args,
+        len = inv[].argsLen,
+      )
+      return true
   if outb.queueLive and ctx[].eventQueue.popEventInto(outb.held):
     let ev = outb.held.event
     fill(
