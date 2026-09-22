@@ -195,6 +195,41 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
       )
     )
 
+  when defined(ffiPollMode):
+    # {libraryName}_last_error: an export returns a code, this gives the words.
+    let lastErrorName = libraryName & "_last_error"
+    let lastErrorBody = quote:
+      return lastError()
+
+    stmts.add(
+      newProc(
+        name = ident(lastErrorName),
+        params = @[ident("cstring")],
+        body = lastErrorBody,
+        pragmas = cdeclExportPragma,
+      )
+    )
+
+    # {libraryName}_static_ctx: the replies of `{.ffiStatic.}` requests arrive on
+    # the library's own context, so the host needs its token to poll for them.
+    let staticCtxName = libraryName & "_static_ctx"
+    let staticCtxBody = quote:
+      when declared(initializeLibrary):
+        initializeLibrary()
+      let `ctxIdent` = `poolIdent`.staticFFIContext().valueOr:
+        setLastError("static context: " & error)
+        return FFICtxToken(nil)
+      return `ctxIdent`.ffiToken()
+
+    stmts.add(
+      newProc(
+        name = ident(staticCtxName),
+        params = @[ident("FFICtxToken")],
+        body = staticCtxBody,
+        pragmas = cdeclExportPragma,
+      )
+    )
+
   # A polling host takes its events out of the message queue, so a library
   # built for it has no listener registry to add to.
   when not defined(ffiPollMode):
