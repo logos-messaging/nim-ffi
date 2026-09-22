@@ -37,6 +37,12 @@ extern "C" {
 #define NIMFFI_RET_ERR 1
 #define NIMFFI_RET_MISSING_CALLBACK 2
 #define NIMFFI_RET_STALE_WARN 3
+#define NIMFFI_RET_TIMEOUT 4
+#define NIMFFI_RET_CLOSED 5
+#define NIMFFI_RET_INVALID_CTX 6
+#define NIMFFI_RET_BUSY 7
+#define NIMFFI_RET_QUEUE_FULL 8
+#define NIMFFI_RET_TOO_LARGE 9
 #endif
 
 #include <unordered_map>
