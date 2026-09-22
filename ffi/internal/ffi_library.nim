@@ -196,6 +196,36 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
     )
 
   when defined(ffiPollMode):
+    # {libraryName}_reverse_reply: the host's answer to a NIMFFI_MSG_REVERSE_CALL.
+    let reverseReplyName = libraryName & "_reverse_reply"
+    let reverseReplyBody = quote:
+      let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
+      if `ctxIdent`.isNil():
+        return RET_INVALID_CTX
+      if not `ctxIdent`[].outbound.reverse.pushReply(
+        callId, retCode, cast[pointer](payload), int(payloadLen)
+      ):
+        return RET_ERR
+      # The FFI thread matches the id; an answer it does not know is dropped there.
+      `ctxIdent`.wakeFFIThread()
+      return RET_OK
+
+    stmts.add(
+      newProc(
+        name = ident(reverseReplyName),
+        params = @[
+          ident("cint"),
+          newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
+          newIdentDefs(ident("callId"), ident("uint64")),
+          newIdentDefs(ident("retCode"), ident("cint")),
+          newIdentDefs(ident("payload"), nnkPtrTy.newTree(ident("byte"))),
+          newIdentDefs(ident("payloadLen"), ident("csize_t")),
+        ],
+        body = reverseReplyBody,
+        pragmas = cdeclExportPragma,
+      )
+    )
+
     # {libraryName}_last_error: an export returns a code, this gives the words.
     let lastErrorName = libraryName & "_last_error"
     let lastErrorBody = quote:

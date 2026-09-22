@@ -29,6 +29,7 @@ const
   MsgReply* = 1'u32
   MsgEvent* = 2'u32
   MsgStale* = 3'u32
+  MsgReverseCall* = 4'u32
   MsgNotRespondingHeartbeat* = 5'u32
   MsgResponding* = 6'u32
   MsgClosed* = 7'u32
@@ -47,6 +48,11 @@ const MsgKinds* = [
       "request id is still running; duration_ms is the ms in flight, and its REPLY still comes",
   ),
   MsgKind(name: "EVENT", value: MsgEvent, doc: "name_id names it; payload is its CBOR"),
+  MsgKind(
+    name: "REVERSE_CALL",
+    value: MsgReverseCall,
+    doc: "the library asks: answer id with <lib>_reverse_reply within duration_ms",
+  ),
   MsgKind(
     name: "NOT_RESPONDING_HEARTBEAT",
     value: MsgNotRespondingHeartbeat,
