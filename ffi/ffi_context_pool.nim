@@ -8,10 +8,8 @@ const
   SlotBits = 5
   SlotMask = (1'u shl SlotBits) - 1
   TokenBase = 1'u shl 12
-    ## A token is an opaque handle, not an address, but a host in a garbage-collected
-    ## language holds it in a pointer variable. Keeping every token clear of the
-    ## first page means the collector reads it as a pointer of no interest instead
-    ## of a corrupt one: Go, for one, kills the process over a pointer below 4096.
+    ## Tokens start at 4096 so hosts that store them as pointers don't crash:
+    ## Go aborts on any pointer below 4096.
 
 static:
   doAssert MaxFFIContexts <= int(SlotMask) + 1,
