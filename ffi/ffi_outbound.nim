@@ -5,7 +5,13 @@
 
 import std/[atomics, locks, monotimes]
 import results
-import ./ffi_wake, ./ffi_events, ./ffi_msg, ./ffi_thread_request, ./ffi_request_queue
+import
+  ./ffi_wake,
+  ./ffi_events,
+  ./ffi_msg,
+  ./ffi_reverse,
+  ./ffi_thread_request,
+  ./ffi_request_queue
 
 const MaxOutstandingRequests* = 16 * RequestQueueDepth
 
@@ -38,6 +44,7 @@ type
     staleHead*, staleTail*: ptr FFIThreadRequest
       # Requests with a warning pending, linked through `staleNext`.
     outstanding*: Atomic[int] # Submitted requests the host has not collected yet.
+    reverse*: FFIReverse # Calls the other way: the library asking the host.
     held*: HeldEvent
     heldReply*: ptr FFIThreadRequest # The reply the host reads; freed at the next poll.
     heldMsg*: array[2, NimFfiMsg]
@@ -55,6 +62,7 @@ proc initOutbound*(outb: var FFIOutbound): Result[void, string] =
   ?outb.wake.init()
   outb.pollLock.initLock()
   outb.lock.initLock()
+  initReverse(outb.reverse)
   initHeldEvent(outb.held)
   outb.queueLive = true
   outb.ready = true
@@ -180,6 +188,7 @@ proc dropQueuedMessages*(
   ## `poll`, so call `closeOutbound` first. What the host still holds is untouched.
   withLock outb.pollLock:
     clearEventQueue(q)
+    outb.reverse.dropQueuedCalls()
     var replies: ptr FFIThreadRequest = nil
     withLock outb.lock:
       replies = outb.replyHead
