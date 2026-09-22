@@ -66,12 +66,23 @@ registerReqFFI(Ping, lib: ptr TestPollLib):
   proc(): Future[Result[string, string]] {.async.} =
     return ok("pong")
 
+registerReqFFI(FailRequest, lib: ptr TestPollLib):
+  proc(): Future[Result[string, string]] {.async.} =
+    return err("handler said no")
+
+registerReqFFI(SlowRequest, lib: ptr TestPollLib):
+  proc(delayMs: int): Future[Result[string, string]] {.async.} =
+    await sleepAsync(delayMs.milliseconds)
+    return ok("slept")
+
 type PolledMsg = object
   ret: cint
   kind: uint32
   seq: uint64
+  id: uint64
   nameId: uint64
   aux: uint64
+  retCode: int32
   payload: seq[byte]
 
 proc pollMsg[T](
@@ -82,8 +93,10 @@ proc pollMsg[T](
   if not msg.isNil():
     got.kind = msg.kind
     got.seq = msg.seq
+    got.id = msg.id
     got.nameId = msg.nameId
     got.aux = msg.aux
+    got.retCode = msg.retCode
     got.payload = newSeq[byte](int(msg.len))
     if msg.len > 0:
       copyMem(addr got.payload[0], msg.payload, int(msg.len))
@@ -92,33 +105,22 @@ proc pollMsg[T](
 proc pollMsg[T](ctx: ptr FFIContext[T], timeoutMs = 5000): PolledMsg {.gcsafe.} =
   return pollMsg(ctx, ctx.currentGeneration(), timeoutMs)
 
-template awaitReply(ctx: untyped, newReq: untyped) =
-  ## Replies still travel by callback in this mode, so waiting for one is how a
-  ## test knows the handler ran; the events it produced wait in the queue until
-  ## this test polls for them.
-  block:
-    setupCallbackData(reply)
-    check sendRequestToFFIThread(ctx, newReq(testCallback, addr reply)).isOk()
-    waitCallback(reply)
-    check reply.retCode == RET_OK
-
-template request(ctx: untyped, reqType: untyped) =
-  awaitReply(ctx, reqType.ffiNewReq)
-
-template request(ctx: untyped, reqType: untyped, arg: untyped) =
-  block:
-    setupCallbackData(reply)
-    check sendRequestToFFIThread(ctx, reqType.ffiNewReq(testCallback, addr reply, arg))
-      .isOk()
-    waitCallback(reply)
-    check reply.retCode == RET_OK
-
 template submit(ctx: untyped, reqType: untyped) =
-  ## Sends without waiting for the reply: for a test about what sits in the queue.
+  ## Every request is answered by a message the host polls for, so a test sends
+  ## and then reads; nothing here waits on a callback.
   check sendRequestToFFIThread(ctx, reqType.ffiNewReq(noopCallback, nil)).isOk()
 
 template submit(ctx: untyped, reqType: untyped, arg: untyped) =
   check sendRequestToFFIThread(ctx, reqType.ffiNewReq(noopCallback, nil, arg)).isOk()
+
+template expectReply(ctx: untyped) =
+  ## The reply of the request just sent, once its events have been read.
+  block:
+    let reply = pollMsg(ctx)
+    check reply.ret == RET_OK
+    check reply.kind == MsgReply
+    check reply.retCode == RET_OK
+    check reply.id != 0'u64
 
 template waitUntil(cond: untyped) =
   block:
@@ -130,7 +132,7 @@ template waitUntil(cond: untyped) =
 suite "events through poll":
   test "a typed event carries its name id and the bare CBOR payload":
     withPool(ctx):
-      request(ctx, EmitCborEventRequest)
+      submit(ctx, EmitCborEventRequest)
 
       let got = pollMsg(ctx)
       check got.ret == RET_OK
@@ -140,20 +142,22 @@ suite "events through poll":
       check decoded.isOk()
       check decoded.value.requestId == "req-1"
       check decoded.value.messageHash == "0xdeadbeef"
+      expectReply(ctx)
 
   test "a raw event body arrives as is":
     withPool(ctx):
-      request(ctx, EmitRawBytesEventRequest)
+      submit(ctx, EmitRawBytesEventRequest)
 
       let got = pollMsg(ctx)
       check got.ret == RET_OK
       check got.nameId == nameId("raw_bytes")
       check got.payload == @[byte 0x01, 0x02, 0x03]
+      expectReply(ctx)
 
   test "a payload above the slab budget arrives intact":
     withPool(ctx):
       let size = MaxEventPayloadBytes + 64
-      request(ctx, EmitOversizeRequest, size)
+      submit(ctx, EmitOversizeRequest, size)
 
       let got = pollMsg(ctx)
       check got.ret == RET_OK
@@ -163,11 +167,12 @@ suite "events through poll":
         if got.payload[i] != byte(i and 0xFF):
           intact = false
       check intact
+      expectReply(ctx)
 
   test "events arrive in the order they were produced":
     withPool(ctx):
       const Count = 50
-      request(ctx, BurstEmit, Count)
+      submit(ctx, BurstEmit, Count)
 
       var lastSeq = 0'u64
       for i in 0 ..< Count:
@@ -176,6 +181,8 @@ suite "events through poll":
         check got.seq > lastSeq
         lastSeq = got.seq
         check cborDecode(got.payload, LatchPayload).value.iter == i
+      # The reply is the youngest message of the three the handler produced.
+      expectReply(ctx)
       check pollMsg(ctx, 0).ret == RET_TIMEOUT
 
 suite "poll timeouts":
@@ -201,6 +208,7 @@ suite "poll timeouts":
       check got.ret == RET_OK
       check got.kind == MsgEvent
       check Moment.now() - start < 4.seconds
+      expectReply(ctx)
 
 suite "message lifetime":
   test "a message stays valid until the next poll, whatever the producer does":
@@ -263,20 +271,26 @@ suite "wake handle":
       check pollMsg(ctx, 0).ret == RET_TIMEOUT
       check not hostSeesReady(handle, 0)
 
-      request(ctx, BurstEmit, 3)
+      submit(ctx, BurstEmit, 3)
       check hostSeesReady(handle, 2000)
 
       # The host loop: wait on the handle, then drain until RET_TIMEOUT.
       var events = 0
-      while events < 3:
+      var replies = 0
+      while events + replies < 4:
         check hostSeesReady(handle, 2000)
         while true:
           let got = pollMsg(ctx, 0)
           if got.ret != RET_OK:
             check got.ret == RET_TIMEOUT
             break
-          check got.kind == MsgEvent
-          events.inc()
+          if got.kind == MsgEvent:
+            events.inc()
+          else:
+            check got.kind == MsgReply
+            replies.inc()
+      check events == 3
+      check replies == 1
       check not hostSeesReady(handle, 0)
 
       # Closing the host's copy leaves the library's wake working.
@@ -291,7 +305,13 @@ suite "event queue overflow":
       waitUntil(ctx[].eventQueue.count == EventQueueCapacity)
       os.sleep(50)
       check not ctx.eventQueueStuck.load()
-      request(ctx, Ping)
+      submit(ctx, Ping)
+      # The events that fit are ahead of it in the queue.
+      var msg = pollMsg(ctx)
+      while msg.ret == RET_OK and msg.kind == MsgEvent:
+        msg = pollMsg(ctx)
+      check msg.kind == MsgReply
+      check msg.retCode == RET_OK
 
   test "overflow marks the context stuck, poll reports it once, requests are refused":
     withPool(ctx):
@@ -311,10 +331,111 @@ suite "event queue overflow":
 
       # The report is not repeated, and the events that fit are all there.
       var events = 0
+      var replies = 0
       while true:
         let got = pollMsg(ctx, 200)
         if got.ret != RET_OK:
           break
-        check got.kind == MsgEvent
-        events.inc()
+        if got.kind == MsgEvent:
+          events.inc()
+        else:
+          check got.kind == MsgReply
+          replies.inc()
       check events >= EventQueueCapacity
+      check replies == 1
+
+suite "replies through poll":
+  test "a reply carries the id of its request and the CBOR return value":
+    withPool(ctx):
+      submit(ctx, Ping)
+      let reply = pollMsg(ctx)
+      check reply.ret == RET_OK
+      check reply.kind == MsgReply
+      check reply.retCode == RET_OK
+      check cborDecode(reply.payload, string).value == "pong"
+
+  test "each request gets an id of its own, and it never repeats":
+    withPool(ctx):
+      var seen: seq[uint64] = @[]
+      for _ in 0 ..< 5:
+        submit(ctx, Ping)
+        let reply = pollMsg(ctx)
+        check reply.kind == MsgReply
+        check reply.id != 0'u64
+        check not seen.contains(reply.id)
+        seen.add(reply.id)
+
+  test "a handler that fails answers with its text, not a value":
+    withPool(ctx):
+      submit(ctx, FailRequest)
+      let reply = pollMsg(ctx)
+      check reply.kind == MsgReply
+      check reply.retCode == RET_ERR
+      var text = ""
+      for b in reply.payload:
+        text.add(char(b))
+      check text.contains("handler said no")
+
+  test "replies arrive in the order the handlers finished":
+    withPool(ctx):
+      for _ in 0 ..< 20:
+        submit(ctx, Ping)
+      var lastSeq = 0'u64
+      for _ in 0 ..< 20:
+        let reply = pollMsg(ctx)
+        check reply.kind == MsgReply
+        check reply.seq > lastSeq
+        lastSeq = reply.seq
+
+  test "a reply stays valid until the next poll":
+    withPool(ctx):
+      submit(ctx, Ping)
+      var msg: ptr NimFfiMsg
+      check pollContext(ctx, ctx.currentGeneration(), 5000, addr msg) == RET_OK
+      check msg.kind == MsgReply
+      # More replies queue up behind it; the held one is a node of its own.
+      for _ in 0 ..< 20:
+        submit(ctx, Ping)
+      os.sleep(50)
+      var bytes = newSeq[byte](int(msg.len))
+      copyMem(addr bytes[0], msg.payload, int(msg.len))
+      check cborDecode(bytes, string).value == "pong"
+
+suite "a request still running":
+  test "a stale warning names the request and is not repeated per poll":
+    withPool(ctx):
+      ctx.staleWarnInterval = 50.milliseconds
+      submit(ctx, SlowRequest, 400)
+
+      let warn = pollMsg(ctx)
+      check warn.ret == RET_OK
+      check warn.kind == MsgStaleWarn
+      check warn.id != 0'u64
+      check warn.aux >= 50'u64
+
+      # The reply is still owed, and it carries the same id.
+      var msg = pollMsg(ctx)
+      while msg.ret == RET_OK and msg.kind == MsgStaleWarn:
+        check msg.id == warn.id
+        msg = pollMsg(ctx)
+      check msg.kind == MsgReply
+      check msg.id == warn.id
+      check msg.retCode == RET_OK
+
+suite "a host that stops collecting":
+  test "a submit is refused once too many replies are uncollected":
+    withPool(ctx):
+      var refused = ""
+      for _ in 0 .. MaxOutstandingRequests + 1:
+        let res = sendRequestToFFIThread(ctx, Ping.ffiNewReq(noopCallback, nil))
+        if res.isErr():
+          refused = res.error
+          break
+      check refused.contains("waiting to be collected")
+
+      # Collecting frees the room again.
+      var drained = 0
+      while pollMsg(ctx, 200).ret == RET_OK:
+        drained.inc()
+      check drained > 0
+      check sendRequestToFFIThread(ctx, Ping.ffiNewReq(noopCallback, nil)).isOk()
