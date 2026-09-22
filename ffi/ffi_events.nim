@@ -362,6 +362,14 @@ proc popEventInto*(
     q.count.dec()
   return true
 
+proc headSeq*(q: var EventQueue): uint64 {.raises: [], gcsafe.} =
+  ## The order mark of the oldest queued event, 0 when there is none. The poller
+  ## is the only consumer, so what this returns cannot be taken from under it.
+  withLock q.lock:
+    if q.count == 0:
+      return 0'u64
+    return q.buf[q.head].seq
+
 proc clearEventQueue*(q: var EventQueue) {.raises: [], gcsafe.} =
   ## Drops every queued event: the next owner of a slot must not see them.
   withLock q.lock:
@@ -408,6 +416,9 @@ var ffiCurrentNotifyEventEnqueued* {.threadvar.}: proc() {.gcsafe, raises: [].}
 var ffiCurrentStampEvent* {.threadvar.}: proc(): uint64 {.gcsafe, raises: [].}
   # Gives an event its place in the context's message order; nil-safe, 0 when unset.
 
+var ffiCurrentHostPolls* {.threadvar.}: proc(): bool {.gcsafe, raises: [].}
+  # Whether anyone is collecting this context's events. Nil means someone is.
+
 template enqueueOrMarkStuck(eventName: string, src: pointer, dataLen: int) =
   ## Enqueues into the reused slot buffers; on queue-full sets the sticky stuck
   ## flag and wakes the event thread (firing onNotResponding here would run the
@@ -423,7 +434,10 @@ template enqueueOrMarkStuck(eventName: string, src: pointer, dataLen: int) =
     if not q[].tryEnqueueEvent(cstring(eventName), nameId(eventName), seq, src, dataLen):
       chronicles.error "event queue full; library marked stuck",
         event = eventName, capacity = EventQueueCapacity
-      if not ffiCurrentEventQueueStuck.isNil():
+      # A host that never collects this context's events did not ask for them:
+      # dropping them is its choice, and must not wedge the library's requests.
+      let collected = ffiCurrentHostPolls.isNil() or ffiCurrentHostPolls()
+      if collected and not ffiCurrentEventQueueStuck.isNil():
         ffiCurrentEventQueueStuck[].store(true)
       if not ffiCurrentNotifyEventEnqueued.isNil():
         ffiCurrentNotifyEventEnqueued()
@@ -449,9 +463,15 @@ template dispatchFFIEventCbor*(eventName: string, eventPayload: typed) =
   ## `EventEnvelope.payload` substitution.
   block:
     let evtName: string = eventName
-    let encoded = cborEncode(
-      EventEnvelope[typeof(eventPayload)](eventType: evtName, payload: eventPayload)
-    )
+    # A polling host is told which event this is by the message header, so the
+    # envelope that names it for a listener would only be a wrapper to unwrap.
+    let encoded =
+      when defined(ffiPollMode):
+        cborEncode(eventPayload)
+      else:
+        cborEncode(
+          EventEnvelope[typeof(eventPayload)](eventType: evtName, payload: eventPayload)
+        )
     let src: pointer =
       if encoded.len > 0:
         unsafeAddr encoded[0]
