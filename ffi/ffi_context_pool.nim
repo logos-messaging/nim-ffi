@@ -18,7 +18,8 @@ static:
     "SlotBits is too small for MaxFFIContexts"
 
 proc makeToken(slot: int, generation: uint): FFICtxToken =
-  ## Host handle: the generation of the claim above the slot index, over `TokenBase`. A claim makes the generation odd and non-zero, so a nil token never resolves.
+  ## Token = TokenBase + (generation << SlotBits) + slot.
+  ## Generations are always odd, so a nil token never matches a context.``
   cast[FFICtxToken](TokenBase + (generation shl SlotBits) + (uint(slot) and SlotMask))
 
 func tokenSlotAndGeneration(token: FFICtxToken): tuple[slot: int, generation: uint] =

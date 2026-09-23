@@ -374,9 +374,6 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
       cleanFinishedRequests()
 
-      # Drain before blocking: the wake of the submit that made this slot active
-      # again was consumed by the wait in the branch above, so a queue checked
-      # only after the next wait would sit there for the fallback timeout.
       processQueue()
 
       # Block until a submit signals us, or at most 100ms.
