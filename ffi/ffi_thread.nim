@@ -157,12 +157,10 @@ const RecycledReason =
   "FFI context was recycled before this request ran; the caller is gone"
 
 proc rejectQueuedRequests[T](ctx: ptr FFIContext[T], ownerGen: uint) =
-  ## Fails every queued request of `ownerGen` instead of dispatching it. A request
-  ## that a destroyed context left behind still carries that host's `userData`,
-  ## which the host has freed; running it would answer a dead callback, and running
-  ## it after the slot is reused would run it against the library of the next owner.
-  ## A request stamped with a later claim belongs to the owner that has just taken
-  ## this slot, so it goes back on the queue to be served.
+  ## Clears the queue after a recycle:
+  ## - requests from `ownerGen` fail (their host is gone; running them is unsafe)
+  ## - requests from older owners are dropped
+  ## - requests from newer owners go back on the queue for the new owner
   var request = ctx.reqQueueBank.mergeQueues()
   while not request.isNil():
     let nextRequest = request[].next # read before handleRes frees it
@@ -366,9 +364,8 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
         continue
 
       # A submit that read `Active` just before the recycle can still land here.
-      # Fail it rather than run it against the library of the next owner. Read the
-      # claim first: a slot handed to a new owner between these two loads must not
-      # have that owner's first request answered as if it were the old one's.
+      # Fail it instead of running it on the next owner's library. Read the generation
+      # before the lifecycle, so a new owner's request isn't mistaken for the old one's.
       let ownerGen = ctx.currentGeneration()
       if ctx.lifecycle.load() != CtxLifecycle.Active:
         rejectQueuedRequests(ctx, ownerGen)
@@ -377,9 +374,6 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
       cleanFinishedRequests()
 
-      # Drain before blocking: the wake of the submit that made this slot active
-      # again was consumed by the wait in the branch above, so a queue checked
-      # only after the next wait would sit there for the fallback timeout.
       processQueue()
 
       # Block until a submit signals us, or at most 100ms.
