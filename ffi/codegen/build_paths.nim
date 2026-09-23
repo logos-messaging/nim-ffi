@@ -26,6 +26,59 @@ func buildPath*(head, tail: string): string =
     joinedPath.add(tail[tailStart .. ^1])
   return joinedPath
 
+func buildSplitPath(path: string): seq[string] =
+  ## Components of `path`, split on either separator: a build path may carry
+  ## both when it came from a config file written elsewhere.
+  var
+    components: seq[string] = @[]
+    part = ""
+  for c in path:
+    if c in {'/', '\\'}:
+      if part.len > 0:
+        components.add(part)
+        part = ""
+    else:
+      part.add(c)
+  if part.len > 0:
+    components.add(part)
+  return components
+
+func buildIsAbsolute*(path: string): bool =
+  ## Absolute for `buildOS`. `std/os.isAbsolute` answers for the target, which
+  ## is the wrong question for a path the compiler itself writes.
+  if path.len == 0:
+    return false
+  when buildOS == "windows":
+    path[0] in {'/', '\\'} or
+      (path.len >= 3 and path[1] == ':' and path[2] in {'/', '\\'})
+  else:
+    path[0] == '/'
+
+func buildRelativePath*(path, base: string): string =
+  ## `path` seen from `base`, joined for `buildOS`. Unlike `std/os.relativePath`
+  ## it never consults the current directory and never emits a target separator;
+  ## a non-absolute argument is returned unchanged rather than guessed at.
+  if not buildIsAbsolute(path) or not buildIsAbsolute(base):
+    return path
+  let
+    pathParts = buildSplitPath(path)
+    baseParts = buildSplitPath(base)
+  var shared = 0
+  while shared < pathParts.len and shared < baseParts.len and
+      pathParts[shared] == baseParts[shared]:
+    inc(shared)
+  var parts: seq[string]
+  for _ in shared ..< baseParts.len:
+    parts.add("..")
+  for i in shared ..< pathParts.len:
+    parts.add(pathParts[i])
+  if parts.len == 0:
+    return "."
+  var relative = parts[0]
+  for i in 1 ..< parts.len:
+    relative = buildPath(relative, parts[i])
+  return relative
+
 proc ensureOutputDir*(path: string) =
   createDir(path)
   if not dirExists(path):
