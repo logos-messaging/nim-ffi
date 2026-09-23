@@ -114,7 +114,7 @@ const
     ## hook and slack, so it only fires when the worker itself is wedged. The
     ## generated C destructor blocks its caller this long — 15 s by default.
   RecycleDonePollInterval* = 50.milliseconds
-    ## How often a caller waiting out a recycle looks at the claim itself.
+    ## How often a recycle caller checks if its claim ended.
   EventThreadTickInterval* = 1.seconds
   FFIHeartbeatStartDelay* = 10.seconds
   FFIHeartbeatStaleThreshold* = 1.seconds
