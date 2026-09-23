@@ -157,12 +157,10 @@ const RecycledReason =
   "FFI context was recycled before this request ran; the caller is gone"
 
 proc rejectQueuedRequests[T](ctx: ptr FFIContext[T], ownerGen: uint) =
-  ## Fails every queued request of `ownerGen` instead of dispatching it. A request
-  ## that a destroyed context left behind still carries that host's `userData`,
-  ## which the host has freed; running it would answer a dead callback, and running
-  ## it after the slot is reused would run it against the library of the next owner.
-  ## A request stamped with a later claim belongs to the owner that has just taken
-  ## this slot, so it goes back on the queue to be served.
+  ## Clears the queue after a recycle:
+  ## - requests from `ownerGen` fail (their host is gone; running them is unsafe)
+  ## - requests from older owners are dropped
+  ## - requests from newer owners go back on the queue for the new owner
   var request = ctx.reqQueueBank.mergeQueues()
   while not request.isNil():
     let nextRequest = request[].next # read before handleRes frees it
