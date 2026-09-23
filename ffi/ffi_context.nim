@@ -317,24 +317,28 @@ proc markAsActive*[T](ctx: ptr FFIContext[T]) =
   ## Reused context: its worker threads are still alive; re-arm for requests.
   ctx.lifecycle.store(CtxLifecycle.Active)
 
-proc awaitClaimReleased[T](ctx: ptr FFIContext[T]): bool =
-  ## `finishRecycle` releases the claim one step after it fires the done signal. False on timeout.
+proc awaitClaimReleased[T](ctx: ptr FFIContext[T], claimed: uint): bool =
+  ## Waits until the slot's generation moves past `claimed`, meaning our claim
+  ## ended. We don't wait for the slot to be free because another thread may
+  ## grab it first. Returns false on timeout.
   const
     SpinRounds = 1000
     SleepRounds = 1000
       ## then 1ms apiece: a spin alone starves the releasing thread on one core.
   for _ in 0 ..< SpinRounds:
-    if not ctx.isInUse():
+    if ctx.generation.load() != claimed:
       return true
     cpuRelax()
   for _ in 0 ..< SleepRounds:
-    if not ctx.isInUse():
+    if ctx.generation.load() != claimed:
       return true
     os.sleep(1)
   false
 
 proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Frees the lib and releases the slot, keeping its threads for the next createFFIContext.
+  let claimed = ctx.currentGeneration()
+
   var expected = CtxLifecycle.Active
   if not ctx.lifecycle.compareExchange(expected, CtxLifecycle.RecyclePending):
     return err("requestRecycle: context is not Active (already recycling)")
@@ -364,7 +368,7 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
         "; the library and the pool slot leak, and callbacks can still fire"
     )
 
-  if not ctx.awaitClaimReleased():
+  if not ctx.awaitClaimReleased(claimed):
     # An ok here reads as a live slot, so the idle reap is skipped and nothing triggers a later one.
     error "the recycled slot did not come free; the pool treats it as still owned"
     return err("requestRecycle: the slot did not come free")
