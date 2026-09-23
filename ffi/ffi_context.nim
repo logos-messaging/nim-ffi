@@ -113,6 +113,8 @@ const
     ## Caller-side bound for synchronous recycle: both drain rounds, the teardown
     ## hook and slack, so it only fires when the worker itself is wedged. The
     ## generated C destructor blocks its caller this long — 15 s by default.
+  RecycleDonePollInterval* = 50.milliseconds
+    ## How often a recycle caller checks if its claim ended.
   EventThreadTickInterval* = 1.seconds
   FFIHeartbeatStartDelay* = 10.seconds
   FFIHeartbeatStaleThreshold* = 1.seconds
@@ -354,8 +356,19 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   if not fired:
     return err("requestRecycle: failed to signal the FFI thread in time")
 
-  let done = ctx.recycleDoneSignal.waitSync(RecycleWaitTimeout).valueOr:
-    return err("requestRecycle: failed waiting for recycle: " & $error)
+  # The done signal is shared by the slot, so a new owner may clear it before we
+  # see it. Poll the generation too: if it changed, the recycle is done.
+  let deadline = Moment.now() + RecycleWaitTimeout
+  var done = false
+  while true:
+    let fired = ctx.recycleDoneSignal.waitSync(RecycleDonePollInterval).valueOr:
+      return err("requestRecycle: failed waiting for recycle: " & $error)
+    if fired or ctx.currentGeneration() != claimed or
+        ctx.lifecycle.load() == CtxLifecycle.RecycleFailed:
+      done = true
+      break
+    if Moment.now() >= deadline:
+      break
   if not done:
     # Quarantine, not release: this caller already saw the failure.
     ctx.recycleAbandoned.store(true)
