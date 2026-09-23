@@ -2,13 +2,15 @@
 //!
 //! Run with: `cargo run --example sync_main`
 
-use my_timer::{EchoEvent, EchoRequest, MyTimerCtx, TimerConfig};
+use my_timer::{EchoEvent, EchoRequest, MyTimerCtx, TimerConfig, TIMER_VERSION};
 use std::sync::mpsc;
 use std::time::Duration;
 
 fn main() -> Result<(), String> {
     // `myTimerLibVersion` is {.ffiStatic.}: an associated fn, no ctx needed.
-    println!("lib version: {}", MyTimerCtx::lib_version(Duration::from_secs(5))?);
+    let lib_version = MyTimerCtx::lib_version(Duration::from_secs(5))?;
+    println!("lib version: {lib_version}");
+    assert_eq!(lib_version, TIMER_VERSION);
 
     let ctx = MyTimerCtx::create(
         TimerConfig { name: "rust-sync-demo".into() },
@@ -23,11 +25,13 @@ fn main() -> Result<(), String> {
 
     ctx.echo(EchoRequest { message: "sync-event-demo".into(), delay_ms: 1 })?;
 
-    match rx.recv_timeout(Duration::from_secs(2)) {
-        Ok(evt) => println!("typed onEchoFired: message={}, echo_count={}", evt.message, evt.echo_count),
-        Err(e) => return Err(format!("event never arrived: {}", e)),
-    }
+    let evt = rx
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|e| format!("event never arrived: {e}"))?;
+    println!("typed onEchoFired: message={}, echo_count={}", evt.message, evt.echo_count);
+    assert_eq!(evt.message, "sync-event-demo");
+    assert_eq!(evt.echo_count, 1);
 
-    ctx.remove_event_listener(typed_handle);
+    assert!(ctx.remove_event_listener(typed_handle));
     Ok(())
 }
