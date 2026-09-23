@@ -163,6 +163,7 @@ fn main() {
     assert!(status.success(), "Nim compilation failed");
 
     println!("cargo:rustc-link-search={}", repo_root.display());
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", repo_root.display());
     println!("cargo:rustc-link-lib=$2");
     println!("cargo:rerun-if-changed={}", nim_src.display());
 }

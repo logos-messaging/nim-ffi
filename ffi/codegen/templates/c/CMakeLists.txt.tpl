@@ -4,6 +4,11 @@ project({{LIB}}_c_bindings C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# MSVC gates <stdatomic.h> behind this flag (C11 atomics, VS 2022 17.5+).
+if(MSVC)
+    add_compile_options(/experimental:c11atomics)
+endif()
+
 {{FIND_REPO_ROOT}}
 
 # Build the Nim dylib + vendored TinyCBOR (shared with the C++ backend).
