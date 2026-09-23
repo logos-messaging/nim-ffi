@@ -365,9 +365,10 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
       cleanFinishedRequests()
 
+      processQueue()
+
       # Block until a submit signals us, or at most 100ms.
       discard await ctx.reqSignal.wait().withTimeout(chronos.milliseconds(100))
-      processQueue()
 
     # Drain once more for requests enqueued just before `running` flipped.
     processQueue()
