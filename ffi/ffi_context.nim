@@ -318,9 +318,9 @@ proc markAsActive*[T](ctx: ptr FFIContext[T]) =
   ctx.lifecycle.store(CtxLifecycle.Active)
 
 proc awaitClaimReleased[T](ctx: ptr FFIContext[T], claimed: uint): bool =
-  ## `finishRecycle` releases the claim one step after it fires the done signal.
-  ## Waits for `claimed` to end, not for the slot to be free: under churn the next
-  ## owner claims it first, and this owner would never see it free. False on timeout.
+  ## Waits until the slot's generation moves past `claimed`, meaning our claim
+  ## ended. We don't wait for the slot to be free because another thread may
+  ## grab it first. Returns false on timeout.
   const
     SpinRounds = 1000
     SleepRounds = 1000

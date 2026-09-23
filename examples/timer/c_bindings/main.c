@@ -38,14 +38,32 @@ static bool wait_done(atomic_int* done) {
     return atomic_load(done) != 0;
 }
 
-static atomic_int g_echo_count = 0;
+static int g_failures = 0;
+
+static void expect_str(const char* what, const char* got, const char* want) {
+    if (strcmp(got, want) != 0) {
+        fprintf(stderr, "FAIL %s: got \"%s\", want \"%s\"\n", what, got, want);
+        g_failures++;
+    }
+}
+
+static void expect_int(const char* what, long long got, long long want) {
+    if (got != want) {
+        fprintf(stderr, "FAIL %s: got %lld, want %lld\n", what, got, want);
+        g_failures++;
+    }
+}
+
+static atomic_int g_echo_fired = 0;
+static int g_echo_count;
 static char g_echo_message[256];
 
 static void on_echo_fired(const EchoEvent* evt, void* user_data) {
     (void)user_data;
-    atomic_store(&g_echo_count, (int)evt->echoCount);
     snprintf(g_echo_message, sizeof(g_echo_message), "%s",
              evt->message ? evt->message : "");
+    g_echo_count = (int)evt->echoCount;
+    atomic_fetch_add(&g_echo_fired, 1);
 }
 
 typedef struct {
@@ -64,7 +82,7 @@ static void on_created(int ec, MyTimerCtx* ctx, const char* em, void* ud) {
 }
 
 /* Generic reply sink: each step copies the fields it cares about out of its
- * typed reply into these slots (text_a/text_b for strings, num_a/num_b for
+ * typed reply into these slots (text_a/text_b for strings, num_a..num_c for
  * integers, flag for a boolean) before the binding reclaims the reply. */
 typedef struct {
     atomic_int done;
@@ -74,6 +92,7 @@ typedef struct {
     char text_b[256];
     long long num_a;
     long long num_b;
+    long long num_c;
     int flag;
 } ReplyWaiter;
 
@@ -117,6 +136,7 @@ static void on_schedule(int ec, const ScheduleResult* reply, const char* em, voi
     if (reply) {
         w->num_a = (long long)reply->willRunCount;
         w->num_b = (long long)reply->effectiveBackoffMs;
+        w->num_c = (long long)reply->firstRunAtMs;
         w->flag = (int)reply->priority;
         if (reply->jobId)
             snprintf(w->text_a, sizeof(w->text_a), "%s", reply->jobId);
@@ -160,6 +180,8 @@ int main(void) {
     ReplyWaiter w;
     RUN(my_timer_ctx_version(ctx, on_version, &w), w);
     printf("[2] Version: %s\n", w.text_a);
+    expect_str("version", w.text_a, TIMER_VERSION);
+    expect_int("MAX_DELAY_MS", (long long)MAX_DELAY_MS, 5000);
 
     printf("[2b] Header consts: TIMER_VERSION=%s, MAX_DELAY_MS=%lld\n", TIMER_VERSION,
            (long long)MAX_DELAY_MS);
@@ -167,6 +189,20 @@ int main(void) {
     EchoRequest echo_req = {"hello from C", 50};
     RUN(my_timer_ctx_echo(ctx, &echo_req, on_echo, &w), w);
     printf("[3] Echo: echoed=%s, timerName=%s\n", w.text_a, w.text_b);
+    expect_str("echo.echoed", w.text_a, "hello from C");
+    expect_str("echo.timerName", w.text_b, "c-demo");
+
+    /* A delay above MAX_DELAY_MS is rejected: the callback gets an error. */
+    EchoRequest too_slow = {"too slow", MAX_DELAY_MS + 1};
+    memset(&w, 0, sizeof(w));
+    my_timer_ctx_echo(ctx, &too_slow, on_echo, &w);
+    if (!wait_done(&w.done)) {
+        fprintf(stderr, "Error: FFI call did not complete\n");
+        my_timer_ctx_destroy(ctx);
+        return 1;
+    }
+    printf("[3b] Echo over MAX_DELAY_MS: err_code=%d, err=%s\n", w.err_code, w.err);
+    expect_str("echo over limit error", w.err, "delayMs must not exceed 5000");
 
     EchoRequest items[2] = {
         {"one", 10},
@@ -186,6 +222,10 @@ int main(void) {
     RUN(my_timer_ctx_complex(ctx, &complex_req, on_complex, &w), w);
     printf("[4] Complex: summary=%s, itemCount=%lld, hasNote=%d\n", w.text_a, w.num_a,
            w.flag);
+    expect_str("complex.summary", w.text_a,
+               "received 2 messages, note=extra note, retries=3");
+    expect_int("complex.itemCount", w.num_a, 2);
+    expect_int("complex.hasNote", w.flag, 1);
 
     const char* job_payload[2] = {"rollup", "v2"};
     JobSpec job;
@@ -208,9 +248,14 @@ int main(void) {
     schedule.jitter.value = 250;
 
     RUN(my_timer_ctx_schedule(ctx, &job, &retry, &schedule, on_schedule, &w), w);
-    printf("[5] Schedule: jobId=%s, willRunCount=%lld, effectiveBackoffMs=%lld, "
-           "priority=%d\n",
-           w.text_a, w.num_a, w.num_b, w.flag);
+    printf("[5] Schedule: jobId=%s, willRunCount=%lld, firstRunAtMs=%lld, "
+           "effectiveBackoffMs=%lld, priority=%d\n",
+           w.text_a, w.num_a, w.num_c, w.num_b, w.flag);
+    expect_str("schedule.jobId", w.text_a, "c-demo:nightly-rollup");
+    expect_int("schedule.willRunCount", w.num_a, 60000 / 15000);
+    expect_int("schedule.firstRunAtMs", w.num_c, 1000 + 250);
+    expect_int("schedule.effectiveBackoffMs", w.num_b, 500 / 2);
+    expect_int("schedule.priority", w.flag, JOB_PRIORITY_JP_HIGH);
 
     uint64_t handle =
         my_timer_ctx_add_on_echo_fired_listener(ctx, on_echo_fired, NULL);
@@ -218,14 +263,33 @@ int main(void) {
     memset(&w, 0, sizeof(w));
     my_timer_ctx_echo(ctx, &evt_req, on_echo, &w);
     wait_done(&w.done);
-    /* The event fires from the library's dispatch thread; give it a moment. */
-    sleep_ms(500);
+    /* The event fires from the library's dispatch thread; poll up to ~5s. */
+    for (int i = 0; i < 500 && atomic_load(&g_echo_fired) == 0; i++) {
+        sleep_ms(10);
+    }
+    if (atomic_load(&g_echo_fired) == 0) {
+        fprintf(stderr, "Error: onEchoFired never arrived\n");
+        my_timer_ctx_destroy(ctx);
+        return 1;
+    }
     printf("[6] typed event onEchoFired: message=%s, echoCount=%d\n",
-           g_echo_message, atomic_load(&g_echo_count));
+           g_echo_message, g_echo_count);
+    expect_str("onEchoFired.message", g_echo_message, "event-demo");
+    expect_int("onEchoFired.echoCount", g_echo_count, 1);
 
-    my_timer_ctx_remove_event_listener(ctx, handle);
+    expect_int("remove_event_listener", my_timer_ctx_remove_event_listener(ctx, handle), 1);
+    EchoRequest after_req = {"after-remove", 1};
+    RUN(my_timer_ctx_echo(ctx, &after_req, on_echo, &w), w);
+    sleep_ms(100);
+    printf("[7] after remove_event_listener: onEchoFired fired %d time(s)\n",
+           atomic_load(&g_echo_fired));
+    expect_int("onEchoFired calls after remove", atomic_load(&g_echo_fired), 1);
 
     my_timer_ctx_destroy(ctx);
+    if (g_failures != 0) {
+        fprintf(stderr, "\n%d check(s) failed.\n", g_failures);
+        return 1;
+    }
     printf("\nDone.\n");
     return 0;
 }
