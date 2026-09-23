@@ -364,9 +364,8 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
         continue
 
       # A submit that read `Active` just before the recycle can still land here.
-      # Fail it rather than run it against the library of the next owner. Read the
-      # claim first: a slot handed to a new owner between these two loads must not
-      # have that owner's first request answered as if it were the old one's.
+      # Fail it instead of running it on the next owner's library. Read the generation
+      # before the lifecycle, so a new owner's request isn't mistaken for the old one's.
       let ownerGen = ctx.currentGeneration()
       if ctx.lifecycle.load() != CtxLifecycle.Active:
         rejectQueuedRequests(ctx, ownerGen)
