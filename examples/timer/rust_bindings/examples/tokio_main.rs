@@ -29,7 +29,9 @@ async fn main() -> Result<(), String> {
         .map_err(|_| "event never arrived".to_string())?
         .ok_or_else(|| "typed channel closed".to_string())?;
     println!("typed onEchoFired: message={}, echo_count={}", evt.message, evt.echo_count);
+    assert_eq!(evt.message, "async-event-demo");
+    assert_eq!(evt.echo_count, 1);
 
-    ctx.remove_event_listener(typed_handle);
+    assert!(ctx.remove_event_listener(typed_handle));
     Ok(())
 }

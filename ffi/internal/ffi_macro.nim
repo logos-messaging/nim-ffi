@@ -1,5 +1,4 @@
 import std/[macros, options, tables, strutils]
-from std/os import relativePath
 from std/compilesettings import querySetting, SingleValueSetting
 import chronos
 import ../ffi_types
@@ -1758,19 +1757,22 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
 
 proc bindingsOutputDir(lang, explicit: string): string {.compileTime.} =
   ## Output dir for `lang`; defaults to `<lang>_bindings/` next to the compiled
-  ## source, or an explicit -d:ffiOutputDir override.
-  if explicit.len > 0:
-    explicit
-  else:
+  ## source. A relative -d:ffiOutputDir resolves against that same directory,
+  ## because the compiler's working directory is not a stable base for it.
+  if explicit.len == 0:
     return buildPath(querySetting(SingleValueSetting.projectPath), lang & "_bindings")
+  if buildIsAbsolute(explicit):
+    return explicit
+  return buildPath(querySetting(SingleValueSetting.projectPath), explicit)
 
 proc bindingsSrcPath(outDir, explicit: string): string {.compileTime.} =
   ## Nim source path embedded in build files, relative to `outDir`; defaults to
-  ## the compiled file, or an explicit -d:ffiSrcPath override.
+  ## the compiled file, or an explicit -d:ffiSrcPath override. Derived for
+  ## `buildOS`: the build files that carry it run on the build machine.
   if explicit.len > 0:
     explicit
   else:
-    relativePath(querySetting(SingleValueSetting.projectFull), outDir)
+    buildRelativePath(querySetting(SingleValueSetting.projectFull), outDir)
 
 when defined(ffiGenBindings):
   proc emitBindingsFor(

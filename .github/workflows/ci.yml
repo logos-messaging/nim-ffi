@@ -128,6 +128,14 @@ jobs:
           fi
           nimble test_c_e2e -y
 
+      - name: Run C and C++ examples
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+          fi
+          nimble run_examples -y
+
   check-bindings:
     # Single OS is enough — codegen output is platform-independent; the Nim
     # matrix catches version-sensitive output (the PR #39 drift class).
@@ -140,12 +148,12 @@ jobs:
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
   rust-bindings:
-    # `--examples` reaches api.rs, which no other target uses; build.rs shells out to `nim c`, hence the nimble job.
-    name: Build generated Rust bindings
+    # The examples are the only consumers of api.rs; build.rs shells out to `nim c`, hence the nimble job.
+    name: Run Rust examples
     needs: versions
     uses: ./.github/workflows/nimble-job.yml
     with:
-      run: cargo build --locked --manifest-path examples/timer/rust_bindings/Cargo.toml --examples
+      run: nimble run_examples_rust -y
       nim-versions:   ${{ needs.versions.outputs.nim-versions }}
       nimble-version: ${{ needs.versions.outputs.nimble }}
 

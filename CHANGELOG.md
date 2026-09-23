@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Cross-compiled `genBindings` no longer needs `-d:ffiSrcPath`.** The embedded
+  source path was derived with `std/os.relativePath`, which judges absoluteness
+  and joins separators by the TARGET's rules. Cross-compiling to Windows from a
+  POSIX builder, a build path like `/tmp/out` is not absolute under Windows
+  rules, so the derivation fell back to the current directory and the compile
+  died with `cannot 'importc' variable at compile time; getCurrentDirectoryW`.
+  It is now derived for `buildOS`, and never consults the working directory.
+- **A relative `-d:ffiOutputDir` resolves against the compiled source**, not the
+  compiler's working directory, which is not a stable base: the same flag wrote
+  to a different place depending on where the build was invoked from.
+
 ### Added
 - `declareLibrary` exports `<lib>_shutdown()`, declared in the generated C and
   C++ headers and wrapped by the Rust crate as `<Lib>Ctx::shutdown()`. It stops

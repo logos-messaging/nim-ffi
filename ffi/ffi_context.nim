@@ -114,7 +114,7 @@ const
     ## hook and slack, so it only fires when the worker itself is wedged. The
     ## generated C destructor blocks its caller this long — 15 s by default.
   RecycleDonePollInterval* = 50.milliseconds
-    ## How often a caller waiting out a recycle looks at the claim itself.
+    ## How often a recycle caller checks if its claim ended.
   EventThreadTickInterval* = 1.seconds
   FFIHeartbeatStartDelay* = 10.seconds
   FFIHeartbeatStaleThreshold* = 1.seconds
@@ -356,10 +356,8 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   if not fired:
     return err("requestRecycle: failed to signal the FFI thread in time")
 
-  # The done signal belongs to the slot, not to this recycle: the next owner of
-  # the slot drains a stale fire on its way in, and that can be the fire meant for
-  # us if we were still on our way to this wait. The claim ending is the truth, so
-  # check it between waits and treat the signal as the prompt wake it is.
+  # The done signal is shared by the slot, so a new owner may clear it before we
+  # see it. Poll the generation too: if it changed, the recycle is done.
   let deadline = Moment.now() + RecycleWaitTimeout
   var done = false
   while true:
