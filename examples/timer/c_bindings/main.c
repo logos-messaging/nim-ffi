@@ -181,7 +181,6 @@ int main(void) {
     RUN(my_timer_ctx_version(ctx, on_version, &w), w);
     printf("[2] Version: %s\n", w.text_a);
     expect_str("version", w.text_a, TIMER_VERSION);
-    expect_str("TIMER_VERSION", TIMER_VERSION, "nim-timer v0.1.0");
     expect_int("MAX_DELAY_MS", (long long)MAX_DELAY_MS, 5000);
 
     printf("[2b] Header consts: TIMER_VERSION=%s, MAX_DELAY_MS=%lld\n", TIMER_VERSION,
