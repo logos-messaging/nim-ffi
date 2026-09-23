@@ -356,10 +356,8 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   if not fired:
     return err("requestRecycle: failed to signal the FFI thread in time")
 
-  # The done signal belongs to the slot, not to this recycle: the next owner of
-  # the slot drains a stale fire on its way in, and that can be the fire meant for
-  # us if we were still on our way to this wait. The claim ending is the truth, so
-  # check it between waits and treat the signal as the prompt wake it is.
+  # The done signal is shared by the slot, so a new owner may clear it before we
+  # see it. Poll the generation too: if it changed, the recycle is done.
   let deadline = Moment.now() + RecycleWaitTimeout
   var done = false
   while true:
