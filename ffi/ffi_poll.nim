@@ -4,7 +4,7 @@
 
 import std/[atomics, locks, monotimes, times]
 import chronos/timer
-import ./ffi_context, ./ffi_msg, ./ffi_wake, ./ret_codes
+import ./ffi_context, ./ffi_msg, ./ffi_wake, ./ffi_thread_request, ./ret_codes
 
 const
   WatchSliceMs = 1000 ## A blocked poll still looks at the heartbeat this often.
@@ -114,28 +114,80 @@ proc releaseHeld(outb: var FFIOutbound) =
   ## Ends the host's use of the message it last polled.
   if outb.queueLive:
     releaseHeldEvent(outb.held)
+  if not outb.heldReply.isNil():
+    outb.retireRequest(outb.heldReply)
+    outb.heldReply = nil
 
 proc hasMessage[T](ctx: ptr FFIContext[T]): bool =
   let outb = addr ctx[].outbound
-  return outb.queueLive and ctx[].eventQueue.headSeq() != 0
+  if outb.queueLive and ctx[].eventQueue.headSeq() != 0:
+    return true
+  withLock outb.lock:
+    return not outb.replyHead.isNil() or not outb.staleHead.isNil()
 
 proc takeMessage[T](ctx: ptr FFIContext[T], msg: ptr ptr NimFfiMsg): bool =
+  ## Hands out the oldest message of the three queues, so the host sees the
+  ## order the library produced and no kind can starve another.
   let outb = addr ctx[].outbound
-  if not outb.queueLive:
-    return false
-  if not ctx[].eventQueue.popEventInto(outb.held):
-    return false
-  let ev = outb.held.event
-  fill(
-    msg,
-    outb[],
-    MsgEvent,
-    seq = ev.seq,
-    nameId = ev.nameId,
-    payload = ev.data,
-    len = ev.dataLen,
-  )
-  return true
+  var eventSeq = 0'u64
+  if outb.queueLive:
+    eventSeq = ctx[].eventQueue.headSeq()
+
+  var
+    reply: ptr FFIThreadRequest = nil
+    staleId, staleSeq: uint64
+    staleMs: int64
+    gotStale = false
+  withLock outb.lock:
+    var replySeq = 0'u64
+    if not outb.replyHead.isNil():
+      replySeq = outb.replyHead[].seq
+    var staleHeadSeq = 0'u64
+    if not outb.staleHead.isNil():
+      staleHeadSeq = outb.staleHead[].staleSeq
+
+    # The event queue has one consumer, this thread, so its head cannot move under us.
+    var oldest = eventSeq
+    if replySeq != 0 and (oldest == 0 or replySeq < oldest):
+      oldest = replySeq
+    if staleHeadSeq != 0 and (oldest == 0 or staleHeadSeq < oldest):
+      oldest = staleHeadSeq
+    if oldest == 0:
+      return false
+    if oldest == replySeq:
+      reply = outb[].popReply()
+    elif oldest == staleHeadSeq:
+      gotStale = outb[].popStaleWarn(staleId, staleSeq, staleMs)
+
+  if not reply.isNil():
+    outb.heldReply = reply
+    fill(
+      msg,
+      outb[],
+      MsgReply,
+      seq = reply[].seq,
+      id = reply[].id,
+      retCode = reply[].retCode,
+      payload = reply[].data,
+      len = reply[].dataLen,
+    )
+    return true
+  if gotStale:
+    fill(msg, outb[], MsgStaleWarn, seq = staleSeq, id = staleId, aux = uint64(staleMs))
+    return true
+  if outb.queueLive and ctx[].eventQueue.popEventInto(outb.held):
+    let ev = outb.held.event
+    fill(
+      msg,
+      outb[],
+      MsgEvent,
+      seq = ev.seq,
+      nameId = ev.nameId,
+      payload = ev.data,
+      len = ev.dataLen,
+    )
+    return true
+  return false
 
 proc pollContext*[T](
     ctx: ptr FFIContext[T], generation: uint, timeoutMs: int, msg: ptr ptr NimFfiMsg
