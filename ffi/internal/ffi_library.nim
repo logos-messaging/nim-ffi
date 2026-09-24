@@ -151,73 +151,118 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
     newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
   )
 
-  # {libraryName}_add_event_listener
-  let addName = libraryName & "_add_event_listener"
-  let addErr = "error: invalid context in " & addName
-  # `ctxIdent` is substituted so the body below sees it (`quote` gensyms).
+  # `ctxIdent` is substituted so the bodies below see it (`quote` gensyms).
   let ctxIdent = ident("ctx")
-  let addBody = quote:
-    # This code runs on the foreign caller thread. That thread can differ from
-    # the thread of an earlier entry point. If the GC of the thread is not
-    # ready, the first Nim allocation ($eventName, the registry Table and seq)
-    # faults. Therefore initialize the GC here.
-    when declared(initializeLibrary):
-      initializeLibrary()
-    var ret: uint64 = 0
-    let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
-    if `ctxIdent`.isNil():
-      echo `addErr`
-      return ret
-    let evtName =
-      if eventName.isNil():
-        ""
-      else:
-        $eventName
-    ret = addEventListener(`ctxIdent`[].eventRegistry, evtName, callback, userData)
-    return ret
 
-  stmts.add(
-    newProc(
-      name = ident(addName),
-      params = @[
-        ident("uint64"),
-        newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
-        newIdentDefs(ident("eventName"), ident("cstring")),
-        newIdentDefs(ident("callback"), ident("FFICallBack")),
-        newIdentDefs(ident("userData"), ident("pointer")),
-      ],
-      body = addBody,
-      pragmas = cdeclExportPragma,
+  when defined(ffiPollMode):
+    # {libraryName}_poll. No `initializeLibrary`: a token that resolves proves the
+    # runtime is up, and poll makes no Nim allocation, so the thread needs no GC setup.
+    let pollName = libraryName & "_poll"
+    let pollBody = quote:
+      let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
+      if `ctxIdent`.isNil():
+        if not msg.isNil():
+          msg[] = nil
+        return RET_INVALID_CTX
+      return pollContext(`ctxIdent`, ctxToken.tokenGeneration(), int(timeoutMs), msg)
+
+    stmts.add(
+      newProc(
+        name = ident(pollName),
+        params = @[
+          ident("cint"),
+          newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
+          newIdentDefs(ident("timeoutMs"), ident("int32")),
+          newIdentDefs(
+            ident("msg"), newTree(nnkPtrTy, newTree(nnkPtrTy, ident("NimFfiMsg")))
+          ),
+        ],
+        body = pollBody,
+        pragmas = cdeclExportPragma,
+      )
     )
-  )
 
-  # Param is `listenerId`, not `id`: `id` collides with chronos's `futures.id` template under quote injection and the captured symbol wins.
-  let removeName = libraryName & "_remove_event_listener"
-  let removeErr = "error: invalid context in " & removeName
-  let removeBody = quote:
-    when declared(initializeLibrary):
-      initializeLibrary()
-    var ret: cint = 1
-    let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
-    if `ctxIdent`.isNil():
-      echo `removeErr`
-      return ret
-    if removeEventListener(`ctxIdent`[].eventRegistry, listenerId):
-      ret = 0
-    return ret
+    let pollFdName = libraryName & "_poll_fd"
+    let pollFdBody = quote:
+      return pollContextHandle(`poolIdent`.resolveCtx(ctxToken))
 
-  stmts.add(
-    newProc(
-      name = ident(removeName),
-      params = @[
-        ident("cint"),
-        newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
-        newIdentDefs(ident("listenerId"), ident("uint64")),
-      ],
-      body = removeBody,
-      pragmas = cdeclExportPragma,
+    stmts.add(
+      newProc(
+        name = ident(pollFdName),
+        params = @[ident("int"), newIdentDefs(ident("ctxToken"), ident("FFICtxToken"))],
+        body = pollFdBody,
+        pragmas = cdeclExportPragma,
+      )
     )
-  )
+
+  # A polling host takes its events out of the message queue, so a library
+  # built for it has no listener registry to add to.
+  when not defined(ffiPollMode):
+    # {libraryName}_add_event_listener
+    let addName = libraryName & "_add_event_listener"
+    let addErr = "error: invalid context in " & addName
+    let addBody = quote:
+      # This code runs on the foreign caller thread. That thread can differ from
+      # the thread of an earlier entry point. If the GC of the thread is not
+      # ready, the first Nim allocation ($eventName, the registry Table and seq)
+      # faults. Therefore initialize the GC here.
+      when declared(initializeLibrary):
+        initializeLibrary()
+      var ret: uint64 = 0
+      let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
+      if `ctxIdent`.isNil():
+        echo `addErr`
+        return ret
+      let evtName =
+        if eventName.isNil():
+          ""
+        else:
+          $eventName
+      ret = addEventListener(`ctxIdent`[].eventRegistry, evtName, callback, userData)
+      return ret
+
+    stmts.add(
+      newProc(
+        name = ident(addName),
+        params = @[
+          ident("uint64"),
+          newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
+          newIdentDefs(ident("eventName"), ident("cstring")),
+          newIdentDefs(ident("callback"), ident("FFICallBack")),
+          newIdentDefs(ident("userData"), ident("pointer")),
+        ],
+        body = addBody,
+        pragmas = cdeclExportPragma,
+      )
+    )
+
+    # Param is `listenerId`, not `id`: `id` collides with chronos's `futures.id` template under quote injection and the captured symbol wins.
+    let removeName = libraryName & "_remove_event_listener"
+    let removeErr = "error: invalid context in " & removeName
+    let removeBody = quote:
+      when declared(initializeLibrary):
+        initializeLibrary()
+      var ret: cint = 1
+      let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
+      if `ctxIdent`.isNil():
+        echo `removeErr`
+        return ret
+      if removeEventListener(`ctxIdent`[].eventRegistry, listenerId):
+        ret = 0
+      return ret
+
+    stmts.add(
+      newProc(
+        name = ident(removeName),
+        params = @[
+          ident("cint"),
+          newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
+          newIdentDefs(ident("listenerId"), ident("uint64")),
+        ],
+        body = removeBody,
+        pragmas = cdeclExportPragma,
+      )
+    )
 
   # {libraryName}_shutdown
   let shutdownName = libraryName & "_shutdown"

@@ -3,24 +3,41 @@
 ## message counter and the message last handed out. Nothing here runs chronos:
 ## the poller is a host thread.
 
-import std/[atomics, locks]
+import std/[atomics, locks, monotimes]
 import results
-import ./ffi_wake, ./ffi_events
+import ./ffi_wake, ./ffi_events, ./ffi_msg
 
-type FFIOutbound* = object
-  ## Lives as long as its pool slot, like the slot's signals: a host thread may
-  ## sit in `poll` whatever the context is doing.
-  ready: bool
-  pollLock*: Lock
-  wake*: WakeSignal
-  wakeArmed*: Atomic[bool]
-  msgSeq*: Atomic[uint64]
-  closedGeneration*: Atomic[uint]
-    # The claim whose messages ended. A claim is never 0, so 0 closes nothing.
-  polledGeneration*: Atomic[uint] # The last claim a host polled under.
-  queueLive*: bool
-    # Guarded by `pollLock`: false while the event queue and `held` are torn down.
-  held*: HeldEvent
+type
+  HeartbeatWatch* = object
+    ## Poller-side view of the FFI thread's heartbeat. Guarded by `pollLock`.
+    generation*: uint
+    startedAt*: MonoTime
+    lastChange*: MonoTime
+    lastValue*: int64
+    notifiedStale*: bool
+    notifiedStuck*: bool
+
+  FFIOutbound* = object
+    ## Lives as long as its pool slot, like the slot's signals: a host thread may
+    ## sit in `poll` whatever the context is doing.
+    ready: bool
+    pollLock*: Lock
+    wake*: WakeSignal
+    wakeArmed*: Atomic[bool]
+    msgSeq*: Atomic[uint64]
+    closedGeneration*: Atomic[uint]
+      # The claim whose messages ended. A claim is never 0, so 0 closes nothing.
+    polledGeneration*: Atomic[uint] # The last claim a host polled under.
+    queueLive*: bool
+      # Guarded by `pollLock`: false while the event queue and `held` are torn down.
+    held*: HeldEvent
+    heldMsg*: array[2, NimFfiMsg]
+      # What `poll` hands out. The library owns it, so appending a field to
+      # `NimFfiMsg` never writes past a struct an older host allocated. Two of
+      # them, used in turn: a slot outlives its owners, and the next owner's first
+      # message must not land in the one the last owner is still reading.
+    heldMsgSlot*: int
+    watch*: HeartbeatWatch
 
 proc initOutbound*(outb: var FFIOutbound): Result[void, string] =
   ## Idempotent: a rebuilt slot keeps its outbound (re-initLock is UB).

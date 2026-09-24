@@ -221,6 +221,11 @@ proc drainOngoing(ongoing: ptr seq[Future[void]]): Future[bool] {.async.} =
 proc resetForNextOwner[T](ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]) =
   freeLib(ctx)
   clearListeners(ctx[].eventRegistry)
+  when defined(ffiPollMode):
+    # The host polling this claim is told it ended, and what it never collected
+    # is dropped: the next owner of the slot must not be handed it.
+    ctx[].outbound.closeOutbound(ctx.currentGeneration())
+    ctx[].outbound.dropQueuedMessages(ctx[].eventQueue)
   # A reused slot skips initContextResources, so the handle ids of the old owner
   # would otherwise resolve for the next one.
   ctx[].handles.releaseAll()
@@ -284,11 +289,31 @@ proc recycleContext[T](
 var ffiEventQueueSignalPtr {.threadvar.}: ThreadSignalPtr
   # Stashed so the hook has no closure env.
 
+var ffiOutboundPtr {.threadvar.}: ptr FFIOutbound
+  # Likewise: the context's outbound state, for the hooks below.
+
 proc ffiNotifyEventEnqueuedHook() {.gcsafe, raises: [].} =
-  if not ffiEventQueueSignalPtr.isNil():
-    let res = ffiEventQueueSignalPtr.fireSync()
-    if res.isErr():
-      error "failed to fire eventQueueSignal after enqueue", err = res.error
+  when defined(ffiPollMode):
+    if not ffiOutboundPtr.isNil():
+      ffiOutboundPtr[].notifyOutbound()
+  else:
+    if not ffiEventQueueSignalPtr.isNil():
+      let res = ffiEventQueueSignalPtr.fireSync()
+      if res.isErr():
+        error "failed to fire eventQueueSignal after enqueue", err = res.error
+
+proc ffiStampEventHook(): uint64 {.gcsafe, raises: [].} =
+  ## One order for every message of a context, so a host sees them as produced.
+  if ffiOutboundPtr.isNil():
+    return 0'u64
+  return ffiOutboundPtr[].nextSeq()
+
+var ffiGenerationPtr {.threadvar.}: ptr Atomic[uint]
+
+proc ffiHostPollsHook(): bool {.gcsafe, raises: [].} =
+  if ffiOutboundPtr.isNil() or ffiGenerationPtr.isNil():
+    return true
+  return ffiOutboundPtr[].polledGeneration.load() == ffiGenerationPtr[].load()
 
 proc proveAlive(ctx: ptr FFIContext) =
   ## Advance the heartbeat the event thread polls; only movement matters, not value.
@@ -300,7 +325,12 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ffiCurrentEventQueue = addr ctx[].eventQueue
   ffiCurrentEventQueueStuck = addr ctx[].eventQueueStuck
   ffiEventQueueSignalPtr = ctx.eventQueueSignal
+  ffiOutboundPtr = addr ctx[].outbound
+  ffiGenerationPtr = addr ctx[].generation
   ffiCurrentNotifyEventEnqueued = ffiNotifyEventEnqueuedHook
+  ffiCurrentStampEvent = ffiStampEventHook
+  when defined(ffiPollMode):
+    ffiCurrentHostPolls = ffiHostPollsHook
   onFFIThread = true
 
   defer:
