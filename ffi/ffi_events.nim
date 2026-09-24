@@ -6,7 +6,8 @@
 import system/ansi_c
 import std/[atomics, locks, sequtils, options, tables]
 import chronicles
-import ./ffi_types, ./cbor_serial
+import results
+import ./ffi_types, ./cbor_serial, ./ffi_msg
 
 type EventEnvelope*[T] = object ## CBOR wire shape: { eventType: tstr, payload: <T> }.
   eventType*: string
@@ -158,33 +159,47 @@ type
     # `name`/`data` point into reused per-slot buffers, or a one-off c_malloc marked by `*HeapOwned` when oversize; both c_malloc'd so they outlive the FFI thread's heap.
     name*: cstring
     nameHeapOwned*: bool
+    nameId*: uint64 ## What a polling host matches on; the listeners use `name`.
+    seq*: uint64 ## Production order within the context, 0 when nobody stamped it.
     data*: ptr UncheckedArray[byte]
     dataLen*: int
     dataHeapOwned*: bool
 
-  EventQueue* = object # SPSC ring; plain lock since ops are short and uncontended.
+  EventQueue* = object
+    # SPSC ring; plain lock since ops are short and uncontended.
+    ## The ring itself is c_malloc'd, not inline: a context is a pool slot, and a
+    ## pool held by value — as a test or a host binding does — would otherwise be
+    ## megabytes of object, more than a thread's stack on Windows.
     lock*: Lock
     head*: int
     tail*: int
     count*: int
-    buf*: array[EventQueueCapacity, QueuedEvent]
-    slab*: array[EventQueueCapacity, ptr UncheckedArray[byte]]
-    nameSlab*: array[EventQueueCapacity, ptr UncheckedArray[byte]]
+    buf*: ptr UncheckedArray[QueuedEvent]
+    slab*: ptr UncheckedArray[ptr UncheckedArray[byte]]
+    nameSlab*: ptr UncheckedArray[ptr UncheckedArray[byte]]
 
 proc allocSlot(nbytes: int): ptr UncheckedArray[byte] {.raises: [].} =
   if nbytes <= 0:
     return nil
   cast[ptr UncheckedArray[byte]](c_malloc(csize_t(nbytes)))
 
-proc initEventQueue*(q: var EventQueue) {.raises: [].} =
+proc allocRing[T](count: int): ptr UncheckedArray[T] {.raises: [].} =
+  return cast[ptr UncheckedArray[T]](c_calloc(csize_t(count), csize_t(sizeof(T))))
+
+proc initEventQueue*(q: var EventQueue): Result[void, string] =
   q.lock.initLock()
   q.head = 0
   q.tail = 0
   q.count = 0
+  q.buf = allocRing[QueuedEvent](EventQueueCapacity)
+  q.slab = allocRing[ptr UncheckedArray[byte]](EventQueueCapacity)
+  q.nameSlab = allocRing[ptr UncheckedArray[byte]](EventQueueCapacity)
+  if q.buf.isNil() or q.slab.isNil() or q.nameSlab.isNil():
+    return err("out of memory: could not allocate the event queue")
   for i in 0 ..< EventQueueCapacity:
-    q.buf[i] = QueuedEvent()
     q.slab[i] = allocSlot(MaxEventPayloadBytes)
     q.nameSlab[i] = allocSlot(MaxEventNameBytes)
+  return ok()
 
 proc releaseEvent*(qe: QueuedEvent) {.raises: [], gcsafe.} =
   ## Frees only heap-fallback buffers; reused slot buffers persist.
@@ -196,14 +211,24 @@ proc releaseEvent*(qe: QueuedEvent) {.raises: [], gcsafe.} =
 proc deinitEventQueue*(q: var EventQueue) {.raises: [].} =
   ## Both producer and consumer must have stopped.
   for i in 0 ..< EventQueueCapacity:
-    releaseEvent(q.buf[i])
-    q.buf[i] = QueuedEvent()
-    if not q.slab[i].isNil():
+    if not q.buf.isNil():
+      releaseEvent(q.buf[i])
+      q.buf[i] = QueuedEvent()
+    if not q.slab.isNil() and not q.slab[i].isNil():
       c_free(q.slab[i])
       q.slab[i] = nil
-    if not q.nameSlab[i].isNil():
+    if not q.nameSlab.isNil() and not q.nameSlab[i].isNil():
       c_free(q.nameSlab[i])
       q.nameSlab[i] = nil
+  if not q.buf.isNil():
+    c_free(q.buf)
+    q.buf = nil
+  if not q.slab.isNil():
+    c_free(q.slab)
+    q.slab = nil
+  if not q.nameSlab.isNil():
+    c_free(q.nameSlab)
+    q.nameSlab = nil
   q.head = 0
   q.tail = 0
   q.count = 0
@@ -226,7 +251,7 @@ proc copyIntoSlot(
   (heapBuf, true, true)
 
 proc tryEnqueueEvent*(
-    q: var EventQueue, name: cstring, src: pointer, dataLen: int
+    q: var EventQueue, name: cstring, nameId, seq: uint64, src: pointer, dataLen: int
 ): bool {.raises: [], gcsafe.} =
   ## Copies `name` (NUL included) and payload into the tail slot's reused buffers
   ## or a heap fallback; false when the ring is full or a fallback alloc fails.
@@ -257,6 +282,8 @@ proc tryEnqueueEvent*(
     q.buf[slot] = QueuedEvent(
       name: nameCStr,
       nameHeapOwned: nameRes.heap,
+      nameId: nameId,
+      seq: seq,
       data: dataRes.buf,
       dataLen: dataLen,
       dataHeapOwned: dataRes.heap,
@@ -282,6 +309,69 @@ proc commitDequeue*(q: var EventQueue) {.raises: [], gcsafe.} =
     q.buf[q.head] = QueuedEvent()
     q.head = (q.head + 1) mod EventQueueCapacity
     q.count.dec()
+
+type HeldEvent* = object
+  ## The event a poller last handed to the host. It owns its bytes, so the ring
+  ## slot is free again as soon as the event is popped.
+  event*: QueuedEvent
+  slab*: ptr UncheckedArray[byte]
+    ## Spare payload slab: a pop swaps it with the slot's, moving the bytes out
+    ## without a copy.
+  nameSlab*: ptr UncheckedArray[byte] ## Spare name slab, swapped the same way.
+
+proc initHeldEvent*(held: var HeldEvent) {.raises: [].} =
+  held.event = QueuedEvent()
+  held.slab = allocSlot(MaxEventPayloadBytes)
+  held.nameSlab = allocSlot(MaxEventNameBytes)
+
+proc releaseHeldEvent*(held: var HeldEvent) {.raises: [], gcsafe.} =
+  ## Ends the host's use of the held bytes; the spare slabs stay.
+  releaseEvent(held.event)
+  held.event = QueuedEvent()
+
+proc deinitHeldEvent*(held: var HeldEvent) {.raises: [].} =
+  ## The host must be done with the message it last polled.
+  releaseHeldEvent(held)
+  if not held.slab.isNil():
+    c_free(held.slab)
+    held.slab = nil
+  if not held.nameSlab.isNil():
+    c_free(held.nameSlab)
+    held.nameSlab = nil
+
+proc popEventInto*(
+    q: var EventQueue, held: var HeldEvent
+): bool {.raises: [], gcsafe.} =
+  ## Moves the head event into `held` and frees its ring slot. A payload that sat
+  ## in the slot's slab changes owner by swapping slabs, so nothing is copied.
+  releaseHeldEvent(held)
+  withLock q.lock:
+    if q.count == 0:
+      return false
+    let slot = q.head
+    var qe = q.buf[slot]
+    if not qe.dataHeapOwned and not qe.data.isNil():
+      swap(q.slab[slot], held.slab)
+      qe.data = held.slab
+    if not qe.nameHeapOwned and not qe.name.isNil() and qe.name != emptyListenerPayload:
+      swap(q.nameSlab[slot], held.nameSlab)
+      qe.name = cast[cstring](held.nameSlab)
+    held.event = qe
+    q.buf[slot] = QueuedEvent()
+    q.head = (q.head + 1) mod EventQueueCapacity
+    q.count.dec()
+  return true
+
+proc clearEventQueue*(q: var EventQueue) {.raises: [], gcsafe.} =
+  ## Drops every queued event: the next owner of a slot must not see them.
+  withLock q.lock:
+    while q.count > 0:
+      releaseEvent(q.buf[q.head])
+      q.buf[q.head] = QueuedEvent()
+      q.head = (q.head + 1) mod EventQueueCapacity
+      q.count.dec()
+    q.head = 0
+    q.tail = 0
 
 proc notifyListeners*(
     listeners: seq[FFIEventListener], retCode: cint, data: pointer, dataLen: int
@@ -315,6 +405,9 @@ var ffiCurrentEventQueueStuck* {.threadvar.}: ptr Atomic[bool]
 var ffiCurrentNotifyEventEnqueued* {.threadvar.}: proc() {.gcsafe, raises: [].}
   # Wake hook so this module needn't depend on chronos; nil-safe.
 
+var ffiCurrentStampEvent* {.threadvar.}: proc(): uint64 {.gcsafe, raises: [].}
+  # Gives an event its place in the context's message order; nil-safe, 0 when unset.
+
 template enqueueOrMarkStuck(eventName: string, src: pointer, dataLen: int) =
   ## Enqueues into the reused slot buffers; on queue-full sets the sticky stuck
   ## flag and wakes the event thread (firing onNotResponding here would run the
@@ -324,7 +417,10 @@ template enqueueOrMarkStuck(eventName: string, src: pointer, dataLen: int) =
     if q.isNil():
       chronicles.error "event queue not set on this thread", event = eventName
       break enqueueBlock
-    if not q[].tryEnqueueEvent(cstring(eventName), src, dataLen):
+    var seq = 0'u64
+    if not ffiCurrentStampEvent.isNil():
+      seq = ffiCurrentStampEvent()
+    if not q[].tryEnqueueEvent(cstring(eventName), nameId(eventName), seq, src, dataLen):
       chronicles.error "event queue full; library marked stuck",
         event = eventName, capacity = EventQueueCapacity
       if not ffiCurrentEventQueueStuck.isNil():

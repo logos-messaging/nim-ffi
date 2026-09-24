@@ -17,6 +17,10 @@ All notable changes to this project are documented in this file.
   to a different place depending on where the build was invoked from.
 
 ### Added
+- `ffi/ffi_wake.nim`: a level-triggered wake signal whose handle a host can wait
+  on, built on each OS's own primitive (eventfd on Linux, a kqueue with an
+  `EVFILT_USER` event on macOS and the BSDs, a manual-reset Event on Windows).
+  Nothing uses it yet; it is the base for the upcoming `<lib>_poll`.
 - `declareLibrary` exports `<lib>_shutdown()`, declared in the generated C and
   C++ headers and wrapped by the Rust crate as `<Lib>Ctx::shutdown()`. It stops
   every context the pool still holds, the `{.ffiStatic.}` one included, and
