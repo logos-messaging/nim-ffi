@@ -152,22 +152,25 @@ proc unregisterWaitedSignal(signal: ThreadSignalPtr) =
     let fd = cast[ptr AsyncFD](signal)[]
     if getThreadDispatcher().contains(fd):
       unregister2(fd).isOkOr:
-        error "failed to unregister a signal from its thread's dispatcher",
+        chronicles.error "failed to unregister a signal from its thread's dispatcher",
           err = osErrorMsg(error)
 
 proc closeDispatcherHook() {.gcsafe, raises: [].} =
   ## chronos never closes a thread's dispatcher, and a library's `onThreadDestruction`
   ## hook can still poll it after the thread body returns (nim-brokers does). Nim
   ## runs the hooks in reverse, so registering this one first makes it run last.
-  try:
-    let diagnostic = closeThreadDispatcher()
-    if diagnostic.isSome():
-      error "a thread's chronos dispatcher did not close cleanly",
-        error = diagnostic.get()
-  except Defect as e:
-    # chronos asserts nothing is still registered; leak the dispatcher rather than abort the host.
-    error "a thread's chronos dispatcher still had work registered; it leaks",
-      error = e.msg
+  # `closeThreadDispatcher` arrived in chronos 4.3; on an older chronos the
+  # dispatcher leaks with the thread, which is what every version did before.
+  when declared(closeThreadDispatcher):
+    try:
+      let diagnostic = closeThreadDispatcher()
+      if diagnostic.isSome():
+        chronicles.error "a thread's chronos dispatcher did not close cleanly",
+          error = diagnostic.get()
+    except Defect as e:
+      # chronos asserts nothing is still registered; leak the dispatcher rather than abort the host.
+      chronicles.error "a thread's chronos dispatcher still had work registered; it leaks",
+        error = e.msg
   when defined(gcDestructors):
     # orc never frees the hook list; this is the last hook, so nothing reads it after.
     reset(nimThreadDestructionHandlers)
@@ -199,7 +202,7 @@ proc drainSignal(sig: ThreadSignalPtr) =
     ## One fire per request the last cycle could have left queued: every fire a stop strands.
   for _ in 0 ..< MaxDrain:
     let fired = sig.waitSync(ZeroDuration).valueOr:
-      error "failed to drain a signal before restarting a context's threads",
+      chronicles.error "failed to drain a signal before restarting a context's threads",
         err = error
       return
     if not fired:
@@ -237,7 +240,7 @@ proc startContextThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
       ctx.running.store(false)
       let fireRes = ctx.reqSignal.fireSync()
       if fireRes.isErr():
-        error "failed to signal ffiThread during event-thread cleanup",
+        chronicles.error "failed to signal ffiThread during event-thread cleanup",
           error = fireRes.error
       joinThread(ctx.ffiThread)
       return err("failed to create the event thread: " & getCurrentExceptionMsg())
@@ -272,7 +275,7 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     if not success:
       # `ctx` is a pool slot the caller owns; close what was opened, never free it.
       ctx.deinitContextResources().isOkOr:
-        error "failed to clean up resources after createFFIContext failure",
+        chronicles.error "failed to clean up resources after createFFIContext failure",
           error = error
 
   newSignalOrErr(ctx.reqSignal, "reqSignal")
@@ -309,7 +312,7 @@ proc signalStop*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ?ctx.reqSignal.fireOrErr("reqSignal")
   ?ctx.stopSignal.fireOrErr("stopSignal")
   ctx.eventQueueSignal.fireOrErr("eventQueueSignal").isOkOr:
-    error "failed to signal eventQueueSignal in signalStop", error = error
+    chronicles.error "failed to signal eventQueueSignal in signalStop", error = error
   ok()
 
 proc tryClaim*[T](ctx: ptr FFIContext[T]): bool =
@@ -393,7 +396,7 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   if not done:
     # Quarantine, not release: this caller already saw the failure.
     ctx.recycleAbandoned.store(true)
-    error "recycle did not complete in time; the pool slot is quarantined",
+    chronicles.error "recycle did not complete in time; the pool slot is quarantined",
       timeoutMs = RecycleWaitTimeout.milliseconds
     return err("requestRecycle: recycle did not complete in time")
   if ctx.lifecycle.load() == CtxLifecycle.RecycleFailed:
@@ -404,7 +407,7 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
 
   if not ctx.awaitClaimReleased(claimed):
     # An ok here reads as a live slot, so the idle reap is skipped and nothing triggers a later one.
-    error "the recycled slot did not come free; the pool treats it as still owned"
+    chronicles.error "the recycled slot did not come free; the pool treats it as still owned"
     return err("requestRecycle: the slot did not come free")
   ok()
 
