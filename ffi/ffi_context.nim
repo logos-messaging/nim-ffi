@@ -8,12 +8,13 @@ import
   ./ffi_types,
   ./ffi_events,
   ./ffi_handles,
+  ./ffi_last_error,
   ./ffi_outbound,
   ./ffi_thread_request,
   ./ffi_request_queue,
   ./cbor_serial
 
-export ffi_events, ffi_handles, ffi_outbound
+export ffi_events, ffi_handles, ffi_last_error, ffi_outbound
 export ffi_request_queue.RequestQueueDepth
 
 type FFICtxToken* = distinct pointer
@@ -180,7 +181,8 @@ include ./ffi_thread
 proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Mirror of `initContextResources`. Threads MUST be joined, and only their owner may call it.
   deinitRequestQueue(ctx[].reqQueueBank)
-  deinitEventRegistry(ctx[].eventRegistry)
+  when not defined(ffiPollMode):
+    deinitEventRegistry(ctx[].eventRegistry)
   deinitHandleRegistry(ctx[].handles)
   # A poller must not be inside the queue while it is freed, and must find it
   # gone rather than freed under it when it comes back.
@@ -249,7 +251,11 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ctx.recycleFailure.store(RecycleFailure.None)
   ctx.recycleAbandoned.store(false)
   initRequestQueue(ctx[].reqQueueBank)
-  initEventRegistry(ctx[].eventRegistry)
+  # No listener registry in poll mode: nothing registers, and under refc its
+  # table would belong to whichever host thread created the context while the
+  # FFI thread is the one that clears it.
+  when not defined(ffiPollMode):
+    initEventRegistry(ctx[].eventRegistry)
   initHandleRegistry(ctx[].handles)
   ?initEventQueue(ctx[].eventQueue)
   ?initOutbound(ctx[].outbound)
