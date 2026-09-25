@@ -5,7 +5,8 @@
 #                  through `set(NIM_FFI_EXTRA_ARGS ... CACHE STRING "" FORCE)`
 #                  so the Nim dylib itself is instrumented.
 #   SAN_CFLAGS     compile + link flags for the C/C++ side of the test.
-#   _san_test_env  runtime options, for the ENVIRONMENT property of each test.
+#   _san_test_env  runtime options from sanitizer.env, for the ENVIRONMENT
+#                  property of each test.
 #
 # The first two are both required: instrumenting only the consumer leaves every
 # allocation and every thread inside the dylib invisible to the sanitizer.
@@ -15,6 +16,26 @@
 
 get_filename_component(_repo_root "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
 set(_san_check_script "${CMAKE_CURRENT_LIST_DIR}/sanitizer_symbol_check.cmake")
+set(_san_env_file "${CMAKE_CURRENT_LIST_DIR}/sanitizer.env")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_san_env_file}")
+file(STRINGS "${_san_env_file}" _san_env_lines REGEX "^[A-Z_]+=")
+
+# Appends the sanitizer.env line of each key in ARGN to _san_test_env.
+macro(_san_env_append)
+    foreach(_key ${ARGN})
+        set(_found FALSE)
+        foreach(_line IN LISTS _san_env_lines)
+            if(_line MATCHES "^${_key}=")
+                string(REPLACE "@REPO_ROOT@" "${_repo_root}" _line "${_line}")
+                list(APPEND _san_test_env "${_line}")
+                set(_found TRUE)
+            endif()
+        endforeach()
+        if(NOT _found)
+            message(FATAL_ERROR "${_san_env_file} has no ${_key}")
+        endif()
+    endforeach()
+endmacro()
 
 set(NIM_SAN_ARGS "")
 set(SAN_CFLAGS "")
@@ -35,14 +56,8 @@ if("${NIM_FFI_SANITIZER}" STREQUAL "asan-ubsan")
     set(SAN_CFLAGS -fsanitize=address,undefined -fno-sanitize-recover=all
         -fno-omit-frame-pointer -g)
     set(_san_symbol "__asan_")
-    # Halt and exit non-zero on any report so ctest fails the job. The matching
-    # env block in tests-sanitized.yml keeps the unit runs in agreement; set here
-    # too so a local `ctest` behaves the same. LSan runs inside ASan under
-    # detect_leaks=1 and still honours LSAN_OPTIONS for its suppressions.
-    list(APPEND _san_test_env
-        "ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=1:strict_string_checks=1"
-        "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1"
-        "LSAN_OPTIONS=suppressions=${_repo_root}/lsan.supp:print_suppressions=0")
+    # LSan runs inside ASan under detect_leaks=1 and still honours LSAN_OPTIONS.
+    _san_env_append(ASAN_OPTIONS UBSAN_OPTIONS LSAN_OPTIONS)
 elseif("${NIM_FFI_SANITIZER}" STREQUAL "tsan")
     set(NIM_SAN_ARGS "--passC:-fsanitize=thread"
         "--passC:-fno-omit-frame-pointer"
@@ -50,8 +65,7 @@ elseif("${NIM_FFI_SANITIZER}" STREQUAL "tsan")
         "--passL:-fsanitize=thread")
     set(SAN_CFLAGS -fsanitize=thread -fno-omit-frame-pointer -g)
     set(_san_symbol "__tsan_")
-    list(APPEND _san_test_env
-        "TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:history_size=7:suppressions=${_repo_root}/tsan.supp")
+    _san_env_append(TSAN_OPTIONS)
 elseif(NOT "${NIM_FFI_SANITIZER}" STREQUAL "" AND NOT "${NIM_FFI_SANITIZER}" STREQUAL "none")
     message(FATAL_ERROR "unknown NIM_FFI_SANITIZER: ${NIM_FFI_SANITIZER}")
 endif()
