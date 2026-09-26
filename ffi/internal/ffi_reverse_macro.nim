@@ -99,7 +99,16 @@ macro ffiReverse*(prc: untyped): untyped =
 
   var callProc = prc.copyNimTree()
   callProc[^1] = callBody
-  callProc[4] = newTree(nnkPragma, ident("async"))
+  # Only cancellation can escape: the answer, a timeout, a host that never
+  # replies, all come back as the Result's error.
+  callProc[4] = newTree(
+    nnkPragma,
+    newTree(
+      nnkExprColonExpr,
+      ident("async"),
+      newTree(nnkTupleConstr, newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket, ident("CancelledError")))),
+    ),
+  )
 
   let stmts = newStmtList(argsType, callProc)
   when defined(ffiDumpMacros):

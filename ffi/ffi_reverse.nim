@@ -283,10 +283,11 @@ proc callHost*(
     args: openArray[byte],
     stampSeq: proc(): uint64 {.gcsafe, raises: [].},
     timeoutMs = ReverseCallTimeoutMs,
-): Future[Result[seq[byte], string]] =
+): Future[Result[seq[byte], string]].Raising([CancelledError]) =
   ## FFI thread. Queues the question for the host and hands back the future its
-  ## answer completes. The handler awaits it like any other call.
-  let fut = newFuture[Result[seq[byte], string]]("ffi.callHost")
+  ## answer completes. The handler awaits it like any other call; a failure is
+  ## the Result's error, never an exception.
+  let fut = Future[Result[seq[byte], string]].Raising([CancelledError]).init("ffi.callHost")
   let inv = rev.newInvocation(nameId, generation, args, timeoutMs)
   if inv.isNil():
     fut.complete(
