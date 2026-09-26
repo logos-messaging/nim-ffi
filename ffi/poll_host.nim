@@ -15,7 +15,7 @@
 ## reverse call's CBOR arguments. The exports are bound by their C names, so a
 ## host depends on the ABI and not on how the library was built.
 
-import std/[sets, tables]
+import std/[macros, sets, tables]
 import results
 import ./ffi_msg, ./ret_codes
 import cbor_serialization
@@ -57,11 +57,14 @@ type
     ctx: Ctx
     onEvent*: EventHandler
     onReverseCall*: ReverseHandler
+    timeoutMs*: int ## what a call waits for its reply when it names no deadline
     settled: Table[uint64, Reply] # replies read before their caller asked
     unwaited: HashSet[uint64] # submitted with no one waiting: their replies are dropped
     closed: bool
 
-const SliceMs = 50'i32 # one poll; the deadline is checked between slices
+const
+  SliceMs = 50'i32 # one poll; the deadline is checked between slices
+  HostDefault* = -1 ## for `timeoutMs`: the host's own
 
 # --- binding exports by their C names ------------------------------------------
 # A library's exports are `exportc` procs that keep the Nim name of the proc
@@ -109,9 +112,42 @@ template importLibrary*(prefix: static string, ctor: static string): Library =
   )
 
 proc newHost*(
-    lib: Library, onEvent: EventHandler = nil, onReverseCall: ReverseHandler = nil
+    lib: Library,
+    onEvent: EventHandler = nil,
+    onReverseCall: ReverseHandler = nil,
+    timeoutMs = 30_000,
 ): Host =
-  return Host(lib: lib, onEvent: onEvent, onReverseCall: onReverseCall)
+  return Host(lib: lib, onEvent: onEvent, onReverseCall: onReverseCall, timeoutMs: timeoutMs)
+
+proc deadline(host: Host, timeoutMs: int): int =
+  return if timeoutMs == HostDefault: host.timeoutMs else: timeoutMs
+
+macro request*(fields: untyped): seq[byte] =
+  ## The request of a `{.ffi.}` export, from `{"param": value, ...}`: a CBOR
+  ## map keyed by the export's parameter names, the values whatever
+  ## cbor_serialization writes. `request({})` is a no-parameter export's.
+  if fields.kind notin {nnkTableConstr, nnkCurly}:
+    error("request takes {\"param\": value, ...}", fields)
+  let typ = genSym(nskType, "Request")
+  var fieldDefs = newNimNode(nnkRecList)
+  var ctor = newTree(nnkObjConstr, typ)
+  for f in fields:
+    if f.kind != nnkExprColonExpr or f[0].kind != nnkStrLit:
+      error("request takes {\"param\": value, ...}", f)
+    let name = ident(f[0].strVal)
+    fieldDefs.add(newIdentDefs(name, newCall(ident("typeof"), f[1])))
+    ctor.add(newTree(nnkExprColonExpr, name, f[1]))
+  let typeDef = newTree(
+    nnkTypeSection,
+    newTree(
+      nnkTypeDef, typ, newEmptyNode(),
+      newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), fieldDefs),
+    ),
+  )
+  return quote do:
+    block:
+      `typeDef`
+      cborEncode(`ctor`)
 
 proc ctx*(host: Host): Ctx =
   return host.ctx
@@ -179,8 +215,9 @@ proc drain*(host: Host) =
       return
     host.dispatch(m)
 
-proc waitFor*(host: Host, id: uint64, timeoutMs: int): Reply =
+proc waitFor*(host: Host, id: uint64, timeoutMs = HostDefault): Reply =
   ## Pumps the context on the calling thread until reply `id`, or the deadline.
+  let timeoutMs = host.deadline(timeoutMs)
   var left = timeoutMs
   while true:
     if host.settled.hasKey(id):
@@ -201,7 +238,7 @@ proc waitFor*(host: Host, id: uint64, timeoutMs: int): Reply =
     elif rc != RET_OK:
       return Reply(ret: rc, error: "poll rc=" & $rc)
 
-proc create*(host: Host, req: openArray[byte], timeoutMs: int): Result[void, string] =
+proc create*(host: Host, req: openArray[byte], timeoutMs = HostDefault): Result[void, string] =
   ## Runs the constructor and waits for its reply: the host holds the context
   ## from here on. On failure the context is destroyed again.
   if not host.ctx.isNil:
@@ -241,7 +278,7 @@ proc submit*(host: Host, m: MethodFn, req: openArray[byte]): Result[uint64, stri
   host.unwaited.incl(id)
   return ok(id)
 
-proc call*(host: Host, m: MethodFn, req: openArray[byte], timeoutMs: int): Reply =
+proc call*(host: Host, m: MethodFn, req: openArray[byte], timeoutMs = HostDefault): Reply =
   ## Submits and pumps until the reply.
   if host.ctx.isNil:
     return Reply(ret: RET_ERR, error: "no context")
@@ -255,7 +292,7 @@ template submit*(host: Host, name: static string, req: openArray[byte]): Result[
   ## `submit` of the export named `name`.
   submit(host, importMethod(name), req)
 
-template call*(host: Host, name: static string, req: openArray[byte], timeoutMs: int): Reply =
+template call*(host: Host, name: static string, req: openArray[byte], timeoutMs = HostDefault): Reply =
   ## `call` of the export named `name`.
   call(host, importMethod(name), req, timeoutMs)
 
@@ -264,8 +301,15 @@ proc encode*[T](req: T): seq[byte] =
   ## fields of `req`. An object with no fields is the empty request.
   return cborEncode(req)
 
+proc failure(r: Reply): string =
+  return if r.error.len > 0: r.error else: "rc=" & $r.ret
+
+proc outcome*(r: Reply): Result[void, string] =
+  ## Whether the call succeeded, for a reply whose value means nothing to the caller.
+  return if r.ret == RET_OK: ok() else: err(r.failure)
+
 proc decode*(r: Reply, T: typedesc): Result[T, string] =
   ## The value of a RET_OK reply.
   if r.ret != RET_OK:
-    return err(if r.error.len > 0: r.error else: "rc=" & $r.ret)
+    return err(r.failure)
   return cborDecode(r.payload, T)
