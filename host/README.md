@@ -29,10 +29,8 @@ export's parameter names, replies `decode` into the declared type.
 
 ```nim
 import ffi/poll_host
-proc myCreate(req: ptr byte, len: csize_t, ctxOut: ptr pointer, idOut: ptr uint64): cint {.importc: "my_create", cdecl, gcsafe, raises: [].}
-# ... my_destroy, my_poll, my_reverse_reply, my_send likewise
-let host = newHost(Library(create: myCreate, destroy: myDestroy, poll: myPoll, reverseReply: myReverseReply),
+let host = newHost(importLibrary("my", ctor = "my_create"),   # my_destroy, my_poll, my_reverse_reply
                    onEvent = proc(nameId: uint64, payload: seq[byte]) {.gcsafe, raises: [].} = discard)
 discard host.create(encode(CreateReq(configJson: "{}")), 5_000)
-let r = host.call(mySend, encode(SendReq(messageJson: msg)), 30_000)   # pumps meanwhile
+let r = host.call("my_send", encode(SendReq(messageJson: msg)), 30_000)   # pumps meanwhile
 ```

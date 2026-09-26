@@ -63,6 +63,51 @@ type
 
 const SliceMs = 50'i32 # one poll; the deadline is checked between slices
 
+# --- binding exports by their C names ------------------------------------------
+# A library's exports are `exportc` procs that keep the Nim name of the proc
+# they wrap, so from Nim the name is ambiguous and the C-shaped overload has to
+# be picked by type. These spell the shape once; a caller names the symbol.
+# The linker resolves it, whether the library is a loaded image or this one.
+
+template importCtor*(name: static string): CtorFn =
+  block:
+    proc bound(req: ptr byte, len: csize_t, ctxOut: ptr pointer, idOut: ptr uint64): cint
+      {.importc: name, cdecl, gcsafe, raises: [].}
+    CtorFn(bound)
+
+template importMethod*(name: static string): MethodFn =
+  block:
+    proc bound(ctx: pointer, req: ptr byte, len: csize_t, idOut: ptr uint64): cint
+      {.importc: name, cdecl, gcsafe, raises: [].}
+    MethodFn(bound)
+
+template importDestroy*(name: static string): DestroyFn =
+  block:
+    proc bound(ctx: pointer): cint {.importc: name, cdecl, gcsafe, raises: [].}
+    DestroyFn(bound)
+
+template importPoll*(name: static string): PollFn =
+  block:
+    proc bound(ctx: pointer, timeoutMs: int32, msg: ptr ptr NimFfiMsg): cint
+      {.importc: name, cdecl, gcsafe, raises: [].}
+    PollFn(bound)
+
+template importReverseReply*(name: static string): ReverseReplyFn =
+  block:
+    proc bound(ctx: pointer, callId: uint64, retCode: cint, payload: ptr byte, len: csize_t): cint
+      {.importc: name, cdecl, gcsafe, raises: [].}
+    ReverseReplyFn(bound)
+
+template importLibrary*(prefix: static string, ctor: static string): Library =
+  ## The fixed exports of the library declared as `declareLibrary(prefix, ...)`,
+  ## plus its `{.ffiCtor.}`, which has a name of its own.
+  Library(
+    create: importCtor(ctor),
+    destroy: importDestroy(prefix & "_destroy"),
+    poll: importPoll(prefix & "_poll"),
+    reverseReply: importReverseReply(prefix & "_reverse_reply"),
+  )
+
 proc newHost*(
     lib: Library, onEvent: EventHandler = nil, onReverseCall: ReverseHandler = nil
 ): Host =
@@ -205,6 +250,14 @@ proc call*(host: Host, m: MethodFn, req: openArray[byte], timeoutMs: int): Reply
   if rc != RET_OK:
     return Reply(ret: rc, error: "not accepted, rc=" & $rc)
   return host.waitFor(id, timeoutMs)
+
+template submit*(host: Host, name: static string, req: openArray[byte]): Result[uint64, string] =
+  ## `submit` of the export named `name`.
+  submit(host, importMethod(name), req)
+
+template call*(host: Host, name: static string, req: openArray[byte], timeoutMs: int): Reply =
+  ## `call` of the export named `name`.
+  call(host, importMethod(name), req, timeoutMs)
 
 proc encode*[T](req: T): seq[byte] =
   ## A request: a CBOR map keyed by the export's parameter names, i.e. the

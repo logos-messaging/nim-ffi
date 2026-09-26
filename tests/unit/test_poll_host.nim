@@ -46,30 +46,8 @@ type
     who: string
   Empty = object
 
-# The C exports share their names with the Nim procs they wrap; the expected
-# type picks the export. Only the token's spelling differs from poll_host's.
-type
-  CtorExport = proc(
-    reqCbor: ptr byte, reqCborLen: csize_t, ctxOut: ptr FFICtxToken, reqIdOut: ptr uint64
-  ): cint {.cdecl, raises: [].}
-  MethodExport = proc(
-    ctx: FFICtxToken, reqCbor: ptr byte, reqCborLen: csize_t, reqIdOut: ptr uint64
-  ): cint {.cdecl, raises: [].}
-  DestroyExport = proc(ctx: FFICtxToken): cint {.cdecl, raises: [].}
-
-template asMethod(p: untyped): MethodFn =
-  block:
-    let e: MethodExport = p
-    cast[MethodFn](e)
-
-let createExport: CtorExport = pollhost_create
-let destroyExport: DestroyExport = pollhost_destroy
-let library = Library(
-  create: cast[CtorFn](createExport),
-  destroy: cast[DestroyFn](destroyExport),
-  poll: cast[PollFn](pollhost_poll),
-  reverseReply: cast[ReverseReplyFn](pollhost_reverse_reply),
-)
+# The exports are this image's own; the host binds them by C name all the same.
+let library = importLibrary("pollhost", ctor = "pollhost_create")
 
 var greeted: Atomic[int]
 var lastAnswered: Atomic[uint64]
@@ -94,7 +72,7 @@ suite "a Nim host of a poll-mode library":
             discard greeted.fetchAdd(1),
     )
     check host.create(encode(CreateReq(who: "x")), 5_000).isOk
-    let r = host.call(asMethod(pollhost_greet), encode(GreetReq(who: "world")), 5_000)
+    let r = host.call("pollhost_greet", encode(GreetReq(who: "world")), 5_000)
     check r.ret == RET_OK
     check r.decode(string).get() == "hello world"
     check greeted.load() == 1
@@ -103,7 +81,7 @@ suite "a Nim host of a poll-mode library":
   test "an error reply carries the library's text":
     let host = newHost(library)
     check host.create(encode(CreateReq(who: "x")), 5_000).isOk
-    let r = host.call(asMethod(pollhost_refuse), encode(Empty()), 5_000)
+    let r = host.call("pollhost_refuse", encode(Empty()), 5_000)
     check r.ret == RET_ERR
     check r.error == "no"
     check r.decode(string).error == "no"
@@ -118,7 +96,7 @@ suite "a Nim host of a poll-mode library":
         discard host.reverseReply(callId, RET_OK, cborEncode("an answer")),
     )
     check host.create(encode(CreateReq(who: "x")), 5_000).isOk
-    let r = host.call(asMethod(pollhost_ask), encode(Empty()), 5_000)
+    let r = host.call("pollhost_ask", encode(Empty()), 5_000)
     check r.ret == RET_OK
     check r.decode(string).get() == "an answer"
     check lastAnswered.load() != 0'u64
@@ -127,8 +105,8 @@ suite "a Nim host of a poll-mode library":
   test "a submitted call's reply is dropped, later calls still match theirs":
     let host = newHost(library)
     check host.create(encode(CreateReq(who: "x")), 5_000).isOk
-    check host.submit(asMethod(pollhost_greet), encode(GreetReq(who: "a"))).isOk
-    let r = host.call(asMethod(pollhost_greet), encode(GreetReq(who: "b")), 5_000)
+    check host.submit("pollhost_greet", encode(GreetReq(who: "a"))).isOk
+    let r = host.call("pollhost_greet", encode(GreetReq(who: "b")), 5_000)
     check r.decode(string).get() == "hello b"
     host.drain()
     host.destroy()
