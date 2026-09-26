@@ -266,7 +266,7 @@ proc destroy*(host: Host) =
   host.settled.clear()
   host.unwaited.clear()
 
-proc submit*(host: Host, m: MethodFn, req: openArray[byte]): Result[uint64, string] =
+proc submit*(host: Host, m: MethodFn, req: openArray[byte]): Result[void, string] =
   ## Submits without waiting: the reply, when it comes, is dropped. For a call
   ## whose outcome the library reports as an event.
   if host.ctx.isNil:
@@ -276,7 +276,7 @@ proc submit*(host: Host, m: MethodFn, req: openArray[byte]): Result[uint64, stri
   if rc != RET_OK:
     return err("not accepted, rc=" & $rc)
   host.unwaited.incl(id)
-  return ok(id)
+  return ok()
 
 proc call*(host: Host, m: MethodFn, req: openArray[byte], timeoutMs = HostDefault): Reply =
   ## Submits and pumps until the reply.
@@ -288,7 +288,7 @@ proc call*(host: Host, m: MethodFn, req: openArray[byte], timeoutMs = HostDefaul
     return Reply(ret: rc, error: "not accepted, rc=" & $rc)
   return host.waitFor(id, timeoutMs)
 
-template submit*(host: Host, name: static string, req: openArray[byte]): Result[uint64, string] =
+template submit*(host: Host, name: static string, req: openArray[byte]): Result[void, string] =
   ## `submit` of the export named `name`.
   submit(host, importMethod(name), req)
 
