@@ -167,6 +167,20 @@ macro request*(fields: untyped): seq[byte] =
 proc ctx*(host: Host): Ctx =
   return host.ctx
 
+proc elapsedMs*(m: ptr NimFfiMsg): uint64 {.raises: [].} =
+  ## `MsgStaleWarn`: how long the request has been running. 0 for any other
+  ## kind, so a mismatched read never hands back a number that means something
+  ## else -- `kindDetail` is one slot several kinds write.
+  return if m.isNil or m.kind != MsgStaleWarn: 0'u64 else: m.kindDetail
+
+proc answerWithinMs*(m: ptr NimFfiMsg): uint64 {.raises: [].} =
+  ## `MsgReverseCall`: how long this host has to answer it.
+  return if m.isNil or m.kind != MsgReverseCall: 0'u64 else: m.kindDetail
+
+proc notRespondingReason*(m: ptr NimFfiMsg): uint64 {.raises: [].} =
+  ## `MsgNotResponding`: a `NotResponding*` reason.
+  return if m.isNil or m.kind != MsgNotResponding: 0'u64 else: m.kindDetail
+
 proc bytesOf(m: ptr NimFfiMsg): seq[byte] =
   var bytes = newSeq[byte](int(m.len))
   if m.len > 0:

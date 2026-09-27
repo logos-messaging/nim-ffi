@@ -50,9 +50,9 @@ typedef struct {
   uint64_t seq;           /* production order within the context */
   uint64_t id;            /* REPLY, STALE_WARN: the request id. REVERSE_CALL: the call id. Otherwise 0 */
   uint64_t name_id;       /* EVENT, REVERSE_CALL: which one. Otherwise 0 */
-  uint64_t aux;
+  uint64_t kind_detail;   /* STALE_WARN: ms in flight. REVERSE_CALL: ms left to answer. NOT_RESPONDING: a reason */
   int32_t  ret_code;      /* REPLY: NIMFFI_RET_OK, payload is CBOR; otherwise UTF-8 text */
-  uint32_t flags;
+  uint32_t flags;         /* reserved; zero today */
   const uint8_t* payload; /* bare CBOR value; never NULL */
   size_t   len;
 } NimFfiMsg;
@@ -61,7 +61,7 @@ typedef struct {
 #define NIMFFI_MSG_EVENT 2           /* name_id names it; payload is its CBOR */
 #define NIMFFI_MSG_STALE_WARN 3      /* a request has run long; not terminal */
 #define NIMFFI_MSG_REVERSE_CALL 4    /* the library asks; answer with <lib>_reverse_reply(id, ...) */
-#define NIMFFI_MSG_NOT_RESPONDING 5  /* aux says why */
+#define NIMFFI_MSG_NOT_RESPONDING 5  /* kind_detail says why */
 #define NIMFFI_MSG_RESPONDING 6
 #define NIMFFI_MSG_CLOSED 7          /* the context is gone; every later poll fails */
 
@@ -70,6 +70,23 @@ typedef struct {
 #endif /* NIMFFI_MSG_DECLARED */
 
 /* FNV-1a 64 of a wire name: what EVENT and REVERSE_CALL carry as name_id. */
+/* `kind_detail` read by the kind that owns it: 0 for any other kind, so a
+ * mismatched read can never hand back a number that means something else. */
+static inline uint64_t nimffi_elapsed_ms(const NimFfiMsg* m)
+{
+  return (m && m->kind == NIMFFI_MSG_STALE_WARN) ? m->kind_detail : 0;
+}
+
+static inline uint64_t nimffi_answer_within_ms(const NimFfiMsg* m)
+{
+  return (m && m->kind == NIMFFI_MSG_REVERSE_CALL) ? m->kind_detail : 0;
+}
+
+static inline uint64_t nimffi_not_responding_reason(const NimFfiMsg* m)
+{
+  return (m && m->kind == NIMFFI_MSG_NOT_RESPONDING) ? m->kind_detail : 0;
+}
+
 static inline uint64_t nimffi_name_id(const char* wire)
 {
   uint64_t h = 0xcbf29ce484222325ULL;
