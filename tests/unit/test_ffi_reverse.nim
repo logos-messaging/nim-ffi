@@ -26,7 +26,9 @@ proc hostFetch*(url: string): Future[Result[string, string]] {.ffiReverse.}
 proc hostJoin*(left, right: string): Future[Result[string, string]] {.ffiReverse.}
 
 # A deadline of its own, longer than the library's default.
-proc hostSlowFetch*(url: string): Future[Result[string, string]] {.ffiReverseWithin: 60_000.}
+proc hostSlowFetch*(
+  url: string
+): Future[Result[string, string]] {.ffiReverseWithin: 60_000.}
 
 type HostJoinHostCallArgs = object
   left*: string
@@ -35,7 +37,9 @@ type HostJoinHostCallArgs = object
 proc rev_join*(lib: ReverseLib, a, b: string): Future[Result[string, string]] {.ffi.} =
   return await hostJoin(a, b)
 
-proc rev_slow_fetch*(lib: ReverseLib, url: string): Future[Result[string, string]] {.ffi.} =
+proc rev_slow_fetch*(
+    lib: ReverseLib, url: string
+): Future[Result[string, string]] {.ffi.} =
   return await hostSlowFetch(url)
 
 proc rev_fetch*(lib: ReverseLib, url: string): Future[Result[string, string]] {.ffi.} =
@@ -115,7 +119,9 @@ suite "a handler asks the host":
     check decoded.value.left == "left"
     check decoded.value.right == "right"
     var answer = cborEncode("joined")
-    check rev_reverse_reply(token, call.id, RET_OK, encodedPtr(answer), answer.len.csize_t) == RET_OK
+    check rev_reverse_reply(
+      token, call.id, RET_OK, encodedPtr(answer), answer.len.csize_t
+    ) == RET_OK
     let (reply, payload) = pollFor(token, MsgReply)
     check reply.retCode == RET_OK
     check cborDecode(payload, string).value == "joined"
@@ -131,7 +137,9 @@ suite "a handler asks the host":
     let (call, _) = pollFor(token, MsgReverseCall)
     check call.aux > 30_000'u64 # well past the 1.5 s the .cfg gives the others
     var answer = cborEncode("eventually")
-    check rev_reverse_reply(token, call.id, RET_OK, encodedPtr(answer), answer.len.csize_t) == RET_OK
+    check rev_reverse_reply(
+      token, call.id, RET_OK, encodedPtr(answer), answer.len.csize_t
+    ) == RET_OK
     let (reply, _) = pollFor(token, MsgReply)
     check reply.retCode == RET_OK
 

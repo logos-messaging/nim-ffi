@@ -920,9 +920,14 @@ proc generateCLibHeader*(
     lines.add("/* keyed by the proc's parameter names) and, when it returns     */")
     lines.add("/* NIMFFI_RET_OK, promises exactly one REPLY message carrying    */")
     lines.add("/* *req_id_out. Replies, events and the library's own questions  */")
-    lines.add("/* (REVERSE_CALL) come out of " & libName & "_poll(); " & libName & "_poll_fd() */")
+    lines.add(
+      "/* (REVERSE_CALL) come out of " & libName & "_poll(); " & libName &
+        "_poll_fd() */"
+    )
     lines.add("/* is readable while a message waits. Any host thread may poll   */")
-    lines.add("/* and any may answer with " & libName & "_reverse_reply().            */")
+    lines.add(
+      "/* and any may answer with " & libName & "_reverse_reply().            */"
+    )
     lines.add("/* ============================================================ */")
     lines.add(cMsgDecl())
     lines.add("")
@@ -939,7 +944,8 @@ proc generateCLibHeader*(
       case p.kind
       of FFIKind.FFI:
         lines.add(
-          "int " & p.procName & "(void* ctx, const uint8_t* req_cbor, size_t req_cbor_len, " &
+          "int " & p.procName &
+            "(void* ctx, const uint8_t* req_cbor, size_t req_cbor_len, " &
             "uint64_t* req_id_out);"
         )
       of FFIKind.STATIC:
