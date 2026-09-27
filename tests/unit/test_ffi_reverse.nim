@@ -135,7 +135,7 @@ suite "a handler asks the host":
     var reqId: uint64
     check rev_slow_fetch(token, encodedPtr(req), req.len.csize_t, addr reqId) == RET_OK
     let (call, _) = pollFor(token, MsgReverseCall)
-    check call.aux > 30_000'u64 # well past the 1.5 s the .cfg gives the others
+    check call.kindDetail > 30_000'u64 # well past the 1.5 s the .cfg gives the others
     var answer = cborEncode("eventually")
     check rev_reverse_reply(
       token, call.id, RET_OK, encodedPtr(answer), answer.len.csize_t
