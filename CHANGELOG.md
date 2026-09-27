@@ -27,6 +27,12 @@ All notable changes to this project are documented in this file.
   shipped inside a larger Nim program, `setFFIEventSink` and
   `setFFIReverseSink` hand it events and questions on the emitting thread. A
   `{.ffiReverse.}` proc returns `Future[...].Raising([CancelledError])`.
+- **What a library needs from the poll model.** `{.ffiReverse.}` takes grouped
+  parameters (`a, b: string`); `{.ffiReverseWithin: ms.}` gives one question a
+  deadline of its own instead of the library-wide `-d:ffiReverseCallTimeoutMs`;
+  and under `-d:ffiPollMode` the generated `<lib>.h` declares the poll shape
+  (the message, every export as `(ctx, req, len, id_out)`, the fixed exports,
+  the codecs) instead of the callback ABI.
 - `ffi/ffi_wake.nim`: a level-triggered wake signal whose handle a host can wait
   on, built on each OS's own primitive (eventfd on Linux, a kqueue with an
   `EVFILT_USER` event on macOS and the BSDs, a manual-reset Event on Windows).
