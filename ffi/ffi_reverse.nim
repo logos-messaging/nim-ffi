@@ -275,9 +275,8 @@ proc failPendingReverseCalls*(reason: string) =
     settle(pending, Result[seq[byte], string].err(reason))
   ffiPendingReverse.clear()
 
-type FFIReverseSink* = proc(callId, nameId: uint64, args: pointer, len: int) {.
-  nimcall, gcsafe, raises: []
-.}
+type FFIReverseSink* =
+  proc(callId, nameId: uint64, args: pointer, len: int) {.nimcall, gcsafe, raises: [].}
   ## A host living in this same image, taking the library's questions on the
   ## asking thread. It answers through `<lib>_reverse_reply`, from any thread,
   ## and must copy `args` before returning.
@@ -302,7 +301,8 @@ proc callHost*(
   ## FFI thread. Queues the question for the host and hands back the future its
   ## answer completes. The handler awaits it like any other call; a failure is
   ## the Result's error, never an exception.
-  let fut = Future[Result[seq[byte], string]].Raising([CancelledError]).init("ffi.callHost")
+  let fut =
+    Future[Result[seq[byte], string]].Raising([CancelledError]).init("ffi.callHost")
   let inv = rev.newInvocation(nameId, generation, args, timeoutMs)
   if inv.isNil():
     fut.complete(

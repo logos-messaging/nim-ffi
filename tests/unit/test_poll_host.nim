@@ -23,7 +23,9 @@ proc pollhost_create(who: string): Future[Result[HostedLib, string]] {.ffiCtor.}
     return err("nobody to greet")
   return ok(HostedLib())
 
-proc pollhost_greet(lib: HostedLib, who: string): Future[Result[string, string]] {.ffi.} =
+proc pollhost_greet(
+    lib: HostedLib, who: string
+): Future[Result[string, string]] {.ffi.} =
   dispatchFFIEventCbor("greeted", Greeting(who: who))
   return ok("hello " & who)
 
@@ -64,7 +66,8 @@ suite "a Nim host of a poll-mode library":
         if nameId == nameId("greeted"):
           let g = cborDecode(payload, Greeting)
           if g.isOk and g.value.who == "world":
-            discard greeted.fetchAdd(1),
+            discard greeted.fetchAdd(1)
+      ,
     )
     check host.create(request({"who": "x"}), 5_000).isOk
     let r = host.call("pollhost_greet", request({"who": "world"}), 5_000)
@@ -87,7 +90,9 @@ suite "a Nim host of a poll-mode library":
     var host: Host
     host = newHost(
       library,
-      onReverseCall = proc(callId, nameId: uint64, args: seq[byte]) {.gcsafe, raises: [].} =
+      onReverseCall = proc(
+          callId, nameId: uint64, args: seq[byte]
+      ) {.gcsafe, raises: [].} =
         lastAnswered.store(callId)
         discard host.reverseReply(callId, RET_OK, cborEncode("an answer")),
     )
@@ -103,10 +108,17 @@ suite "a Nim host of a poll-mode library":
       let bytes = cborEncode("from the sink")
       {.cast(gcsafe).}:
         discard pollhost_reverse_reply(
-          cast[FFICtxToken](call[0]), call[1], RET_OK, unsafeAddr bytes[0], csize_t(bytes.len)
+          cast[FFICtxToken](call[0]),
+          call[1],
+          RET_OK,
+          unsafeAddr bytes[0],
+          csize_t(bytes.len),
         )
+
     setFFIReverseSink(
-      proc(callId, nameId: uint64, args: pointer, len: int) {.nimcall, gcsafe, raises: [].} =
+      proc(
+          callId, nameId: uint64, args: pointer, len: int
+      ) {.nimcall, gcsafe, raises: [].} =
         {.cast(gcsafe), cast(raises: []).}:
           createThread(answered, answer, (sinkHost.ctx, callId))
     )

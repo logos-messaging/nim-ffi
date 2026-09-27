@@ -25,18 +25,22 @@ export ret_codes
 
 type
   Ctx* = pointer ## The library's context token.
-  CtorFn* = proc(req: ptr byte, len: csize_t, ctxOut: ptr pointer, idOut: ptr uint64): cint {.cdecl, gcsafe, raises: [].}
+  CtorFn* = proc(
+    req: ptr byte, len: csize_t, ctxOut: ptr pointer, idOut: ptr uint64
+  ): cint {.cdecl, gcsafe, raises: [].}
     ## `<lib>_<ctor>`: hands the context out at once; its reply says whether it came up.
-  MethodFn* = proc(ctx: pointer, req: ptr byte, len: csize_t, idOut: ptr uint64): cint {.cdecl, gcsafe, raises: [].}
-    ## Any `{.ffi.}` export: the request is a CBOR map keyed by its parameter names.
+  MethodFn* = proc(ctx: pointer, req: ptr byte, len: csize_t, idOut: ptr uint64): cint {.
+    cdecl, gcsafe, raises: []
+  .} ## Any `{.ffi.}` export: the request is a CBOR map keyed by its parameter names.
   DestroyFn* = proc(ctx: pointer): cint {.cdecl, gcsafe, raises: [].}
-  PollFn* = proc(ctx: pointer, timeoutMs: int32, msg: ptr ptr NimFfiMsg): cint {.cdecl, gcsafe, raises: [].}
+  PollFn* = proc(ctx: pointer, timeoutMs: int32, msg: ptr ptr NimFfiMsg): cint {.
+    cdecl, gcsafe, raises: []
+  .}
   ReverseReplyFn* = proc(
     ctx: pointer, callId: uint64, retCode: cint, payload: ptr byte, len: csize_t
   ): cint {.cdecl, gcsafe, raises: [].}
 
-  Library* = object
-    ## The fixed exports of one library, by their C names.
+  Library* = object ## The fixed exports of one library, by their C names.
     create*: CtorFn
     destroy*: DestroyFn
     poll*: PollFn
@@ -74,14 +78,18 @@ const
 
 template importCtor*(name: static string): CtorFn =
   block:
-    proc bound(req: ptr byte, len: csize_t, ctxOut: ptr pointer, idOut: ptr uint64): cint
-      {.importc: name, cdecl, gcsafe, raises: [].}
+    proc bound(
+      req: ptr byte, len: csize_t, ctxOut: ptr pointer, idOut: ptr uint64
+    ): cint {.importc: name, cdecl, gcsafe, raises: [].}
+
     CtorFn(bound)
 
 template importMethod*(name: static string): MethodFn =
   block:
-    proc bound(ctx: pointer, req: ptr byte, len: csize_t, idOut: ptr uint64): cint
-      {.importc: name, cdecl, gcsafe, raises: [].}
+    proc bound(
+      ctx: pointer, req: ptr byte, len: csize_t, idOut: ptr uint64
+    ): cint {.importc: name, cdecl, gcsafe, raises: [].}
+
     MethodFn(bound)
 
 template importDestroy*(name: static string): DestroyFn =
@@ -91,14 +99,18 @@ template importDestroy*(name: static string): DestroyFn =
 
 template importPoll*(name: static string): PollFn =
   block:
-    proc bound(ctx: pointer, timeoutMs: int32, msg: ptr ptr NimFfiMsg): cint
-      {.importc: name, cdecl, gcsafe, raises: [].}
+    proc bound(
+      ctx: pointer, timeoutMs: int32, msg: ptr ptr NimFfiMsg
+    ): cint {.importc: name, cdecl, gcsafe, raises: [].}
+
     PollFn(bound)
 
 template importReverseReply*(name: static string): ReverseReplyFn =
   block:
-    proc bound(ctx: pointer, callId: uint64, retCode: cint, payload: ptr byte, len: csize_t): cint
-      {.importc: name, cdecl, gcsafe, raises: [].}
+    proc bound(
+      ctx: pointer, callId: uint64, retCode: cint, payload: ptr byte, len: csize_t
+    ): cint {.importc: name, cdecl, gcsafe, raises: [].}
+
     ReverseReplyFn(bound)
 
 template importLibrary*(prefix: static string, ctor: static string): Library =
@@ -117,7 +129,8 @@ proc newHost*(
     onReverseCall: ReverseHandler = nil,
     timeoutMs = 30_000,
 ): Host =
-  return Host(lib: lib, onEvent: onEvent, onReverseCall: onReverseCall, timeoutMs: timeoutMs)
+  return
+    Host(lib: lib, onEvent: onEvent, onReverseCall: onReverseCall, timeoutMs: timeoutMs)
 
 proc deadline(host: Host, timeoutMs: int): int =
   return if timeoutMs == HostDefault: host.timeoutMs else: timeoutMs
@@ -140,11 +153,13 @@ macro request*(fields: untyped): seq[byte] =
   let typeDef = newTree(
     nnkTypeSection,
     newTree(
-      nnkTypeDef, typ, newEmptyNode(),
+      nnkTypeDef,
+      typ,
+      newEmptyNode(),
       newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), fieldDefs),
     ),
   )
-  return quote do:
+  return quote:
     block:
       `typeDef`
       cborEncode(`ctor`)
@@ -175,7 +190,13 @@ proc reverseReply*(
   if host.lib.reverseReply.isNil or host.ctx.isNil:
     return RET_ERR
   return host.lib.reverseReply(
-    host.ctx, callId, ret, if payload.len > 0: unsafeAddr payload[0] else: nil,
+    host.ctx,
+    callId,
+    ret,
+    if payload.len > 0:
+      unsafeAddr payload[0]
+    else:
+      nil,
     csize_t(payload.len),
   )
 
@@ -238,7 +259,9 @@ proc waitFor*(host: Host, id: uint64, timeoutMs = HostDefault): Reply =
     elif rc != RET_OK:
       return Reply(ret: rc, error: "poll rc=" & $rc)
 
-proc create*(host: Host, req: openArray[byte], timeoutMs = HostDefault): Result[void, string] =
+proc create*(
+    host: Host, req: openArray[byte], timeoutMs = HostDefault
+): Result[void, string] =
   ## Runs the constructor and waits for its reply: the host holds the context
   ## from here on. On failure the context is destroyed again.
   if not host.ctx.isNil:
@@ -246,7 +269,13 @@ proc create*(host: Host, req: openArray[byte], timeoutMs = HostDefault): Result[
   var ctx: pointer = nil
   var id: uint64 = 0
   let rc = host.lib.create(
-    if req.len > 0: unsafeAddr req[0] else: nil, csize_t(req.len), addr ctx, addr id
+    if req.len > 0:
+      unsafeAddr req[0]
+    else:
+      nil,
+    csize_t(req.len),
+    addr ctx,
+    addr id,
   )
   if rc != RET_OK or ctx.isNil:
     return err("constructor not accepted, rc=" & $rc)
@@ -256,7 +285,12 @@ proc create*(host: Host, req: openArray[byte], timeoutMs = HostDefault): Result[
   if ready.ret != RET_OK:
     discard host.lib.destroy(ctx)
     host.ctx = nil
-    return err(if ready.error.len > 0: ready.error else: "rc=" & $ready.ret)
+    return err(
+      if ready.error.len > 0:
+        ready.error
+      else:
+        "rc=" & $ready.ret
+    )
   return ok()
 
 proc destroy*(host: Host) =
@@ -272,27 +306,49 @@ proc submit*(host: Host, m: MethodFn, req: openArray[byte]): Result[void, string
   if host.ctx.isNil:
     return err("no context")
   var id: uint64 = 0
-  let rc = m(host.ctx, if req.len > 0: unsafeAddr req[0] else: nil, csize_t(req.len), addr id)
+  let rc = m(
+    host.ctx,
+    if req.len > 0:
+      unsafeAddr req[0]
+    else:
+      nil,
+    csize_t(req.len),
+    addr id,
+  )
   if rc != RET_OK:
     return err("not accepted, rc=" & $rc)
   host.unwaited.incl(id)
   return ok()
 
-proc call*(host: Host, m: MethodFn, req: openArray[byte], timeoutMs = HostDefault): Reply =
+proc call*(
+    host: Host, m: MethodFn, req: openArray[byte], timeoutMs = HostDefault
+): Reply =
   ## Submits and pumps until the reply.
   if host.ctx.isNil:
     return Reply(ret: RET_ERR, error: "no context")
   var id: uint64 = 0
-  let rc = m(host.ctx, if req.len > 0: unsafeAddr req[0] else: nil, csize_t(req.len), addr id)
+  let rc = m(
+    host.ctx,
+    if req.len > 0:
+      unsafeAddr req[0]
+    else:
+      nil,
+    csize_t(req.len),
+    addr id,
+  )
   if rc != RET_OK:
     return Reply(ret: rc, error: "not accepted, rc=" & $rc)
   return host.waitFor(id, timeoutMs)
 
-template submit*(host: Host, name: static string, req: openArray[byte]): Result[void, string] =
+template submit*(
+    host: Host, name: static string, req: openArray[byte]
+): Result[void, string] =
   ## `submit` of the export named `name`.
   submit(host, importMethod(name), req)
 
-template call*(host: Host, name: static string, req: openArray[byte], timeoutMs = HostDefault): Reply =
+template call*(
+    host: Host, name: static string, req: openArray[byte], timeoutMs = HostDefault
+): Reply =
   ## `call` of the export named `name`.
   call(host, importMethod(name), req, timeoutMs)
 
@@ -302,11 +358,19 @@ proc encode*[T](req: T): seq[byte] =
   return cborEncode(req)
 
 proc failure(r: Reply): string =
-  return if r.error.len > 0: r.error else: "rc=" & $r.ret
+  return
+    if r.error.len > 0:
+      r.error
+    else:
+      "rc=" & $r.ret
 
 proc outcome*(r: Reply): Result[void, string] =
   ## Whether the call succeeded, for a reply whose value means nothing to the caller.
-  return if r.ret == RET_OK: ok() else: err(r.failure)
+  return
+    if r.ret == RET_OK:
+      ok()
+    else:
+      err(r.failure)
 
 proc decode*(r: Reply, T: typedesc): Result[T, string] =
   ## The value of a RET_OK reply.

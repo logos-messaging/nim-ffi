@@ -419,9 +419,8 @@ var ffiCurrentStampEvent* {.threadvar.}: proc(): uint64 {.gcsafe, raises: [].}
 var ffiCurrentHostPolls* {.threadvar.}: proc(): bool {.gcsafe, raises: [].}
   # Whether anyone is collecting this context's events. Nil means someone is.
 
-type FFIEventSink* = proc(eventName: string, payload: pointer, len: int) {.
-  nimcall, gcsafe, raises: []
-.}
+type FFIEventSink* =
+  proc(eventName: string, payload: pointer, len: int) {.nimcall, gcsafe, raises: [].}
   ## A host living in this same image, taking events on the emitting thread.
 
 var ffiEventSink: FFIEventSink

@@ -106,7 +106,14 @@ macro ffiReverse*(prc: untyped): untyped =
     newTree(
       nnkExprColonExpr,
       ident("async"),
-      newTree(nnkTupleConstr, newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket, ident("CancelledError")))),
+      newTree(
+        nnkTupleConstr,
+        newTree(
+          nnkExprColonExpr,
+          ident("raises"),
+          newTree(nnkBracket, ident("CancelledError")),
+        ),
+      ),
     ),
   )
 
