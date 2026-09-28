@@ -275,6 +275,20 @@ proc failPendingReverseCalls*(reason: string) =
     settle(pending, Result[seq[byte], string].err(reason))
   ffiPendingReverse.clear()
 
+type FFIReverseSink* =
+  proc(callId, nameId: uint64, args: pointer, len: int) {.nimcall, gcsafe, raises: [].}
+  ## A host living in this same image, taking the library's questions on the
+  ## asking thread. It answers through `<lib>_reverse_reply`, from any thread,
+  ## and must copy `args` before returning.
+
+var ffiReverseSink: FFIReverseSink
+
+proc setFFIReverseSink*(sink: FFIReverseSink) =
+  ## Hands every reverse call to `sink` instead of the queue `<lib>_poll`
+  ## serves: for a library shipped inside a larger Nim program whose host has
+  ## no thread of its own to poll from. Set before the first question.
+  ffiReverseSink = sink
+
 proc callHost*(
     outbNotify: proc() {.gcsafe, raises: [].},
     rev: var FFIReverse,
@@ -283,15 +297,25 @@ proc callHost*(
     args: openArray[byte],
     stampSeq: proc(): uint64 {.gcsafe, raises: [].},
     timeoutMs = ReverseCallTimeoutMs,
-): Future[Result[seq[byte], string]] =
+): Future[Result[seq[byte], string]].Raising([CancelledError]) =
   ## FFI thread. Queues the question for the host and hands back the future its
-  ## answer completes. The handler awaits it like any other call.
-  let fut = newFuture[Result[seq[byte], string]]("ffi.callHost")
+  ## answer completes. The handler awaits it like any other call; a failure is
+  ## the Result's error, never an exception.
+  let fut =
+    Future[Result[seq[byte], string]].Raising([CancelledError]).init("ffi.callHost")
   let inv = rev.newInvocation(nameId, generation, args, timeoutMs)
   if inv.isNil():
     fut.complete(
       Result[seq[byte], string].err("out of memory: could not queue the call")
     )
+    return fut
+  if not ffiReverseSink.isNil():
+    # Handed over here instead of queued; the answer still comes back through
+    # reverse_reply and is matched on this thread like any other.
+    inv[].state.store(ReverseCallState.Delivered)
+    rememberPending(inv, fut)
+    ffiReverseSink(inv[].callId, nameId, cast[pointer](inv[].args), inv[].argsLen)
+    release(inv) # the queue's share: no queue holds it
     return fut
   if not rev.enqueue(inv, stampSeq()):
     # Both references are ours: nothing else ever saw this one.

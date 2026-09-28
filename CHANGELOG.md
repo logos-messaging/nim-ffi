@@ -17,6 +17,16 @@ All notable changes to this project are documented in this file.
   to a different place depending on where the build was invoked from.
 
 ### Added
+- **The host side of the poll model.** `host/nim_ffi.h` declares what a
+  `-d:ffiPollMode` library hands out (`NimFfiMsg`, the message kinds, the
+  status codes, `nimffi_name_id()`); `host/nim_ffi_host.hpp` is a header-only
+  C++17 host for one context, and `ffi/poll_host` the same host in Nim
+  (`importLibrary`, `request({...})`, `call`, `submit`, `decode`, `outcome`,
+  `reverseReply`). None owns a thread: a call pumps on the calling thread
+  until its reply, serving events and reverse calls on the way. For a library
+  shipped inside a larger Nim program, `setFFIEventSink` and
+  `setFFIReverseSink` hand it events and questions on the emitting thread. A
+  `{.ffiReverse.}` proc returns `Future[...].Raising([CancelledError])`.
 - `ffi/ffi_wake.nim`: a level-triggered wake signal whose handle a host can wait
   on, built on each OS's own primitive (eventfd on Linux, a kqueue with an
   `EVFILT_USER` event on macOS and the BSDs, a manual-reset Event on Windows).
