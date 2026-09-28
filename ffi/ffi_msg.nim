@@ -9,10 +9,10 @@ type NimFfiMsg* {.bycopy.} = object
   structSize*: uint32 ## `sizeof(NimFfiMsg)` of the library; fields are only appended.
   kind*: uint32
   seqNum*: uint64 ## Production order within the context.
-  id*: uint64 ## Reply, StaleWarn: the request id. Otherwise 0.
+  id*: uint64 ## Reply, Stale: the request id. Otherwise 0.
   nameId*: uint64 ## Event: `nameId` of its wire name. Otherwise 0.
   kindDetail*: uint64
-    ## The one number whose meaning `kind` decides: StaleWarn the milliseconds a
+    ## The one number whose meaning `kind` decides: Stale the milliseconds a
     ## request has been in flight, ReverseCall the milliseconds left to answer
     ## it, NotResponding a `NotResponding*` reason. Otherwise 0.
   retCode*: int32 ## Reply, Closed: RET_OK or RET_ERR. Otherwise 0.
@@ -29,7 +29,7 @@ type MsgKind* = object
 const
   MsgReply* = 1'u32
   MsgEvent* = 2'u32
-  MsgStaleWarn* = 3'u32
+  MsgStale* = 3'u32
   MsgNotResponding* = 5'u32
   MsgResponding* = 6'u32
   MsgClosed* = 7'u32
@@ -41,8 +41,8 @@ const MsgKinds* = [
     doc: "id is the request; ret_code OK: payload is its CBOR, ERR: UTF-8 text",
   ),
   MsgKind(
-    name: "STALE_WARN",
-    value: MsgStaleWarn,
+    name: "STALE",
+    value: MsgStale,
     doc:
       "request id is still running; kind_detail is the ms in flight, and its REPLY still comes",
   ),
@@ -82,7 +82,7 @@ func cMsgDecl*(): string =
     "  uint32_t struct_size;   /* sizeof(NimFfiMsg) of the library; fields are only appended */",
     "  uint32_t kind;          /* NIMFFI_MSG_* */",
     "  uint64_t seq_num;       /* production order within the context */",
-    "  uint64_t id;            /* REPLY, STALE_WARN: the request id. Otherwise 0 */",
+    "  uint64_t id;            /* REPLY, STALE: the request id. Otherwise 0 */",
     "  uint64_t name_id;       /* EVENT: which one. Otherwise 0 */",
     "  uint64_t kind_detail;   /* the number `kind` decides the meaning of */",
     "  int32_t  ret_code;", "  uint32_t flags;          /* reserved; zero today */",
