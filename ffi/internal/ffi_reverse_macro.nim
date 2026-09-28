@@ -10,8 +10,9 @@ import ../codegen/string_helpers
 proc reverseArgsTypeName(procName: string): string =
   return snakeToPascalCase(camelToSnakeCase(procName)) & "HostCall"
 
-macro ffiReverse*(prc: untyped): untyped =
-  ## `proc hostFetch(url: string): Future[Result[string, string]] {.ffiReverse.}`
+proc buildReverse(prc: NimNode, timeoutMs: NimNode): NimNode =
+  ## The asking side of one reverse call; `timeoutMs` is how long the handler
+  ## waits for the host's answer before failing it.
   if prc.kind notin {nnkProcDef, nnkFuncDef}:
     error("`.ffiReverse.` must be applied to a proc declaration")
 
@@ -43,12 +44,14 @@ macro ffiReverse*(prc: untyped): untyped =
   var fields: seq[NimNode] = @[]
   var assigns: seq[NimNode] = @[]
   for i in 1 ..< formalParams.len:
-    let paramName = formalParams[i][0]
-    let paramType = formalParams[i][1]
-    fields.add(
-      newTree(nnkIdentDefs, postfix(paramName, "*"), paramType, newEmptyNode())
-    )
-    assigns.add(newTree(nnkExprColonExpr, paramName, paramName))
+    let group = formalParams[i]
+    let paramType = group[^2]
+    for j in 0 ..< group.len - 2: # `a, b: string` is one identdef, two params
+      let paramName = group[j]
+      fields.add(
+        newTree(nnkIdentDefs, postfix(paramName, "*"), paramType, newEmptyNode())
+      )
+      assigns.add(newTree(nnkExprColonExpr, paramName, paramName))
   if fields.len == 0:
     fields.add(
       newTree(
@@ -89,6 +92,7 @@ macro ffiReverse*(prc: untyped): untyped =
       argsCbor,
       proc(): uint64 {.gcsafe, raises: [].} =
         outb[].nextSeq(),
+      `timeoutMs`,
     )
     if answer.isErr():
       return err(answer.error)
@@ -121,3 +125,14 @@ macro ffiReverse*(prc: untyped): untyped =
   when defined(ffiDumpMacros):
     echo stmts.repr
   return stmts
+
+macro ffiReverse*(prc: untyped): untyped =
+  ## `proc hostFetch(url: string): Future[Result[string, string]] {.ffiReverse.}`
+  ## The host has `-d:ffiReverseCallTimeoutMs` (10 s unless set) to answer.
+  return buildReverse(prc, ident("ReverseCallTimeoutMs"))
+
+macro ffiReverseWithin*(timeoutMs: static int, prc: untyped): untyped =
+  ## `{.ffiReverseWithin: 70_000.}`: the same, with a deadline of its own, for a
+  ## question whose answer legitimately takes longer than the library's default
+  ## (a registry read, a proof).
+  return buildReverse(prc, newLit(timeoutMs))

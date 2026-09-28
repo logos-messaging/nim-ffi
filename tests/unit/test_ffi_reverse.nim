@@ -22,6 +22,26 @@ proc rev_create*(): Future[Result[ReverseLib, string]] {.ffiCtor.} =
 
 proc hostFetch*(url: string): Future[Result[string, string]] {.ffiReverse.}
 
+# Grouped parameters are one identdef each: both must ride.
+proc hostJoin*(left, right: string): Future[Result[string, string]] {.ffiReverse.}
+
+# A deadline of its own, longer than the library's default.
+proc hostSlowFetch*(
+  url: string
+): Future[Result[string, string]] {.ffiReverseWithin: 60_000.}
+
+type HostJoinHostCallArgs = object
+  left*: string
+  right*: string
+
+proc rev_join*(lib: ReverseLib, a, b: string): Future[Result[string, string]] {.ffi.} =
+  return await hostJoin(a, b)
+
+proc rev_slow_fetch*(
+    lib: ReverseLib, url: string
+): Future[Result[string, string]] {.ffi.} =
+  return await hostSlowFetch(url)
+
 proc rev_fetch*(lib: ReverseLib, url: string): Future[Result[string, string]] {.ffi.} =
   # What a handler does with it: ask the host, then answer its own caller.
   let body = (await hostFetch(url)).valueOr:
@@ -83,6 +103,45 @@ suite "a handler asks the host":
     check reply.id == reqId
     check reply.retCode == RET_OK
     check cborDecode(payload, string).value == "got hello"
+
+  test "grouped parameters both reach the host":
+    var token: FFICtxToken
+    createCtx(token)
+    defer:
+      discard rev_destroy(token)
+    var req = cborEncode(RevJoinReq(a: "left", b: "right"))
+    var reqId: uint64
+    check rev_join(token, encodedPtr(req), req.len.csize_t, addr reqId) == RET_OK
+    let (call, args) = pollFor(token, MsgReverseCall)
+    check call.nameId == nameId("host_join")
+    let decoded = cborDecode(args, HostJoinHostCallArgs)
+    check decoded.isOk()
+    check decoded.value.left == "left"
+    check decoded.value.right == "right"
+    var answer = cborEncode("joined")
+    check rev_reverse_reply(
+      token, call.id, RET_OK, encodedPtr(answer), answer.len.csize_t
+    ) == RET_OK
+    let (reply, payload) = pollFor(token, MsgReply)
+    check reply.retCode == RET_OK
+    check cborDecode(payload, string).value == "joined"
+
+  test "a question with a deadline of its own carries it":
+    var token: FFICtxToken
+    createCtx(token)
+    defer:
+      discard rev_destroy(token)
+    var req = cborEncode(RevSlowFetchReq(url: "https://example.test/slow"))
+    var reqId: uint64
+    check rev_slow_fetch(token, encodedPtr(req), req.len.csize_t, addr reqId) == RET_OK
+    let (call, _) = pollFor(token, MsgReverseCall)
+    check call.kindDetail > 30_000'u64 # well past the 1.5 s the .cfg gives the others
+    var answer = cborEncode("eventually")
+    check rev_reverse_reply(
+      token, call.id, RET_OK, encodedPtr(answer), answer.len.csize_t
+    ) == RET_OK
+    let (reply, _) = pollFor(token, MsgReply)
+    check reply.retCode == RET_OK
 
   test "a host that refuses is the handler's error":
     var token: FFICtxToken

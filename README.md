@@ -296,6 +296,28 @@ The wire name is **optional**: when omitted it is derived from the proc name
 export symbol. Pass a string literal (`{.ffiEvent: "custom_name".}`) only when
 you need a name that differs from the proc.
 
+### The poll model (`-d:ffiPollMode`)
+
+Built with `-d:ffiPollMode`, the same source exports the poll ABI instead: no
+callbacks, every export answers with a message read from `<lib>_poll()`, and
+the generated `<lib>.h` declares that shape (the message, the exports, the
+codecs; a host brings its own loop, see `host/`). What differs for a library:
+
+- Events emitted with `dispatchFFIEvent(name): <string>` arrive as the bytes
+  given, `dispatchFFIEventCbor` ones as CBOR. A host matches on the message's
+  `name_id` and knows which is which per event.
+- `{.ffiReverse.}` is the library asking the host a question and awaiting the
+  answer; it exists only under the poll model. Grouped parameters are fine.
+  The host has `-d:ffiReverseCallTimeoutMs` (10 s unless set) to answer;
+  `{.ffiReverseWithin: 70_000.}` gives one question a deadline of its own.
+  The future raises nothing but cancellation: a timeout or a refusal is the
+  Result's error.
+- A synchronous export (no parameters, a plain return type) stays a plain C
+  function in both models.
+- A library shipped inside a larger Nim program uses `ffi/poll_host` to call
+  its own exports and `setFFIEventSink` / `setFFIReverseSink` to be handed its
+  events and questions on the emitting thread, with no thread to poll from.
+
 ## Placement of `genBindings()`
 
 `genBindings()` reads the compile-time registries that the pragmas populate as

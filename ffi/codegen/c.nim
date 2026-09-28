@@ -9,7 +9,8 @@ import
   ./types_ir,
   ./consts,
   ./build_paths,
-  ../ret_codes
+  ../ret_codes,
+  ../ffi_msg
 
 ## Fixed 64-bit wire type for any Nim `ptr T`/`pointer` (mirrors CppPtrType).
 const CPtrType* = "uint64_t"
@@ -876,8 +877,14 @@ proc generateCLibHeader*(
     libName: string,
     events: seq[FFIEventMeta] = @[],
     consts: seq[FFIConstMeta] = @[],
+    pollMode = defined(ffiPollMode),
 ): string =
-  ## The `<lib>.h` header: library structs, monomorphised codecs and async API.
+  ## The `<lib>.h` header: library structs, monomorphised codecs and the C ABI.
+  ## Under the callback model it adds the typed async wrappers; under the poll
+  ## model (`pollMode`) every export has one shape and answers with a message
+  ## read from `<lib>_poll`, so the header declares the message, the exports and
+  ## the codecs, and a host brings its own loop (host/nim_ffi_host.hpp,
+  ## ffi/poll_host.nim).
   let classified = classifyProcs(procs)
   let ctors = classified.ctors
   let libType = libTypeName(ctors, libName)
@@ -907,6 +914,23 @@ proc generateCLibHeader*(
     lines.add(codec)
   lines.add("")
 
+  if pollMode:
+    lines.add("/* ============================================================ */")
+    lines.add("/* The poll model: every export submits a CBOR request (a map    */")
+    lines.add("/* keyed by the proc's parameter names) and, when it returns     */")
+    lines.add("/* NIMFFI_RET_OK, promises exactly one REPLY message carrying    */")
+    lines.add("/* *req_id_out. Replies, events and the library's own questions  */")
+    lines.add(
+      "/* (REVERSE_CALL) come out of " & libName & "_poll(); " & libName &
+        "_poll_fd() */"
+    )
+    lines.add("/* is readable while a message waits. Any host thread may poll   */")
+    lines.add(
+      "/* and any may answer with " & libName & "_reverse_reply().            */"
+    )
+    lines.add("/* ============================================================ */")
+    lines.add(cMsgDecl())
+    lines.add("")
   lines.add("/* ============================================================ */")
   lines.add("/* C ABI declarations (symbols exported by the Nim dylib)       */")
   lines.add("/* ============================================================ */")
@@ -914,6 +938,47 @@ proc generateCLibHeader*(
   lines.add("extern \"C\" {")
   lines.add("#endif")
   lines.add("")
+  if pollMode:
+    for p in procs:
+      lines.add(renderBlockDocComment(p.doc))
+      case p.kind
+      of FFIKind.FFI:
+        lines.add(
+          "int " & p.procName &
+            "(void* ctx, const uint8_t* req_cbor, size_t req_cbor_len, " &
+            "uint64_t* req_id_out);"
+        )
+      of FFIKind.STATIC:
+        lines.add(
+          "int " & p.procName & "(const uint8_t* req_cbor, size_t req_cbor_len, " &
+            "uint64_t* req_id_out);"
+        )
+      of FFIKind.CTOR:
+        lines.add(
+          "int " & p.procName & "(const uint8_t* req_cbor, size_t req_cbor_len, " &
+            "void** ctx_out, uint64_t* req_id_out);"
+        )
+      of FFIKind.DTOR:
+        lines.add("int " & p.procName & "(void* ctx);")
+    lines.add(
+      "int " & libName & "_poll(void* ctx, int32_t timeout_ms, const NimFfiMsg** msg);"
+    )
+    lines.add("int " & libName & "_poll_fd(void* ctx);")
+    lines.add(
+      "int " & libName & "_reverse_reply(void* ctx, uint64_t call_id, int ret, " &
+        "const uint8_t* payload, size_t len);"
+    )
+    lines.add("const char* " & libName & "_last_error(void);")
+    lines.add("void* " & libName & "_static_ctx(void);")
+    lines.add(renderBlockDocComment(ShutdownDoc))
+    lines.add("int " & libName & "_shutdown(void);")
+    lines.add("")
+    lines.add("#ifdef __cplusplus")
+    lines.add("} /* extern \"C\" */")
+    lines.add("#endif")
+    lines.add("")
+    lines.add("#endif /* " & guard & " */")
+    return lines.join("\n") & "\n"
   for p in procs:
     lines.add(renderBlockDocComment(p.doc))
     case p.kind
