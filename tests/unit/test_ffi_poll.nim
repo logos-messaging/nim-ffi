@@ -431,7 +431,7 @@ suite "a host that stops collecting":
         if res.isErr():
           refused = res.error
           break
-      check refused.contains("waiting to be collected")
+      check refused.contains("wait for the host to poll")
 
       # Collecting frees the room again.
       var drained = 0
