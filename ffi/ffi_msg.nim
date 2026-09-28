@@ -8,7 +8,7 @@ type NimFfiMsg* {.bycopy.} = object
   ## next poll on the same context.
   structSize*: uint32 ## `sizeof(NimFfiMsg)` of the library; fields are only appended.
   kind*: uint32
-  seq*: uint64 ## Production order within the context.
+  seqNum*: uint64 ## Production order within the context.
   id*: uint64 ## Reply, StaleWarn: the request id. Otherwise 0.
   nameId*: uint64 ## Event: `nameId` of its wire name. Otherwise 0.
   kindDetail*: uint64
@@ -81,7 +81,7 @@ func cMsgDecl*(): string =
     "#ifndef NIMFFI_MSG_DECLARED", "#define NIMFFI_MSG_DECLARED", "typedef struct {",
     "  uint32_t struct_size;   /* sizeof(NimFfiMsg) of the library; fields are only appended */",
     "  uint32_t kind;          /* NIMFFI_MSG_* */",
-    "  uint64_t seq;           /* production order within the context */",
+    "  uint64_t seq_num;       /* production order within the context */",
     "  uint64_t id;            /* REPLY, STALE_WARN: the request id. Otherwise 0 */",
     "  uint64_t name_id;       /* EVENT: which one. Otherwise 0 */",
     "  uint64_t kind_detail;   /* the number `kind` decides the meaning of */",
@@ -102,7 +102,7 @@ func cMsgDecl*(): string =
 func rustMsgDecl*(): string =
   var lines = @[
     "#[repr(C)]", "pub struct NimFfiMsg {", "    pub struct_size: u32,",
-    "    pub kind: u32,", "    pub seq: u64,", "    pub id: u64,",
+    "    pub kind: u32,", "    pub seq_num: u64,", "    pub id: u64,",
     "    pub name_id: u64,", "    pub kind_detail: u64,", "    pub ret_code: i32,",
     "    pub flags: u32,", "    pub payload: *const u8,", "    pub len: usize,", "}", "",
   ]
