@@ -8,11 +8,12 @@ import
   ./ffi_types,
   ./ffi_events,
   ./ffi_handles,
+  ./ffi_outbound,
   ./ffi_thread_request,
   ./ffi_request_queue,
   ./cbor_serial
 
-export ffi_events, ffi_handles
+export ffi_events, ffi_handles, ffi_outbound
 export ffi_request_queue.RequestQueueDepth
 
 type FFICtxToken* = distinct pointer
@@ -87,6 +88,9 @@ type FFIContext*[T] = object
   eventRegistry*: FFIEventRegistry
   handles*: FFIHandleRegistry
   eventQueue*: EventQueue
+  outbound*: FFIOutbound
+    # Outlives each owner of the slot, like the signals above: a host thread may
+    # still be polling a context that has already gone.
   ffiHeartbeat*: Atomic[int64]
   eventQueueStuck*: Atomic[bool]
   ffiThreadExited*: Atomic[bool]
@@ -239,7 +243,8 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   initRequestQueue(ctx[].reqQueueBank)
   initEventRegistry(ctx[].eventRegistry)
   initHandleRegistry(ctx[].handles)
-  initEventQueue(ctx[].eventQueue)
+  ?initEventQueue(ctx[].eventQueue)
+  ?initOutbound(ctx[].outbound)
   ctx.ffiHeartbeat.store(0)
   ctx.libReady.store(false)
   ctx.eventQueueStuck.store(false)
