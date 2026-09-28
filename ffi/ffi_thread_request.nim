@@ -28,6 +28,16 @@ type FFIThreadRequest* = object
     ## De-dupes the callback across timeout/completion; both on FFI thread, no race.
   generation*: uint
     ## Claim the submitter resolved its context under; the FFI thread drops the request when the slot has since changed owner.
+  id*: uint64
+    ## What the host was handed at submit; the reply it polls carries the same
+    ## number. 0 for a request nobody can wait for.
+  retCode*: cint ## Set with the reply, for a host that polls for it.
+  seq*: uint64 ## Place of that reply among the context's messages.
+  staleNext*: ptr FFIThreadRequest
+  staleQueued*: bool
+    ## A stale warning waits for the poller. One per request: a newer one overwrites it.
+  staleElapsedMs*: int64
+  staleSeq*: uint64
 
 proc deleteRequest*(request: ptr FFIThreadRequest) =
   if request.isNil():
@@ -44,17 +54,13 @@ proc allocBaseRequest(
   ## c_malloc the envelope and set routing fields; payload set by a helper below.
   ## Nil when the allocation fails; every caller passes that nil on, and
   ## `sendRequestToFFIThread` turns it into an error for the host.
-  var ret = cast[ptr FFIThreadRequest](c_malloc(csize_t(sizeof(FFIThreadRequest))))
+  ## Zeroed, so the poll-side fields (`staleQueued`, `id`, `seq`, ...) start clean.
+  var ret = cast[ptr FFIThreadRequest](c_calloc(1, csize_t(sizeof(FFIThreadRequest))))
   if ret.isNil():
     return nil
   ret[].callback = callback
   ret[].userData = userData
   ret[].reqId = reqId.alloc()
-  ret[].data = nil
-  ret[].dataLen = 0
-  ret[].next = nil
-  ret[].responded = false
-  ret[].generation = 0
   return ret
 
 proc copySharedPayload(req: ptr FFIThreadRequest, data: ptr byte, dataLen: int): bool =
@@ -176,6 +182,45 @@ proc fireStaleWarn*(request: ptr FFIThreadRequest, elapsedMs: int64) =
       cast[csize_t](msg.len),
       request[].userData,
     )
+
+proc setReply*(
+    request: ptr FFIThreadRequest, res: Result[seq[byte], string]
+) {.raises: [].} =
+  ## Swaps the request bytes for the reply: the CBOR value, or the UTF-8 error
+  ## text. c_malloc'd because the poller is a host thread. When that allocation
+  ## fails the reply is a RET_ERR without text.
+  if not request[].data.isNil():
+    c_free(request[].data)
+  request[].data = nil
+  request[].dataLen = 0
+
+  var src: pointer = nil
+  var n = 0
+  # A reply always carries a value; CBOR null marks "no value".
+  var noValue = CborNullByte
+  if res.isOk():
+    request[].retCode = RET_OK
+    n = res.value.len
+    if n > 0:
+      src = unsafeAddr res.value[0]
+    else:
+      src = addr noValue
+      n = 1
+  else:
+    request[].retCode = RET_ERR
+    n = res.error.len
+    if n > 0:
+      src = unsafeAddr res.error[0]
+  if n == 0:
+    return
+
+  let buf = cast[ptr UncheckedArray[byte]](c_malloc(csize_t(n)))
+  if buf.isNil():
+    request[].retCode = RET_ERR
+    return
+  copyMem(buf, src, n)
+  request[].data = buf
+  request[].dataLen = n
 
 proc handleRes*(res: Result[seq[byte], string], request: ptr FFIThreadRequest) =
   ## Terminal step: delivers the response and frees the request exactly once.
