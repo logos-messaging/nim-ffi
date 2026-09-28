@@ -5,7 +5,12 @@
 
 import std/[atomics, locks, monotimes]
 import results
-import ./ffi_wake, ./ffi_events, ./ffi_msg
+import ./ffi_wake, ./ffi_events, ./ffi_msg, ./ffi_thread_request
+
+const MaxOutstandingRequests* {.intdefine: "ffiMaxOutstandingRequests".} = 16384
+  ## Requests submitted but not yet collected by the host. Past it a submit is
+  ## refused, so a host that stops polling cannot grow the library without bound.
+  ## Override `-d:ffiMaxOutstandingRequests=N`.
 
 type
   HeartbeatWatch* = object
@@ -25,12 +30,21 @@ type
     wake*: WakeSignal
     wakeArmed*: Atomic[bool]
     msgSeq*: Atomic[uint64]
+    reqIdSeq*: Atomic[uint64] # Request ids of this slot, over all of its owners.
     closedGeneration*: Atomic[uint]
       # The claim whose messages ended. A claim is never 0, so 0 closes nothing.
     polledGeneration*: Atomic[uint] # The last claim a host polled under.
     queueLive*: bool
       # Guarded by `pollLock`: false while the event queue and `held` are torn down.
+    lock*: Lock # Guards the reply and the stale-warning list.
+    replyHead*, replyTail*: ptr FFIThreadRequest
+      # Answered requests, linked through `next`. Never dropped for want of room:
+      # a lost reply leaves its caller waiting, so the bound is on submits instead.
+    staleHead*, staleTail*: ptr FFIThreadRequest
+      # Requests with a warning pending, linked through `staleNext`.
+    outstanding*: Atomic[int] # Submitted requests the host has not collected yet.
     held*: HeldEvent
+    heldReply*: ptr FFIThreadRequest # The reply the host reads; freed at the next poll.
     heldMsg*: array[2, NimFfiMsg]
       # What `poll` hands out. The library owns it, so appending a field to
       # `NimFfiMsg` never writes past a struct an older host allocated. Two of
@@ -45,6 +59,7 @@ proc initOutbound*(outb: var FFIOutbound): Result[void, string] =
     return ok()
   ?outb.wake.init()
   outb.pollLock.initLock()
+  outb.lock.initLock()
   initHeldEvent(outb.held)
   outb.queueLive = true
   outb.ready = true
@@ -52,6 +67,11 @@ proc initOutbound*(outb: var FFIOutbound): Result[void, string] =
 
 proc nextSeq*(outb: var FFIOutbound): uint64 {.raises: [], gcsafe.} =
   return outb.msgSeq.fetchAdd(1) + 1
+
+proc nextRequestId*(outb: var FFIOutbound): uint64 {.raises: [], gcsafe.} =
+  ## Never 0, and never reset: an id of a past owner of the slot must not name a
+  ## request of the one that holds it now.
+  return outb.reqIdSeq.fetchAdd(1) + 1
 
 proc notifyOutbound*(outb: var FFIOutbound) {.raises: [], gcsafe.} =
   ## Producer side, after an enqueue. One syscall per burst: the poller disarms
@@ -64,6 +84,101 @@ proc closeOutbound*(outb: var FFIOutbound, generation: uint) {.raises: [], gcsaf
   outb.closedGeneration.store(generation)
   outb.wake.fire()
 
+proc claimOutstanding*(outb: var FFIOutbound): bool {.raises: [], gcsafe.} =
+  ## Counts a submit in, or refuses it because the host is not collecting.
+  if outb.outstanding.fetchAdd(1) >= MaxOutstandingRequests:
+    outb.outstanding.atomicDec()
+    return false
+  return true
+
+proc retireRequest*(
+    outb: var FFIOutbound, request: ptr FFIThreadRequest
+) {.raises: [], gcsafe.} =
+  ## Frees a request that was counted in: answered and collected, or dropped.
+  if request.isNil():
+    return
+  deleteRequest(request)
+  outb.outstanding.atomicDec()
+
+proc unlinkStale(outb: var FFIOutbound, request: ptr FFIThreadRequest) =
+  ## Call with `outb.lock` held.
+  if not request[].staleQueued:
+    return
+  var prev: ptr FFIThreadRequest = nil
+  var cur = outb.staleHead
+  while not cur.isNil() and cur != request:
+    prev = cur
+    cur = cur[].staleNext
+  if not cur.isNil():
+    if prev.isNil():
+      outb.staleHead = cur[].staleNext
+    else:
+      prev[].staleNext = cur[].staleNext
+    if outb.staleTail == cur:
+      outb.staleTail = prev
+  request[].staleNext = nil
+  request[].staleQueued = false
+
+proc enqueueReply*(
+    outb: var FFIOutbound, request: ptr FFIThreadRequest
+) {.raises: [], gcsafe.} =
+  ## FFI thread. `request` already carries its reply (`setReply`).
+  request[].next = nil
+  withLock outb.lock:
+    # The reply says more than a warning about the same request.
+    outb.unlinkStale(request)
+    request[].seq = outb.nextSeq()
+    if outb.replyTail.isNil():
+      outb.replyHead = request
+    else:
+      outb.replyTail[].next = request
+    outb.replyTail = request
+  outb.notifyOutbound()
+
+proc enqueueStaleWarn*(
+    outb: var FFIOutbound, request: ptr FFIThreadRequest, elapsedMs: int64
+) {.raises: [], gcsafe.} =
+  ## FFI thread. At most one warning waits per request, so a host that polls
+  ## slowly finds the latest figure, not a backlog.
+  withLock outb.lock:
+    request[].staleElapsedMs = elapsedMs
+    if request[].staleQueued:
+      return
+    request[].staleQueued = true
+    request[].staleSeq = outb.nextSeq()
+    request[].staleNext = nil
+    if outb.staleTail.isNil():
+      outb.staleHead = request
+    else:
+      outb.staleTail[].staleNext = request
+    outb.staleTail = request
+  outb.notifyOutbound()
+
+proc popReply*(outb: var FFIOutbound): ptr FFIThreadRequest {.raises: [], gcsafe.} =
+  ## Call with `outb.lock` held.
+  let request = outb.replyHead
+  if request.isNil():
+    return nil
+  outb.replyHead = request[].next
+  if outb.replyHead.isNil():
+    outb.replyTail = nil
+  request[].next = nil
+  return request
+
+proc popStaleWarn*(
+    outb: var FFIOutbound, reqId: var uint64, seq: var uint64, elapsedMs: var int64
+): bool {.raises: [], gcsafe.} =
+  ## Call with `outb.lock` held. Copies the warning out: the request itself stays
+  ## with the FFI thread, which still owes a reply for it.
+  let request = outb.staleHead
+  if request.isNil():
+    return false
+  reqId = request[].id
+  seq = request[].staleSeq
+  elapsedMs = request[].staleElapsedMs
+  outb.unlinkStale(request)
+  return true
+
 proc dropQueuedMessages*(
     outb: var FFIOutbound, q: var EventQueue
 ) {.raises: [], gcsafe.} =
@@ -71,3 +186,15 @@ proc dropQueuedMessages*(
   ## `poll`, so call `closeOutbound` first. What the host still holds is untouched.
   withLock outb.pollLock:
     clearEventQueue(q)
+    var replies: ptr FFIThreadRequest = nil
+    withLock outb.lock:
+      replies = outb.replyHead
+      outb.replyHead = nil
+      outb.replyTail = nil
+      # Every request with a warning pending was drained or rejected by now.
+      outb.staleHead = nil
+      outb.staleTail = nil
+    while not replies.isNil():
+      let nextReply = replies[].next
+      outb.retireRequest(replies)
+      replies = nextReply
