@@ -11,10 +11,9 @@ type NimFfiMsg* {.bycopy.} = object
   seqNum*: uint64 ## Production order within the context.
   id*: uint64 ## Reply, Stale: the request id. Otherwise 0.
   nameId*: uint64 ## Event: `nameId` of its wire name. Otherwise 0.
-  kindDetail*: uint64
-    ## The one number whose meaning `kind` decides: Stale the milliseconds a
-    ## request has been in flight, ReverseCall the milliseconds left to answer
-    ## it, NotResponding a `NotResponding*` reason. Otherwise 0.
+  durationMs*: uint64
+    ## Stale: how long the request has been in flight. ReverseCall: how long the
+    ## host has left to answer it. Otherwise 0.
   retCode*: int32 ## Reply, Closed: RET_OK or RET_ERR. Otherwise 0.
   flags*: uint32 ## Reserved for per-message bits; zero today.
   payload*: pointer
@@ -30,9 +29,10 @@ const
   MsgReply* = 1'u32
   MsgEvent* = 2'u32
   MsgStale* = 3'u32
-  MsgNotResponding* = 5'u32
+  MsgNotRespondingHeartbeat* = 5'u32
   MsgResponding* = 6'u32
   MsgClosed* = 7'u32
+  MsgNotRespondingQueueFull* = 8'u32
 
 const MsgKinds* = [
   MsgKind(
@@ -44,13 +44,19 @@ const MsgKinds* = [
     name: "STALE",
     value: MsgStale,
     doc:
-      "request id is still running; kind_detail is the ms in flight, and its REPLY still comes",
+      "request id is still running; duration_ms is the ms in flight, and its REPLY still comes",
   ),
   MsgKind(name: "EVENT", value: MsgEvent, doc: "name_id names it; payload is its CBOR"),
   MsgKind(
-    name: "NOT_RESPONDING",
-    value: MsgNotResponding,
-    doc: "kind_detail is a NIMFFI_NOT_RESPONDING_* reason",
+    name: "NOT_RESPONDING_HEARTBEAT",
+    value: MsgNotRespondingHeartbeat,
+    doc: "the FFI thread's heartbeat stalled",
+  ),
+  MsgKind(
+    name: "NOT_RESPONDING_QUEUE_FULL",
+    value: MsgNotRespondingQueueFull,
+    doc:
+      "the event queue overflowed; requests are refused until the context is recycled",
   ),
   MsgKind(
     name: "RESPONDING", value: MsgResponding, doc: "the FFI thread's heartbeat resumed"
@@ -59,11 +65,6 @@ const MsgKinds* = [
     name: "CLOSED", value: MsgClosed, doc: "the context is gone; every later poll fails"
   ),
 ]
-
-const
-  NotRespondingHeartbeat* = 1'u64 ## The FFI thread's heartbeat stalled.
-  NotRespondingEventQueueFull* = 2'u64
-    ## The event queue overflowed; requests are refused until the context is recycled.
 
 func nameId*(wireName: string): uint64 =
   ## FNV-1a 64 of the wire name: what a message carries instead of the string.
@@ -84,7 +85,7 @@ func cMsgDecl*(): string =
     "  uint64_t seq_num;       /* production order within the context */",
     "  uint64_t id;            /* REPLY, STALE: the request id. Otherwise 0 */",
     "  uint64_t name_id;       /* EVENT: which one. Otherwise 0 */",
-    "  uint64_t kind_detail;   /* the number `kind` decides the meaning of */",
+    "  uint64_t duration_ms;   /* STALE: ms in flight; REVERSE_CALL: ms left to answer */",
     "  int32_t  ret_code;", "  uint32_t flags;          /* reserved; zero today */",
     "  const uint8_t* payload; /* bare CBOR value; never NULL */", "  size_t   len;",
     "} NimFfiMsg;", "",
@@ -92,10 +93,6 @@ func cMsgDecl*(): string =
   for k in MsgKinds:
     lines.add("#define NIMFFI_MSG_" & k.name & " " & $k.value & "  /* " & k.doc & " */")
   lines.add("")
-  lines.add("#define NIMFFI_NOT_RESPONDING_HEARTBEAT " & $NotRespondingHeartbeat)
-  lines.add(
-    "#define NIMFFI_NOT_RESPONDING_EVENT_QUEUE_FULL " & $NotRespondingEventQueueFull
-  )
   lines.add("#endif /* NIMFFI_MSG_DECLARED */")
   return lines.join("\n")
 
@@ -103,16 +100,9 @@ func rustMsgDecl*(): string =
   var lines = @[
     "#[repr(C)]", "pub struct NimFfiMsg {", "    pub struct_size: u32,",
     "    pub kind: u32,", "    pub seq_num: u64,", "    pub id: u64,",
-    "    pub name_id: u64,", "    pub kind_detail: u64,", "    pub ret_code: i32,",
+    "    pub name_id: u64,", "    pub duration_ms: u64,", "    pub ret_code: i32,",
     "    pub flags: u32,", "    pub payload: *const u8,", "    pub len: usize,", "}", "",
   ]
   for k in MsgKinds:
     lines.add("pub const NIMFFI_MSG_" & k.name & ": u32 = " & $k.value & ";")
-  lines.add(
-    "pub const NIMFFI_NOT_RESPONDING_HEARTBEAT: u64 = " & $NotRespondingHeartbeat & ";"
-  )
-  lines.add(
-    "pub const NIMFFI_NOT_RESPONDING_EVENT_QUEUE_FULL: u64 = " &
-      $NotRespondingEventQueueFull & ";"
-  )
   return lines.join("\n")
