@@ -40,15 +40,7 @@ jobs:
     env:
       NIM_FFI_MM:    ${{ matrix.mm }}
       NIM_FFI_SAN:   ${{ inputs.sanitizer }}
-      # Per-sanitizer runtime options. Mirrors what tests/e2e/cpp/CMakeLists.txt
-      # injects via gtest_discover_tests so unit and e2e runs agree.
-      #
-      # `asan-ubsan` enables leak detection inside ASan (detect_leaks=1);
-      # LSAN_OPTIONS is honoured for suppressions when LSan runs under ASan.
-      ASAN_OPTIONS:  halt_on_error=1:abort_on_error=1:detect_leaks=1:strict_string_checks=1
-      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-      LSAN_OPTIONS:  suppressions=${{ github.workspace }}/lsan.supp:print_suppressions=0
-      TSAN_OPTIONS:  halt_on_error=1:second_deadlock_stack=1:history_size=7
+      # The nimble tasks export the *_OPTIONS runtime options from tests/e2e/sanitizer.env.
 
     steps:
       - uses: actions/checkout@v4

@@ -63,7 +63,7 @@ proc sanFlags(san: string): string =
   # space-separated flags inside a single --passC argument.
   #
   # `asan-ubsan` enables LeakSanitizer too: ASan includes LSan, so leaks are
-  # reported when ASAN_OPTIONS=detect_leaks=1 (set by the sanitizer CI job).
+  # reported when ASAN_OPTIONS=detect_leaks=1 (set from tests/e2e/sanitizer.env).
   case san
   of "none", "":
     ""
@@ -111,14 +111,34 @@ proc mmModes(): seq[string] =
   else:
     @[nimFlagsOrc, nimFlagsRefc]
 
-proc applyTsanSuppressions() =
-  ## Adds tsan.supp to TSAN_OPTIONS without clobbering options the CI job set.
-  let suppPath = thisDir() & "/tsan.supp"
-  let existing = getEnv("TSAN_OPTIONS")
-  if existing == "":
-    putEnv("TSAN_OPTIONS", "suppressions=" & suppPath)
-  elif "suppressions=" notin existing:
-    putEnv("TSAN_OPTIONS", existing & ":suppressions=" & suppPath)
+func sanitizerEnvKeys(san: string): seq[string] =
+  case san
+  of "asan-ubsan":
+    @["ASAN_OPTIONS", "UBSAN_OPTIONS", "LSAN_OPTIONS"]
+  of "tsan":
+    @["TSAN_OPTIONS"]
+  else:
+    @[]
+
+func envFileValue(lines: openArray[string], key: string): string =
+  for line in lines:
+    if line.startsWith(key & "="):
+      return line[key.len + 1 .. ^1]
+  ""
+
+proc applySanitizerEnv(san: string) =
+  ## Sets the tests/e2e/sanitizer.env options for `san`; a key the env already sets wins.
+  let envFile = thisDir() & "/tests/e2e/sanitizer.env"
+  let lines = readFile(envFile).splitLines()
+  for key in sanitizerEnvKeys(san):
+    let value = lines.envFileValue(key)
+    if value.len == 0:
+      echo envFile & " has no " & key
+      quit(QuitFailure)
+
+    if not existsEnv(key):
+      putEnv(key, value.replace("@REPO_ROOT@", thisDir()))
+    echo key & "=" & getEnv(key)
 
 proc genBindingsCmd(flags, src: string, langs = "rust", outDir = ""): string =
   ## One `nim c` that emits `langs` (comma-separated) from `src`. Output dir and
@@ -184,8 +204,7 @@ task bench_ffi_submit,
   # asan-ubsan and tsan; FFI_SUBMIT_PER_THREAD sets per-thread volume.
   let san = getEnv("NIM_FFI_SAN", "none")
   let extra = sanFlags(san)
-  if san == "tsan":
-    applyTsanSuppressions()
+  applySanitizerEnv(san)
   for flags in mmModes():
     runOrQuit "nim c -r " & flags & " -d:danger" & extra &
       " tests/bench/bench_ffi_submit.nim"
@@ -274,8 +293,7 @@ task test_sanitized,
   "Run all unit tests under a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
   let san = getEnv("NIM_FFI_SAN", "none")
   let extra = sanFlags(san)
-  if san == "tsan":
-    applyTsanSuppressions()
+  applySanitizerEnv(san)
   for flags in mmModes():
     for t in unitTests:
       runOrQuit "nim c -r " & flags & extra & " tests/unit/" & t & ".nim"
@@ -285,6 +303,7 @@ task test_cpp_e2e_sanitized,
   "Build and run the C++ e2e tests with a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
   let mm = getEnv("NIM_FFI_MM", "orc")
   let san = getEnv("NIM_FFI_SAN", "none")
+  applySanitizerEnv(san)
   runOrQuit "nimble genbindings_cpp"
   runOrQuit "nimble genbindings_cpp_echo"
   runOrQuit "cmake -S tests/e2e/cpp -B tests/e2e/cpp/build" & " -DNIM_FFI_MM=" & mm &
@@ -296,6 +315,7 @@ task test_c_e2e_sanitized,
   "Build and run the C e2e tests (timer + echo) with a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
   let mm = getEnv("NIM_FFI_MM", "orc")
   let san = getEnv("NIM_FFI_SAN", "none")
+  applySanitizerEnv(san)
   runOrQuit "nimble genbindings_c"
   runOrQuit "nimble genbindings_c_echo"
   runOrQuit "cmake -S tests/e2e/c -B tests/e2e/c/build" & " -DNIM_FFI_MM=" & mm &
