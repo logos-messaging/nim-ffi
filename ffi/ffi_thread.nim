@@ -126,6 +126,11 @@ when defined(ffiPollMode):
       return lastRefusalCode
     return RET_OK
 
+proc wakeFFIThread*(ctx: ptr FFIContext) {.raises: [], gcsafe.} =
+  ## Brings the FFI thread out of its wait: something it owns has changed.
+  ctx.reqSignal.fireSync().isOkOr:
+    error "failed to wake the FFI thread", error = error
+
 proc sendRequestToFFIThread*(
     ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest
 ): Result[void, string] =
@@ -348,6 +353,12 @@ proc recycleContext[T](
   defer:
     ctx.finishRecycle(failure)
 
+  when defined(ffiPollMode):
+    # Before the drain: a handler parked on the host would otherwise hold the
+    # recycle open until its own deadline, and the host is not going to answer a
+    # context it is destroying.
+    failPendingReverseCalls("the context is closing")
+
   if not await drainOngoing(ongoing):
     # A handler that still runs answers a callback carrying userData the host
     # frees as soon as teardown reports success.
@@ -393,6 +404,16 @@ proc ffiStampEventHook(): uint64 {.gcsafe, raises: [].} =
   return ffiOutboundPtr[].nextSeq()
 
 var ffiGenerationPtr {.threadvar.}: ptr Atomic[uint]
+
+when defined(ffiPollMode):
+  proc ffiCurrentOutbound*(): ptr FFIOutbound {.gcsafe, raises: [].} =
+    ## The outbound state of the context this thread serves; nil off an FFI thread.
+    return ffiOutboundPtr
+
+  proc ffiCurrentClaim*(): uint {.gcsafe, raises: [].} =
+    if ffiGenerationPtr.isNil():
+      return 0'u
+    return ffiGenerationPtr[].load()
 
 proc ffiHostPollsHook(): bool {.gcsafe, raises: [].} =
   if ffiOutboundPtr.isNil() or ffiGenerationPtr.isNil():
@@ -487,6 +508,10 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
         continue
 
       cleanFinishedRequests()
+      when defined(ffiPollMode):
+        # Answers the host sent back, and calls it never answered.
+        ctx[].outbound.reverse.drainReverseReplies()
+        failOverdueReverseCalls()
 
       processQueue()
 
@@ -496,6 +521,8 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
     # Drain once more for requests enqueued just before `running` flipped.
     processQueue()
     cleanFinishedRequests()
+    when defined(ffiPollMode):
+      ctx[].outbound.reverse.drainReverseReplies()
     if pending.len > 0:
       try:
         await allFutures(pending)
