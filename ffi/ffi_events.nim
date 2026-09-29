@@ -345,10 +345,10 @@ proc popEventInto*(
       return false
     let slot = q.head
     var qe = q.buf[slot]
-    if not qe.dataHeapOwned and not qe.data.isNil():
+    if cast[pointer](qe.data) == cast[pointer](q.slab[slot]) and not qe.data.isNil():
       swap(q.slab[slot], held.slab)
       qe.data = held.slab
-    if not qe.nameHeapOwned and not qe.name.isNil() and qe.name != emptyListenerPayload:
+    if cast[pointer](qe.name) == cast[pointer](q.nameSlab[slot]) and not qe.name.isNil():
       swap(q.nameSlab[slot], held.nameSlab)
       qe.name = cast[cstring](held.nameSlab)
     held.event = qe
