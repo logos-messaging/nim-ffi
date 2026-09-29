@@ -39,7 +39,7 @@ suite "the wake fires once per burst":
     outb.notifyOutbound() # still armed: no second syscall
     check outb.wake.waitFor(0)
 
-    # What a poller does once it finds the queues empty.
+    # What a poller disarms, then re-checks the queues, then waits
     outb.wakeArmed.store(false)
     outb.wake.clear()
     check not outb.wake.waitFor(0)
