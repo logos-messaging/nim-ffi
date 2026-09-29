@@ -99,6 +99,22 @@ suite "an event the host reads outlives its ring slot":
     check q.popEventInto(outb.held)
     check payloadOf(outb.held) == big
 
+  test "an event named \"\" keeps its name when its slot is reused":
+    var q: EventQueue
+    check initEventQueue(q).isOk()
+    defer:
+      deinitEventQueue(q)
+    var outb = FFIOutbound()
+    check initOutbound(outb).isOk()
+
+    check q.enqueue("", 1'u64, "empty-named")
+    check q.popEventInto(outb.held)
+    # A full lap of the ring writes into the slot the popped event came from.
+    for i in 0 ..< EventQueueCapacity:
+      check q.enqueue("on_echo_fired", uint64(i + 2), "next")
+    check $outb.held.event.name == ""
+    check payloadOf(outb.held) == "empty-named"
+
   test "clearing drops what the next owner of the slot must not see":
     var q: EventQueue
     check initEventQueue(q).isOk()
