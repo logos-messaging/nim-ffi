@@ -8,11 +8,12 @@ import
   ./ffi_types,
   ./ffi_events,
   ./ffi_handles,
+  ./ffi_outbound,
   ./ffi_thread_request,
   ./ffi_request_queue,
   ./cbor_serial
 
-export ffi_events, ffi_handles
+export ffi_events, ffi_handles, ffi_outbound
 export ffi_request_queue.RequestQueueDepth
 
 type FFICtxToken* = distinct pointer
@@ -87,6 +88,7 @@ type FFIContext*[T] = object
   eventRegistry*: FFIEventRegistry
   handles*: FFIHandleRegistry
   eventQueue*: EventQueue
+  outbound*: FFIOutbound
   ffiHeartbeat*: Atomic[int64]
   eventQueueStuck*: Atomic[bool]
   ffiThreadExited*: Atomic[bool]
@@ -239,13 +241,8 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   initRequestQueue(ctx[].reqQueueBank)
   initEventRegistry(ctx[].eventRegistry)
   initHandleRegistry(ctx[].handles)
-  initEventQueue(ctx[].eventQueue)
-  ctx.ffiHeartbeat.store(0)
-  ctx.libReady.store(false)
-  ctx.eventQueueStuck.store(false)
-  ctx.ffiThreadExited.store(false)
-  ctx.staleWarnInterval = StaleWarnInterval
 
+  # Armed before the first step that can fail, so every early return cleans up.
   var success = false
   defer:
     if not success:
@@ -253,6 +250,14 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
       ctx.deinitContextResources().isOkOr:
         error "failed to clean up resources after createFFIContext failure",
           error = error
+
+  ?initEventQueue(ctx[].eventQueue)
+  ?initOutbound(ctx[].outbound)
+  ctx.ffiHeartbeat.store(0)
+  ctx.libReady.store(false)
+  ctx.eventQueueStuck.store(false)
+  ctx.ffiThreadExited.store(false)
+  ctx.staleWarnInterval = StaleWarnInterval
 
   newSignalOrErr(ctx.reqSignal, "reqSignal")
   newSignalOrErr(ctx.stopSignal, "stopSignal")
