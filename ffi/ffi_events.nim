@@ -167,9 +167,6 @@ type
 
   EventQueue* = object
     # SPSC ring; plain lock since ops are short and uncontended.
-    ## The ring itself is c_malloc'd, not inline: a context is a pool slot, and a
-    ## pool held by value — as a test or a host binding does — would otherwise be
-    ## megabytes of object, more than a thread's stack on Windows.
     lock*: Lock
     head*: int
     tail*: int
