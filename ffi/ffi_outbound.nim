@@ -37,8 +37,7 @@ proc nextSeq*(outb: var FFIOutbound): uint64 {.raises: [], gcsafe.} =
   return outb.msgSeq.fetchAdd(1) + 1
 
 proc notifyOutbound*(outb: var FFIOutbound) {.raises: [], gcsafe.} =
-  ## Producer side, after an enqueue. One syscall per burst: the poller disarms
-  ## only once it found the queues empty.
+  ## Producer side, after an enqueue. One syscall per burst: the poller disarms, then re-checks the queues, then waits
   if not outb.wakeArmed.exchange(true):
     outb.wake.fire()
 
