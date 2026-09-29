@@ -159,7 +159,7 @@ type
     # `name`/`data` point into reused per-slot buffers, or a one-off c_malloc marked by `*HeapOwned` when oversize; both c_malloc'd so they outlive the FFI thread's heap.
     name*: cstring
     nameHeapOwned*: bool
-    nameId*: uint64 ## What a polling host matches on; the listeners use `name`.
+    nameId*: uint64
     seqNum*: uint64 ## Production order within the context, 0 when nobody stamped it.
     data*: ptr UncheckedArray[byte]
     dataLen*: int
