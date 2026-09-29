@@ -312,9 +312,7 @@ type HeldEvent* = object
   ## slot is free again as soon as the event is popped.
   event*: QueuedEvent
   slab*: ptr UncheckedArray[byte]
-    ## Spare payload slab: a pop swaps it with the slot's, moving the bytes out
-    ## without a copy.
-  nameSlab*: ptr UncheckedArray[byte] ## Spare name slab, swapped the same way.
+  nameSlab*: ptr UncheckedArray[byte]
 
 proc initHeldEvent*(held: var HeldEvent) {.raises: [].} =
   held.event = QueuedEvent()
