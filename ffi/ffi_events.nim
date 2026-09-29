@@ -160,7 +160,8 @@ type
     name*: cstring
     nameHeapOwned*: bool
     nameId*: uint64
-    seqNum*: uint64 ## Production order within the context, 0 when nobody stamped it.
+    seqNum*: uint64
+      ## Production order within the context; 0 when none was assigned (callback mode).
     data*: ptr UncheckedArray[byte]
     dataLen*: int
     dataHeapOwned*: bool
@@ -399,7 +400,7 @@ var ffiCurrentEventQueueStuck* {.threadvar.}: ptr Atomic[bool]
 var ffiCurrentNotifyEventEnqueued* {.threadvar.}: proc() {.gcsafe, raises: [].}
   # Wake hook so this module needn't depend on chronos; nil-safe.
 
-var ffiCurrentStampEvent* {.threadvar.}: proc(): uint64 {.gcsafe, raises: [].}
+var ffiNextEventSeqNum* {.threadvar.}: proc(): uint64 {.gcsafe, raises: [].}
   # Gives an event its place in the context's message order; nil-safe, 0 when unset.
 
 template enqueueOrMarkStuck(eventName: string, src: pointer, dataLen: int) =
@@ -412,8 +413,8 @@ template enqueueOrMarkStuck(eventName: string, src: pointer, dataLen: int) =
       chronicles.error "event queue not set on this thread", event = eventName
       break enqueueBlock
     var seqNum = 0'u64
-    if not ffiCurrentStampEvent.isNil():
-      seqNum = ffiCurrentStampEvent()
+    if not ffiNextEventSeqNum.isNil():
+      seqNum = ffiNextEventSeqNum()
     if not q[].tryEnqueueEvent(
       cstring(eventName), nameId(eventName), seqNum, src, dataLen
     ):
