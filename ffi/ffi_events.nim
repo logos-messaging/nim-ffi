@@ -165,8 +165,7 @@ type
     dataLen*: int
     dataHeapOwned*: bool
 
-  EventQueue* = object
-    # SPSC ring; plain lock since ops are short and uncontended.
+  EventQueue* = object # SPSC ring; plain lock since ops are short and uncontended.
     lock*: Lock
     head*: int
     tail*: int
