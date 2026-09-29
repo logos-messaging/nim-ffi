@@ -89,8 +89,6 @@ type FFIContext*[T] = object
   handles*: FFIHandleRegistry
   eventQueue*: EventQueue
   outbound*: FFIOutbound
-    # Outlives each owner of the slot, like the signals above: a host thread may
-    # still be polling a context that has already gone.
   ffiHeartbeat*: Atomic[int64]
   eventQueueStuck*: Atomic[bool]
   ffiThreadExited*: Atomic[bool]
