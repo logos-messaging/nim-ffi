@@ -1,17 +1,5 @@
 ## Level-triggered wake signal with a handle the host can wait on.
 ##
-## `fire` makes the handle ready and it stays ready until `clear`, whoever waits
-## and however often. Each OS uses its own primitive, for the handle and for the
-## blocking `waitFor` alike:
-##
-## ================  ===============================  =====================================
-## OS                handle                           the host waits with
-## ================  ===============================  =====================================
-## Linux, Android    eventfd                          epoll, poll, select
-## macOS, iOS, BSD   kqueue holding one EVFILT_USER   a parent kqueue, poll, select
-## Windows           manual-reset Event               WaitForSingleObject / MultipleObjects
-## ================  ===============================  =====================================
-##
 ## Every proc is free of Nim allocations, so foreign threads may call them.
 
 import results
