@@ -1,5 +1,6 @@
-## A recycle that cannot finish quarantines the slot. The host polling that
-## context must still learn it ended, with the reason, rather than wait forever.
+## A context can end without the clean path: a recycle that cannot finish
+## quarantines the slot, and a destroy can give up on threads that will not stop.
+## The host polling that context must still learn it ended, rather than wait forever.
 
 import std/[atomics, os]
 import unittest2
@@ -10,12 +11,20 @@ import ./helpers
 type QuarantineLib = object
 
 var handlerStarted: Atomic[bool]
+var wedgeStarted: Atomic[bool]
 
 registerReqFFI(HangRequest, lib: ptr QuarantineLib):
   proc(): Future[Result[string, string]] {.async.} =
     handlerStarted.store(true)
     # Outlives both drain rounds, so the recycle gives up and quarantines.
     await sleepAsync(10.seconds)
+    return ok("too late")
+
+registerReqFFI(WedgeRequest, lib: ptr QuarantineLib):
+  proc(): Future[Result[string, string]] {.async.} =
+    wedgeStarted.store(true)
+    # Blocks the FFI thread itself, past the destroy's wait for it to exit.
+    os.sleep(3000)
     return ok("too late")
 
 # Module scope: a quarantined slot is never given back, and its buffers must
@@ -56,3 +65,30 @@ suite "a quarantined context still ends for its poller":
         if msg.len > 0:
           copyMem(addr reason[0], msg.payload, int(msg.len))
         check reason == "in-flight handlers did not drain"
+
+suite "a context whose FFI thread will not stop still ends for its poller":
+  test "poll reports CLOSED after a destroy gives up on the FFI thread":
+    let created = pool.createFFIContext()
+    check created.isOk()
+    if created.isOk():
+      let ctx = created.value
+      let generation = ctx.currentGeneration()
+      check sendRequestToFFIThread(ctx, WedgeRequest.ffiNewReq(noopCallback, nil)).isOk()
+      for _ in 0 ..< 200:
+        if wedgeStarted.load():
+          break
+        sleep(10)
+      check wedgeStarted.load()
+
+      check pool.destroyFFIContext(ctx).isErr()
+
+      var msg: ptr NimFfiMsg
+      var ret = RET_OK
+      for _ in 0 ..< 16:
+        ret = pollContext(ctx, generation, 2000, addr msg)
+        if ret != RET_OK:
+          break
+      check ret == RET_CLOSED
+      check not msg.isNil()
+      if ret == RET_CLOSED and not msg.isNil():
+        check msg.kind == MsgClosed
