@@ -2,7 +2,7 @@
 
 {.passc: "-fPIC".}
 
-import std/[atomics, locks, options, os, sequtils, sysatomics, tables]
+import std/[atomics, locks, monotimes, options, os, sequtils, sysatomics, tables]
 import chronicles, chronos, chronos/threadsync, results
 import
   ./ffi_types,
@@ -90,6 +90,7 @@ type FFIContext*[T] = object
   eventQueue*: EventQueue
   outbound*: FFIOutbound
   ffiHeartbeat*: Atomic[int64]
+    ## `MonoTime` ticks of the FFI thread's last beat; 0 before the first.
   eventQueueStuck*: Atomic[bool]
   ffiThreadExited*: Atomic[bool]
     # set once FFI thread (incl. async {.ffiDtor.}) is done; event thread drains until then

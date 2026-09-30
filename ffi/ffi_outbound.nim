@@ -12,8 +12,6 @@ type
     ## Poller-side view of the FFI thread's heartbeat. Guarded by `pollLock`.
     generation*: uint
     startedAt*: MonoTime
-    lastChange*: MonoTime
-    lastValue*: int64
     notifiedStale*: bool
     notifiedStuck*: bool
 

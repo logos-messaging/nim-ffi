@@ -80,12 +80,7 @@ proc checkLiveness[T](
   let now = getMonoTime()
   let watch = addr ctx[].outbound.watch
   if watch.generation != generation:
-    watch[] = HeartbeatWatch(
-      generation: generation,
-      startedAt: now,
-      lastChange: now,
-      lastValue: ctx.ffiHeartbeat.load(),
-    )
+    watch[] = HeartbeatWatch(generation: generation, startedAt: now)
 
   if not watch.notifiedStuck and ctx.eventQueueStuck.load():
     watch.notifiedStuck = true
@@ -95,15 +90,16 @@ proc checkLiveness[T](
   if msBetween(watch.startedAt, now) <= HeartbeatStartDelayMs:
     return false
 
-  let cur = ctx.ffiHeartbeat.load()
-  if cur != watch.lastValue:
-    watch.lastValue = cur
-    watch.lastChange = now
+  # The age of the last beat, not whether the value moved since the last poll:
+  # a host that polls rarely would otherwise hear of a stall one poll late.
+  let lastBeat = ctx.ffiHeartbeat.load()
+  let stale = lastBeat != 0 and (now.ticks - lastBeat) div 1_000_000 > HeartbeatStaleMs
+  if not stale:
     if watch.notifiedStale:
       watch.notifiedStale = false
       fill(msg, ctx[].outbound, MsgResponding)
       return true
-  elif not watch.notifiedStale and msBetween(watch.lastChange, now) > HeartbeatStaleMs:
+  elif not watch.notifiedStale:
     watch.notifiedStale = true
     fill(msg, ctx[].outbound, MsgNotRespondingHeartbeat)
     return true

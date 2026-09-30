@@ -1,6 +1,6 @@
 ## FFI-thread body and request submission API. Included from `ffi_context.nim`.
 ## Dispatches `FFIThreadRequest`s from `reqQueueBank` and advances
-## `ctx.ffiHeartbeat` so the event thread can spot a wedged FFI thread.
+## `ctx.ffiHeartbeat` (the time of the last beat) so a wedged FFI thread shows.
 
 ## Compile-time-populated table: request type name (cstring) -> async handler.
 ## Public because `{.ffi.}`/`registerReqFFI` expand a write to it in the caller's
@@ -321,8 +321,9 @@ proc ffiHostPollsHook(): bool {.gcsafe, raises: [].} =
   return ffiOutboundPtr[].polledGeneration.load() == ffiGenerationPtr[].load()
 
 proc proveAlive(ctx: ptr FFIContext) =
-  ## Advance the heartbeat the event thread polls; only movement matters, not value.
-  ctx.ffiHeartbeat.atomicInc()
+  ## Stamps the heartbeat with now. A watcher that looks rarely can still tell
+  ## how long ago the thread last beat, not only whether it moved.
+  ctx.ffiHeartbeat.store(getMonoTime().ticks)
 
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   registerCloseDispatcherHook()
