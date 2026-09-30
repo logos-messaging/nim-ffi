@@ -34,13 +34,11 @@ proc fill(
   if data.isNil() or len <= 0:
     data = cast[pointer](emptyListenerPayload)
   var msgSeq = seqNum
-  if msgSeq == 0:
-    msgSeq = outb.nextSeq()
   outb.heldMsgSlot = 1 - outb.heldMsgSlot
   outb.heldMsg[outb.heldMsgSlot] = NimFfiMsg(
     structSize: uint32(sizeof(NimFfiMsg)),
     kind: kind,
-    seqNum: msgSeq,
+    seqNum: seqNum,
     id: id,
     nameId: nameId,
     durationMs: durationMs,
