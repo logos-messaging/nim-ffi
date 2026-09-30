@@ -1026,6 +1026,7 @@ typedef void (*FFIReverseRelease)(void* user_data);
    replaced impl. Returns NIMFFI_REVERSE_ACCEPTED, _INVALID_CTX, or
    _WORKERS_FAILED when it could not be registered; on any error the caller
    still owns user_data and release is never called. */
+/** Asks the host for its wall clock; fails when no host implementation answers. */
 int my_timer_set_fetch_host_clock_impl(void* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release);
 /* Answers a reverse call from ANY thread. ret_code 0 = ok (reply_cbor is
    the CBOR reply), non-zero = error (reply_cbor is a UTF-8 message).
@@ -1277,6 +1278,7 @@ static inline int my_timer_ctx_reverse_reply_err(const MyTimerCtx* ctx, uint64_t
     return my_timer_reverse_reply(ctx->ptr, call_id, 1, (const uint8_t*)msg, msg ? strlen(msg) : 0);
 }
 
+/** Asks the host for its wall clock; fails when no host implementation answers. */
 static inline int my_timer_ctx_set_fetch_host_clock_impl(const MyTimerCtx* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release) {
     return my_timer_set_fetch_host_clock_impl(ctx->ptr, impl, user_data, release);
 }

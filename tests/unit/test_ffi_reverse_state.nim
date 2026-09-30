@@ -4,6 +4,7 @@ import std/[atomics, locks, os, strutils]
 import unittest2
 import results
 import ffi
+import ./reverse_leak_child
 
 proc nopImpl(
     callId: uint64,
@@ -360,7 +361,10 @@ suite "worker pool lifecycle":
     discard waitFor blocker
     deinitReverseState(claimSt)
 
-  test "a worker blocked in a host impl is leaked at stop, not joined":
+  leakingTest(
+    "worker pool lifecycle",
+    "a worker blocked in a host impl is leaked at stop, not joined",
+  ):
     var st: FFIReverseState
     initReverseState(st)
     var g: GateBox

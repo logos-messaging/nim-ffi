@@ -155,8 +155,12 @@ type HostClock {.ffi.} = object
   unixMs: int
   zone: string
 
-proc fetchHostClock(precision: string): Future[Result[HostClock, string]] {.ffiReverse.}
+proc fetchHostClock(
+    precision: string
+): Future[Result[HostClock, string]] {.ffiReverse.} =
   ## Asks the host for its wall clock; fails when no host implementation answers.
+  # A comment-only body is how a bodyless proc keeps its doc: Nim drops a `##`
+  # that follows a declaration without `=`.
 
 proc myTimerHostClock*(timer: MyTimer): Future[Result[string, string]] {.ffi.} =
   ## Calls the host-implemented `fetch_host_clock` interface and formats it.

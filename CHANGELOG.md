@@ -17,10 +17,16 @@ All notable changes to this project are documented in this file.
   `{.ffiReverseEvent.}` declares a handler that runs when the host calls
   `<lib>_emit_<wire>`. The C, C++ and Rust bindings get typed helpers.
 - Host implementations run on per-context reverse worker threads
-  (`-d:ffiReverseWorkers`, default 2) and may block. A worker stuck past
+  (`-d:ffiReverseWorkers`, default 1) and may block. A worker stuck past
   `ReverseWorkerStallMs` emits `reverse_worker_blocked`, and a recycle that
   outlasts a running implementation quarantines the slot with
   `RecycleFailure.ReverseImplBlocked`.
+- `<lib>_set_<wire>_impl` takes a `release` callback: the library owns
+  `user_data` and releases it after the last running invocation, so replacing
+  an implementation from any thread, or from inside itself, is safe. The C++
+  and Rust bindings use it, and catch an exception or a panic in the
+  implementation. Replies are first-wins, lengths are checked before use, and
+  a reverse call fails at once once a recycle or shutdown has begun.
 - Each `{.ffi.}` proc's `##` doc comment reaches the generated C header as a
   `/** ... */` block above the declaration and its wrapper.
 - `genBindings()` fails compilation when a library declares an `{.ffiCtor.}` but

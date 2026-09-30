@@ -4,6 +4,7 @@ import std/[locks, os]
 import unittest2
 import results
 import ffi
+import ./reverse_leak_child
 
 type RevPoolLib = object
 
@@ -118,7 +119,10 @@ registerReqFFI(SuicideRequest, lib: ptr FFIContext[RevPoolLib]):
     return ok("survived")
 
 suite "a teardown reached from inside a host impl":
-  test "stopping the workers from a worker does not join it to itself":
+  leakingTest(
+    "a teardown reached from inside a host impl",
+    "stopping the workers from a worker does not join it to itself",
+  ):
     setupWaiter(w)
     let ctx = gPool.createFFIContext().valueOr:
       check false

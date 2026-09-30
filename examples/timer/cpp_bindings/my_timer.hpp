@@ -1114,6 +1114,7 @@ public:
         }
     };
 
+    /// Asks the host for its wall clock; fails when no host implementation answers.
     bool setFetchHostClockImpl(std::function<void(FetchHostClockCall, const std::string&)> fn) {
         auto* raw = new FetchHostClockImplBox{ptr_, std::move(fn)};
         // The library owns the box now: it deletes it once no invocation runs it.

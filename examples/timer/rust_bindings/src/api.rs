@@ -322,6 +322,7 @@ impl MyTimerCtx {
         rc == 0
     }
 
+    /// Asks the host for its wall clock; fails when no host implementation answers.
     pub fn set_fetch_host_clock_impl<F>(&self, f: F) -> bool
     where F: Fn(FetchHostClockCall, String) + Send + Sync + 'static,
     {

@@ -1,29 +1,30 @@
-## Reproducers for the PR #154 review findings. Each test asserts the intended
-## behaviour, so it fails until its finding is fixed.
+## Regressions for the PR #154 review findings (F1-F7, N1). Each test failed
+## before its fix; the comments say how.
 
 import std/[atomics, locks, monotimes, os, osproc, strtabs, strutils, times]
 import unittest2
 import results
 import ffi
+import ./reverse_leak_child
 import ffi/codegen/[c, meta]
 
-type RevFindLib = object
+type RevRegLib = object
 
 # Stub the importc NimMain declareLibrary emits (plain-exe link).
-{.emit: "void librevfindNimMain(void) {}".}
+{.emit: "void librevregNimMain(void) {}".}
 
-declareLibrary("revfind", RevFindLib)
+declareLibrary("revreg", RevRegLib)
 
 ## Child mode: a probe that may abort runs in a re-exec of this binary.
 
-const ChildEnv = "REVFIND_CHILD"
+const ChildEnv = "REVREG_CHILD"
 
 if getEnv(ChildEnv) == "reply_len_overflow":
-  let ctx = RevFindLibFFIPool.createFFIContext().valueOr:
+  let ctx = RevRegLibFFIPool.createFFIContext().valueOr:
     quit(2)
   var b = [byte 0]
   let rc =
-    revfind_reverse_reply(ctx.ffiToken(), 1'u64, RET_OK, addr b[0], csize_t(high(uint)))
+    revreg_reverse_reply(ctx.ffiToken(), 1'u64, RET_OK, addr b[0], csize_t(high(uint)))
   echo "rc=", rc
   quit(if rc == REVERSE_ACCEPTED: 3 else: 0)
 
@@ -204,8 +205,8 @@ suite "F1: set_impl waits out in-flight invocations":
         os.sleep(1)
 
       check box.done.load()
-      # 1: set_impl returned while "victim" still ran on the other worker (its
-      # userData may already be freed by the host).
+      # Before the fix, 1: set_impl returned while "victim" still ran on the other
+      # worker, whose userData the host may already have freed.
       check box.victimInsideAtReturn.load() == 0
       failPendingReverse("test over")
       discard waitFor victimFut
@@ -226,7 +227,7 @@ suite "F1: set_impl waits out in-flight invocations":
       let elapsedMs = (getMonoTime() - t0).inMilliseconds
       joinThread(opener)
 
-      # ~300 ms today: set_impl("foo") waited for "bar" to be released.
+      # Before the fix, ~300 ms: set_impl("foo") waited for "bar" to be released.
       check elapsedMs < 100
       failPendingReverse("test over")
       discard waitFor barFut
@@ -248,7 +249,7 @@ proc lateCb(
     signal(lateRsp.cond)
     release(lateRsp.lock)
 
-registerReqFFI(LateReverseRequest, lib: ptr RevFindLib):
+registerReqFFI(LateReverseRequest, lib: ptr RevRegLib):
   proc(): Future[Result[string, string]] {.async.} =
     # Outlasts the recycle's failPendingReverse, then parks past RecycleTimeout.
     await sleepAsync(chronos.milliseconds(200))
@@ -261,7 +262,7 @@ suite "F2: recycle vs a reverse call started mid-drain":
   test "a reverse call issued while the recycle drains does not stall it":
     lateRsp.lock.initLock()
     lateRsp.cond.initCond()
-    let ctx = RevFindLibFFIPool.createFFIContext().valueOr:
+    let ctx = RevRegLibFFIPool.createFFIContext().valueOr:
       check false
       return
     ctx[].reverse.setImpl("late", nopImpl, nil) # never answers
@@ -269,7 +270,7 @@ suite "F2: recycle vs a reverse call started mid-drain":
     os.sleep(50) # the handler is inside its sleepAsync
 
     let t0 = getMonoTime()
-    let res = RevFindLibFFIPool.recycleFFIContext(ctx)
+    let res = RevRegLibFFIPool.recycleFFIContext(ctx)
     let elapsedMs = (getMonoTime() - t0).inMilliseconds
     checkpoint("recycle: " & $res & " after " & $elapsedMs & " ms")
     check res.isOk()
@@ -288,7 +289,10 @@ var stopSt: FFIReverseState
 var stopGate: GateBox
 
 suite "F4: worker stop":
-  test "stop honours one deadline for the whole pool, not one per worker":
+  leakingTest(
+    "F4: worker stop",
+    "stop honours one deadline for the whole pool, not one per worker",
+  ):
     initReverseState(stopSt)
     initGate(stopGate)
     check stopSt.startReverseWorkers(2)
@@ -304,7 +308,7 @@ suite "F4: worker stop":
     let stop = stopReverseWorkers(stopSt, 200)
     let elapsedMs = (getMonoTime() - t0).inMilliseconds
     check stop.leaked == 2
-    # ~400 ms today: each wedged worker gets its own 200 ms.
+    # Before the fix, ~400 ms: each wedged worker gets its own 200 ms.
     check elapsedMs < 350
 
     stopGate.open()
@@ -315,7 +319,7 @@ suite "F4: worker stop":
 
 suite "F4: concurrent stop":
   test "two stops racing join each worker exactly once":
-    # Today the child dies with SIGSEGV: the first stop frees `workers` while the
+    # Before the fix, the child died with SIGSEGV: the first stop frees `workers` while the
     # second still walks it (ffi_reverse.nim:490).
     let (output, code) = runChild("concurrent_stop")
     checkpoint(output)
@@ -328,12 +332,12 @@ suite "F5: reverse_reply boundary checks":
     check code == 0
 
   test "a NULL reply buffer with a non-zero length is rejected":
-    let ctx = RevFindLibFFIPool.createFFIContext().valueOr:
+    let ctx = RevRegLibFFIPool.createFFIContext().valueOr:
       check false
       return
     defer:
-      discard RevFindLibFFIPool.destroyFFIContext(ctx)
-    check revfind_reverse_reply(ctx.ffiToken(), 1'u64, RET_OK, nil, 16) !=
+      discard RevRegLibFFIPool.destroyFFIContext(ctx)
+    check revreg_reverse_reply(ctx.ffiToken(), 1'u64, RET_OK, nil, 16) !=
       REVERSE_ACCEPTED
 
 suite "F7: generated C contract":
@@ -365,5 +369,5 @@ suite "N1: duplicate replies (new, from validation)":
       pumpUntil(fut, 2000)
       let res = waitFor fut
       check res.isOk()
-      # @[2] today: the mailbox is LIFO, so the later reply is drained first.
+      # Before the fix, @[2]: the mailbox is LIFO, so the later reply is drained first.
       check res.value == @[byte 1]

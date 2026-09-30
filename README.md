@@ -305,7 +305,11 @@ runtime. Both pragmas use CBOR.
 
 ```nim
 # Host-implemented interface: no body, returns Future[Result[T, string]].
-proc fetchHostClock(precision: string): Future[Result[HostClock, string]] {.ffiReverse.}
+# A comment-only body keeps the doc: Nim drops a `##` after a declaration without `=`.
+proc fetchHostClock(
+  precision: string
+): Future[Result[HostClock, string]] {.ffiReverse.} =
+  ## Asks the host for its wall clock.
 
 # Host-emitted event: the body runs on the FFI processing thread.
 proc onHostTick(tickNo: int) {.ffiReverseEvent.} =
@@ -314,25 +318,40 @@ proc onHostTick(tickNo: int) {.ffiReverseEvent.} =
 
 An `{.ffi.}` handler awaits `fetchHostClock(...)` like any async proc. The call
 goes to the per-context reverse worker threads, which call the host
-implementation with `(call_id, args_cbor, len, user_data)`. The implementation
-may block one worker. The host answers from any thread through
-`<lib>_reverse_reply`. Workers start on the first `set_impl` or on
-`<lib>_start_reverse_workers(ctx, n)`; `-d:ffiReverseWorkers` sets the count
-(default 2).
+implementation with `(call_id, args_cbor, len, user_data)`. `args_cbor` is
+valid only until the implementation returns. The implementation may block its
+worker. The host answers, now or later and from any thread, through
+`<lib>_reverse_reply`; the first reply for a call id wins. Workers start on the
+first `set_impl`; `-d:ffiReverseWorkers` sets the count (default 1), so by
+default a blocked implementation holds every other reverse call of that context
+until it returns or their deadlines fire.
 
 ```c
-int <lib>_set_<wire>_impl(void* ctx, FFIReverseImpl impl, void* user_data); /* NULL unregisters */
+typedef void (*FFIReverseRelease)(void* user_data);
+int <lib>_set_<wire>_impl(void* ctx, FFIReverseImpl impl, void* user_data,
+                          FFIReverseRelease release);   /* impl == NULL unregisters */
 int <lib>_reverse_reply(void* ctx, uint64_t call_id, int ret_code,
                         const uint8_t* reply_cbor, size_t reply_len);
 int <lib>_emit_<wire>(void* ctx, const uint8_t* payload_cbor, size_t payload_len);
-int <lib>_start_reverse_workers(void* ctx, int n);
 ```
+
+`set_impl` with a `release` hands `user_data` to the library: the call never
+waits, and `release(user_data)` runs once the replaced implementation's last
+running invocation returns, on whichever thread that is. That makes replacing or
+clearing an implementation safe from any thread, including from inside the
+implementation itself. With a `NULL` release the host keeps ownership, and
+`set_impl` waits until no other thread runs the replaced implementation (never for
+the caller's own invocation). If `set_impl` fails, the caller still owns
+`user_data`. The status codes are `NIMFFI_REVERSE_*` in C and C++ and
+`REVERSE_*` in Rust.
 
 The C header adds typed helpers: `<lib>_ctx_set_<wire>_impl`,
 `<lib>_decode_<wire>_args`, `<lib>_ctx_reverse_reply_<wire>`,
 `<lib>_ctx_reverse_reply_err` and `<lib>_ctx_emit_<wire>`. The C++ and Rust
-bindings give the implementation a copyable call token with `reply` and `fail`,
-usable from any thread:
+bindings pass a `release`, so the library owns their closures. They give the
+implementation a copyable call token with `reply` and `fail`, usable from any
+thread, and turn a C++ exception or a Rust panic in the implementation into a
+failed call:
 
 ```cpp
 ctx->setFetchHostClockImpl([](MyTimerCtx::FetchHostClockCall call, const std::string& precision) {
@@ -356,10 +375,14 @@ ctx.emit_on_host_tick(7);            // reverse event, fire-and-forget
 | No reply before the deadline | The call fails after `ReverseCallTimeoutMs` (10 s) or the `timeout = ms` of the proc. |
 | Deadline or `cancelSoon()` while the call is queued | The worker skips the call, and the implementation never runs. |
 | Deadline or cancel while the implementation runs | The call fails at once, and the late reply is dropped by call id. |
-| `set_impl` while invocations run | Returns after every in-flight invocation finishes. |
+| `set_impl` while invocations run | With a `release`: returns at once, and the last running invocation releases the old `user_data`. With `NULL`: waits for other threads running the replaced implementation. |
+| Two replies for one call id | The first one completes the call; the second is dropped. |
+| A reply longer than the request limit, or `NULL` with a length | `NIMFFI_REVERSE_PAYLOAD_TOO_LARGE` or `NIMFFI_REVERSE_INVALID_ARGUMENT`; nothing is queued. |
+| Recycle or shutdown has begun | A new reverse call fails at once instead of parking. |
+| The C++ implementation throws, or the Rust one panics | The call fails with the message; the process keeps running. |
 | A worker inside one implementation past `ReverseWorkerStallMs` | `reverse_worker_blocked` fires, then `reverse_worker_recovered` when it returns. |
 | Recycle while an implementation runs | Waits `RecycleTimeout`, then quarantines the slot with `RecycleFailure.ReverseImplBlocked`. |
-| Destroy, park or `<lib>_shutdown` with a stuck worker | The stuck worker leaks with the slot. |
+| Destroy, park or `<lib>_shutdown` with a stuck worker | The stuck worker leaks with the slot, and so does its `user_data`: `release` never runs under it. |
 | A host implementation calls a teardown export | The call returns; the worker that runs it leaks and is not joined. |
 | `{.ffiReverseEvent.}` emit | The return code reports the enqueue only. |
 

@@ -4,6 +4,7 @@ import std/[locks, monotimes, os, strutils, times]
 import unittest2
 import results
 import ffi
+import ./reverse_leak_child
 
 type TestRevLib = object
 
@@ -371,7 +372,10 @@ suite "teardown with a reverse call in flight":
     check rsp.retCode == RET_ERR
     check "abandoned" in callbackMsg(rsp)
 
-  test "destroy with a worker wedged in a host impl leaks it and reports":
+  leakingTest(
+    "teardown with a reverse call in flight",
+    "destroy with a worker wedged in a host impl leaks it and reports",
+  ):
     setupCallbackData(rsp)
     let ctx = gPool.createFFIContext().valueOr:
       check false
@@ -394,7 +398,10 @@ suite "teardown with a reverse call in flight":
     g.open() # let the leaked worker finish so the process can exit
     os.sleep(20)
 
-  test "recycle with a worker wedged in a host impl quarantines the slot":
+  leakingTest(
+    "teardown with a reverse call in flight",
+    "recycle with a worker wedged in a host impl quarantines the slot",
+  ):
     setupCallbackData(rsp)
     let ctx = gPool.createFFIContext().valueOr:
       check false

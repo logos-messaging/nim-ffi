@@ -1,5 +1,5 @@
-//! Reproducers for the PR #154 review findings at the Rust wrapper layer. Each test
-//! asserts the intended behaviour, so it fails until its finding is fixed.
+//! Regressions for the PR #154 review findings at the Rust wrapper layer. Each test
+//! failed before its fix; the comments say how.
 //!
 //! "Dropped" is observed without touching freed memory: every closure captures an
 //! `Arc` token, the test keeps only a `Weak` to it, and the closure clones its probe
@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use my_timer::{FetchHostClockCall, HostClock, MyTimerCtx, TimerConfig};
 
-const CHILD_ENV: &str = "REVFIND_CHILD";
+const CHILD_ENV: &str = "REVREG_CHILD";
 
 fn make_ctx(name: &str) -> MyTimerCtx {
     MyTimerCtx::create(TimerConfig { name: name.into() }, Duration::from_secs(20))
@@ -105,7 +105,7 @@ fn self_replacement_keeps_the_running_closure_alive() {
 
     ctx.host_clock().expect("host_clock");
     assert!(probe.done.load(Ordering::SeqCst));
-    // 1 today: `*slot = Some(owned)` dropped the box this closure runs from.
+    // Before the fix, 1: `*slot = Some(owned)` dropped the box this closure runs from.
     assert_eq!(probe.freed_while_running.load(Ordering::SeqCst), 0);
 }
 
@@ -138,7 +138,7 @@ fn drop_with_a_stuck_impl_keeps_its_closure_alive() {
         std::thread::sleep(Duration::from_millis(1));
     }
     assert!(probe.done.load(Ordering::SeqCst));
-    // 1 today: the leaked worker resumed inside a dropped closure.
+    // Before the fix, 1: the leaked worker resumed inside a dropped closure.
     assert_eq!(probe.freed_while_running.load(Ordering::SeqCst), 0);
 }
 
@@ -152,7 +152,7 @@ fn panicking_impl_fails_the_call_instead_of_aborting() {
         std::process::exit(if r.is_err() { 0 } else { 1 });
     }
     let out = run_child("panicking_impl_fails_the_call_instead_of_aborting", "panic");
-    // Aborts today (SIGABRT): "panic in a function that cannot unwind".
+    // Before the fix, it aborted (SIGABRT): "panic in a function that cannot unwind".
     assert!(
         out.status.success(),
         "child: {:?}\n{}",
@@ -187,8 +187,8 @@ fn concurrent_sets_leave_nim_and_the_wrapper_agreeing() {
                     });
                 }
             });
-            // The closure Nim runs must be the one Rust still owns. Today Nim may run
-            // a dropped box (a use-after-free that often still returns its old id).
+            // The closure Nim runs must be one that is still alive. Before the fix Nim
+            // could run a box Rust had dropped (SIGSEGV, or a stale id).
             let answer = ctx.host_clock().expect("host_clock after the race");
             let id: i64 = answer.rsplit('@').next().unwrap().parse().unwrap();
             let owned = live

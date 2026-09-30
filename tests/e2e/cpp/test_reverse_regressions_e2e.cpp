@@ -1,5 +1,5 @@
-// Reproducers for the PR #154 review findings at the C++ wrapper layer. Each test
-// asserts the intended behaviour, so it fails until its finding is fixed.
+// Regressions for the PR #154 review findings at the C++ wrapper layer. Each test
+// failed before its fix; the comments say how.
 //
 // "Freed" is observed without touching freed memory: every impl captures a
 // shared_ptr token, the test keeps only a weak_ptr to it, and the impl copies
@@ -71,7 +71,7 @@ void noopImpl(MyTimerCtx::FetchHostClockCall call, const std::string&) {
 } // namespace
 
 // Review comment 4087687777, "the same happens when an impl replaces itself".
-TEST(ReverseFindings, SelfReplacementKeepsTheRunningImplsCapturesAlive) {
+TEST(ReverseRegressions, SelfReplacementKeepsTheRunningImplsCapturesAlive) {
     auto ctx = makeCtx("find-self-replace");
     ASSERT_TRUE(ctx);
     Probe probe;
@@ -91,13 +91,13 @@ TEST(ReverseFindings, SelfReplacementKeepsTheRunningImplsCapturesAlive) {
     auto r = ctx->host_clock();
     ASSERT_FALSE(r.isErr()) << r.error();
     ASSERT_TRUE(probe.done.load());
-    // 1 today: set_impl returned, the wrapper destroyed the old box, and with it
+    // Before the fix, 1: set_impl returned, the wrapper destroyed the old box, and with it
     // the std::function this impl is still executing.
     EXPECT_EQ(probe.freedWhileRunning.load(), 0);
 }
 
 // A host-thread clear returns at once; the box lives until the impl returns.
-TEST(ReverseFindings, ClearWhileRunningReleasesTheBoxAfterTheImplReturns) {
+TEST(ReverseRegressions, ClearWhileRunningReleasesTheBoxAfterTheImplReturns) {
     auto ctx = makeCtx("find-host-clear");
     ASSERT_TRUE(ctx);
     Probe probe;
@@ -128,7 +128,7 @@ TEST(ReverseFindings, ClearWhileRunningReleasesTheBoxAfterTheImplReturns) {
 
 // Found in the walkthrough: ~MyTimerCtx frees the box even when destroy had
 // to leak a worker that is still inside the impl.
-TEST(ReverseFindings, DestroyWithAStuckImplKeepsItsCapturesAlive) {
+TEST(ReverseRegressions, DestroyWithAStuckImplKeepsItsCapturesAlive) {
     auto ctx = makeCtx("find-teardown");
     ASSERT_TRUE(ctx);
     auto probe = std::make_shared<Probe>(); // outlives the ctx and the test body
@@ -154,12 +154,12 @@ TEST(ReverseFindings, DestroyWithAStuckImplKeepsItsCapturesAlive) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     ASSERT_TRUE(probe->done.load());
-    // 1 today: the leaked worker resumed inside a destroyed std::function.
+    // Before the fix, 1: the leaked worker resumed inside a destroyed std::function.
     EXPECT_EQ(probe->freedWhileRunning.load(), 0);
 }
 
 // Review comment 4087688037: an exception must not cross the extern "C" boundary.
-TEST(ReverseFindings, ThrowingImplFailsTheCallInsteadOfTerminating) {
+TEST(ReverseRegressions, ThrowingImplFailsTheCallInsteadOfTerminating) {
     GTEST_FLAG_SET(death_test_style, "threadsafe");
     EXPECT_EXIT(
         {
@@ -175,7 +175,7 @@ TEST(ReverseFindings, ThrowingImplFailsTheCallInsteadOfTerminating) {
 
 // Found in the walkthrough: the C++ slot has no lock at all, so the Rust race
 // (review comment 4087687900) is a data race here. Probabilistic without TSan.
-TEST(ReverseFindings, ConcurrentSetsLeaveNimAndTheWrapperAgreeing) {
+TEST(ReverseRegressions, ConcurrentSetsLeaveNimAndTheWrapperAgreeing) {
     auto ctx = makeCtx("find-set-race");
     ASSERT_TRUE(ctx);
     std::atomic<int> invokedId{-1};
@@ -197,7 +197,7 @@ TEST(ReverseFindings, ConcurrentSetsLeaveNimAndTheWrapperAgreeing) {
     for (auto& s : setters) s.join();
     auto r = ctx->host_clock();
     ASSERT_FALSE(r.isErr()) << r.error();
-    // The impl Nim runs must be one the wrapper still owns. Today Nim may hold a
-    // box the wrapper already dropped; ASan reports that as heap-use-after-free.
+    // Before the fix the wrapper's unguarded unique_ptr swap double-freed a box
+    // (ASan) or left Nim holding one the wrapper had dropped.
     EXPECT_GE(invokedId.load(), 0);
 }
