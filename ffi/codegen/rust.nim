@@ -613,8 +613,16 @@ proc generateApiRs*(
     let tramp = reverseSnake(r) & "_impl_trampoline"
     let argsRust = reverseArgsRust(r)
     lines.add(
-      "/// Answer token for one `$1` call: reply once, from any thread." % [r.wireName]
+      "/// Answer token for one `$1` call: a `Copy` {context token, call id} pair." %
+        [r.wireName]
     )
+    lines.add(
+      "/// Move it anywhere and reply once, from any thread, before the call's deadline;"
+    )
+    lines.add(
+      "/// a late or second reply is dropped, and a reply after the context is gone"
+    )
+    lines.add("/// returns false.")
     lines.add("#[derive(Debug, Clone, Copy)]")
     lines.add("pub struct $1 { ctx: usize, id: u64 }" % [callStruct])
     lines.add("")
@@ -894,6 +902,11 @@ proc generateApiRs*(
     let boxStruct = reverseBoxStruct(r)
     let tramp = snake & "_impl_trampoline"
     lines.add(renderMemberDocComment(r.doc))
+    if reverseArgsRust(r).len > 0:
+      lines.add(
+        "    /// The closure runs on a reverse worker and owns its arguments, so a deferred"
+      )
+      lines.add("    /// reply can move them to another thread.")
     lines.add("    pub fn set_$1_impl<F>(&self, f: F) -> bool" % [snake])
     lines.add("    where F: $1 + 'static," % [reverseImplBound(r)])
     lines.add("    {")

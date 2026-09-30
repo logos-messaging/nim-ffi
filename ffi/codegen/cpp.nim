@@ -260,9 +260,16 @@ proc emitReverseApi(
     for r in reverse:
       let callStruct = reverseCallStruct(r)
       lines.add(
-        "    // Answer token for one `$1` call: reply once, from any thread." %
+        "    // Answer token for one `$1` call: a trivially copyable {context token," %
           [r.wireName]
       )
+      lines.add(
+        "    // call id} pair. Copy it anywhere and reply once, from any thread, before the"
+      )
+      lines.add(
+        "    // call's deadline; a late or second reply is dropped, and a reply after the"
+      )
+      lines.add("    // context is gone returns false.")
       lines.add("    struct $1 {" % [callStruct])
       lines.add("        void* ctx = nullptr;")
       lines.add("        std::uint64_t id = 0;")
@@ -303,6 +310,11 @@ proc emitReverseApi(
     for r in reverse:
       let pascal = capitalizeFirstLetter(r.nimProcName)
       lines.add(renderMemberDocComment(r.doc))
+      if reverseArgsCpp(r).len > 0:
+        lines.add(
+          "    // `fn` runs on a reverse worker. Its arguments are borrowed: valid only until"
+        )
+        lines.add("    // `fn` returns, so a deferred reply must copy what it needs.")
       lines.add("    bool set$1Impl($2 fn) {" % [pascal, reverseImplFnType(r)])
       lines.add(
         "        auto* raw = new $1{ptr_, std::move(fn)};" % [reverseBoxStruct(r)]

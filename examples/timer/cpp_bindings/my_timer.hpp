@@ -1101,7 +1101,10 @@ public:
     }
 
     // ── Reverse FFI: host-implemented interfaces ────────────
-    // Answer token for one `fetch_host_clock` call: reply once, from any thread.
+    // Answer token for one `fetch_host_clock` call: a trivially copyable {context token,
+    // call id} pair. Copy it anywhere and reply once, from any thread, before the
+    // call's deadline; a late or second reply is dropped, and a reply after the
+    // context is gone returns false.
     struct FetchHostClockCall {
         void* ctx = nullptr;
         std::uint64_t id = 0;
@@ -1121,6 +1124,8 @@ public:
     };
 
     /// Asks the host for its wall clock; fails when no host implementation answers.
+    // `fn` runs on a reverse worker. Its arguments are borrowed: valid only until
+    // `fn` returns, so a deferred reply must copy what it needs.
     bool setFetchHostClockImpl(std::function<void(FetchHostClockCall, const std::string&)> fn) {
         auto* raw = new FetchHostClockImplBox{ptr_, std::move(fn)};
         // The library owns the box now: it deletes it once no invocation runs it.

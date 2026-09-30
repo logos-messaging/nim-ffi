@@ -175,7 +175,10 @@ pub const REVERSE_MAILBOX_FULL: c_int = 4;
 pub const REVERSE_WORKERS_FAILED: c_int = 5;
 pub const REVERSE_INVALID_ARGUMENT: c_int = 6;
 
-/// Answer token for one `fetch_host_clock` call: reply once, from any thread.
+/// Answer token for one `fetch_host_clock` call: a `Copy` {context token, call id} pair.
+/// Move it anywhere and reply once, from any thread, before the call's deadline;
+/// a late or second reply is dropped, and a reply after the context is gone
+/// returns false.
 #[derive(Debug, Clone, Copy)]
 pub struct FetchHostClockCall { ctx: usize, id: u64 }
 
@@ -335,6 +338,8 @@ impl MyTimerCtx {
     }
 
     /// Asks the host for its wall clock; fails when no host implementation answers.
+    /// The closure runs on a reverse worker and owns its arguments, so a deferred
+    /// reply can move them to another thread.
     pub fn set_fetch_host_clock_impl<F>(&self, f: F) -> bool
     where F: Fn(FetchHostClockCall, String) + Send + Sync + 'static,
     {

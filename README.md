@@ -348,14 +348,21 @@ the caller's own invocation). If `set_impl` fails, the caller still owns
 The C header adds typed helpers: `<lib>_ctx_set_<wire>_impl`,
 `<lib>_decode_<wire>_args`, `<lib>_ctx_reverse_reply_<wire>`,
 `<lib>_ctx_reverse_reply_err` and `<lib>_ctx_emit_<wire>`. The C++ and Rust
-bindings pass a `release`, so the library owns their closures. They give the
-implementation a copyable call token with `reply` and `fail`, usable from any
-thread, and turn a C++ exception or a Rust panic in the implementation into a
-failed call:
+bindings pass a `release`, so the library owns their closures, and turn a C++
+exception or a Rust panic in the implementation into a failed call.
+
+The implementation gets a call token with `reply` and `fail`: a small copyable
+value holding the context token and the call id, nothing else. Copy it to any
+thread and answer once, before the call's deadline; a late or second reply is
+dropped, and a reply after the context is gone returns `false`. The arguments
+differ by language: C++ receives them by `const&`, borrowed until the
+implementation returns, so a deferred reply captures a copy. Rust closures own
+theirs and move them. C gets `args_cbor`, also valid only until it returns.
 
 ```cpp
 ctx->setFetchHostClockImpl([](MyTimerCtx::FetchHostClockCall call, const std::string& precision) {
-    std::thread([call] { call.reply(HostClock{now_ms(), "CET"}); }).detach();
+    // `precision` is borrowed until this returns: capture a copy, never a reference.
+    std::thread([call, precision] { call.reply(HostClock{now_ms(precision), "CET"}); }).detach();
 });
 auto r = ctx->host_clock();          // Nim awaits the C++ impl
 ctx->emitOnHostTick(7);              // reverse event, fire-and-forget
@@ -363,7 +370,8 @@ ctx->emitOnHostTick(7);              // reverse event, fire-and-forget
 
 ```rust
 ctx.set_fetch_host_clock_impl(|call, precision: String| {
-    std::thread::spawn(move || { call.reply(&HostClock { unix_ms: now_ms(), zone: "CET".into() }); });
+    // `precision` is owned: move it into the thread.
+    std::thread::spawn(move || { call.reply(&HostClock { unix_ms: now_ms(&precision), zone: "CET".into() }); });
 });
 let r = ctx.host_clock()?;           // Nim awaits the Rust impl
 ctx.emit_on_host_tick(7);            // reverse event, fire-and-forget

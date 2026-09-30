@@ -20,6 +20,7 @@
 #include <chrono>
 #include <future>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -497,6 +498,36 @@ TEST(ReverseFFI, DeferredReplyFromAHostThread) {
     auto r = ctx->host_clock();
     ASSERT_FALSE(r.isErr()) << r.error();
     EXPECT_EQ(r.value(), "CET@42");
+}
+
+TEST(ReverseFFI, DeferredReplyUsesACopyOfTheBorrowedArgs) {
+    auto ctx = makeCtx("rev-deferred-args");
+    ASSERT_TRUE(ctx->setFetchHostClockImpl(
+        [](MyTimerCtx::FetchHostClockCall call, const std::string& precision) {
+            // `precision` dies when this returns; the thread keeps its own copy.
+            std::thread([call, precision] {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                EXPECT_TRUE(call.reply(HostClock{7, precision}));
+            }).detach();
+        }));
+    auto r = ctx->host_clock();
+    ASSERT_FALSE(r.isErr()) << r.error();
+    EXPECT_EQ(r.value(), "ms@7");
+}
+
+TEST(ReverseFFI, ACallTokenOutlivingItsContextRepliesFalse) {
+    auto ctx = makeCtx("rev-stale-token");
+    auto kept = std::make_shared<std::optional<MyTimerCtx::FetchHostClockCall>>();
+    ASSERT_TRUE(ctx->setFetchHostClockImpl(
+        [kept](MyTimerCtx::FetchHostClockCall call, const std::string&) {
+            *kept = call; // a plain copy: {context token, call id}
+            EXPECT_TRUE(call.reply(HostClock{1, "UTC"}));
+        }));
+    ASSERT_FALSE(ctx->host_clock().isErr());
+    ASSERT_TRUE(kept->has_value());
+    ctx.reset(); // the token now names a slot with no owner, or a new one
+    EXPECT_FALSE((*kept)->reply(HostClock{2, "UTC"}));
+    EXPECT_FALSE((*kept)->fail("too late"));
 }
 
 TEST(ReverseFFI, FailPropagatesTheHostMessage) {
