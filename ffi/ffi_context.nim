@@ -2,7 +2,7 @@
 
 {.passc: "-fPIC".}
 
-import std/[atomics, locks, options, os, sequtils, sysatomics, tables]
+import std/[atomics, locks, monotimes, options, os, sequtils, sysatomics, tables]
 import chronicles, chronos, chronos/threadsync, results
 import
   ./ffi_types,
@@ -90,6 +90,7 @@ type FFIContext*[T] = object
   eventQueue*: EventQueue
   outbound*: FFIOutbound
   ffiHeartbeat*: Atomic[int64]
+    ## `MonoTime` ticks of the FFI thread's last beat; 0 before the first.
   eventQueueStuck*: Atomic[bool]
   ffiThreadExited*: Atomic[bool]
     # set once FFI thread (incl. async {.ffiDtor.}) is done; event thread drains until then
@@ -180,7 +181,12 @@ proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   deinitRequestQueue(ctx[].reqQueueBank)
   deinitEventRegistry(ctx[].eventRegistry)
   deinitHandleRegistry(ctx[].handles)
-  deinitEventQueue(ctx[].eventQueue)
+  # A poller must not be inside the queue while it is freed, and must find it
+  # gone rather than freed under it when it comes back.
+  withLock ctx[].outbound.pollLock:
+    ctx[].outbound.queueLive = false
+    releaseHeldEvent(ctx[].outbound.held)
+    deinitEventQueue(ctx[].eventQueue)
   ok()
 
 proc drainSignal(sig: ThreadSignalPtr) =
@@ -217,17 +223,20 @@ proc startContextThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   except ValueError, ResourceExhaustedError:
     return err("failed to create the FFI thread: " & getCurrentExceptionMsg())
 
-  try:
-    createThread(ctx.eventThread, eventThreadBody[T], ctx)
-  except ValueError, ResourceExhaustedError:
-    # Join ffiThread before the caller cleans up state it is waiting on.
-    ctx.running.store(false)
-    let fireRes = ctx.reqSignal.fireSync()
-    if fireRes.isErr():
-      error "failed to signal ffiThread during event-thread cleanup",
-        error = fireRes.error
-    joinThread(ctx.ffiThread)
-    return err("failed to create the event thread: " & getCurrentExceptionMsg())
+  # In poll mode the host's own thread drains the queue and runs the watchdog,
+  # so the context has no thread of its own for that.
+  when not defined(ffiPollMode):
+    try:
+      createThread(ctx.eventThread, eventThreadBody[T], ctx)
+    except ValueError, ResourceExhaustedError:
+      # Join ffiThread before the caller cleans up state it is waiting on.
+      ctx.running.store(false)
+      let fireRes = ctx.reqSignal.fireSync()
+      if fireRes.isErr():
+        error "failed to signal ffiThread during event-thread cleanup",
+          error = fireRes.error
+      joinThread(ctx.ffiThread)
+      return err("failed to create the event thread: " & getCurrentExceptionMsg())
 
   ok()
 
@@ -253,6 +262,7 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
 
   ?initEventQueue(ctx[].eventQueue)
   ?initOutbound(ctx[].outbound)
+  ctx[].outbound.queueLive = true
   ctx.ffiHeartbeat.store(0)
   ctx.libReady.store(false)
   ctx.eventQueueStuck.store(false)
@@ -403,11 +413,20 @@ proc stopAndJoinThreads*[T](
     ctx: ptr FFIContext[T], timeout = ThreadExitTimeout
 ): Result[void, string] =
   ## On timeout, returns err and skips remaining joins (leaves threads live); caller cleans up.
+  when defined(ffiPollMode):
+    defer:
+      ctx[].outbound.closeOutbound(ctx.generation.load())
   ctx.signalStop().isOkOr:
     return err("signalStop failed: " & $error)
 
   ?ctx.threadExitSignal.waitExitOrErr("FFI thread", timeout)
   joinThread(ctx.ffiThread)
-  ?ctx.eventThreadExitSignal.waitExitOrErr("event thread", timeout)
-  joinThread(ctx.eventThread)
+  when not defined(ffiPollMode):
+    ?ctx.eventThreadExitSignal.waitExitOrErr("event thread", timeout)
+    joinThread(ctx.eventThread)
+  else:
+    # A poller is a host thread, so there is nothing to join; it is told the
+    # context ended and its queues are dropped once it leaves `poll`.
+    ctx[].outbound.closeOutbound(ctx.generation.load())
+    ctx[].outbound.dropQueuedMessages(ctx[].eventQueue)
   ok()

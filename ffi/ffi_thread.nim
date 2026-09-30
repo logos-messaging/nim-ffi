@@ -1,6 +1,6 @@
 ## FFI-thread body and request submission API. Included from `ffi_context.nim`.
 ## Dispatches `FFIThreadRequest`s from `reqQueueBank` and advances
-## `ctx.ffiHeartbeat` so the event thread can spot a wedged FFI thread.
+## `ctx.ffiHeartbeat` (the time of the last beat) so a wedged FFI thread shows.
 
 ## Compile-time-populated table: request type name (cstring) -> async handler.
 ## Public because `{.ffi.}`/`registerReqFFI` expand a write to it in the caller's
@@ -221,6 +221,11 @@ proc drainOngoing(ongoing: ptr seq[Future[void]]): Future[bool] {.async.} =
 proc resetForNextOwner[T](ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]) =
   freeLib(ctx)
   clearListeners(ctx[].eventRegistry)
+  when defined(ffiPollMode):
+    # The host polling this claim is told it ended, and what it never collected
+    # is dropped: the next owner of the slot must not be handed it.
+    ctx[].outbound.closeOutbound(ctx.currentGeneration())
+    ctx[].outbound.dropQueuedMessages(ctx[].eventQueue)
   # A reused slot skips initContextResources, so the handle ids of the old owner
   # would otherwise resolve for the next one.
   ctx[].handles.releaseAll()
@@ -241,6 +246,11 @@ proc finishRecycle[T](ctx: ptr FFIContext[T], failure: RecycleFailure) =
   if outcome != RecycleFailure.None:
     ctx.recycleFailure.store(outcome)
     ctx.lifecycle.store(CtxLifecycle.RecycleFailed)
+    when defined(ffiPollMode):
+      # A failed recycle skips `resetForNextOwner`, which is what closes the
+      # outbound, so its poller would never hear that the context ended. After
+      # the stores above, so that poll reports the quarantine and its reason.
+      ctx[].outbound.closeOutbound(ctx.currentGeneration())
     error "context quarantined; the pool slot and its threads leak, the " &
       "library stays alive and its callbacks can still fire",
       reason = outcome.reason(), cause = $outcome
@@ -284,15 +294,36 @@ proc recycleContext[T](
 var ffiEventQueueSignalPtr {.threadvar.}: ThreadSignalPtr
   # Stashed so the hook has no closure env.
 
+var ffiOutboundPtr {.threadvar.}: ptr FFIOutbound
+  # Likewise: the context's outbound state, for the hooks below.
+
 proc ffiNotifyEventEnqueuedHook() {.gcsafe, raises: [].} =
-  if not ffiEventQueueSignalPtr.isNil():
-    let res = ffiEventQueueSignalPtr.fireSync()
-    if res.isErr():
-      error "failed to fire eventQueueSignal after enqueue", err = res.error
+  when defined(ffiPollMode):
+    if not ffiOutboundPtr.isNil():
+      ffiOutboundPtr[].notifyOutbound()
+  else:
+    if not ffiEventQueueSignalPtr.isNil():
+      let res = ffiEventQueueSignalPtr.fireSync()
+      if res.isErr():
+        error "failed to fire eventQueueSignal after enqueue", err = res.error
+
+proc ffiNextEventSeqNumHook(): uint64 {.gcsafe, raises: [].} =
+  ## One order for every message of a context, so a host sees them as produced.
+  if ffiOutboundPtr.isNil():
+    return 0'u64
+  return ffiOutboundPtr[].nextSeq()
+
+var ffiGenerationPtr {.threadvar.}: ptr Atomic[uint]
+
+proc ffiHostPollsHook(): bool {.gcsafe, raises: [].} =
+  if ffiOutboundPtr.isNil() or ffiGenerationPtr.isNil():
+    return true
+  return ffiOutboundPtr[].polledGeneration.load() == ffiGenerationPtr[].load()
 
 proc proveAlive(ctx: ptr FFIContext) =
-  ## Advance the heartbeat the event thread polls; only movement matters, not value.
-  ctx.ffiHeartbeat.atomicInc()
+  ## Stamps the heartbeat with now. A watcher that looks rarely can still tell
+  ## how long ago the thread last beat, not only whether it moved.
+  ctx.ffiHeartbeat.store(getMonoTime().ticks)
 
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   registerCloseDispatcherHook()
@@ -300,7 +331,12 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ffiCurrentEventQueue = addr ctx[].eventQueue
   ffiCurrentEventQueueStuck = addr ctx[].eventQueueStuck
   ffiEventQueueSignalPtr = ctx.eventQueueSignal
+  ffiOutboundPtr = addr ctx[].outbound
+  ffiGenerationPtr = addr ctx[].generation
   ffiCurrentNotifyEventEnqueued = ffiNotifyEventEnqueuedHook
+  ffiNextEventSeqNum = ffiNextEventSeqNumHook
+  when defined(ffiPollMode):
+    ffiCurrentHostPolls = ffiHostPollsHook
   onFFIThread = true
 
   defer:
