@@ -310,10 +310,13 @@ suite "event queue overflow":
 
       # The report is not repeated, and the events that fit are all there.
       var events = 0
+      var lastSeq = 0'u64
       while true:
         let got = pollMsg(ctx, 200)
         if got.ret != RET_OK:
           break
         check got.kind == MsgEvent
+        check got.seqNum > lastSeq
+        lastSeq = got.seqNum
         events.inc()
       check events >= EventQueueCapacity
