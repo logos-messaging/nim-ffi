@@ -164,7 +164,14 @@ fn main() {
 
     println!("cargo:rustc-link-search={}", repo_root.display());
     println!("cargo:rustc-link-lib=$2");
+    // Tests and examples then find the library without DYLD_/LD_LIBRARY_PATH.
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", repo_root.display());
     println!("cargo:rerun-if-changed={}", nim_src.display());
+    // Inside the nim-ffi checkout, a runtime change must rebuild the library too.
+    let ffi_dir = repo_root.join("ffi");
+    if ffi_dir.is_dir() {
+        println!("cargo:rerun-if-changed={}", ffi_dir.display());
+    }
 }
 """ %
     [escapedSrc, libName]
@@ -591,6 +598,13 @@ proc generateApiRs*(
     lines.add("pub struct ListenerHandle { pub id: u64 }")
     lines.add("")
 
+  if reverse.len > 0:
+    lines.add(
+      "/// Status of `set_*_impl` and a reverse reply, emitted from ffi/ret_codes.nim."
+    )
+    lines.add(rustReverseCodeConsts())
+    lines.add("")
+
   # The token holds the ctx as usize, so that a host thread can answer later.
   for r in reverse:
     let callStruct = reverseCallStruct(r)
@@ -635,29 +649,48 @@ proc generateApiRs*(
     lines.add("    f: Box<dyn $1>," % [reverseImplBound(r)])
     lines.add("}")
     lines.add("")
+    lines.add("/// The library calls it once no invocation runs the box any more.")
+    lines.add(
+      "unsafe extern \"C\" fn $1_impl_release(ud: *mut c_void) {" % [reverseSnake(r)]
+    )
+    lines.add(
+      "    if !ud.is_null() { drop(Box::from_raw(ud as *mut $1)); }" % [boxStruct]
+    )
+    lines.add("}")
+    lines.add("")
     lines.add("unsafe extern \"C\" fn $1(" % [tramp])
     lines.add("    call_id: u64, args: *const u8, len: usize, ud: *mut c_void,")
     lines.add(") {")
     lines.add("    if ud.is_null() { return; }")
     lines.add("    let b = &*(ud as *const $1);" % [boxStruct])
     lines.add("    let call = $1 { ctx: b.ctx, id: call_id };" % [callStruct])
+    lines.add(
+      "    // A panic must not unwind into the library's worker thread: it would abort."
+    )
+    lines.add("    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {")
     if argsRust.len == 0:
-      lines.add("    let _ = (args, len);")
-      lines.add("    (b.f)(call);")
+      lines.add("        let _ = (args, len);")
+      lines.add("        (b.f)(call);")
     else:
-      lines.add("    let bytes = if args.is_null() || len == 0 {")
-      lines.add("        &[][..]")
-      lines.add("    } else {")
-      lines.add("        slice::from_raw_parts(args, len)")
-      lines.add("    };")
-      lines.add("    match decode_cbor::<$1>(bytes) {" % [argsRust])
-      lines.add("        Ok(a) => (b.f)(call, a),")
-      lines.add("        Err(e) => {")
+      lines.add("        let bytes = if args.is_null() || len == 0 {")
+      lines.add("            &[][..]")
+      lines.add("        } else {")
+      lines.add("            slice::from_raw_parts(args, len)")
+      lines.add("        };")
+      lines.add("        match decode_cbor::<$1>(bytes) {" % [argsRust])
+      lines.add("            Ok(a) => (b.f)(call, a),")
+      lines.add("            Err(e) => {")
       lines.add(
-        "            let _ = call.fail(&format!(\"reverse args decode failed: {e}\"));"
+        "                let _ = call.fail(&format!(\"reverse args decode failed: {e}\"));"
       )
+      lines.add("            }")
       lines.add("        }")
-      lines.add("    }")
+    lines.add("    }));")
+    lines.add("    if r.is_err() {")
+    lines.add(
+      "        let _ = call.fail(\"host impl panicked\"); // dropped if it already replied"
+    )
+    lines.add("    }")
     lines.add("}")
     lines.add("")
 
@@ -669,12 +702,6 @@ proc generateApiRs*(
     # Keeps each handler box alive while its listener id is live on the Nim side.
     lines.add(
       "    listeners: std::sync::Mutex<std::collections::HashMap<u64, Box<dyn std::any::Any + Send>>>,"
-    )
-  for r in reverse:
-    # One slot per interface: keeps the impl box alive while it is registered.
-    lines.add(
-      "    $1_impl: std::sync::Mutex<Option<Box<$2>>>," %
-        [reverseSnake(r), reverseBoxStruct(r)]
     )
   lines.add("}")
   lines.add("")
@@ -718,8 +745,6 @@ proc generateApiRs*(
   var selfExtras: seq[string] = @[]
   if events.len > 0:
     selfExtras.add("listeners: std::sync::Mutex::new(std::collections::HashMap::new())")
-  for r in reverse:
-    selfExtras.add(reverseSnake(r) & "_impl: std::sync::Mutex::new(None)")
   let selfInit =
     if selfExtras.len > 0:
       "        Ok(Self { ptr: addr as *mut c_void, timeout, " & selfExtras.join(", ") &
@@ -872,31 +897,33 @@ proc generateApiRs*(
     lines.add("    where F: $1 + 'static," % [reverseImplBound(r)])
     lines.add("    {")
     lines.add(
-      "        let owned: Box<$1> = Box::new($1 { ctx: self.ptr as usize, f: Box::new(f) });" %
+      "        let raw = Box::into_raw(Box::new($1 { ctx: self.ptr as usize, f: Box::new(f) })) as *mut c_void;" %
         [boxStruct]
     )
-    lines.add("        let raw = &*owned as *const $1 as *mut c_void;" % [boxStruct])
+    lines.add(
+      "        // The library owns the box now: it releases it once no invocation runs it."
+    )
     lines.add("        let rc = unsafe {")
     lines.add(
-      "            ffi::$1_set_$2_impl(self.ptr, Some($3), raw, None)" %
-        [libName, r.wireName, tramp]
+      "            ffi::$1_set_$2_impl(self.ptr, Some($3), raw, Some($4_impl_release))" %
+        [libName, r.wireName, tramp, snake]
     )
     lines.add("        };")
-    lines.add("        if rc != 0 { return false; }")
-    lines.add("        *self.$1_impl.lock().unwrap() = Some(owned);" % [snake])
+    lines.add("        if rc != 0 {")
+    lines.add(
+      "            drop(unsafe { Box::from_raw(raw as *mut $1) }); // refused: still ours" %
+        [boxStruct]
+    )
+    lines.add("            return false;")
+    lines.add("        }")
     lines.add("        true")
     lines.add("    }")
     lines.add("")
     lines.add("    pub fn clear_$1_impl(&self) -> bool {" % [snake])
-    lines.add("        let rc = unsafe {")
     lines.add(
-      "            ffi::$1_set_$2_impl(self.ptr, None, std::ptr::null_mut(), None)" %
+      "        unsafe { ffi::$1_set_$2_impl(self.ptr, None, std::ptr::null_mut(), None) == 0 }" %
         [libName, r.wireName]
     )
-    lines.add("        };")
-    lines.add("        if rc != 0 { return false; }")
-    lines.add("        *self.$1_impl.lock().unwrap() = None;" % [snake])
-    lines.add("        true")
     lines.add("    }")
     lines.add("")
   for rev in reverseEvents:

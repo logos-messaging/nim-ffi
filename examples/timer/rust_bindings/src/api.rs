@@ -154,6 +154,15 @@ unsafe extern "C" fn on_job_scheduled_trampoline(
 #[derive(Debug, Clone, Copy)]
 pub struct ListenerHandle { pub id: u64 }
 
+/// Status of `set_*_impl` and a reverse reply, emitted from ffi/ret_codes.nim.
+pub const REVERSE_ACCEPTED: c_int = 0;
+pub const REVERSE_INVALID_CTX: c_int = 1;
+pub const REVERSE_NOT_ACTIVE: c_int = 2;
+pub const REVERSE_PAYLOAD_TOO_LARGE: c_int = 3;
+pub const REVERSE_MAILBOX_FULL: c_int = 4;
+pub const REVERSE_WORKERS_FAILED: c_int = 5;
+pub const REVERSE_INVALID_ARGUMENT: c_int = 6;
+
 /// Answer token for one `fetch_host_clock` call: reply once, from any thread.
 #[derive(Debug, Clone, Copy)]
 pub struct FetchHostClockCall { ctx: usize, id: u64 }
@@ -175,22 +184,33 @@ struct FetchHostClockImplBox {
     f: Box<dyn Fn(FetchHostClockCall, String) + Send + Sync>,
 }
 
+/// The library calls it once no invocation runs the box any more.
+unsafe extern "C" fn fetch_host_clock_impl_release(ud: *mut c_void) {
+    if !ud.is_null() { drop(Box::from_raw(ud as *mut FetchHostClockImplBox)); }
+}
+
 unsafe extern "C" fn fetch_host_clock_impl_trampoline(
     call_id: u64, args: *const u8, len: usize, ud: *mut c_void,
 ) {
     if ud.is_null() { return; }
     let b = &*(ud as *const FetchHostClockImplBox);
     let call = FetchHostClockCall { ctx: b.ctx, id: call_id };
-    let bytes = if args.is_null() || len == 0 {
-        &[][..]
-    } else {
-        slice::from_raw_parts(args, len)
-    };
-    match decode_cbor::<String>(bytes) {
-        Ok(a) => (b.f)(call, a),
-        Err(e) => {
-            let _ = call.fail(&format!("reverse args decode failed: {e}"));
+    // A panic must not unwind into the library's worker thread: it would abort.
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let bytes = if args.is_null() || len == 0 {
+            &[][..]
+        } else {
+            slice::from_raw_parts(args, len)
+        };
+        match decode_cbor::<String>(bytes) {
+            Ok(a) => (b.f)(call, a),
+            Err(e) => {
+                let _ = call.fail(&format!("reverse args decode failed: {e}"));
+            }
         }
+    }));
+    if r.is_err() {
+        let _ = call.fail("host impl panicked"); // dropped if it already replied
     }
 }
 
@@ -199,7 +219,6 @@ pub struct MyTimerCtx {
     ptr: *mut c_void,
     timeout: Duration,
     listeners: std::sync::Mutex<std::collections::HashMap<u64, Box<dyn std::any::Any + Send>>>,
-    fetch_host_clock_impl: std::sync::Mutex<Option<Box<FetchHostClockImplBox>>>,
 }
 
 // SAFETY: The `ptr` field points to an FFIContext owned by the Nim runtime.
@@ -234,7 +253,7 @@ impl MyTimerCtx {
         })?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
         let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
-        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()), fetch_host_clock_impl: std::sync::Mutex::new(None) })
+        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })
     }
 
     /// Creates the FFIContext + MyTimer; async via chronos.
@@ -247,7 +266,7 @@ impl MyTimerCtx {
         }).await?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
         let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
-        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()), fetch_host_clock_impl: std::sync::Mutex::new(None) })
+        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })
     }
 
     fn add_listener_inner(
@@ -306,23 +325,20 @@ impl MyTimerCtx {
     pub fn set_fetch_host_clock_impl<F>(&self, f: F) -> bool
     where F: Fn(FetchHostClockCall, String) + Send + Sync + 'static,
     {
-        let owned: Box<FetchHostClockImplBox> = Box::new(FetchHostClockImplBox { ctx: self.ptr as usize, f: Box::new(f) });
-        let raw = &*owned as *const FetchHostClockImplBox as *mut c_void;
+        let raw = Box::into_raw(Box::new(FetchHostClockImplBox { ctx: self.ptr as usize, f: Box::new(f) })) as *mut c_void;
+        // The library owns the box now: it releases it once no invocation runs it.
         let rc = unsafe {
-            ffi::my_timer_set_fetch_host_clock_impl(self.ptr, Some(fetch_host_clock_impl_trampoline), raw, None)
+            ffi::my_timer_set_fetch_host_clock_impl(self.ptr, Some(fetch_host_clock_impl_trampoline), raw, Some(fetch_host_clock_impl_release))
         };
-        if rc != 0 { return false; }
-        *self.fetch_host_clock_impl.lock().unwrap() = Some(owned);
+        if rc != 0 {
+            drop(unsafe { Box::from_raw(raw as *mut FetchHostClockImplBox) }); // refused: still ours
+            return false;
+        }
         true
     }
 
     pub fn clear_fetch_host_clock_impl(&self) -> bool {
-        let rc = unsafe {
-            ffi::my_timer_set_fetch_host_clock_impl(self.ptr, None, std::ptr::null_mut(), None)
-        };
-        if rc != 0 { return false; }
-        *self.fetch_host_clock_impl.lock().unwrap() = None;
-        true
+        unsafe { ffi::my_timer_set_fetch_host_clock_impl(self.ptr, None, std::ptr::null_mut(), None) == 0 }
     }
 
     /// Records the tick number that the host emits.

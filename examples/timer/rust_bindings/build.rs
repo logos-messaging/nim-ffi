@@ -43,5 +43,12 @@ fn main() {
 
     println!("cargo:rustc-link-search={}", repo_root.display());
     println!("cargo:rustc-link-lib=my_timer");
+    // Tests and examples then find the library without DYLD_/LD_LIBRARY_PATH.
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", repo_root.display());
     println!("cargo:rerun-if-changed={}", nim_src.display());
+    // Inside the nim-ffi checkout, a runtime change must rebuild the library too.
+    let ffi_dir = repo_root.join("ffi");
+    if ffi_dir.is_dir() {
+        println!("cargo:rerun-if-changed={}", ffi_dir.display());
+    }
 }
