@@ -17,6 +17,9 @@ All notable changes to this project are documented in this file.
   to a different place depending on where the build was invoked from.
 
 ### Added
+- Two event names, or two reverse-call names, of one library that hash to the same
+  `nameId` are now a compile error: a polled message carries that id instead of
+  the name, so the host could not tell them apart.
 - `ffi/ffi_wake.nim`: a level-triggered wake signal whose handle a host can wait
   on, built on each OS's own primitive (eventfd on Linux, a kqueue with an
   `EVFILT_USER` event on macOS and the BSDs, a manual-reset Event on Windows).

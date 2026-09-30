@@ -1,7 +1,8 @@
 ## Compile-time metadata types for FFI binding generation, populated by the
 ## {.ffiCtor.}/{.ffi.} macros and consumed by codegen.
 
-import std/options
+import std/[macros, options]
+import ../ffi_msg
 
 type
   FFIParamMeta* = object
@@ -65,6 +66,39 @@ var ffiTypeRegistry* {.compileTime.}: seq[FFITypeMeta]
 var ffiEventRegistry* {.compileTime.}: seq[FFIEventMeta]
 var ffiConstRegistry* {.compileTime.}: seq[FFIConstMeta]
 var currentLibName* {.compileTime.}: string
+
+type FFINameIdClaim* = object
+  ## One wire name of a library and the `nameId` a polled message carries for it.
+  id*: uint64
+  wireName*: string
+  kind*: string
+    ## "event" or "reverse call": each is matched within its own message kind.
+  libName*: string
+
+var ffiNameIdRegistry* {.compileTime.}: seq[FFINameIdClaim]
+
+func clashingName*(claims: openArray[FFINameIdClaim], claim: FFINameIdClaim): string =
+  ## The other name already holding `claim.id` in the same library and kind; "" if none.
+  for c in claims:
+    if c.id == claim.id and c.kind == claim.kind and c.libName == claim.libName and
+        c.wireName != claim.wireName:
+      return c.wireName
+  return ""
+
+proc claimNameId*(wireName, kind: string) {.compileTime.} =
+  ## A polled message names its event or reverse call by `nameId` alone, so two
+  ## names sharing one id would reach the host as the same thing. Stop the build.
+  let claim = FFINameIdClaim(
+    id: nameId(wireName), wireName: wireName, kind: kind, libName: currentLibName
+  )
+  let other = ffiNameIdRegistry.clashingName(claim)
+  if other.len > 0:
+    error(
+      "the " & kind & " names \"" & wireName & "\" and \"" & other &
+        "\" hash to the same name id (" & nameIdLiteral(wireName) &
+        "); rename one of them"
+    )
+  ffiNameIdRegistry.add(claim)
 
 # Set by `declareLibrary`; the FFI annotations require it.
 var libraryDeclared* {.compileTime.}: bool = false
