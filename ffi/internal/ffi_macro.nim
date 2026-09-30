@@ -1956,6 +1956,16 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
       )
     )
 
+  var libReverseCount = 1
+  for r in ffiReverseRegistry:
+    if r.libName == currentLibName:
+      libReverseCount.inc()
+  let countLit = newLit(libReverseCount)
+  resultStmts.add quote do:
+    static:
+      doAssert `countLit` <= ReverseMaxImpls,
+        "more {.ffiReverse.} procs than registry slots; raise -d:ffiReverseMaxImpls"
+
   ffiReverseRegistry.add(
     FFIReverseMeta(
       wireName: wireName,

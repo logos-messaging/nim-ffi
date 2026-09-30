@@ -58,6 +58,24 @@ proc gateImpl(
     wait(g[].cond, g[].lock)
   release(g[].lock)
 
+type ArgsAfterTimeoutBox = object
+  done: Atomic[bool]
+  argsIntact: Atomic[bool]
+
+proc argsAfterTimeoutImpl(
+    callId: uint64,
+    argsCbor: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
+) {.cdecl, gcsafe, raises: [].} =
+  ## Outlives the caller's deadline, then reads its args: the worker's reference keeps them.
+  let box = cast[ptr ArgsAfterTimeoutBox](userData)
+  os.sleep(100)
+  box[].argsIntact.store(
+    argsLen == 3 and argsCbor[0] == 7 and argsCbor[1] == 8 and argsCbor[2] == 9
+  )
+  box[].done.store(true)
+
 proc waitEntered(g: var GateBox, n: int) =
   acquire(g.lock)
   while g.entered < n:
@@ -83,13 +101,13 @@ suite "FFIReverseState registry":
     var marker = 0
     st.setImpl("fetch", nopImpl, addr marker) # replace keeps the name registered
     check st.hasImpl("fetch")
-    let dispatch = st.beginReverseDispatch("fetch")
-    check dispatch.found
-    check dispatch.entry.userData == addr marker
-    st.endReverseDispatch()
+    let entry = st.beginReverseDispatch("fetch")
+    check not entry.isNil()
+    check entry[].userData == addr marker
+    st.endReverseDispatch(entry)
     st.setImpl("fetch", nil, nil) # nil fn unregisters
     check not st.hasImpl("fetch")
-    check not st.beginReverseDispatch("fetch").found
+    check st.beginReverseDispatch("fetch").isNil()
 
   test "call ids start at 1 and are monotonic":
     var st: FFIReverseState
@@ -100,6 +118,113 @@ suite "FFIReverseState registry":
     check st.allocCallId() == 1'u64
     check st.allocCallId() == 2'u64
     check st.allocCallId() == 3'u64
+
+type ReleaseBox = object
+  st: ptr FFIReverseState
+  released: Atomic[int]
+  releasedInside: Atomic[int] # -1 until the impl recorded it
+  done: Atomic[bool]
+
+proc countRelease(userData: pointer) {.cdecl, gcsafe, raises: [].} =
+  cast[ptr ReleaseBox](userData)[].released.atomicInc()
+
+proc selfReplaceImpl(
+    callId: uint64,
+    argsCbor: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
+) {.cdecl, gcsafe, raises: [].} =
+  ## Replaces its own entry, then reads whether its userData was already released.
+  let b = cast[ptr ReleaseBox](userData)
+  b[].st[].setImpl("self", nopImpl, nil)
+  b[].releasedInside.store(b[].released.load())
+  discard b[].st[].pushReply(callId, RET_OK, nil, 0)
+  b[].done.store(true)
+
+suite "impl ownership (release callback)":
+  test "the release runs once, after the last dispatch of the replaced impl":
+    var st: FFIReverseState
+    initReverseState(st)
+    defer:
+      deinitReverseState(st)
+    var box: ReleaseBox
+    check st.setImpl("x", nopImpl, addr box, countRelease)
+    let entry = st.beginReverseDispatch("x")
+    check st.setImpl("x", nopImpl, nil) # replacing does not wait
+    check box.released.load() == 0 # the running dispatch still owns it
+    st.endReverseDispatch(entry)
+    check box.released.load() == 1
+
+  test "an idle impl is released as soon as it is replaced or unregistered":
+    var st: FFIReverseState
+    initReverseState(st)
+    defer:
+      deinitReverseState(st)
+    var a, b: ReleaseBox
+    check st.setImpl("x", nopImpl, addr a, countRelease)
+    check st.setImpl("x", nopImpl, addr b, countRelease)
+    check a.released.load() == 1
+    check st.setImpl("x", nil, nil)
+    check b.released.load() == 1
+    check st.setImpl("absent", nil, nil) # unregistering an unknown name is a no-op
+
+  test "clearImpls releases idle impls and defers the running ones":
+    var st: FFIReverseState
+    initReverseState(st)
+    defer:
+      deinitReverseState(st)
+    var idle, running: ReleaseBox
+    check st.setImpl("idle", nopImpl, addr idle, countRelease)
+    check st.setImpl("running", nopImpl, addr running, countRelease)
+    let entry = st.beginReverseDispatch("running")
+    check st.clearImpls() == 1
+    check idle.released.load() == 1
+    check running.released.load() == 0
+    check not st.hasImpl("running")
+    st.endReverseDispatch(entry)
+    check running.released.load() == 1
+
+  test "deinit releases every impl still registered":
+    var st: FFIReverseState
+    initReverseState(st)
+    var box: ReleaseBox
+    check st.setImpl("x", nopImpl, addr box, countRelease)
+    deinitReverseState(st)
+    check box.released.load() == 1
+
+  test "a nil release does not wait for the caller's own dispatch":
+    var st: FFIReverseState
+    initReverseState(st)
+    defer:
+      deinitReverseState(st)
+    check st.setImpl("x", nopImpl, nil)
+    let entry = st.beginReverseDispatch("x") # this thread now runs "x"
+    check st.setImpl("x", nil, nil) # would deadlock if it waited for itself
+    check not st.hasImpl("x")
+    st.endReverseDispatch(entry)
+
+  test "an impl replacing itself on a worker is released after it returns":
+    var st: FFIReverseState
+    initReverseState(st)
+    ffiCurrentReverseState = addr st
+    defer:
+      ffiCurrentReverseState = nil
+      deinitReverseState(st)
+    var box = ReleaseBox(st: addr st)
+    box.releasedInside.store(-1)
+    check st.setImpl("self", selfReplaceImpl, addr box, countRelease)
+    let callFut = ffiReverseCall("self", @[], 2000)
+    while not callFut.finished():
+      drainReverseReplies()
+      waitFor sleepAsync(chronos.milliseconds(1))
+    check (waitFor callFut).isOk()
+    check box.done.load()
+    check box.releasedInside.load() == 0
+    for _ in 0 ..< 200:
+      if box.released.load() == 1:
+        break
+      os.sleep(1)
+    check box.released.load() == 1
 
 suite "reply mailbox":
   test "push and take returns every parked reply":
@@ -125,10 +250,15 @@ suite "reply mailbox":
         check node[].data[1] == 0xBB'u8
       freeReply(node)
       node = next
-    check seen.len == 2
-    check 7'u64 in seen
-    check 8'u64 in seen
+    check seen == @[7'u64, 8'u64] # FIFO: the first reply for a call id wins
     check st.mailboxLen() == 0
+
+    # The tail resets with the take, so the next push starts a fresh list.
+    check st.pushReply(9'u64, RET_OK, nil, 0) == REVERSE_ACCEPTED
+    let single = st.takeReplies()
+    check single[].callId == 9'u64
+    check single[].next.isNil()
+    freeReply(single)
 
   test "mailbox rejects pushes past ReverseMailboxDepth":
     var st: FFIReverseState
@@ -274,6 +404,22 @@ suite "ffiReverseCall":
       check st.pushReply(1'u64, RET_OK, nil, 0) == REVERSE_ACCEPTED
       drainReverseReplies()
       check st.mailboxLen() == 0
+
+  test "args stay readable for the whole impl, even after the caller timed out":
+    withReverseHarness(st, 1):
+      var box: ArgsAfterTimeoutBox
+      st.setImpl("slow_args", argsAfterTimeoutImpl, addr box)
+      let args = @[byte 7, 8, 9]
+      let res = waitFor ffiReverseCall("slow_args", args, 30)
+      check res.isErr()
+      check "timed out" in res.error
+      check ffiPendingReverseLen() == 0 # the FFI side dropped its reference
+      for _ in 0 ..< 500:
+        if box.done.load():
+          break
+        os.sleep(1)
+      check box.done.load()
+      check box.argsIntact.load()
 
   test "queued calls behind a blocked worker are skipped once expired":
     withReverseHarness(st, 1):
