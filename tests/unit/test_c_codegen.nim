@@ -4,6 +4,7 @@
 import std/strutils
 import unittest2
 import ffi/codegen/[meta, c]
+import ffi/ret_codes
 
 proc field(n, t: string): FFIFieldMeta =
   FFIFieldMeta(name: n, typeName: t)
@@ -408,6 +409,18 @@ suite "generateCLibHeader: reverse FFI":
       header
     check "int timer_emit_on_host_ping(void* ctx, const uint8_t* payload_cbor, size_t payload_len);" in
       header
+
+  test "the reverse status codes are named from ffi/ret_codes.nim":
+    check "#define NIMFFI_REVERSE_ACCEPTED 0" in header
+    check "#define NIMFFI_REVERSE_WORKERS_FAILED 5" in header
+    check "#define NIMFFI_REVERSE_INVALID_ARGUMENT " & $REVERSE_INVALID_ARGUMENT in
+      header
+
+  test "the header states the args lifetime and the user_data ownership rules":
+    check "args_cbor is valid only until" in header
+    check "release(user_data) runs" in header
+    check "release is never called" in header
+    check "The first reply for a call_id wins" in header
 
   test "the release typedef is declared and no worker start export remains":
     check "typedef void (*FFIReverseRelease)(void* user_data);" in header

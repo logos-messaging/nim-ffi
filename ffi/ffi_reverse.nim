@@ -36,15 +36,6 @@ static:
   doAssert ReverseCallTimeoutMs > 0, "-d:ffiReverseCallTimeoutMs must be positive"
   doAssert ReverseMaxImpls >= 1, "-d:ffiReverseMaxImpls must be at least 1"
 
-const
-  REVERSE_ACCEPTED*: cint = 0
-  REVERSE_INVALID_CTX*: cint = 1
-  REVERSE_NOT_ACTIVE*: cint = 2
-  REVERSE_PAYLOAD_TOO_LARGE*: cint = 3
-  REVERSE_MAILBOX_FULL*: cint = 4
-  REVERSE_WORKERS_FAILED*: cint = 5
-  REVERSE_INVALID_ARGUMENT*: cint = 6
-
 proc ffiNoopCallback*(
     callerRet: cint, msg: ptr cchar, len: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =

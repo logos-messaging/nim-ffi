@@ -37,3 +37,40 @@ func rustRetCodeConsts*(): string =
     lines.add("const NIMFFI_RET_" & code.name & ": c_int = " & $code.value & ";")
 
   return lines
+
+const
+  REVERSE_ACCEPTED*: cint = 0
+  REVERSE_INVALID_CTX*: cint = 1
+  REVERSE_NOT_ACTIVE*: cint = 2
+  REVERSE_PAYLOAD_TOO_LARGE*: cint = 3
+  REVERSE_MAILBOX_FULL*: cint = 4
+  REVERSE_WORKERS_FAILED*: cint = 5
+  REVERSE_INVALID_ARGUMENT*: cint = 6
+
+const ReverseCodes* = [
+  RetCode(name: "ACCEPTED", value: REVERSE_ACCEPTED),
+  RetCode(name: "INVALID_CTX", value: REVERSE_INVALID_CTX),
+  RetCode(name: "NOT_ACTIVE", value: REVERSE_NOT_ACTIVE),
+  RetCode(name: "PAYLOAD_TOO_LARGE", value: REVERSE_PAYLOAD_TOO_LARGE),
+  RetCode(name: "MAILBOX_FULL", value: REVERSE_MAILBOX_FULL),
+  RetCode(name: "WORKERS_FAILED", value: REVERSE_WORKERS_FAILED),
+  RetCode(name: "INVALID_ARGUMENT", value: REVERSE_INVALID_ARGUMENT),
+] ## Status of `<lib>_set_<wire>_impl` and `<lib>_reverse_reply`.
+
+func cReverseCodeDefines*(): string =
+  var lines = ""
+  for code in ReverseCodes:
+    if lines.len > 0:
+      lines.add("\n")
+    lines.add("#define NIMFFI_REVERSE_" & code.name & " " & $code.value)
+
+  return lines
+
+func rustReverseCodeConsts*(): string =
+  var lines = ""
+  for code in ReverseCodes:
+    if lines.len > 0:
+      lines.add("\n")
+    lines.add("pub const REVERSE_" & code.name & ": c_int = " & $code.value & ";")
+
+  return lines

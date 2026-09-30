@@ -1053,15 +1053,45 @@ proc generateCLibHeader*(
   if reverse.len > 0:
     lines.add("#ifndef NIM_FFI_REVERSE_IMPL_DEFINED")
     lines.add("#define NIM_FFI_REVERSE_IMPL_DEFINED")
+    lines.add("/* Status of <lib>_set_<wire>_impl and <lib>_reverse_reply. */")
+    lines.add(cReverseCodeDefines())
     lines.add(
-      "/* Runs on a reverse worker thread and may block; answer via <lib>_reverse_reply. */"
+      "/* Runs on a reverse worker thread and may block. args_cbor is valid only until"
     )
+    lines.add(
+      "   the impl returns: copy what a deferred reply needs. Answer, now or later"
+    )
+    lines.add("   and from any thread, via <lib>_reverse_reply. */")
     lines.add(
       "typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, " &
         "size_t args_len, void* user_data);"
     )
+    lines.add(
+      "/* Frees an impl's user_data once no invocation uses it. It runs on whichever"
+    )
+    lines.add(
+      "   thread drops the last reference (a reverse worker, the set_impl caller or"
+    )
+    lines.add("   the library's own thread at teardown), so it must be thread-safe. */")
     lines.add("typedef void (*FFIReverseRelease)(void* user_data);")
     lines.add("#endif")
+    lines.add(
+      "/* <lib>_set_<wire>_impl registers impl (NULL unregisters). With a release the"
+    )
+    lines.add(
+      "   library owns user_data: the call never waits, and release(user_data) runs"
+    )
+    lines.add(
+      "   once the replaced impl's last running invocation returns. With a NULL release"
+    )
+    lines.add(
+      "   the host keeps ownership and the call waits until no other thread runs the"
+    )
+    lines.add("   replaced impl. Returns NIMFFI_REVERSE_ACCEPTED, _INVALID_CTX, or")
+    lines.add(
+      "   _WORKERS_FAILED when it could not be registered; on any error the caller"
+    )
+    lines.add("   still owns user_data and release is never called. */")
     for r in reverse:
       lines.add(renderBlockDocComment(r.doc))
       lines.add(
@@ -1073,12 +1103,28 @@ proc generateCLibHeader*(
       "/* Answers a reverse call from ANY thread. ret_code 0 = ok (reply_cbor is"
     )
     lines.add("   the CBOR reply), non-zero = error (reply_cbor is a UTF-8 message).")
-    lines.add("   Returns 0 accepted, 1 invalid ctx, 2 ctx not active, 3 payload too")
-    lines.add("   large, 4 mailbox full. */")
+    lines.add(
+      "   The first reply for a call_id wins; a later one, or one for a call that"
+    )
+    lines.add(
+      "   already timed out, is dropped. Returns NIMFFI_REVERSE_ACCEPTED, _INVALID_CTX,"
+    )
+    lines.add(
+      "   _NOT_ACTIVE, _PAYLOAD_TOO_LARGE, _MAILBOX_FULL, or _INVALID_ARGUMENT (NULL"
+    )
+    lines.add("   reply_cbor with a non-zero reply_len). */")
     lines.add(
       "int " & libName & "_reverse_reply(void* ctx, uint64_t call_id, int ret_code, " &
         "const uint8_t* reply_cbor, size_t reply_len);"
     )
+  if reverseEvents.len > 0:
+    lines.add(
+      "/* <lib>_emit_<wire> queues a host event for the library's own thread and"
+    )
+    lines.add(
+      "   returns NIMFFI_RET_OK once queued; NIMFFI_RET_ERR for a bad ctx, a payload"
+    )
+    lines.add("   over the request limit, or NULL payload_cbor with a length. */")
   for rev in reverseEvents:
     lines.add(renderBlockDocComment(rev.doc))
     lines.add(

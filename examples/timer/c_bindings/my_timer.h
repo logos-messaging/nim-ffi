@@ -1002,16 +1002,41 @@ int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
 /* Reverse FFI: host-implemented interfaces + host-emitted events */
 #ifndef NIM_FFI_REVERSE_IMPL_DEFINED
 #define NIM_FFI_REVERSE_IMPL_DEFINED
-/* Runs on a reverse worker thread and may block; answer via <lib>_reverse_reply. */
+/* Status of <lib>_set_<wire>_impl and <lib>_reverse_reply. */
+#define NIMFFI_REVERSE_ACCEPTED 0
+#define NIMFFI_REVERSE_INVALID_CTX 1
+#define NIMFFI_REVERSE_NOT_ACTIVE 2
+#define NIMFFI_REVERSE_PAYLOAD_TOO_LARGE 3
+#define NIMFFI_REVERSE_MAILBOX_FULL 4
+#define NIMFFI_REVERSE_WORKERS_FAILED 5
+#define NIMFFI_REVERSE_INVALID_ARGUMENT 6
+/* Runs on a reverse worker thread and may block. args_cbor is valid only until
+   the impl returns: copy what a deferred reply needs. Answer, now or later
+   and from any thread, via <lib>_reverse_reply. */
 typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, size_t args_len, void* user_data);
+/* Frees an impl's user_data once no invocation uses it. It runs on whichever
+   thread drops the last reference (a reverse worker, the set_impl caller or
+   the library's own thread at teardown), so it must be thread-safe. */
 typedef void (*FFIReverseRelease)(void* user_data);
 #endif
+/* <lib>_set_<wire>_impl registers impl (NULL unregisters). With a release the
+   library owns user_data: the call never waits, and release(user_data) runs
+   once the replaced impl's last running invocation returns. With a NULL release
+   the host keeps ownership and the call waits until no other thread runs the
+   replaced impl. Returns NIMFFI_REVERSE_ACCEPTED, _INVALID_CTX, or
+   _WORKERS_FAILED when it could not be registered; on any error the caller
+   still owns user_data and release is never called. */
 int my_timer_set_fetch_host_clock_impl(void* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release);
 /* Answers a reverse call from ANY thread. ret_code 0 = ok (reply_cbor is
    the CBOR reply), non-zero = error (reply_cbor is a UTF-8 message).
-   Returns 0 accepted, 1 invalid ctx, 2 ctx not active, 3 payload too
-   large, 4 mailbox full. */
+   The first reply for a call_id wins; a later one, or one for a call that
+   already timed out, is dropped. Returns NIMFFI_REVERSE_ACCEPTED, _INVALID_CTX,
+   _NOT_ACTIVE, _PAYLOAD_TOO_LARGE, _MAILBOX_FULL, or _INVALID_ARGUMENT (NULL
+   reply_cbor with a non-zero reply_len). */
 int my_timer_reverse_reply(void* ctx, uint64_t call_id, int ret_code, const uint8_t* reply_cbor, size_t reply_len);
+/* <lib>_emit_<wire> queues a host event for the library's own thread and
+   returns NIMFFI_RET_OK once queued; NIMFFI_RET_ERR for a bad ctx, a payload
+   over the request limit, or NULL payload_cbor with a length. */
 /** Records the tick number that the host emits. */
 int my_timer_emit_on_host_tick(void* ctx, const uint8_t* payload_cbor, size_t payload_len);
 /**
