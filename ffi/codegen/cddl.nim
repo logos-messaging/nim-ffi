@@ -1,8 +1,8 @@
 ## CDDL (RFC 8610) schema generator mirroring the CBOR wire format from
 ## ffi/cbor_serial.nim: types become rules, procs get request/response rules.
 
-import std/[os, strutils, unicode]
-import ./meta, ./string_helpers
+import std/[strutils, unicode]
+import ./meta, ./string_helpers, ./build_paths
 
 proc innerOf(typeName, prefix: string): string =
   if typeName.startsWith(prefix) and typeName.endsWith("]"):
@@ -183,8 +183,8 @@ proc generateCddlBindings*(
     outputDir: string,
     nimSrcRelPath: string,
 ) =
-  createDir(outputDir)
-  writeFile(
-    outputDir / (libName & ".cddl"),
+  ensureOutputDir(outputDir)
+  writeOutputFile(
+    buildPath(outputDir, libName & ".cddl"),
     generateCddlSchema(procs, types, libName, nimSrcRelPath),
   )

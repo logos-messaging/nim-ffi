@@ -5,7 +5,7 @@
 use std::time::Duration;
 use my_timer::{
     EchoRequest, JobPriority, JobSpec, MyTimerCtx, RetryPolicy, ScheduleConfig,
-    TimerConfig,
+    TimerConfig, TIMER_VERSION,
 };
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -18,6 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let version = ctx.version_async().await?;
     println!("[1] Tokio runtime started");
     println!("[2] Version: {version}");
+    assert_eq!(version, TIMER_VERSION);
 
     let echo1 = ctx
         .echo_async(EchoRequest {
@@ -35,6 +36,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("[3] Echo 1: echoed={}, timerName={}", echo1.echoed, echo1.timer_name);
     println!("[4] Echo 2: echoed={}, timerName={}", echo2.echoed, echo2.timer_name);
+    assert_eq!(echo1.echoed, "hello from tokio");
+    assert_eq!(echo1.timer_name, "tokio-demo");
+    assert_eq!(echo2.echoed, "second tokio request");
+    assert_eq!(echo2.timer_name, "tokio-demo");
 
     // ── A call with three complex parameters ────────────────────────────
     // The generated `*_async` method returns a Future, so a tokio-driven
@@ -63,6 +68,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "[5] Schedule (3 complex params, awaited): jobId={}, willRunCount={}, firstRunAtMs={}, priority={:?}",
         schedule.job_id, schedule.will_run_count, schedule.first_run_at_ms, schedule.priority,
     );
+    assert_eq!(schedule.job_id, "tokio-demo:hourly-sync");
+    assert_eq!(schedule.will_run_count, 1);
+    assert_eq!(schedule.first_run_at_ms, 500);
+    assert_eq!(schedule.effective_backoff_ms, 250);
+    assert_eq!(schedule.priority, JobPriority::JpNormal);
 
     println!("\nDone. Tokio runtime shut down.");
     Ok(())

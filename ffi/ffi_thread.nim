@@ -156,15 +156,21 @@ proc freeLib[T](ctx: ptr FFIContext[T]) {.gcsafe.} =
 const RecycledReason =
   "FFI context was recycled before this request ran; the caller is gone"
 
-proc rejectQueuedRequests[T](ctx: ptr FFIContext[T]) =
-  ## Fails every queued request instead of dispatching it. A request that a
-  ## destroyed context left behind still carries that host's `userData`, which
-  ## the host has freed; running it would answer a dead callback, and running it
-  ## after the slot is reused would run it against the library of the next owner.
+proc rejectQueuedRequests[T](ctx: ptr FFIContext[T], ownerGen: uint) =
+  ## Clears the queue after a recycle:
+  ## - requests from `ownerGen` fail (their host is gone; running them is unsafe)
+  ## - requests from older owners are dropped
+  ## - requests from newer owners go back on the queue for the new owner
   var request = ctx.reqQueueBank.mergeQueues()
   while not request.isNil():
     let nextRequest = request[].next # read before handleRes frees it
-    if request[].generation != ctx.currentGeneration():
+    if request[].generation > ownerGen:
+      request[].next = nil
+      if ctx.reqQueueBank.pushRequest(request) != QueueFull:
+        request = nextRequest
+        continue
+    elif request[].generation < ownerGen:
+      # An owner older than the one being recycled: its caller is long gone.
       deleteRequest(request)
       request = nextRequest
       continue
@@ -223,7 +229,8 @@ proc resetForNextOwner[T](ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]
   ctx[].handles.releaseAll()
   # Same reason: the sticky overflow flag would reject every request of the next owner, ctor included.
   ctx.eventQueueStuck.store(false)
-  rejectQueuedRequests(ctx)
+  # Still claimed by the owner being recycled, so its own requests are the ones to fail.
+  rejectQueuedRequests(ctx, ctx.currentGeneration())
   ongoing[].setLen(0)
 
 proc finishRecycle[T](ctx: ptr FFIContext[T], failure: RecycleFailure) =
@@ -307,6 +314,7 @@ proc proveAlive(ctx: ptr FFIContext) =
   ctx.ffiHeartbeat.atomicInc()
 
 proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
+  registerCloseDispatcherHook()
   ffiCurrentEventRegistry = addr ctx[].eventRegistry
   ffiCurrentEventQueue = addr ctx[].eventQueue
   ffiCurrentEventQueueStuck = addr ctx[].eventQueueStuck
@@ -319,6 +327,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
   defer:
     onFFIThread = false
+    unregisterWaitedSignal(ctx.reqSignal)
     # Free handle refs on the thread that allocated them (refc heap is thread-local).
     ctx[].handles.releaseAll()
     # Let the event thread stop draining and exit; wake it so it notices now.
@@ -329,7 +338,6 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
     let fireRes = ctx.threadExitSignal.fireSync()
     if fireRes.isErr():
       error "failed to fire threadExitSignal on FFI thread exit", err = fireRes.error
-    closeThreadDispatcher()
 
   let ffiRun = proc(ctx: ptr FFIContext[T]) {.async.} =
     var ffiReqHandler: T # main library object (Waku, LibP2P, SDS, …)
@@ -378,18 +386,21 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
         continue
 
       # A submit that read `Active` just before the recycle can still land here.
-      # Fail it rather than run it against the library of the next owner.
+      # Fail it instead of running it on the next owner's library. Read the generation
+      # before the lifecycle, so a new owner's request isn't mistaken for the old one's.
+      let ownerGen = ctx.currentGeneration()
       if ctx.lifecycle.load() != CtxLifecycle.Active:
-        rejectQueuedRequests(ctx)
+        rejectQueuedRequests(ctx, ownerGen)
         discard await ctx.reqSignal.wait().withTimeout(chronos.milliseconds(100))
         continue
 
       cleanFinishedRequests()
 
-      # Block until a submit signals us, or at most 100ms.
-      discard await ctx.reqSignal.wait().withTimeout(chronos.milliseconds(100))
       processQueue()
       drainReverseReplies()
+
+      # Block until a submit signals us, or at most 100ms.
+      discard await ctx.reqSignal.wait().withTimeout(chronos.milliseconds(100))
 
     # Drain once more for requests enqueued just before `running` flipped.
     processQueue()

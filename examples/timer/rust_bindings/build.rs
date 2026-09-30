@@ -42,6 +42,7 @@ fn main() {
     assert!(status.success(), "Nim compilation failed");
 
     println!("cargo:rustc-link-search={}", repo_root.display());
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", repo_root.display());
     println!("cargo:rustc-link-lib=my_timer");
     // Tests and examples then find the library without DYLD_/LD_LIBRARY_PATH.
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", repo_root.display());

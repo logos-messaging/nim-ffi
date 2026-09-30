@@ -5,6 +5,16 @@
 #include <iostream>
 #include <thread>
 
+static int failures = 0;
+
+template <typename T, typename U>
+static void expect(const char* what, const T& got, const U& want) {
+    if (!(got == want)) {
+        std::cerr << "FAIL " << what << ": got " << got << ", want " << want << "\n";
+        failures++;
+    }
+}
+
 // The generated bindings never throw: every call returns a Result<T>. We
 // branch on isErr() and read value()/error() instead of using try/catch.
 int main() {
@@ -27,6 +37,9 @@ int main() {
     }
     std::cout << "[2] Version: " << version.value() << " (const TIMER_VERSION="
               << TIMER_VERSION << ", MAX_DELAY_MS=" << MAX_DELAY_MS << ")\n";
+    expect("version", version.value(), std::string(TIMER_VERSION));
+    expect("TIMER_VERSION", std::string(TIMER_VERSION), "nim-timer v0.1.0");
+    expect("MAX_DELAY_MS", MAX_DELAY_MS, 5000);
 
     auto echo = echo1Future.get();
     if (echo.isErr()) {
@@ -35,6 +48,8 @@ int main() {
     }
     std::cout << "[3] Echo 1: echoed=" << echo->echoed
               << ", timerName=" << echo->timerName << "\n";
+    expect("echo1.echoed", echo->echoed, "hello from C++");
+    expect("echo1.timerName", echo->timerName, "cpp-demo");
 
     auto echo2 = echo2Future.get();
     if (echo2.isErr()) {
@@ -43,6 +58,16 @@ int main() {
     }
     std::cout << "[4] Echo 2: echoed=" << echo2->echoed
               << ", timerName=" << echo2->timerName << "\n";
+    expect("echo2.echoed", echo2->echoed, "second C++ request");
+    expect("echo2.timerName", echo2->timerName, "cpp-demo");
+
+    // A delay above MAX_DELAY_MS is rejected: the Result carries the error.
+    auto tooSlow = ctx->echo(EchoRequest{"too slow", MAX_DELAY_MS + 1});
+    std::cout << "[4b] Echo over MAX_DELAY_MS: isErr=" << tooSlow.isErr() << "\n";
+    expect("echo over limit fails", tooSlow.isErr(), true);
+    if (tooSlow.isErr()) {
+        expect("echo over limit error", tooSlow.error(), "delayMs must not exceed 5000");
+    }
 
     auto complexReq = ComplexRequest{
         std::vector<EchoRequest>{EchoRequest{"one", 10}, EchoRequest{"two", 20}},
@@ -59,6 +84,10 @@ int main() {
     std::cout << "[5] Complex: summary=" << complex->summary
               << ", itemCount=" << complex->itemCount
               << ", hasNote=" << complex->hasNote << "\n";
+    expect("complex.summary", complex->summary,
+           "received 2 messages, note=extra note, retries=3");
+    expect("complex.itemCount", complex->itemCount, 2);
+    expect("complex.hasNote", complex->hasNote, true);
 
     // ── 6. Call with three complex parameters ─────────────────────
     // Each parameter is its own generated C++ struct. The nim-ffi
@@ -90,6 +119,11 @@ int main() {
               << ", firstRunAtMs=" << scheduleRes->firstRunAtMs
               << ", effectiveBackoffMs=" << scheduleRes->effectiveBackoffMs
               << ", priority=" << static_cast<int>(scheduleRes->priority) << "\n";
+    expect("schedule.jobId", scheduleRes->jobId, "cpp-demo:nightly-rollup");
+    expect("schedule.willRunCount", scheduleRes->willRunCount, 60000 / 15000);
+    expect("schedule.firstRunAtMs", scheduleRes->firstRunAtMs, 1000 + 250);
+    expect("schedule.effectiveBackoffMs", scheduleRes->effectiveBackoffMs, 500 / 2);
+    expect("schedule.priority", scheduleRes->priority == JobPriority::jpHigh, true);
 
     // Each `{.ffiEvent.}` declared on the Nim side gets a typed
     // registration method — `addOnEchoFiredListener(handler)` here.
@@ -97,22 +131,35 @@ int main() {
     // dispatch thread, so synchronise via std::promise / atomics.
     std::promise<EchoEvent> echoEvtPromise;
     auto echoEvtFuture = echoEvtPromise.get_future();
-    const auto typedHandle = ctx->addOnEchoFiredListener(
-        [&](const EchoEvent& evt) { echoEvtPromise.set_value(evt); });
+    std::atomic<int> echoEvtCalls{0};
+    const auto typedHandle = ctx->addOnEchoFiredListener([&](const EchoEvent& evt) {
+        if (echoEvtCalls.fetch_add(1) == 0) echoEvtPromise.set_value(evt);
+    });
 
     ctx->echo(EchoRequest{"event-demo", 1});
+    if (echoEvtFuture.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+        std::cerr << "Error: onEchoFired never arrived\n";
+        ctx->removeEventListener(typedHandle);
+        return 1;
+    }
     const auto evt = echoEvtFuture.get();
     std::cout << "[7] typed event onEchoFired: message=" << evt.message
               << ", echoCount=" << evt.echoCount << "\n";
+    expect("onEchoFired.message", evt.message, "event-demo");
+    expect("onEchoFired.echoCount", evt.echoCount, 1);
 
-    // Drop the typed listener — no handler fires for the follow-up echo.
-    // Sleep briefly to give the lib thread time to settle before we tear
-    // the ctx down.
-    ctx->removeEventListener(typedHandle);
+    // Drop the typed listener: no handler fires for the follow-up echo.
+    expect("removeEventListener", ctx->removeEventListener(typedHandle), true);
     ctx->echo(EchoRequest{"event-demo-after-remove", 1});
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    std::cout << "[7] after removeEventListener: typed listener removed\n";
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::cout << "[7] after removeEventListener: handler calls=" << echoEvtCalls.load()
+              << "\n";
+    expect("onEchoFired calls after remove", echoEvtCalls.load(), 1);
 
+    if (failures != 0) {
+        std::cerr << "\n" << failures << " check(s) failed.\n";
+        return 1;
+    }
     std::cout << "\nDone.\n";
     return 0;
 }

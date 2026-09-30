@@ -31,6 +31,12 @@ typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_dat
 #define NIMFFI_RET_ERR 1
 #define NIMFFI_RET_MISSING_CALLBACK 2
 #define NIMFFI_RET_STALE_WARN 3
+#define NIMFFI_RET_TIMEOUT 4
+#define NIMFFI_RET_CLOSED 5
+#define NIMFFI_RET_INVALID_CTX 6
+#define NIMFFI_RET_BUSY 7
+#define NIMFFI_RET_QUEUE_FULL 8
+#define NIMFFI_RET_TOO_LARGE 9
 
 /* ── leaf encoders ─────────────────────────────────────────────────────── */
 static inline CborError nimffi_enc_bool(CborEncoder* e, const bool* v) {
@@ -66,8 +72,8 @@ static inline CborError nimffi_enc_f64(CborEncoder* e, const double* v) {
 static inline CborError nimffi_enc_f32(CborEncoder* e, const float* v) {
     return cbor_encode_float(e, *v);
 }
-static inline CborError nimffi_enc_str(CborEncoder* e, const NimFfiStr* v) {
-    return cbor_encode_text_string(e, v->len != 0 ? v->data : "", v->len);
+static inline CborError nimffi_enc_str(CborEncoder* e, const char* const* v) {
+    return cbor_encode_text_stringz(e, *v ? *v : "");
 }
 static inline CborError nimffi_enc_bytes(CborEncoder* e, const NimFfiBytes* v) {
     /* A null src is UB in memcpy even for len 0, and UBSan reports it. */
@@ -205,7 +211,7 @@ static inline CborError nimffi_dec_f32(CborValue* it, float* out) {
     }
     return CborErrorImproperValue;
 }
-static inline CborError nimffi_dec_str(CborValue* it, NimFfiStr* out) {
+static inline CborError nimffi_dec_str(CborValue* it, const char** out) {
     if (!cbor_value_is_text_string(it)) {
         return CborErrorImproperValue;
     }
@@ -217,21 +223,18 @@ static inline CborError nimffi_dec_str(CborValue* it, NimFfiStr* out) {
     if (len == SIZE_MAX) { /* len + 1 would wrap to a 0-byte allocation */
         return CborErrorDataTooLarge;
     }
-    /* one extra byte so a NUL-free payload is a valid C string */
-    out->data = (char*)malloc(len + 1);
-    if (!out->data) {
+    char* buf = (char*)malloc(len + 1); /* + the NUL terminator */
+    if (!buf) {
         return CborErrorOutOfMemory;
     }
-    out->len = len;
     size_t copied = len;
-    err = cbor_value_copy_text_string(it, out->data, &copied, NULL);
+    err = cbor_value_copy_text_string(it, buf, &copied, NULL);
     if (err) {
-        free(out->data);
-        out->data = NULL;
-        out->len = 0;
+        free(buf);
         return err;
     }
-    out->data[len] = '\0';
+    buf[len] = '\0';
+    *out = buf;
     return cbor_value_advance(it);
 }
 static inline CborError nimffi_dec_bytes(CborValue* it, NimFfiBytes* out) {

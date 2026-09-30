@@ -4,20 +4,17 @@
 
 import std/[atomics, locks, options, os, sequtils, sysatomics, tables]
 import chronicles, chronos, chronos/threadsync, results
-when defined(windows):
-  import chronos/osdefs
-else:
-  import chronos/selectors2
 import
   ./ffi_types,
   ./ffi_events,
   ./ffi_reverse,
   ./ffi_handles,
+  ./ffi_outbound,
   ./ffi_thread_request,
   ./ffi_request_queue,
   ./cbor_serial
 
-export ffi_events, ffi_reverse, ffi_handles
+export ffi_events, ffi_reverse, ffi_handles, ffi_outbound
 export ffi_request_queue.RequestQueueDepth
 
 type FFICtxToken* = distinct pointer
@@ -97,6 +94,7 @@ type FFIContext*[T] = object
   reverse*: FFIReverseState
   handles*: FFIHandleRegistry
   eventQueue*: EventQueue
+  outbound*: FFIOutbound
   ffiHeartbeat*: Atomic[int64]
   eventQueueStuck*: Atomic[bool]
   ffiThreadExited*: Atomic[bool]
@@ -123,6 +121,8 @@ const
     ## Caller-side bound for synchronous recycle: both drain rounds, the teardown
     ## hook and slack, so it only fires when the worker itself is wedged. The
     ## generated C destructor blocks its caller this long — 15 s by default.
+  RecycleDonePollInterval* = 50.milliseconds
+    ## How often a recycle caller checks if its claim ended.
   EventThreadTickInterval* = 1.seconds
   FFIHeartbeatStartDelay* = 10.seconds
   FFIHeartbeatStaleThreshold* = 1.seconds
@@ -146,14 +146,44 @@ proc reverseWakeHook[T](ud: pointer) {.nimcall, gcsafe, raises: [].} =
 proc reverseGenerationHook[T](ud: pointer): uint {.nimcall, gcsafe, raises: [].} =
   return cast[ptr FFIContext[T]](ud).generation.load()
 
-proc closeThreadDispatcher() =
-  ## chronos leaks a thread's dispatcher; free it last, once nothing polls (nim-chronos#614).
-  when defined(windows):
-    if closeHandle(getThreadDispatcher().getIoHandler()) == 0:
-      error "failed to close the thread's IOCP port; the handle leaks"
-  else:
-    getThreadDispatcher().getIoHandler().close2().isOkOr:
-      error "failed to close the thread's poller; the fd leaks", err = error
+proc unregisterWaitedSignal(signal: ThreadSignalPtr) =
+  ## `wait` leaves the signal's fd registered in this thread's dispatcher, and
+  ## `closeThreadDispatcher` refuses to close a dispatcher that still has one.
+  ## chronos keeps that fd private, so it is read from the signal's layout until
+  ## `ThreadSignalPtr.unregister` ships:
+  ## https://github.com/status-im/nim-chronos/pull/740
+  when not defined(windows):
+    # `ThreadSignal` is `efd` on Linux, `rfd, wfd` elsewhere; `wait` registers the first.
+    const fdFields = when defined(linux) and not defined(emscripten): 1 else: 2
+    static:
+      doAssert sizeof(ThreadSignal) == fdFields * sizeof(AsyncFD),
+        "chronos changed ThreadSignal's layout; revisit unregisterWaitedSignal"
+    let fd = cast[ptr AsyncFD](signal)[]
+    if getThreadDispatcher().contains(fd):
+      unregister2(fd).isOkOr:
+        error "failed to unregister a signal from its thread's dispatcher",
+          err = osErrorMsg(error)
+
+proc closeDispatcherHook() {.gcsafe, raises: [].} =
+  ## chronos never closes a thread's dispatcher, and a library's `onThreadDestruction`
+  ## hook can still poll it after the thread body returns (nim-brokers does). Nim
+  ## runs the hooks in reverse, so registering this one first makes it run last.
+  try:
+    let diagnostic = closeThreadDispatcher()
+    if diagnostic.isSome():
+      error "a thread's chronos dispatcher did not close cleanly",
+        error = diagnostic.get()
+  except Defect as e:
+    # chronos asserts nothing is still registered; leak the dispatcher rather than abort the host.
+    error "a thread's chronos dispatcher still had work registered; it leaks",
+      error = e.msg
+  when defined(gcDestructors):
+    # orc never frees the hook list; this is the last hook, so nothing reads it after.
+    reset(nimThreadDestructionHandlers)
+
+proc registerCloseDispatcherHook() =
+  ## Call first thing in a thread body, before any library can register its own hook.
+  onThreadDestruction(closeDispatcherHook)
 
 include ./event_thread
 include ./ffi_thread
@@ -227,13 +257,8 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   initReverseState(ctx[].reverse)
   ctx[].reverse.installContextHooks(reverseWakeHook[T], reverseGenerationHook[T], ctx)
   initHandleRegistry(ctx[].handles)
-  initEventQueue(ctx[].eventQueue)
-  ctx.ffiHeartbeat.store(0)
-  ctx.libReady.store(false)
-  ctx.eventQueueStuck.store(false)
-  ctx.ffiThreadExited.store(false)
-  ctx.staleWarnInterval = StaleWarnInterval
 
+  # Armed before the first step that can fail, so every early return cleans up.
   var success = false
   defer:
     if not success:
@@ -241,6 +266,14 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
       ctx.deinitContextResources().isOkOr:
         error "failed to clean up resources after createFFIContext failure",
           error = error
+
+  ?initEventQueue(ctx[].eventQueue)
+  ?initOutbound(ctx[].outbound)
+  ctx.ffiHeartbeat.store(0)
+  ctx.libReady.store(false)
+  ctx.eventQueueStuck.store(false)
+  ctx.ffiThreadExited.store(false)
+  ctx.staleWarnInterval = StaleWarnInterval
 
   newSignalOrErr(ctx.reqSignal, "reqSignal")
   newSignalOrErr(ctx.stopSignal, "stopSignal")
@@ -307,24 +340,28 @@ proc markAsActive*[T](ctx: ptr FFIContext[T]) =
   ## Reused context: its worker threads are still alive; re-arm for requests.
   ctx.lifecycle.store(CtxLifecycle.Active)
 
-proc awaitClaimReleased[T](ctx: ptr FFIContext[T]): bool =
-  ## `finishRecycle` releases the claim one step after it fires the done signal. False on timeout.
+proc awaitClaimReleased[T](ctx: ptr FFIContext[T], claimed: uint): bool =
+  ## `finishRecycle` releases the claim one step after it fires the done signal.
+  ## Waits for `claimed` to end, not for the slot to be free: under churn the next
+  ## owner claims it first, and this owner would never see it free. False on timeout.
   const
     SpinRounds = 1000
     SleepRounds = 1000
       ## then 1ms apiece: a spin alone starves the releasing thread on one core.
   for _ in 0 ..< SpinRounds:
-    if not ctx.isInUse():
+    if ctx.generation.load() != claimed:
       return true
     cpuRelax()
   for _ in 0 ..< SleepRounds:
-    if not ctx.isInUse():
+    if ctx.generation.load() != claimed:
       return true
     os.sleep(1)
   false
 
 proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Frees the lib and releases the slot, keeping its threads for the next createFFIContext.
+  let claimed = ctx.currentGeneration()
+
   var expected = CtxLifecycle.Active
   if not ctx.lifecycle.compareExchange(expected, CtxLifecycle.RecyclePending):
     return err("requestRecycle: context is not Active (already recycling)")
@@ -340,8 +377,19 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   if not fired:
     return err("requestRecycle: failed to signal the FFI thread in time")
 
-  let done = ctx.recycleDoneSignal.waitSync(RecycleWaitTimeout).valueOr:
-    return err("requestRecycle: failed waiting for recycle: " & $error)
+  # The done signal is shared by the slot, so a new owner may clear it before we
+  # see it. Poll the generation too: if it changed, the recycle is done.
+  let deadline = Moment.now() + RecycleWaitTimeout
+  var done = false
+  while true:
+    let fired = ctx.recycleDoneSignal.waitSync(RecycleDonePollInterval).valueOr:
+      return err("requestRecycle: failed waiting for recycle: " & $error)
+    if fired or ctx.currentGeneration() != claimed or
+        ctx.lifecycle.load() == CtxLifecycle.RecycleFailed:
+      done = true
+      break
+    if Moment.now() >= deadline:
+      break
   if not done:
     # Quarantine, not release: this caller already saw the failure.
     ctx.recycleAbandoned.store(true)
@@ -354,7 +402,7 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
         "; the library and the pool slot leak, and callbacks can still fire"
     )
 
-  if not ctx.awaitClaimReleased():
+  if not ctx.awaitClaimReleased(claimed):
     # An ok here reads as a live slot, so the idle reap is skipped and nothing triggers a later one.
     error "the recycled slot did not come free; the pool treats it as still owned"
     return err("requestRecycle: the slot did not come free")

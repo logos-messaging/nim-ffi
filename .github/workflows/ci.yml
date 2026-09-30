@@ -42,7 +42,8 @@ jobs:
         test_ffi_context test_gc_compat test_serial test_ctx_validation
         test_foreign_thread test_event_listener_reentrancy test_ffi_teardown
         test_ffi_recycle_reset test_ffi_claim_generation test_ffi_ingress_limits
-        test_ctx_after_failed_ctor test_event_thread
+        test_ctx_after_failed_ctor test_event_thread test_ffi_thread_destruction
+        test_ffi_pool_churn test_ffi_wake
       oses: '["macos-15","windows-latest"]'
       nim-versions: '["stable"]'
       nimble-version: ${{ needs.versions.outputs.nimble }}
@@ -90,7 +91,7 @@ jobs:
           path: |
             nimbledeps/
             nimble.paths
-          key: ${{ runner.os }}-nimbledeps-stable-${{ hashFiles('*.nimble') }}
+          key: ${{ runner.os }}-nimbledeps-stable-${{ hashFiles('*.nimble', 'nimble.lock') }}
           restore-keys: |
             ${{ runner.os }}-nimbledeps-stable-
             ${{ runner.os }}-nimbledeps-
@@ -127,6 +128,14 @@ jobs:
           fi
           nimble test_c_e2e -y
 
+      - name: Run C and C++ examples
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            export PATH="$GITHUB_WORKSPACE/.nim_runtime/bin:$HOME/.nimble/bin:$PATH"
+          fi
+          nimble run_examples -y
+
   check-bindings:
     # Single OS is enough — codegen output is platform-independent; the Nim
     # matrix catches version-sensitive output (the PR #39 drift class).
@@ -139,13 +148,13 @@ jobs:
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
   rust-bindings:
-    # `--examples` reaches api.rs, which no other target uses; build.rs shells out to `nim c`, hence the nimble job.
-    # `--tests` runs the wrapper-level reverse FFI tests; build.rs sets the rpath to the built library.
-    name: Build and test generated Rust bindings
+    # The examples are the only consumers of api.rs; build.rs shells out to `nim c`, hence the nimble job.
+    # `cargo test --tests` runs the wrapper-level reverse FFI tests; build.rs sets the rpath.
+    name: Run Rust examples and tests
     needs: versions
     uses: ./.github/workflows/nimble-job.yml
     with:
-      run: cargo build --locked --manifest-path examples/timer/rust_bindings/Cargo.toml --examples && cargo test --locked --manifest-path examples/timer/rust_bindings/Cargo.toml --tests
+      run: nimble run_examples_rust -y && cargo test --locked --manifest-path examples/timer/rust_bindings/Cargo.toml --tests
       nim-versions:   ${{ needs.versions.outputs.nim-versions }}
       nimble-version: ${{ needs.versions.outputs.nimble }}
 

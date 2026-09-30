@@ -4,7 +4,23 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Cross-compiled `genBindings` no longer needs `-d:ffiSrcPath`.** The embedded
+  source path was derived with `std/os.relativePath`, which judges absoluteness
+  and joins separators by the TARGET's rules. Cross-compiling to Windows from a
+  POSIX builder, a build path like `/tmp/out` is not absolute under Windows
+  rules, so the derivation fell back to the current directory and the compile
+  died with `cannot 'importc' variable at compile time; getCurrentDirectoryW`.
+  It is now derived for `buildOS`, and never consults the working directory.
+- **A relative `-d:ffiOutputDir` resolves against the compiled source**, not the
+  compiler's working directory, which is not a stable base: the same flag wrote
+  to a different place depending on where the build was invoked from.
+
 ### Added
+- `ffi/ffi_wake.nim`: a level-triggered wake signal whose handle a host can wait
+  on, built on each OS's own primitive (eventfd on Linux, a kqueue with an
+  `EVFILT_USER` event on macOS and the BSDs, a manual-reset Event on Windows).
+  Nothing uses it yet; it is the base for the upcoming `<lib>_poll`.
 - `declareLibrary` exports `<lib>_shutdown()`, declared in the generated C and
   C++ headers and wrapped by the Rust crate as `<Lib>Ctx::shutdown()`. It stops
   every context the pool still holds, the `{.ffiStatic.}` one included, and
@@ -76,6 +92,14 @@ All notable changes to this project are documented in this file.
   router would silently give it the ctor ABI instead.
 
 ### Changed
+- **FFI parameter names no longer collide with generated request internals.**
+  Names such as `callback`, `userData`, `T`, and `request` remain available to
+  user APIs and keep their original CBOR field names.
+- **Cross-compiled bindings now land in `ffiOutputDir`.** `genBindings` joined
+    paths with the target OS's separator, so building for another OS wrote
+    backslash-named files into the working directory. `nim check` now fails with a
+    diagnostic instead of silently skipping generation; pass
+    `--experimental:vmopsDanger`, or generate with `nim c --compileOnly`.
 - **The generated `NIMFFI_RET_*` codes come from the Nim constants.** The four
   codes were typed by hand in the C template, the C++ template and the Rust
   generator, and they had already drifted: the C header defined
@@ -109,6 +133,15 @@ All notable changes to this project are documented in this file.
   define if your host needs more.
 
 ### Removed
+- **`NimFfiStr` and its `nimffi_str()` wrapper are gone from the C binding.** A
+  Nim `string`/`cstring` now maps to a plain `const char*`, so a request field
+  takes a string literal directly (`EchoRequest req = {"hello"}`) and a reply
+  string is read without `.data`. The pointer-to-length pair only ever carried
+  a length C could already get from `strlen`, at the cost of a wrapper call at
+  every call site. The one behaviour lost is a string carrying embedded NUL
+  bytes, which now truncates at the first one — `seq[byte]`/`NimFfiBytes`
+  remains the binary-safe type. C++, Rust and Go bindings are unaffected; they
+  never used these types.
 - **The `abi = c` wire is gone; CBOR is the only wire.** `declareLibrary` takes
   the library name and its type alone, and no annotation accepts an
   `"abi = ..."` argument. With it go the `_CWire` companions and their codec
@@ -134,6 +167,16 @@ All notable changes to this project are documented in this file.
   their `genbindings_*` copies duplicated the root tasks.
 
 ### Fixed
+- **A call that carries a nil or stale handle before the library is initialized
+  no longer segfaults.** The context guard of every `{.ffi.}` proc answers a
+  token it cannot resolve with `RET_ERR` and the message `ctx is not a valid FFI
+  context` — a Nim string, so the error path's first act is an allocation. A
+  host whose very first call passes an uninitialized or already-destroyed handle
+  gets there before any `{.ffiCtor.}` or `{.ffiStatic.}` call has run
+  `initializeLibrary()`, so under `--mm:refc` that allocation reaches a
+  collector that was never started and dies in `collectCT`. The guard now
+  initializes the library on that path, as the static guard already did.
+  `--mm:orc` never showed it: the literal does not go through the collector.
 - **A context whose teardown did not finish is quarantined, not recycled.**
   `recycleContext` gated the slot release on the request drain alone, and
   `runTeardown` returned nothing: a `{.ffiDtor.}` cut short by

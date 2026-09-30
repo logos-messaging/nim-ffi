@@ -63,7 +63,7 @@ proc sanFlags(san: string): string =
   # space-separated flags inside a single --passC argument.
   #
   # `asan-ubsan` enables LeakSanitizer too: ASan includes LSan, so leaks are
-  # reported when ASAN_OPTIONS=detect_leaks=1 (set by the sanitizer CI job).
+  # reported when ASAN_OPTIONS=detect_leaks=1 (set from tests/e2e/sanitizer.env).
   case san
   of "none", "":
     ""
@@ -111,14 +111,34 @@ proc mmModes(): seq[string] =
   else:
     @[nimFlagsOrc, nimFlagsRefc]
 
-proc applyTsanSuppressions() =
-  ## Adds tsan.supp to TSAN_OPTIONS without clobbering options the CI job set.
-  let suppPath = thisDir() & "/tsan.supp"
-  let existing = getEnv("TSAN_OPTIONS")
-  if existing == "":
-    putEnv("TSAN_OPTIONS", "suppressions=" & suppPath)
-  elif "suppressions=" notin existing:
-    putEnv("TSAN_OPTIONS", existing & ":suppressions=" & suppPath)
+func sanitizerEnvKeys(san: string): seq[string] =
+  case san
+  of "asan-ubsan":
+    @["ASAN_OPTIONS", "UBSAN_OPTIONS", "LSAN_OPTIONS"]
+  of "tsan":
+    @["TSAN_OPTIONS"]
+  else:
+    @[]
+
+func envFileValue(lines: openArray[string], key: string): string =
+  for line in lines:
+    if line.startsWith(key & "="):
+      return line[key.len + 1 .. ^1]
+  ""
+
+proc applySanitizerEnv(san: string) =
+  ## Sets the tests/e2e/sanitizer.env options for `san`; a key the env already sets wins.
+  let envFile = thisDir() & "/tests/e2e/sanitizer.env"
+  let lines = readFile(envFile).splitLines()
+  for key in sanitizerEnvKeys(san):
+    let value = lines.envFileValue(key)
+    if value.len == 0:
+      echo envFile & " has no " & key
+      quit(QuitFailure)
+
+    if not existsEnv(key):
+      putEnv(key, value.replace("@REPO_ROOT@", thisDir()))
+    echo key & "=" & getEnv(key)
 
 proc genBindingsCmd(flags, src: string, langs = "rust", outDir = ""): string =
   ## One `nim c` that emits `langs` (comma-separated) from `src`. Output dir and
@@ -131,6 +151,44 @@ proc genBindingsCmd(flags, src: string, langs = "rust", outDir = ""): string =
     cmd.add " -d:ffiOutputDir=" & outDir
   cmd.add " " & src
   cmd
+
+proc checkCrossTargetCodegenPaths() =
+  ## Code generation runs inside the compiler process, so its filesystem paths
+  ## must follow the build OS even when the generated library targets another OS.
+  let testRoot = getTempDir() / "nim_ffi_cross_codegen"
+  let workDir = testRoot / "work"
+  let outDir = testRoot / "bindings"
+  let nimcache = testRoot / "nimcache"
+  let source = thisDir() / echoSrc
+  let targetOs = when defined(windows): "linux" else: "windows"
+
+  rmDir(testRoot)
+  mkDir(workDir)
+
+  withDir(workDir):
+    # No -d:ffiSrcPath: the embedded source path is derived for the build OS,
+    # so a cross target must not need an override to get a usable one.
+    runOrQuit genBindingsCmd(
+      nimFlagsOrc & " --os:" & targetOs & " --cpu:amd64 --nimcache:" & nimcache,
+      source,
+      "c,cpp,rust,cddl",
+      outDir,
+    )
+
+  let expected = [
+    "echo.h", "nim_ffi_prelude.h", "nim_ffi_cbor.h", "echo.hpp", "CMakeLists.txt",
+    "Cargo.toml", "build.rs", "src/lib.rs", "src/ffi.rs", "src/types.rs", "src/api.rs",
+    "echo.cddl",
+  ]
+  var missing: seq[string]
+  for path in expected:
+    if not fileExists(outDir / path):
+      missing.add(path)
+
+  rmDir(testRoot)
+  if missing.len > 0:
+    echo "Cross-target codegen wrote files outside ffiOutputDir: " & missing.join(", ")
+    quit(QuitFailure)
 
 task buildffi, "Compile the library":
   runOrQuit "nim c " & nimFlagsOrc & " --app:lib --noMain ffi.nim"
@@ -146,8 +204,7 @@ task bench_ffi_submit,
   # asan-ubsan and tsan; FFI_SUBMIT_PER_THREAD sets per-thread volume.
   let san = getEnv("NIM_FFI_SAN", "none")
   let extra = sanFlags(san)
-  if san == "tsan":
-    applyTsanSuppressions()
+  applySanitizerEnv(san)
   for flags in mmModes():
     runOrQuit "nim c -r " & flags & " -d:danger" & extra &
       " tests/bench/bench_ffi_submit.nim"
@@ -212,12 +269,31 @@ task test_c_e2e, "Build and run the C end-to-end tests (timer + echo)":
   runOrQuit "cmake --build tests/e2e/c/build --config Debug"
   runOrQuit "ctest --test-dir tests/e2e/c/build --output-on-failure -C Debug"
 
+proc runExample(dir: string) =
+  runOrQuit "cmake -S " & dir & " -B " & dir & "/build"
+  runOrQuit "cmake --build " & dir & "/build --config Debug"
+  # Visual Studio is multi-config: the binary lands under build/Debug/.
+  when defined(windows):
+    runOrQuit dir & "/build/Debug/my_timer_example.exe"
+  else:
+    runOrQuit dir & "/build/my_timer_example"
+
+task run_examples, "Build and run the C and C++ example programs":
+  runOrQuit "nimble genbindings_c"
+  runOrQuit "nimble genbindings_cpp"
+  runExample("examples/timer/c_bindings")
+  runExample("examples/timer/cpp_bindings")
+
+task run_examples_rust, "Build and run the Rust example programs":
+  const manifest = "examples/timer/rust_bindings/Cargo.toml"
+  for example in ["sync_main", "sync_client", "tokio_main", "tokio_client"]:
+    runOrQuit "cargo run --locked --manifest-path " & manifest & " --example " & example
+
 task test_sanitized,
   "Run all unit tests under a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
   let san = getEnv("NIM_FFI_SAN", "none")
   let extra = sanFlags(san)
-  if san == "tsan":
-    applyTsanSuppressions()
+  applySanitizerEnv(san)
   for flags in mmModes():
     for t in unitTests:
       runOrQuit "nim c -r " & flags & extra & " tests/unit/" & t & ".nim"
@@ -227,6 +303,7 @@ task test_cpp_e2e_sanitized,
   "Build and run the C++ e2e tests with a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
   let mm = getEnv("NIM_FFI_MM", "orc")
   let san = getEnv("NIM_FFI_SAN", "none")
+  applySanitizerEnv(san)
   runOrQuit "nimble genbindings_cpp"
   runOrQuit "nimble genbindings_cpp_echo"
   runOrQuit "cmake -S tests/e2e/cpp -B tests/e2e/cpp/build" & " -DNIM_FFI_MM=" & mm &
@@ -238,6 +315,7 @@ task test_c_e2e_sanitized,
   "Build and run the C e2e tests (timer + echo) with a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
   let mm = getEnv("NIM_FFI_MM", "orc")
   let san = getEnv("NIM_FFI_SAN", "none")
+  applySanitizerEnv(san)
   runOrQuit "nimble genbindings_c"
   runOrQuit "nimble genbindings_c_echo"
   runOrQuit "cmake -S tests/e2e/c -B tests/e2e/c/build" & " -DNIM_FFI_MM=" & mm &
@@ -268,6 +346,10 @@ task genbindings_c_echo, "Generate C bindings for the echo example":
   runOrQuit genBindingsCmd(nimFlagsOrc, echoSrc, "c")
   runOrQuit genBindingsCmd(nimFlagsRefc, echoSrc, "c")
 
+task test_cross_target_codegen_paths,
+  "Verify cross-target codegen writes through build-OS paths":
+  checkCrossTargetCodegenPaths()
+
 task check_bindings_rust, "Verify checked-in Rust bindings match Nim source":
   runOrQuit "nimble genbindings_rust"
   checkBindingsDiff(
@@ -277,7 +359,7 @@ task check_bindings_rust, "Verify checked-in Rust bindings match Nim source":
       "examples/timer/rust_bindings/build.rs",
       "examples/timer/rust_bindings/src",
       # Hand-written, but inside the generated tree: diff them so codegen can
-      # never quietly overwrite or drop the two crate examples CI compiles.
+      # never overwrite or drop the crate examples CI runs.
       "examples/timer/rust_bindings/examples",
     ],
   )
@@ -317,6 +399,7 @@ task check_bindings_cddl, "Verify the checked-in CDDL schema matches Nim source"
   )
 
 task check_bindings, "Verify all checked-in example bindings match Nim source":
+  runOrQuit "nimble test_cross_target_codegen_paths"
   runOrQuit "nimble check_bindings_rust"
   runOrQuit "nimble check_bindings_cpp"
   runOrQuit "nimble check_bindings_c"

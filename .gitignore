@@ -27,8 +27,9 @@ tests/perf/benchlib/cpp_bindings/
 # Cargo build dirs of the example crates
 examples/**/target/
 
-# Example C++ build artifacts
+# Example C and C++ build artifacts
 examples/**/cpp_bindings/build/
+examples/**/c_bindings/build/
 
 # Development plans and working notes (local only)
 .local/

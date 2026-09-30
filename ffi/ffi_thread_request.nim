@@ -41,20 +41,15 @@ proc deleteRequest*(request: ptr FFIThreadRequest) =
 proc allocBaseRequest(
     callback: FFICallBack, userData: pointer, reqId: cstring
 ): ptr FFIThreadRequest =
-  ## c_malloc the envelope and set routing fields; payload set by a helper below.
+  ## c_calloc the envelope and set routing fields; payload set by a helper below.
   ## Nil when the allocation fails; every caller passes that nil on, and
   ## `sendRequestToFFIThread` turns it into an error for the host.
-  var ret = cast[ptr FFIThreadRequest](c_malloc(csize_t(sizeof(FFIThreadRequest))))
+  let ret = cast[ptr FFIThreadRequest](c_calloc(1, csize_t(sizeof(FFIThreadRequest))))
   if ret.isNil():
     return nil
   ret[].callback = callback
   ret[].userData = userData
   ret[].reqId = reqId.alloc()
-  ret[].data = nil
-  ret[].dataLen = 0
-  ret[].next = nil
-  ret[].responded = false
-  ret[].generation = 0
   return ret
 
 proc copySharedPayload(req: ptr FFIThreadRequest, data: ptr byte, dataLen: int): bool =
