@@ -307,6 +307,7 @@ suite "event queue overflow":
       let report = pollMsg(ctx)
       check report.ret == RET_OK
       check report.kind == MsgNotRespondingQueueFull
+      check report.seqNum == 0
 
       # The report is not repeated, and the events that fit are all there.
       var events = 0
