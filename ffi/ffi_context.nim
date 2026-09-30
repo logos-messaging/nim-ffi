@@ -414,9 +414,6 @@ proc stopAndJoinThreads*[T](
 ): Result[void, string] =
   ## On timeout, returns err and skips remaining joins (leaves threads live); caller cleans up.
   when defined(ffiPollMode):
-    # Every return, the early ones included, must tell the poller the context
-    # ended. Deferred rather than done first, so what the teardown still emits
-    # on the way out reaches the poller before CLOSED.
     defer:
       ctx[].outbound.closeOutbound(ctx.generation.load())
   ctx.signalStop().isOkOr:
