@@ -5,7 +5,7 @@
 ## wait, and the answer decoded into the declared return type.
 
 import std/[macros, strutils]
-import ../codegen/string_helpers
+import ../codegen/[meta, string_helpers]
 
 proc reverseArgsTypeName(procName: string): string =
   return snakeToPascalCase(camelToSnakeCase(procName)) & "HostCall"
@@ -36,6 +36,7 @@ macro ffiReverse*(prc: untyped): untyped =
     procNameNode = procNameNode[1]
   let procNameStr = $procNameNode
   let wireName = camelToSnakeCase(procNameStr)
+  claimNameId(wireName, "reverse call")
 
   # The arguments ride as one named map, the same shape a request uses, so the
   # host decodes one typed value instead of a positional list.
