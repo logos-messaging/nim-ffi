@@ -50,14 +50,16 @@ proc fill(
   msg[] = addr outb.heldMsg[outb.heldMsgSlot]
 
 proc fillClosed[T](msg: ptr ptr NimFfiMsg, ctx: ptr FFIContext[T]) =
+  let seqNum = ctx[].outbound.nextSeq()
   if ctx.lifecycle.load() != CtxLifecycle.RecycleFailed:
-    fill(msg, ctx[].outbound, MsgClosed)
+    fill(msg, ctx[].outbound, MsgClosed, seqNum = seqNum)
     return
   let text = cstring(QuarantineReasons[ctx.recycleFailure.load()])
   fill(
     msg,
     ctx[].outbound,
     MsgClosed,
+    seqNum = seqNum,
     retCode = RET_ERR,
     payload = cast[pointer](text),
     len = text.len,
