@@ -96,8 +96,8 @@ TEST(ReverseFindings, SelfReplacementKeepsTheRunningImplsCapturesAlive) {
     EXPECT_EQ(probe.freedWhileRunning.load(), 0);
 }
 
-// Control: a host thread outside any dispatch already waits.
-TEST(ReverseFindings, ClearFromAHostThreadWaitsForTheRunningImpl) {
+// A host-thread clear returns at once; the box lives until the impl returns.
+TEST(ReverseFindings, ClearWhileRunningReleasesTheBoxAfterTheImplReturns) {
     auto ctx = makeCtx("find-host-clear");
     ASSERT_TRUE(ctx);
     Probe probe;
@@ -115,15 +115,15 @@ TEST(ReverseFindings, ClearFromAHostThreadWaitsForTheRunningImpl) {
 
     auto pending = ctx->host_clockAsync();
     probe.latch.waitEntered(1);
-    std::thread releaser([&] {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        probe.latch.release();
-    });
-    ASSERT_TRUE(ctx->clearFetchHostClockImpl()); // blocks until the impl returns
-    releaser.join();
+    ASSERT_TRUE(ctx->clearFetchHostClockImpl()); // no wait: the library owns the box
+    EXPECT_FALSE(probe.capture.expired());
+    probe.latch.release();
+    ASSERT_FALSE(pending.get().isErr());
     EXPECT_EQ(probe.freedWhileRunning.load(), 0);
-    EXPECT_TRUE(probe.capture.expired()); // and the box is gone right after
-    (void)pending.get();
+    for (int i = 0; i < 1000 && !probe.capture.expired(); i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(probe.capture.expired()); // released by the last invocation
 }
 
 // Found in the walkthrough: ~MyTimerCtx frees the box even when destroy had

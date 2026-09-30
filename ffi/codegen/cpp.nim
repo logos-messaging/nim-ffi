@@ -225,9 +225,6 @@ func reverseCallStruct(r: FFIReverseMeta): string =
 func reverseBoxStruct(r: FFIReverseMeta): string =
   capitalizeFirstLetter(r.nimProcName) & "ImplBox"
 
-func reverseBoxMember(r: FFIReverseMeta): string =
-  r.nimProcName & "ImplBox_"
-
 func reverseArgsCpp(r: FFIReverseMeta): string =
   ## "" when the interface takes no arguments.
   if r.argsTypeName.len == 0:
@@ -287,6 +284,13 @@ proc emitReverseApi(
           [libName]
       )
       lines.add("        }")
+      lines.add("        // Allocation-free, for reporting from a catch block.")
+      lines.add("        bool failRaw(const char* msg) const noexcept {")
+      lines.add(
+        "            return $1_reverse_reply(ctx, id, 1, reinterpret_cast<const std::uint8_t*>(msg), msg ? std::strlen(msg) : 0) == 0;" %
+          [libName]
+      )
+      lines.add("        }")
       lines.add("    };")
       lines.add("")
     for r in reverse:
@@ -294,25 +298,26 @@ proc emitReverseApi(
       lines.add(renderMemberDocComment(r.doc))
       lines.add("    bool set$1Impl($2 fn) {" % [pascal, reverseImplFnType(r)])
       lines.add(
-        "        auto owned = std::make_unique<$1>($1{ptr_, std::move(fn)});" %
-          [reverseBoxStruct(r)]
+        "        auto* raw = new $1{ptr_, std::move(fn)};" % [reverseBoxStruct(r)]
       )
-      lines.add("        auto* raw = owned.get();")
       lines.add(
-        "        if ($1_set_$2_impl(ptr_, &$3::$4ImplTrampoline, raw, nullptr) != 0) return false;" %
+        "        // The library owns the box now: it deletes it once no invocation runs it."
+      )
+      lines.add(
+        "        if ($1_set_$2_impl(ptr_, &$3::$4ImplTrampoline, raw, &$3::$4ImplRelease) != 0) {" %
           [libName, r.wireName, ctxTypeName, r.nimProcName]
       )
-      lines.add("        $1 = std::move(owned);" % [reverseBoxMember(r)])
+      lines.add("            delete raw; // refused: still ours")
+      lines.add("            return false;")
+      lines.add("        }")
       lines.add("        return true;")
       lines.add("    }")
       lines.add("")
       lines.add("    bool clear$1Impl() {" % [pascal])
       lines.add(
-        "        if ($1_set_$2_impl(ptr_, nullptr, nullptr, nullptr) != 0) return false;" %
+        "        return $1_set_$2_impl(ptr_, nullptr, nullptr, nullptr) == 0;" %
           [libName, r.wireName]
       )
-      lines.add("        $1.reset();" % [reverseBoxMember(r)])
-      lines.add("        return true;")
       lines.add("    }")
       lines.add("")
   if reverseEvents.len > 0:
@@ -362,23 +367,39 @@ proc emitReverseMachinery(
     lines.add("        void* ctx = nullptr;")
     lines.add("        $1 fn;" % [reverseImplFnType(r)])
     lines.add("    };")
+    lines.add("    static void $1ImplRelease(void* ud) {" % [r.nimProcName])
+    lines.add("        delete static_cast<$1*>(ud);" % [box])
+    lines.add("    }")
     lines.add(
-      "    static void $1ImplTrampoline(std::uint64_t call_id, const std::uint8_t* args, std::size_t len, void* ud) {" %
+      "    // noexcept: an exception must not unwind into the library's worker thread."
+    )
+    lines.add(
+      "    static void $1ImplTrampoline(std::uint64_t call_id, const std::uint8_t* args, std::size_t len, void* ud) noexcept {" %
         [r.nimProcName]
     )
     lines.add("        auto* box = static_cast<$1*>(ud);" % [box])
     lines.add("        $1 call{box->ctx, call_id};" % [callStruct])
-    lines.add("        if (!box->fn) { call.fail(\"no C++ impl callable\"); return; }")
+    lines.add("        try {")
+    lines.add(
+      "            if (!box->fn) { call.failRaw(\"no C++ impl callable\"); return; }"
+    )
     if argsCpp.len == 0:
-      lines.add("        (void)args; (void)len;")
-      lines.add("        box->fn(call);")
+      lines.add("            (void)args; (void)len;")
+      lines.add("            box->fn(call);")
     else:
-      lines.add("        $1 a{};" % [argsCpp])
-      lines.add("        if (decodeReverseArgs_(args, len, a) != CborNoError) {")
-      lines.add("            call.fail(\"reverse args decode failed\");")
-      lines.add("            return;")
-      lines.add("        }")
-      lines.add("        box->fn(call, a);")
+      lines.add("            $1 a{};" % [argsCpp])
+      lines.add("            if (decodeReverseArgs_(args, len, a) != CborNoError) {")
+      lines.add("                call.failRaw(\"reverse args decode failed\");")
+      lines.add("                return;")
+      lines.add("            }")
+      lines.add("            box->fn(call, a);")
+    lines.add("        } catch (const std::exception& e) {")
+    lines.add(
+      "            call.failRaw(e.what()); // dropped if the impl already replied"
+    )
+    lines.add("        } catch (...) {")
+    lines.add("            call.failRaw(\"host impl threw\");")
+    lines.add("        }")
     lines.add("    }")
     lines.add("")
 
@@ -519,6 +540,9 @@ proc generateCppHeader*(
       "typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, size_t args_len, void* user_data);"
     )
     lines.add("typedef void (*FFIReverseRelease)(void* user_data);")
+    lines.add("#ifndef NIMFFI_REVERSE_ACCEPTED")
+    lines.add(cReverseCodeDefines())
+    lines.add("#endif")
     for r in reverse:
       lines.add(
         "int $1_set_$2_impl(void* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release);" %
@@ -738,10 +762,6 @@ proc generateCppHeader*(
   if events.len > 0:
     lines.add(
       "    std::unordered_map<std::uint64_t, std::unique_ptr<ListenerBase>> listeners_;"
-    )
-  for r in reverse:
-    lines.add(
-      "    std::unique_ptr<$1> $2;" % [reverseBoxStruct(r), reverseBoxMember(r)]
     )
   lines.add(
     "    explicit $1(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}" %

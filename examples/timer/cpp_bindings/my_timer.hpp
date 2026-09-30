@@ -24,6 +24,7 @@
 #include <optional>
 #include <type_traits>
 #include <cstring>
+#include <exception>
 #include <cassert>
 extern "C" {
 #include <tinycbor/cbor.h>
@@ -912,6 +913,15 @@ int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
 // Reverse FFI: host-implemented interfaces + host-emitted events
 typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, size_t args_len, void* user_data);
 typedef void (*FFIReverseRelease)(void* user_data);
+#ifndef NIMFFI_REVERSE_ACCEPTED
+#define NIMFFI_REVERSE_ACCEPTED 0
+#define NIMFFI_REVERSE_INVALID_CTX 1
+#define NIMFFI_REVERSE_NOT_ACTIVE 2
+#define NIMFFI_REVERSE_PAYLOAD_TOO_LARGE 3
+#define NIMFFI_REVERSE_MAILBOX_FULL 4
+#define NIMFFI_REVERSE_WORKERS_FAILED 5
+#define NIMFFI_REVERSE_INVALID_ARGUMENT 6
+#endif
 int my_timer_set_fetch_host_clock_impl(void* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release);
 int my_timer_reverse_reply(void* ctx, uint64_t call_id, int ret_code, const uint8_t* reply_cbor, size_t reply_len);
 int my_timer_emit_on_host_tick(void* ctx, const uint8_t* payload_cbor, size_t payload_len);
@@ -1098,20 +1108,24 @@ public:
         bool fail(const std::string& msg) const {
             return my_timer_reverse_reply(ctx, id, 1, reinterpret_cast<const std::uint8_t*>(msg.data()), msg.size()) == 0;
         }
+        // Allocation-free, for reporting from a catch block.
+        bool failRaw(const char* msg) const noexcept {
+            return my_timer_reverse_reply(ctx, id, 1, reinterpret_cast<const std::uint8_t*>(msg), msg ? std::strlen(msg) : 0) == 0;
+        }
     };
 
     bool setFetchHostClockImpl(std::function<void(FetchHostClockCall, const std::string&)> fn) {
-        auto owned = std::make_unique<FetchHostClockImplBox>(FetchHostClockImplBox{ptr_, std::move(fn)});
-        auto* raw = owned.get();
-        if (my_timer_set_fetch_host_clock_impl(ptr_, &MyTimerCtx::fetchHostClockImplTrampoline, raw, nullptr) != 0) return false;
-        fetchHostClockImplBox_ = std::move(owned);
+        auto* raw = new FetchHostClockImplBox{ptr_, std::move(fn)};
+        // The library owns the box now: it deletes it once no invocation runs it.
+        if (my_timer_set_fetch_host_clock_impl(ptr_, &MyTimerCtx::fetchHostClockImplTrampoline, raw, &MyTimerCtx::fetchHostClockImplRelease) != 0) {
+            delete raw; // refused: still ours
+            return false;
+        }
         return true;
     }
 
     bool clearFetchHostClockImpl() {
-        if (my_timer_set_fetch_host_clock_impl(ptr_, nullptr, nullptr, nullptr) != 0) return false;
-        fetchHostClockImplBox_.reset();
-        return true;
+        return my_timer_set_fetch_host_clock_impl(ptr_, nullptr, nullptr, nullptr) == 0;
     }
 
     // ── Reverse FFI: host-emitted events (fire-and-forget) ──
@@ -1284,21 +1298,30 @@ private:
         void* ctx = nullptr;
         std::function<void(FetchHostClockCall, const std::string&)> fn;
     };
-    static void fetchHostClockImplTrampoline(std::uint64_t call_id, const std::uint8_t* args, std::size_t len, void* ud) {
+    static void fetchHostClockImplRelease(void* ud) {
+        delete static_cast<FetchHostClockImplBox*>(ud);
+    }
+    // noexcept: an exception must not unwind into the library's worker thread.
+    static void fetchHostClockImplTrampoline(std::uint64_t call_id, const std::uint8_t* args, std::size_t len, void* ud) noexcept {
         auto* box = static_cast<FetchHostClockImplBox*>(ud);
         FetchHostClockCall call{box->ctx, call_id};
-        if (!box->fn) { call.fail("no C++ impl callable"); return; }
-        std::string a{};
-        if (decodeReverseArgs_(args, len, a) != CborNoError) {
-            call.fail("reverse args decode failed");
-            return;
+        try {
+            if (!box->fn) { call.failRaw("no C++ impl callable"); return; }
+            std::string a{};
+            if (decodeReverseArgs_(args, len, a) != CborNoError) {
+                call.failRaw("reverse args decode failed");
+                return;
+            }
+            box->fn(call, a);
+        } catch (const std::exception& e) {
+            call.failRaw(e.what()); // dropped if the impl already replied
+        } catch (...) {
+            call.failRaw("host impl threw");
         }
-        box->fn(call, a);
     }
 
     void* ptr_;
     std::chrono::milliseconds timeout_;
     std::unordered_map<std::uint64_t, std::unique_ptr<ListenerBase>> listeners_;
-    std::unique_ptr<FetchHostClockImplBox> fetchHostClockImplBox_;
     explicit MyTimerCtx(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}
 };
