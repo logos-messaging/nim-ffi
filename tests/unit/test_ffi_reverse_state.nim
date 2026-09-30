@@ -293,6 +293,19 @@ suite "reply mailbox":
     check wakes == 2
     st.freeAllReplies()
 
+proc initGate(g: var GateBox) =
+  g.lock.initLock()
+  g.cond.initCond()
+
+# Shared with a stopping thread, so module level.
+var claimSt: FFIReverseState
+var claimGate: GateBox
+var claimStopped: Atomic[int]
+
+proc stopClaimSt() {.thread.} =
+  {.cast(gcsafe).}:
+    claimStopped.store(stopReverseWorkers(claimSt, 5000).stopped)
+
 suite "worker pool lifecycle":
   test "start is lazy, idempotent and explicit stop joins every worker":
     var st: FFIReverseState
@@ -312,6 +325,40 @@ suite "worker pool lifecycle":
     check not st.workersStarted()
     check st.startReverseWorkers(1)
     check st.workerCount == 1
+
+  test "a stop right after the start does not strand a worker that has not run yet":
+    # The claimed stop clears `workers`; each worker got its own slot at creation.
+    for _ in 0 ..< 200:
+      var st: FFIReverseState
+      initReverseState(st)
+      check st.startReverseWorkers(2)
+      let stop = stopReverseWorkers(st)
+      check stop.stopped == 2
+      check stop.leaked == 0
+      deinitReverseState(st)
+
+  test "a start while a stop is joining the pool is refused":
+    initReverseState(claimSt)
+    initGate(claimGate)
+    check claimSt.startReverseWorkers(1)
+    claimSt.setImpl("gate", gateImpl, addr claimGate)
+    ffiCurrentReverseState = addr claimSt
+    defer:
+      ffiCurrentReverseState = nil
+    let blocker = ffiReverseCall("gate", @[], 60_000)
+    claimGate.waitEntered(1)
+
+    var stopper: Thread[void]
+    createThread(stopper, stopClaimSt)
+    os.sleep(50) # the stop has claimed the pool and waits on the stuck worker
+    check not claimSt.startReverseWorkers(1)
+    claimGate.open()
+    joinThread(stopper)
+    check claimStopped.load() == 1
+    check claimSt.startReverseWorkers(1) # the stop finished: a fresh pool may start
+    failPendingReverse("done")
+    discard waitFor blocker
+    deinitReverseState(claimSt)
 
   test "a worker blocked in a host impl is leaked at stop, not joined":
     var st: FFIReverseState
@@ -350,6 +397,16 @@ template withReverseHarness(stIdent: untyped, workers: int, body: untyped) =
   body
 
 suite "ffiReverseCall":
+  test "fails fast once the context is closing, without queueing":
+    withReverseHarness(st, 0):
+      st.setImpl("echo", nopImpl, nil)
+      st.closing.store(true)
+      let res = waitFor ffiReverseCall("echo", @[], 1000)
+      check res.isErr()
+      check "closing" in res.error
+      check st.queueLen() == 0
+      check ffiPendingReverseLen() == 0
+
   test "fails fast when no implementation is registered":
     withReverseHarness(st, 0):
       let res = waitFor ffiReverseCall("nobody", @[], 1000)

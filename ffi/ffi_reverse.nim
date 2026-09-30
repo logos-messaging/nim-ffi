@@ -99,6 +99,7 @@ type
 
   ReverseWorkerArg = object
     st: ptr FFIReverseState
+    me: ptr FFIReverseWorker # fixed at creation: a claimed stop clears `st.workers`
     idx: int
 
   FFIReverseWorker* = object
@@ -139,6 +140,8 @@ type
     qHead, qTail: ptr ReverseInvocation
     qCount: int
     stopping*: Atomic[bool]
+    stopClaimed: bool # a stop is joining the workers; a start must not race it
+    closing*: Atomic[bool] # recycle or shutdown began: new reverse calls fail fast
     workers: ptr UncheckedArray[FFIReverseWorker] # c_malloc'd, nil until started
     workerCount*: int
     leakedWorkers*: int # never joined: the worker array and the locks stay alive
@@ -172,6 +175,8 @@ proc initReverseState*(st: var FFIReverseState) =
   st.qTail = nil
   st.qCount = 0
   st.stopping.store(false)
+  st.stopClaimed = false
+  st.closing.store(false)
   st.workers = nil
   st.workerCount = 0
   st.leakedWorkers = 0
@@ -568,7 +573,7 @@ proc runInvocation(
 
 proc reverseWorkerBody(arg: ReverseWorkerArg) {.thread.} =
   let st = arg.st
-  let me = addr st[].workers[arg.idx]
+  let me = arg.me
   onReverseWorker = true
   myWorkerIdx = arg.idx + 1
   defer:
@@ -585,25 +590,32 @@ proc reverseWorkerBody(arg: ReverseWorkerArg) {.thread.} =
 proc stopReverseWorkers*(
     st: var FFIReverseState, timeoutMs: int = ReverseWorkerJoinTimeoutMs
 ): ReverseStopResult {.nimcall, gcsafe, raises: [].} =
-  ## Idempotent. Joins each worker within `timeoutMs`; one still inside an impl leaks.
+  ## Idempotent. The caller that claims the pool joins it within one `timeoutMs`; a
+  ## worker still inside an impl then leaks. A concurrent second call returns empty.
   var count = 0
+  var workers: ptr UncheckedArray[FFIReverseWorker]
   withLock st.qLock:
     count = st.workerCount
     if count == 0:
       return ReverseStopResult()
+    # The claim: a second stopper, or a start, now sees no running pool.
+    workers = st.workers
+    st.workerCount = 0
+    st.workers = nil
+    st.stopClaimed = true
     st.stopping.store(true)
     broadcast(st.qCond)
   st.purgeQueue()
 
   var stopped = 0
   var leaked = 0
+  let deadline = nowNs() + int64(max(timeoutMs, 0)) * 1_000_000'i64
   for i in 0 ..< count:
-    let w = addr st.workers[i]
+    let w = addr workers[i]
     if onReverseWorker and myWorkerIdx == i + 1:
       # A host impl called a teardown export on this worker: a self-join would hang.
       leaked.inc()
       continue
-    let deadline = nowNs() + int64(max(timeoutMs, 0)) * 1_000_000'i64
     while not w[].exited.load() and nowNs() < deadline:
       sleep(1)
     if w[].exited.load():
@@ -612,12 +624,11 @@ proc stopReverseWorkers*(
     else:
       leaked.inc()
 
-  withLock st.qLock:
-    st.workerCount = 0
-    st.leakedWorkers += leaked
   if leaked == 0:
-    c_free(st.workers)
-    st.workers = nil
+    c_free(workers)
+  withLock st.qLock:
+    st.leakedWorkers += leaked
+    st.stopClaimed = false
   return ReverseStopResult(stopped: stopped, leaked: leaked)
 
 proc startReverseWorkers*(
@@ -626,7 +637,7 @@ proc startReverseWorkers*(
   ## Idempotent: a running pool keeps its size. `n <= 0` starts `ReverseWorkersDefault`.
   let count = if n <= 0: ReverseWorkersDefault else: n
   withLock st.qLock:
-    if st.workerCount > 0 or st.leakedWorkers > 0:
+    if st.workerCount > 0 or st.leakedWorkers > 0 or st.stopClaimed:
       return st.workerCount > 0
 
     st.stopping.store(false)
@@ -645,7 +656,9 @@ proc startReverseWorkers*(
     for i in 0 ..< count:
       try:
         createThread(
-          st.workers[i].thread, reverseWorkerBody, ReverseWorkerArg(st: addr st, idx: i)
+          st.workers[i].thread,
+          reverseWorkerBody,
+          ReverseWorkerArg(st: addr st, me: addr st.workers[i], idx: i),
         )
         started.inc()
       except ValueError, ResourceExhaustedError:
@@ -664,15 +677,17 @@ proc scanReverseWorkers*(
 ): seq[ReverseWorkerTransition] {.raises: [], gcsafe.} =
   ## Event thread only: reports once each worker that just stalled or just recovered.
   var count = 0
+  var workers: ptr UncheckedArray[FFIReverseWorker]
   withLock st.qLock:
     count = st.workerCount
-  if count == 0 or st.workers.isNil():
+    workers = st.workers
+  if count == 0 or workers.isNil():
     return @[]
 
   var transitions: seq[ReverseWorkerTransition] = @[]
   let now = nowNs()
   for i in 0 ..< count:
-    let w = addr st.workers[i]
+    let w = addr workers[i]
     let busy = w[].busySinceNs.load()
     if busy > 0 and now - busy > stallNs:
       if not w[].stalled:
@@ -754,6 +769,9 @@ proc ffiReverseCall*(
   let st = ffiCurrentReverseState
   if st.isNil():
     return err("reverse call " & name & " outside an FFI processing thread")
+  if st[].closing.load():
+    # Set before the teardown fails the parked calls, so nothing parks behind it.
+    return err("reverse call " & name & " abandoned: the FFI context is closing")
   if not st[].hasImpl(name):
     return err("no host implementation registered for " & name)
   if not st[].startReverseWorkers():

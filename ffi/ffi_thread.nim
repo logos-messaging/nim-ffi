@@ -217,6 +217,7 @@ proc resetForNextOwner[T](ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]
   clearListeners(ctx[].eventRegistry)
   ctx[].reverse.purgeQueue()
   ctx[].reverse.freeAllReplies()
+  ctx[].reverse.closing.store(false)
   # A reused slot skips initContextResources, so the handle ids of the old owner
   # would otherwise resolve for the next one.
   ctx[].handles.releaseAll()
@@ -254,7 +255,9 @@ proc recycleContext[T](
   defer:
     ctx.finishRecycle(failure)
 
-  # Before the drain: a handler parked on a reverse call holds the drain until its deadline.
+  # Before the drain: a handler parked on a reverse call holds the drain until its
+  # deadline. `closing` first, so a handler or the dtor cannot park a new one after.
+  ctx[].reverse.closing.store(true)
   failPendingReverse("FFI context is recycling; the reverse call was abandoned")
 
   if not await drainOngoing(ongoing):
@@ -308,6 +311,8 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ffiCurrentEventQueue = addr ctx[].eventQueue
   ffiCurrentEventQueueStuck = addr ctx[].eventQueueStuck
   ffiCurrentReverseState = addr ctx[].reverse
+  # A parked slot served again: the previous thread's shutdown left it closing.
+  ctx[].reverse.closing.store(false)
   ffiEventQueueSignalPtr = ctx.eventQueueSignal
   ffiCurrentNotifyEventEnqueued = ffiNotifyEventEnqueuedHook
   onFFIThread = true
@@ -390,6 +395,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
     processQueue()
     drainReverseReplies()
     # The host is shutting down and will not answer a parked reverse call.
+    ctx[].reverse.closing.store(true)
     failPendingReverse("FFI context is shutting down; the reverse call was abandoned")
     cleanFinishedRequests()
     if pending.len > 0:
