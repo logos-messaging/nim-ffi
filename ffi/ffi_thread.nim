@@ -246,6 +246,11 @@ proc finishRecycle[T](ctx: ptr FFIContext[T], failure: RecycleFailure) =
   if outcome != RecycleFailure.None:
     ctx.recycleFailure.store(outcome)
     ctx.lifecycle.store(CtxLifecycle.RecycleFailed)
+    when defined(ffiPollMode):
+      # A failed recycle skips `resetForNextOwner`, which is what closes the
+      # outbound, so its poller would never hear that the context ended. After
+      # the stores above, so that poll reports the quarantine and its reason.
+      ctx[].outbound.closeOutbound(ctx.currentGeneration())
     error "context quarantined; the pool slot and its threads leak, the " &
       "library stays alive and its callbacks can still fire",
       reason = outcome.reason(), cause = $outcome
