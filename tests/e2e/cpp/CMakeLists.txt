@@ -88,6 +88,31 @@ else()
         DISCOVERY_TIMEOUT 120)
 endif()
 
+# PR #154 review reproducers: they fail until their findings are fixed.
+add_executable(reverse_findings_e2e test_reverse_findings_e2e.cpp)
+target_link_libraries(reverse_findings_e2e PRIVATE my_timer_headers GTest::gtest_main)
+add_dependencies(reverse_findings_e2e my_timer_nim_lib)
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    set_target_properties(reverse_findings_e2e PROPERTIES
+        BUILD_RPATH   "${_my_timer_dir}"
+        INSTALL_RPATH "${_my_timer_dir}")
+else()
+    add_custom_command(TARGET reverse_findings_e2e POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${my_timer_RUNTIME_LIB}"
+            "$<TARGET_FILE_DIR:reverse_findings_e2e>")
+endif()
+if(_san_test_env)
+    gtest_discover_tests(reverse_findings_e2e
+        DISCOVERY_MODE PRE_TEST
+        DISCOVERY_TIMEOUT 120
+        PROPERTIES ENVIRONMENT "${_san_test_env}")
+else()
+    gtest_discover_tests(reverse_findings_e2e
+        DISCOVERY_MODE PRE_TEST
+        DISCOVERY_TIMEOUT 120)
+endif()
+
 # The dylibs too: an instrumented exe against a plain dylib still looks green.
 sanitizer_symbol_check(timer_e2e_tests "$<TARGET_FILE:timer_e2e_tests>")
 sanitizer_symbol_check(my_timer_lib "${my_timer_RUNTIME_LIB}")

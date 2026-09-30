@@ -18,8 +18,9 @@ type RevConfig* {.ffi.} = object
   attempt*: int
 
 proc fetchConfig(
-  key: string, attempt: int
-): Future[Result[RevConfig, string]] {.ffiReverse.}
+    key: string, attempt: int
+): Future[Result[RevConfig, string]] {.ffiReverse.} =
+  ## Asks the host for a config entry.
 
 proc notifyHost(
   note: string
@@ -35,6 +36,9 @@ static:
   doAssert ffiReverseRegistry[0].wireName == "fetch_config"
   doAssert ffiReverseRegistry[0].argsTypeName == "FetchConfigArgs"
   doAssert ffiReverseRegistry[0].replyTypeName == "RevConfig"
+  # A comment-only body is how a bodyless proc keeps its doc: Nim drops a
+  # `##` that follows a declaration without `=`.
+  doAssert ffiReverseRegistry[0].doc == "Asks the host for a config entry."
   doAssert ffiReverseRegistry[1].wireName == "host_note"
   doAssert ffiReverseRegistry[1].replyTypeName == ""
   doAssert ffiReverseRegistry[1].timeoutMs == 300
@@ -222,6 +226,31 @@ suite "{.ffiReverse.} through the generated exports":
         REVERSE_INVALID_CTX
       check revmacro_reverse_reply(FFICtxToken(nil), 1'u64, RET_OK, nil, 0) ==
         REVERSE_INVALID_CTX
+
+suite "reverse_reply boundaries":
+  test "a reply over MaxRequestPayloadBytes is rejected before it is read":
+    withLibCtx(ctx, token):
+      var b = [byte 0]
+      # Only the length is checked; the one-byte buffer is never read.
+      check revmacro_reverse_reply(
+        token, 1'u64, RET_OK, addr b[0], csize_t(MaxRequestPayloadBytes + 1)
+      ) == REVERSE_PAYLOAD_TOO_LARGE
+      check ctx[].reverse.mailboxLen() == 0
+
+  test "the previous owner's token no longer reaches a reused slot":
+    let first = RevMacroLibFFIPool.createFFIContext().valueOr:
+      check false
+      return
+    let oldToken = first.ffiToken()
+    check RevMacroLibFFIPool.destroyFFIContext(first).isOk()
+    withLibCtx(ctx, token):
+      check ctx == first # same slot, new owner
+      check revmacro_reverse_reply(oldToken, 1'u64, RET_OK, nil, 0) ==
+        REVERSE_INVALID_CTX
+      check revmacro_set_host_note_impl(oldToken, silentImpl, nil) == REVERSE_INVALID_CTX
+      check revmacro_start_reverse_workers(oldToken, 1) == REVERSE_INVALID_CTX
+      check not ctx[].reverse.hasImpl("host_note")
+      check ctx[].reverse.mailboxLen() == 0
 
 suite "reverse worker start":
   test "set_impl starts the workers lazily; a fresh context has none":
