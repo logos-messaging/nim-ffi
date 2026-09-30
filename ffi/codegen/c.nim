@@ -690,12 +690,6 @@ proc emitReverseMachinery(
   lines.add("/* Reverse FFI helpers (typed sugar over the raw exports above) */")
   if reverse.len > 0:
     lines.add(
-      "static inline int " & libName & "_ctx_start_reverse_workers(const " & ctxType &
-        "* ctx, int n) {"
-    )
-    lines.add("    return " & libName & "_start_reverse_workers(ctx->ptr, n);")
-    lines.add("}")
-    lines.add(
       "static inline int " & libName & "_ctx_reverse_reply_err(const " & ctxType &
         "* ctx, uint64_t call_id, const char* msg) {"
     )
@@ -710,10 +704,11 @@ proc emitReverseMachinery(
     lines.add(renderBlockDocComment(r.doc))
     lines.add(
       "static inline int " & libName & "_ctx_set_" & snake & "_impl(const " & ctxType &
-        "* ctx, FFIReverseImpl impl, void* user_data) {"
+        "* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release) {"
     )
     lines.add(
-      "    return " & libName & "_set_" & snake & "_impl(ctx->ptr, impl, user_data);"
+      "    return " & libName & "_set_" & snake &
+        "_impl(ctx->ptr, impl, user_data, release);"
     )
     lines.add("}")
     if r.argsTypeName.len > 0:
@@ -1065,12 +1060,14 @@ proc generateCLibHeader*(
       "typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, " &
         "size_t args_len, void* user_data);"
     )
+    lines.add("typedef void (*FFIReverseRelease)(void* user_data);")
     lines.add("#endif")
     for r in reverse:
       lines.add(renderBlockDocComment(r.doc))
       lines.add(
         "int " & libName & "_set_" & r.wireName &
-          "_impl(void* ctx, FFIReverseImpl impl, void* user_data);"
+          "_impl(void* ctx, FFIReverseImpl impl, void* user_data, " &
+          "FFIReverseRelease release);"
       )
     lines.add(
       "/* Answers a reverse call from ANY thread. ret_code 0 = ok (reply_cbor is"
@@ -1082,13 +1079,6 @@ proc generateCLibHeader*(
       "int " & libName & "_reverse_reply(void* ctx, uint64_t call_id, int ret_code, " &
         "const uint8_t* reply_cbor, size_t reply_len);"
     )
-    lines.add(
-      "/* Starts the context's reverse worker threads ahead of the first set_impl"
-    )
-    lines.add(
-      "   (which starts them lazily otherwise); n <= 0 picks the library default. */"
-    )
-    lines.add("int " & libName & "_start_reverse_workers(void* ctx, int n);")
   for rev in reverseEvents:
     lines.add(renderBlockDocComment(rev.doc))
     lines.add(

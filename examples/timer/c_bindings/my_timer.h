@@ -1004,16 +1004,14 @@ int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
 #define NIM_FFI_REVERSE_IMPL_DEFINED
 /* Runs on a reverse worker thread and may block; answer via <lib>_reverse_reply. */
 typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, size_t args_len, void* user_data);
+typedef void (*FFIReverseRelease)(void* user_data);
 #endif
-int my_timer_set_fetch_host_clock_impl(void* ctx, FFIReverseImpl impl, void* user_data);
+int my_timer_set_fetch_host_clock_impl(void* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release);
 /* Answers a reverse call from ANY thread. ret_code 0 = ok (reply_cbor is
    the CBOR reply), non-zero = error (reply_cbor is a UTF-8 message).
    Returns 0 accepted, 1 invalid ctx, 2 ctx not active, 3 payload too
    large, 4 mailbox full. */
 int my_timer_reverse_reply(void* ctx, uint64_t call_id, int ret_code, const uint8_t* reply_cbor, size_t reply_len);
-/* Starts the context's reverse worker threads ahead of the first set_impl
-   (which starts them lazily otherwise); n <= 0 picks the library default. */
-int my_timer_start_reverse_workers(void* ctx, int n);
 /** Records the tick number that the host emits. */
 int my_timer_emit_on_host_tick(void* ctx, const uint8_t* payload_cbor, size_t payload_len);
 /**
@@ -1250,15 +1248,12 @@ static inline bool my_timer_ctx_remove_event_listener(MyTimerCtx* ctx, uint64_t 
 }
 
 /* Reverse FFI helpers (typed sugar over the raw exports above) */
-static inline int my_timer_ctx_start_reverse_workers(const MyTimerCtx* ctx, int n) {
-    return my_timer_start_reverse_workers(ctx->ptr, n);
-}
 static inline int my_timer_ctx_reverse_reply_err(const MyTimerCtx* ctx, uint64_t call_id, const char* msg) {
     return my_timer_reverse_reply(ctx->ptr, call_id, 1, (const uint8_t*)msg, msg ? strlen(msg) : 0);
 }
 
-static inline int my_timer_ctx_set_fetch_host_clock_impl(const MyTimerCtx* ctx, FFIReverseImpl impl, void* user_data) {
-    return my_timer_set_fetch_host_clock_impl(ctx->ptr, impl, user_data);
+static inline int my_timer_ctx_set_fetch_host_clock_impl(const MyTimerCtx* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release) {
+    return my_timer_set_fetch_host_clock_impl(ctx->ptr, impl, user_data, release);
 }
 /* Decode the args of a `fetch_host_clock` invocation; free `out` with nimffi_free_str. */
 static inline int my_timer_decode_fetch_host_clock_args(const uint8_t* args_cbor, size_t args_len, NimFfiStr* out, char** err) {

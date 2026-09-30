@@ -911,9 +911,9 @@ int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
 
 // Reverse FFI: host-implemented interfaces + host-emitted events
 typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, size_t args_len, void* user_data);
-int my_timer_set_fetch_host_clock_impl(void* ctx, FFIReverseImpl impl, void* user_data);
+typedef void (*FFIReverseRelease)(void* user_data);
+int my_timer_set_fetch_host_clock_impl(void* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release);
 int my_timer_reverse_reply(void* ctx, uint64_t call_id, int ret_code, const uint8_t* reply_cbor, size_t reply_len);
-int my_timer_start_reverse_workers(void* ctx, int n);
 int my_timer_emit_on_host_tick(void* ctx, const uint8_t* payload_cbor, size_t payload_len);
 /**
  * Stop every context the library still holds and join their threads.
@@ -1085,11 +1085,6 @@ public:
     }
 
     // ── Reverse FFI: host-implemented interfaces ────────────
-    // n <= 0 starts the library default number of reverse workers.
-    bool startReverseWorkers(int n = 0) const {
-        return my_timer_start_reverse_workers(ptr_, n) == 0;
-    }
-
     // Answer token for one `fetch_host_clock` call: reply once, from any thread.
     struct FetchHostClockCall {
         void* ctx = nullptr;
@@ -1108,13 +1103,13 @@ public:
     bool setFetchHostClockImpl(std::function<void(FetchHostClockCall, const std::string&)> fn) {
         auto owned = std::make_unique<FetchHostClockImplBox>(FetchHostClockImplBox{ptr_, std::move(fn)});
         auto* raw = owned.get();
-        if (my_timer_set_fetch_host_clock_impl(ptr_, &MyTimerCtx::fetchHostClockImplTrampoline, raw) != 0) return false;
+        if (my_timer_set_fetch_host_clock_impl(ptr_, &MyTimerCtx::fetchHostClockImplTrampoline, raw, nullptr) != 0) return false;
         fetchHostClockImplBox_ = std::move(owned);
         return true;
     }
 
     bool clearFetchHostClockImpl() {
-        if (my_timer_set_fetch_host_clock_impl(ptr_, nullptr, nullptr) != 0) return false;
+        if (my_timer_set_fetch_host_clock_impl(ptr_, nullptr, nullptr, nullptr) != 0) return false;
         fetchHostClockImplBox_.reset();
         return true;
     }

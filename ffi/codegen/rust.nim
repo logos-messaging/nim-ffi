@@ -275,15 +275,11 @@ proc generateFFIRs*(
   if reverse.len > 0:
     for r in reverse:
       lines.add(
-        "    pub fn $1_set_$2_impl(ctx: *mut c_void, imp: Option<FFIReverseImpl>, user_data: *mut c_void) -> c_int;" %
+        "    pub fn $1_set_$2_impl(ctx: *mut c_void, imp: Option<FFIReverseImpl>, user_data: *mut c_void, release: Option<FFIReverseRelease>) -> c_int;" %
           [linkLibName, r.wireName]
       )
     lines.add(
       "    pub fn $1_reverse_reply(ctx: *mut c_void, call_id: u64, ret_code: c_int, reply_cbor: *const u8, reply_len: usize) -> c_int;" %
-        [linkLibName]
-    )
-    lines.add(
-      "    pub fn $1_start_reverse_workers(ctx: *mut c_void, n: c_int) -> c_int;" %
         [linkLibName]
     )
   for rev in reverseEvents:
@@ -305,6 +301,12 @@ proc generateFFIRs*(
     lines.add("    args_len: usize,")
     lines.add("    user_data: *mut c_void,")
     lines.add(");")
+    lines.add(
+      "/// Frees an impl's `user_data` once no invocation uses it; runs on any thread."
+    )
+    lines.add(
+      "pub type FFIReverseRelease = unsafe extern \"C\" fn(user_data: *mut c_void);"
+    )
 
   return lines.join("\n") & "\n"
 
@@ -861,15 +863,6 @@ proc generateApiRs*(
     lines.add("    }")
     lines.add("")
 
-  if reverse.len > 0:
-    lines.add("    /// `n <= 0` starts the library default number of reverse workers.")
-    lines.add("    pub fn start_reverse_workers(&self, n: i32) -> bool {")
-    lines.add(
-      "        unsafe { ffi::$1_start_reverse_workers(self.ptr, n as c_int) == 0 }" %
-        [libName]
-    )
-    lines.add("    }")
-    lines.add("")
   for r in reverse:
     let snake = reverseSnake(r)
     let boxStruct = reverseBoxStruct(r)
@@ -885,7 +878,7 @@ proc generateApiRs*(
     lines.add("        let raw = &*owned as *const $1 as *mut c_void;" % [boxStruct])
     lines.add("        let rc = unsafe {")
     lines.add(
-      "            ffi::$1_set_$2_impl(self.ptr, Some($3), raw)" %
+      "            ffi::$1_set_$2_impl(self.ptr, Some($3), raw, None)" %
         [libName, r.wireName, tramp]
     )
     lines.add("        };")
@@ -897,7 +890,7 @@ proc generateApiRs*(
     lines.add("    pub fn clear_$1_impl(&self) -> bool {" % [snake])
     lines.add("        let rc = unsafe {")
     lines.add(
-      "            ffi::$1_set_$2_impl(self.ptr, None, std::ptr::null_mut())" %
+      "            ffi::$1_set_$2_impl(self.ptr, None, std::ptr::null_mut(), None)" %
         [libName, r.wireName]
     )
     lines.add("        };")

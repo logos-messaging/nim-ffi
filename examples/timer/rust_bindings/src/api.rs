@@ -303,18 +303,13 @@ impl MyTimerCtx {
         rc == 0
     }
 
-    /// `n <= 0` starts the library default number of reverse workers.
-    pub fn start_reverse_workers(&self, n: i32) -> bool {
-        unsafe { ffi::my_timer_start_reverse_workers(self.ptr, n as c_int) == 0 }
-    }
-
     pub fn set_fetch_host_clock_impl<F>(&self, f: F) -> bool
     where F: Fn(FetchHostClockCall, String) + Send + Sync + 'static,
     {
         let owned: Box<FetchHostClockImplBox> = Box::new(FetchHostClockImplBox { ctx: self.ptr as usize, f: Box::new(f) });
         let raw = &*owned as *const FetchHostClockImplBox as *mut c_void;
         let rc = unsafe {
-            ffi::my_timer_set_fetch_host_clock_impl(self.ptr, Some(fetch_host_clock_impl_trampoline), raw)
+            ffi::my_timer_set_fetch_host_clock_impl(self.ptr, Some(fetch_host_clock_impl_trampoline), raw, None)
         };
         if rc != 0 { return false; }
         *self.fetch_host_clock_impl.lock().unwrap() = Some(owned);
@@ -323,7 +318,7 @@ impl MyTimerCtx {
 
     pub fn clear_fetch_host_clock_impl(&self) -> bool {
         let rc = unsafe {
-            ffi::my_timer_set_fetch_host_clock_impl(self.ptr, None, std::ptr::null_mut())
+            ffi::my_timer_set_fetch_host_clock_impl(self.ptr, None, std::ptr::null_mut(), None)
         };
         if rc != 0 { return false; }
         *self.fetch_host_clock_impl.lock().unwrap() = None;

@@ -1726,9 +1726,6 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
   assertFFIPath(prc, fpEvent)
   return buildFFIEventProc(prc, args[0 ..^ 2])
 
-var reverseStartEmittedFor {.compileTime.}: seq[string]
-  # Libraries whose `<lib>_start_reverse_workers` export was already emitted.
-
 proc hasRealBody(prc: NimNode): bool {.compileTime.} =
   ## A leading `##` doc comment alone does not count as a body.
   if prc.body.kind == nnkEmpty:
@@ -1740,7 +1737,7 @@ proc hasRealBody(prc: NimNode): bool {.compileTime.} =
     return false
   return true
 
-type ReverseSpecs = object
+type ReversePragmaArgs = object
   wireName: string
   timeoutNode: NimNode
   timeoutMs: int
@@ -1754,9 +1751,9 @@ proc cdeclExportPragma(name: string): NimNode {.compileTime.} =
     newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
   )
 
-proc resolveReverseSpecs(
+proc resolveReversePragmaArgs(
     leading: seq[NimNode], userProcName: NimNode
-): ReverseSpecs {.compileTime.} =
+): ReversePragmaArgs {.compileTime.} =
   ## Parses the optional wire-name literal and `timeout = <ms>`.
   var wireName = camelToSnakeCase($userProcName)
   var timeoutNode: NimNode = ident("ReverseCallTimeoutMs")
@@ -1773,8 +1770,9 @@ proc resolveReverseSpecs(
         "`.ffiReverse.`: unsupported argument " & arg.repr &
           "; expected an optional wire-name string literal and/or `timeout = <ms>`"
       )
-  return
-    ReverseSpecs(wireName: wireName, timeoutNode: timeoutNode, timeoutMs: timeoutMs)
+  return ReversePragmaArgs(
+    wireName: wireName, timeoutNode: timeoutNode, timeoutMs: timeoutMs
+  )
 
 proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compileTime.} =
   ## Emits the async caller stub and the `<lib>_set_<wire>_impl` export.
@@ -1783,9 +1781,9 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
   if procName.kind == nnkPostfix:
     userProcName = procName[1]
 
-  let specs = resolveReverseSpecs(leading, userProcName)
-  let wireName = specs.wireName
-  let timeoutNode = specs.timeoutNode
+  let pragmaArgs = resolveReversePragmaArgs(leading, userProcName)
+  let wireName = pragmaArgs.wireName
+  let timeoutNode = pragmaArgs.timeoutNode
 
   if hasRealBody(prc):
     error(
@@ -1913,7 +1911,8 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
     let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
     if `ctxIdent`.isNil():
       return REVERSE_INVALID_CTX
-    if not setImpl(`ctxIdent`[].reverse, `wireNameLit`, impl, userData):
+    # Refused: `userData` stays the caller's and `release` is never called for it.
+    if not setImpl(`ctxIdent`[].reverse, `wireNameLit`, impl, userData, release):
       return REVERSE_WORKERS_FAILED
     return REVERSE_ACCEPTED
 
@@ -1925,36 +1924,12 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
         newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
         newIdentDefs(ident("impl"), ident("FFIReverseImpl")),
         newIdentDefs(ident("userData"), ident("pointer")),
+        newIdentDefs(ident("release"), ident("FFIReverseRelease")),
       ],
       body = setBody,
       pragmas = cdeclExportPragma(setImplName),
     )
   )
-
-  if currentLibName notin reverseStartEmittedFor:
-    reverseStartEmittedFor.add(currentLibName)
-    let startName = currentLibName & "_start_reverse_workers"
-    let startBody = quote:
-      when declared(initializeLibrary):
-        initializeLibrary()
-      let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
-      if `ctxIdent`.isNil():
-        return REVERSE_INVALID_CTX
-      if not startReverseWorkers(`ctxIdent`[].reverse, int(n)):
-        return REVERSE_WORKERS_FAILED
-      return REVERSE_ACCEPTED
-    resultStmts.add(
-      newProc(
-        name = postfix(ident(startName), "*"),
-        params = @[
-          ident("cint"),
-          newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
-          newIdentDefs(ident("n"), ident("cint")),
-        ],
-        body = startBody,
-        pragmas = cdeclExportPragma(startName),
-      )
-    )
 
   var libReverseCount = 1
   for r in ffiReverseRegistry:
@@ -1978,7 +1953,7 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
           ""
         else:
           nimTypeNameRepr(replyType),
-      timeoutMs: specs.timeoutMs,
+      timeoutMs: pragmaArgs.timeoutMs,
       doc: extractDocComment(prc),
     )
   )
@@ -2100,10 +2075,17 @@ proc buildFFIReverseEventProc(
     let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
     if `ctxIdent`.isNil():
       return RET_ERR
+    # Checked on the csize_t, before the int conversion can raise a RangeDefect.
+    if payloadLen > csize_t(MaxRequestPayloadBytes):
+      return RET_ERR
+    if payloadCbor.isNil() and payloadLen > 0:
+      return RET_ERR
     let `ctxGenIdent` = ctxToken.tokenGeneration()
     let `reqPtrIdent` = FFIThreadRequest.initFromPtr(
       ffiNoopCallback, nil, cstring(`reqNameLit`), payloadCbor, int(payloadLen)
     )
+    if `reqPtrIdent`.isNil():
+      return RET_ERR
     let `sendResIdent` =
       try:
         ffi_context.sendRequestToFFIThread(`ctxIdent`, `reqPtrIdent`, `ctxGenIdent`)

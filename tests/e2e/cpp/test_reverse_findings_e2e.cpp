@@ -60,7 +60,6 @@ struct Probe {
     MyTimerCtx* ctx = nullptr;
     std::weak_ptr<int> capture; // the running impl's own capture
     Latch latch;
-    std::atomic<int> seq{0};
     std::atomic<int> freedWhileRunning{-1}; // -1 unset, 0 alive, 1 freed
     std::atomic<bool> done{false};
 };
@@ -94,42 +93,6 @@ TEST(ReverseFindings, SelfReplacementKeepsTheRunningImplsCapturesAlive) {
     ASSERT_TRUE(probe.done.load());
     // 1 today: set_impl returned, the wrapper destroyed the old box, and with it
     // the std::function this impl is still executing.
-    EXPECT_EQ(probe.freedWhileRunning.load(), 0);
-}
-
-// Review comment 4087687777, the cross-worker case.
-TEST(ReverseFindings, ReplacingFromAnotherWorkerKeepsARunningImplAlive) {
-    auto ctx = makeCtx("find-cross-worker");
-    ASSERT_TRUE(ctx);
-    ASSERT_TRUE(ctx->startReverseWorkers(2));
-    Probe probe;
-    probe.ctx = ctx.get();
-    auto token = std::make_shared<int>(1);
-    probe.capture = token;
-    ASSERT_TRUE(ctx->setFetchHostClockImpl(
-        [token, p = &probe](MyTimerCtx::FetchHostClockCall call, const std::string&) {
-            Probe* local = p;
-            if (local->seq.fetch_add(1) == 0) {
-                // First call: stays inside the impl until the test releases it.
-                local->latch.enterAndWait();
-                local->freedWhileRunning.store(local->capture.expired() ? 1 : 0);
-                local->done.store(true);
-            } else {
-                // Second call, on the other worker: replaces the impl and returns.
-                local->ctx->setFetchHostClockImpl(&noopImpl);
-            }
-            call.reply(HostClock{1, "UTC"});
-        }));
-    token.reset();
-
-    auto first = ctx->host_clockAsync();
-    probe.latch.waitEntered(1);
-    auto second = ctx->host_clockAsync();
-    ASSERT_FALSE(second.get().isErr());
-    probe.latch.release();
-    ASSERT_FALSE(first.get().isErr());
-    ASSERT_TRUE(probe.done.load());
-    // 1 today: the second worker's set_impl skipped the wait for the first one.
     EXPECT_EQ(probe.freedWhileRunning.load(), 0);
 }
 

@@ -43,6 +43,7 @@ const
   REVERSE_PAYLOAD_TOO_LARGE*: cint = 3
   REVERSE_MAILBOX_FULL*: cint = 4
   REVERSE_WORKERS_FAILED*: cint = 5
+  REVERSE_INVALID_ARGUMENT*: cint = 6
 
 proc ffiNoopCallback*(
     callerRet: cint, msg: ptr cchar, len: csize_t, userData: pointer

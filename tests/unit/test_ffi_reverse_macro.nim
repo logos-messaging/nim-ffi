@@ -161,6 +161,9 @@ proc ackNoteImpl(
     let box = cast[ptr TokenBox](userData)
     discard revmacro_reverse_reply(box[].token, callId, RET_OK, nil, 0)
 
+proc countRelease(userData: pointer) {.cdecl, gcsafe, raises: [].} =
+  cast[ptr Atomic[int]](userData)[].atomicInc()
+
 proc silentImpl(
     callId: uint64,
     argsCbor: ptr UncheckedArray[byte],
@@ -174,7 +177,7 @@ suite "{.ffiReverse.} through the generated exports":
     setupCallbackData(rsp)
     withLibCtx(ctx, token):
       var box = TokenBox(token: token)
-      check revmacro_set_fetch_config_impl(token, fetchConfigImpl, addr box) ==
+      check revmacro_set_fetch_config_impl(token, fetchConfigImpl, addr box, nil) ==
         REVERSE_ACCEPTED
 
       check sendRequestToFFIThread(
@@ -189,7 +192,8 @@ suite "{.ffiReverse.} through the generated exports":
     setupCallbackData(rsp)
     withLibCtx(ctx, token):
       var box = TokenBox(token: token)
-      check revmacro_set_host_note_impl(token, ackNoteImpl, addr box) == REVERSE_ACCEPTED
+      check revmacro_set_host_note_impl(token, ackNoteImpl, addr box, nil) ==
+        REVERSE_ACCEPTED
 
       check sendRequestToFFIThread(
         ctx, DriveNotifyRequest.ffiNewReq(captureCb, addr rsp)
@@ -202,7 +206,7 @@ suite "{.ffiReverse.} through the generated exports":
   test "pragma-level timeout override fires":
     setupCallbackData(rsp)
     withLibCtx(ctx, token):
-      check revmacro_set_host_note_impl(token, silentImpl, nil) == REVERSE_ACCEPTED
+      check revmacro_set_host_note_impl(token, silentImpl, nil, nil) == REVERSE_ACCEPTED
       check sendRequestToFFIThread(
         ctx, DriveNotifyRequest.ffiNewReq(captureCb, addr rsp)
       )
@@ -222,7 +226,7 @@ suite "{.ffiReverse.} through the generated exports":
       check rsp.retCode == RET_ERR
       check "no host implementation" in callbackMsg(rsp)
 
-      check revmacro_set_fetch_config_impl(FFICtxToken(nil), fetchConfigImpl, nil) ==
+      check revmacro_set_fetch_config_impl(FFICtxToken(nil), fetchConfigImpl, nil, nil) ==
         REVERSE_INVALID_CTX
       check revmacro_reverse_reply(FFICtxToken(nil), 1'u64, RET_OK, nil, 0) ==
         REVERSE_INVALID_CTX
@@ -237,6 +241,12 @@ suite "reverse_reply boundaries":
       ) == REVERSE_PAYLOAD_TOO_LARGE
       check ctx[].reverse.mailboxLen() == 0
 
+  test "a NULL reply with a length is an invalid argument, not an empty reply":
+    withLibCtx(ctx, token):
+      check revmacro_reverse_reply(token, 1'u64, RET_OK, nil, 16) ==
+        REVERSE_INVALID_ARGUMENT
+      check ctx[].reverse.mailboxLen() == 0
+
   test "the previous owner's token no longer reaches a reused slot":
     let first = RevMacroLibFFIPool.createFFIContext().valueOr:
       check false
@@ -247,8 +257,8 @@ suite "reverse_reply boundaries":
       check ctx == first # same slot, new owner
       check revmacro_reverse_reply(oldToken, 1'u64, RET_OK, nil, 0) ==
         REVERSE_INVALID_CTX
-      check revmacro_set_host_note_impl(oldToken, silentImpl, nil) == REVERSE_INVALID_CTX
-      check revmacro_start_reverse_workers(oldToken, 1) == REVERSE_INVALID_CTX
+      check revmacro_set_host_note_impl(oldToken, silentImpl, nil, nil) ==
+        REVERSE_INVALID_CTX
       check not ctx[].reverse.hasImpl("host_note")
       check ctx[].reverse.mailboxLen() == 0
 
@@ -256,17 +266,29 @@ suite "reverse worker start":
   test "set_impl starts the workers lazily; a fresh context has none":
     withLibCtx(ctx, token):
       check not ctx[].reverse.workersStarted()
-      check revmacro_set_host_note_impl(token, silentImpl, nil) == REVERSE_ACCEPTED
+      check revmacro_set_host_note_impl(token, silentImpl, nil, nil) == REVERSE_ACCEPTED
       check ctx[].reverse.workersStarted()
       check ctx[].reverse.workerCount == ReverseWorkersDefault
 
-  test "the explicit start export sizes the pool and rejects a stale token":
+suite "set_impl ownership through the export":
+  test "with a release the library frees userData once the impl is replaced":
     withLibCtx(ctx, token):
-      check revmacro_start_reverse_workers(token, 3) == REVERSE_ACCEPTED
-      check ctx[].reverse.workerCount == 3
-      check revmacro_start_reverse_workers(token, 9) == REVERSE_ACCEPTED # idempotent
-      check ctx[].reverse.workerCount == 3
-      check revmacro_start_reverse_workers(FFICtxToken(nil), 1) == REVERSE_INVALID_CTX
+      var a, b: Atomic[int]
+      check revmacro_set_host_note_impl(token, silentImpl, addr a, countRelease) ==
+        REVERSE_ACCEPTED
+      check revmacro_set_host_note_impl(token, silentImpl, addr b, countRelease) ==
+        REVERSE_ACCEPTED
+      check a.load() == 1 # idle, so released at once
+      check b.load() == 0
+      check revmacro_set_host_note_impl(token, nil, nil, nil) == REVERSE_ACCEPTED
+      check b.load() == 1
+
+  test "a refused registration never calls the release":
+    var a: Atomic[int]
+    check revmacro_set_host_note_impl(
+      FFICtxToken(nil), silentImpl, addr a, countRelease
+    ) == REVERSE_INVALID_CTX
+    check a.load() == 0
 
 suite "{.ffiReverseEvent.} through the generated emit export":
   test "host-encoded Req runs the handler on the FFI thread":
@@ -284,6 +306,15 @@ suite "{.ffiReverseEvent.} through the generated emit export":
           break
         os.sleep(1)
       check delivered
+
+  test "emit rejects an oversized, overflowing or NULL payload before reading it":
+    withLibCtx(ctx, token):
+      var b = [byte 0]
+      check revmacro_emit_on_host_ping(
+        token, addr b[0], csize_t(MaxRequestPayloadBytes + 1)
+      ) == RET_ERR
+      check revmacro_emit_on_host_ping(token, addr b[0], csize_t(high(uint))) == RET_ERR
+      check revmacro_emit_on_host_ping(token, nil, 4) == RET_ERR
 
   test "emit with a stale token is rejected":
     let payload = cborEncode(OnHostPingReq(seqNo: 1))

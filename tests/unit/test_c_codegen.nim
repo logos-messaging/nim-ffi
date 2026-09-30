@@ -400,22 +400,21 @@ suite "generateCLibHeader: reverse FFI":
   test "raw reverse exports are declared with the impl typedef":
     check "typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, size_t args_len, void* user_data);" in
       header
-    check "int timer_set_fetch_config_impl(void* ctx, FFIReverseImpl impl, void* user_data);" in
+    check "int timer_set_fetch_config_impl(void* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release);" in
       header
-    check "int timer_set_host_note_impl(void* ctx, FFIReverseImpl impl, void* user_data);" in
+    check "int timer_set_host_note_impl(void* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release);" in
       header
     check "int timer_reverse_reply(void* ctx, uint64_t call_id, int ret_code, const uint8_t* reply_cbor, size_t reply_len);" in
       header
     check "int timer_emit_on_host_ping(void* ctx, const uint8_t* payload_cbor, size_t payload_len);" in
       header
 
-  test "the worker start export and its ctx helper are declared":
-    check "int timer_start_reverse_workers(void* ctx, int n);" in header
-    check "static inline int timer_ctx_start_reverse_workers(const TimerCtx* ctx, int n)" in
-      header
+  test "the release typedef is declared and no worker start export remains":
+    check "typedef void (*FFIReverseRelease)(void* user_data);" in header
+    check "start_reverse_workers" notin header
 
   test "typed helpers ride the ctx wrapper":
-    check "static inline int timer_ctx_set_fetch_config_impl(const TimerCtx* ctx, FFIReverseImpl impl, void* user_data)" in
+    check "static inline int timer_ctx_set_fetch_config_impl(const TimerCtx* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release)" in
       header
     check "static inline int timer_decode_fetch_config_args(const uint8_t* args_cbor, size_t args_len, FetchConfigArgs* out, char** err)" in
       header

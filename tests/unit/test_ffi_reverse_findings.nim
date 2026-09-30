@@ -14,9 +14,6 @@ type RevFindLib = object
 
 declareLibrary("revfind", RevFindLib)
 
-# Only here so that `revfind_start_reverse_workers` is emitted.
-proc findProbe(): Future[Result[void, string]] {.ffiReverse.}
-
 ## Child mode: a probe that may abort runs in a re-exec of this binary.
 
 const ChildEnv = "REVFIND_CHILD"
@@ -338,30 +335,6 @@ suite "F5: reverse_reply boundary checks":
       discard RevFindLibFFIPool.destroyFFIContext(ctx)
     check revfind_reverse_reply(ctx.ffiToken(), 1'u64, RET_OK, nil, 16) !=
       REVERSE_ACCEPTED
-
-  test "a slot re-served without parking honours the new owner's worker count":
-    # A second live context keeps the pool from parking the recycled slot.
-    let keeper = RevFindLibFFIPool.createFFIContext().valueOr:
-      check false
-      return
-    defer:
-      discard RevFindLibFFIPool.recycleFFIContext(keeper)
-    let first = RevFindLibFFIPool.createFFIContext().valueOr:
-      check false
-      return
-    check revfind_start_reverse_workers(first.ffiToken(), 3) == REVERSE_ACCEPTED
-    check first[].reverse.workerCount == 3
-    check RevFindLibFFIPool.recycleFFIContext(first).isOk()
-
-    let second = RevFindLibFFIPool.createFFIContext().valueOr:
-      check false
-      return
-    defer:
-      discard RevFindLibFFIPool.recycleFFIContext(second)
-    check second == first # the same slot, handed to a new owner
-    check revfind_start_reverse_workers(second.ffiToken(), 1) == REVERSE_ACCEPTED
-    # 3 today: the previous owner's pool survives the recycle and the new size is ignored.
-    check second[].reverse.workerCount == 1
 
 suite "F7: generated C contract":
   test "the header names the REVERSE_* status codes, including workers-failed":

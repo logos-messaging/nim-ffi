@@ -368,6 +368,8 @@ proc submitReverseReply*[T](
     return REVERSE_NOT_ACTIVE
   if dataLen > MaxRequestPayloadBytes:
     return REVERSE_PAYLOAD_TOO_LARGE
+  if data.isNil() and dataLen > 0:
+    return REVERSE_INVALID_ARGUMENT
 
   return ctx[].reverse.pushReply(callId, retCode, data, dataLen)
 

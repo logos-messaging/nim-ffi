@@ -523,10 +523,9 @@ TEST(ReverseFFI, ClearImplRestoresFailFast) {
     EXPECT_NE(r.error().find("no host implementation"), std::string::npos);
 }
 
-TEST(ReverseFFI, BlockingImplsRunConcurrentlyOnWorkers) {
-    // Two blocking 150 ms impls overlap on two reverse workers.
-    auto ctx = makeCtx("rev-concurrent");
-    ASSERT_TRUE(ctx->startReverseWorkers(2));
+TEST(ReverseFFI, BlockingImplsQueueOnTheSingleWorker) {
+    // One reverse worker by default: two blocking 150 ms impls run one after the other.
+    auto ctx = makeCtx("rev-queued");
     ASSERT_TRUE(ctx->setFetchHostClockImpl(
         [](MyTimerCtx::FetchHostClockCall call, const std::string&) {
             std::this_thread::sleep_for(std::chrono::milliseconds(150));
@@ -541,7 +540,7 @@ TEST(ReverseFFI, BlockingImplsRunConcurrentlyOnWorkers) {
         std::chrono::steady_clock::now() - t0);
     ASSERT_FALSE(ra.isErr()) << ra.error();
     ASSERT_FALSE(rb.isErr()) << rb.error();
-    EXPECT_LT(elapsed.count(), 280);
+    EXPECT_GE(elapsed.count(), 290);
 }
 
 TEST(ReverseFFI, EmittedReverseEventReachesTheNimHandler) {

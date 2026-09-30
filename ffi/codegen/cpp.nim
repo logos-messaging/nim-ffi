@@ -253,11 +253,6 @@ proc emitReverseApi(
     lines.add(
       "    // ── Reverse FFI: host-implemented interfaces ────────────"
     )
-    lines.add("    // n <= 0 starts the library default number of reverse workers.")
-    lines.add("    bool startReverseWorkers(int n = 0) const {")
-    lines.add("        return $1_start_reverse_workers(ptr_, n) == 0;" % [libName])
-    lines.add("    }")
-    lines.add("")
     for r in reverse:
       let callStruct = reverseCallStruct(r)
       lines.add(
@@ -304,7 +299,7 @@ proc emitReverseApi(
       )
       lines.add("        auto* raw = owned.get();")
       lines.add(
-        "        if ($1_set_$2_impl(ptr_, &$3::$4ImplTrampoline, raw) != 0) return false;" %
+        "        if ($1_set_$2_impl(ptr_, &$3::$4ImplTrampoline, raw, nullptr) != 0) return false;" %
           [libName, r.wireName, ctxTypeName, r.nimProcName]
       )
       lines.add("        $1 = std::move(owned);" % [reverseBoxMember(r)])
@@ -313,7 +308,7 @@ proc emitReverseApi(
       lines.add("")
       lines.add("    bool clear$1Impl() {" % [pascal])
       lines.add(
-        "        if ($1_set_$2_impl(ptr_, nullptr, nullptr) != 0) return false;" %
+        "        if ($1_set_$2_impl(ptr_, nullptr, nullptr, nullptr) != 0) return false;" %
           [libName, r.wireName]
       )
       lines.add("        $1.reset();" % [reverseBoxMember(r)])
@@ -523,16 +518,16 @@ proc generateCppHeader*(
     lines.add(
       "typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, size_t args_len, void* user_data);"
     )
+    lines.add("typedef void (*FFIReverseRelease)(void* user_data);")
     for r in reverse:
       lines.add(
-        "int $1_set_$2_impl(void* ctx, FFIReverseImpl impl, void* user_data);" %
+        "int $1_set_$2_impl(void* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release);" %
           [libName, r.wireName]
       )
     lines.add(
       "int $1_reverse_reply(void* ctx, uint64_t call_id, int ret_code, const uint8_t* reply_cbor, size_t reply_len);" %
         [libName]
     )
-    lines.add("int $1_start_reverse_workers(void* ctx, int n);" % [libName])
   for rev in reverseEvents:
     lines.add(
       "int $1_emit_$2(void* ctx, const uint8_t* payload_cbor, size_t payload_len);" %

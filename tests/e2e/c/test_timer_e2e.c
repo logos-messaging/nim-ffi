@@ -249,7 +249,7 @@ static void test_reverse_missing_impl(MyTimerCtx* ctx) {
 }
 
 static void test_reverse_host_clock(MyTimerCtx* ctx) {
-    assert(my_timer_ctx_set_fetch_host_clock_impl(ctx, host_clock_impl, ctx) == 0);
+    assert(my_timer_ctx_set_fetch_host_clock_impl(ctx, host_clock_impl, ctx, NULL) == 0);
 
     ReplyWaiter w;
     memset(&w, 0, sizeof(w));
@@ -259,7 +259,7 @@ static void test_reverse_host_clock(MyTimerCtx* ctx) {
     assert(strcmp(w.text_a, "UTC@1700000123456") == 0);
 
     /* Unregister (NULL impl): the next call fails fast again. */
-    assert(my_timer_ctx_set_fetch_host_clock_impl(ctx, NULL, NULL) == 0);
+    assert(my_timer_ctx_set_fetch_host_clock_impl(ctx, NULL, NULL, NULL) == 0);
     memset(&w, 0, sizeof(w));
     my_timer_ctx_host_clock(ctx, on_str, &w);
     wait_done(&w.done);

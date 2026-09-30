@@ -50,7 +50,6 @@ struct Probe {
     ctx: AtomicUsize, // *const MyTimerCtx; the ctx outlives every call that reads it
     capture: Mutex<Weak<()>>,
     latch: Latch,
-    seq: AtomicI32,
     freed_while_running: AtomicI32, // -1 unset, 0 alive, 1 dropped
     done: AtomicBool,
 }
@@ -61,7 +60,6 @@ impl Probe {
             ctx: AtomicUsize::new(ctx as *const MyTimerCtx as usize),
             capture: Mutex::new(Arc::downgrade(token)),
             latch: Latch::default(),
-            seq: AtomicI32::new(0),
             freed_while_running: AtomicI32::new(-1),
             done: AtomicBool::new(false),
         })
@@ -108,40 +106,6 @@ fn self_replacement_keeps_the_running_closure_alive() {
     ctx.host_clock().expect("host_clock");
     assert!(probe.done.load(Ordering::SeqCst));
     // 1 today: `*slot = Some(owned)` dropped the box this closure runs from.
-    assert_eq!(probe.freed_while_running.load(Ordering::SeqCst), 0);
-}
-
-// Review comment 4087687777, the cross-worker case.
-#[test]
-fn replacing_from_another_worker_keeps_a_running_closure_alive() {
-    let ctx = make_ctx("find-cross-worker");
-    assert!(ctx.start_reverse_workers(2));
-    let token = Arc::new(());
-    let probe = Probe::new(&ctx, &token);
-    let (cap_token, cap_probe) = (token.clone(), probe.clone());
-    assert!(ctx.set_fetch_host_clock_impl(move |call, _| {
-        let _keep = &cap_token;
-        let p = cap_probe.clone();
-        if p.seq.fetch_add(1, Ordering::SeqCst) == 0 {
-            p.latch.enter_and_wait();
-            p.record_capture();
-            p.done.store(true, Ordering::SeqCst);
-        } else {
-            p.ctx().set_fetch_host_clock_impl(noop_impl);
-        }
-        call.reply(&HostClock { unix_ms: 1, zone: "UTC".into() });
-    }));
-    drop(token);
-
-    std::thread::scope(|s| {
-        let first = s.spawn(|| ctx.host_clock());
-        probe.latch.wait_entered(1);
-        ctx.host_clock().expect("second call");
-        probe.latch.release();
-        first.join().unwrap().expect("first call");
-    });
-    assert!(probe.done.load(Ordering::SeqCst));
-    // 1 today: the second worker's set skipped the wait for the first one.
     assert_eq!(probe.freed_while_running.load(Ordering::SeqCst), 0);
 }
 
