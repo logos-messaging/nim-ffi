@@ -2200,7 +2200,7 @@ when defined(ffiGenBindings):
     of "c":
       generateCBindings(
         genProcs, ffiTypeRegistry, libName, outDir, srcRel, ffiEventRegistry,
-        ffiConstRegistry,
+        ffiConstRegistry, ffiReverseRegistry, ffiReverseEventRegistry,
       )
     of "cddl":
       generateCddlBindings(genProcs, ffiTypeRegistry, libName, outDir, srcRel)
