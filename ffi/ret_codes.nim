@@ -60,6 +60,8 @@ const
   REVERSE_MAILBOX_FULL*: cint = 4
   REVERSE_WORKERS_FAILED*: cint = 5
   REVERSE_INVALID_ARGUMENT*: cint = 6
+  REVERSE_OUT_OF_MEMORY*: cint = 7
+  REVERSE_REGISTRY_FULL*: cint = 8
 
 const ReverseCodes* = [
   RetCode(name: "ACCEPTED", value: REVERSE_ACCEPTED),
@@ -69,6 +71,8 @@ const ReverseCodes* = [
   RetCode(name: "MAILBOX_FULL", value: REVERSE_MAILBOX_FULL),
   RetCode(name: "WORKERS_FAILED", value: REVERSE_WORKERS_FAILED),
   RetCode(name: "INVALID_ARGUMENT", value: REVERSE_INVALID_ARGUMENT),
+  RetCode(name: "OUT_OF_MEMORY", value: REVERSE_OUT_OF_MEMORY),
+  RetCode(name: "REGISTRY_FULL", value: REVERSE_REGISTRY_FULL),
 ] ## Status of `<lib>_set_<wire>_impl` and `<lib>_reverse_reply`.
 
 func cReverseCodeDefines*(): string =

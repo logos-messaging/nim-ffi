@@ -174,6 +174,8 @@ pub const REVERSE_PAYLOAD_TOO_LARGE: c_int = 3;
 pub const REVERSE_MAILBOX_FULL: c_int = 4;
 pub const REVERSE_WORKERS_FAILED: c_int = 5;
 pub const REVERSE_INVALID_ARGUMENT: c_int = 6;
+pub const REVERSE_OUT_OF_MEMORY: c_int = 7;
+pub const REVERSE_REGISTRY_FULL: c_int = 8;
 
 /// Answer token for one `fetch_host_clock` call: a `Copy` {context token, call id} pair.
 /// Move it anywhere and reply once, from any thread, before the call's deadline;

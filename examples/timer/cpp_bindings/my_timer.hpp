@@ -927,6 +927,8 @@ typedef void (*FFIReverseRelease)(void* user_data);
 #define NIMFFI_REVERSE_MAILBOX_FULL 4
 #define NIMFFI_REVERSE_WORKERS_FAILED 5
 #define NIMFFI_REVERSE_INVALID_ARGUMENT 6
+#define NIMFFI_REVERSE_OUT_OF_MEMORY 7
+#define NIMFFI_REVERSE_REGISTRY_FULL 8
 #endif
 int my_timer_set_fetch_host_clock_impl(void* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release);
 int my_timer_reverse_reply(void* ctx, uint64_t call_id, int ret_code, const uint8_t* reply_cbor, size_t reply_len);

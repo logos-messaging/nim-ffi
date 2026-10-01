@@ -86,17 +86,25 @@ proc open(g: var GateBox) =
 
 proc stillInside(g: var GateBox): bool =
   acquire(g.lock)
-  result = g.entered > g.exited
+  let inside = g.entered > g.exited
   release(g.lock)
+  return inside
 
 proc openLater(g: ptr GateBox) {.thread.} =
   os.sleep(300)
   g[].open()
 
+var victimReleased: Atomic[int]
+
+proc countVictimRelease(userData: pointer) {.cdecl, gcsafe, raises: [].} =
+  {.cast(gcsafe).}:
+    victimReleased.atomicInc()
+
 type UnregBox = object
   st: ptr FFIReverseState
   gate: ptr GateBox
   victimInsideAtReturn: Atomic[int] # -1 until set_impl returned
+  releasedAtReturn: Atomic[int] # -1 until set_impl returned
   done: Atomic[bool]
 
 proc unregImpl(
@@ -105,10 +113,12 @@ proc unregImpl(
     argsLen: csize_t,
     userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
-  ## Unregisters "victim" from inside a dispatch, then reports whether it still runs.
+  ## Unregisters "victim" from inside a dispatch, then reports what set_impl left.
   let b = cast[ptr UnregBox](userData)
   b[].st[].setImpl("victim", nil, nil)
   b[].victimInsideAtReturn.store(if b[].gate[].stillInside(): 1 else: 0)
+  {.cast(gcsafe).}:
+    b[].releasedAtReturn.store(victimReleased.load())
   b[].done.store(true)
 
 type TwiceBox = object
@@ -180,34 +190,37 @@ proc pumpUntil(fut: FutureBase, ms: int) =
     drainReverseReplies()
     waitFor sleepAsync(chronos.milliseconds(1))
 
-suite "F1: set_impl waits out in-flight invocations":
-  test "from inside an impl, it still waits for another worker running the same name":
+suite "F1: set_impl and in-flight invocations":
+  test "from inside an impl, unregistering another worker's running impl never frees it":
     withReverseHarness(st, 2):
       var g: GateBox
       initGate(g)
       var box = UnregBox(st: addr st, gate: addr g)
       box.victimInsideAtReturn.store(-1)
-      st.setImpl("victim", gateImpl, addr g)
+      box.releasedAtReturn.store(-1)
+      victimReleased.store(0)
+      st.setImpl("victim", gateImpl, addr g, countVictimRelease)
       st.setImpl("unreg", unregImpl, addr box)
 
       let victimFut = ffiReverseCall("victim", @[], 5000)
       g.waitEntered(1)
       let unregFut = ffiReverseCall("unreg", @[], 5000)
-      # A correct set_impl blocks until "victim" returns, so release it after a pause.
-      for _ in 0 ..< 300:
-        if box.done.load():
-          break
-        os.sleep(1)
-      g.open()
       for _ in 0 ..< 2000:
         if box.done.load():
           break
         os.sleep(1)
-
       check box.done.load()
-      # Before the fix, 1: set_impl returned while "victim" still ran on the other
-      # worker, whose userData the host may already have freed.
-      check box.victimInsideAtReturn.load() == 0
+      # set_impl returned at once while "victim" still ran on the other worker...
+      check box.victimInsideAtReturn.load() == 1
+      # ...and its userData was not released under it. Before the fix the host freed
+      # it as soon as set_impl returned.
+      check box.releasedAtReturn.load() == 0
+      g.open()
+      for _ in 0 ..< 2000:
+        if victimReleased.load() == 1:
+          break
+        os.sleep(1)
+      check victimReleased.load() == 1 # released by the victim's own last reference
       failPendingReverse("test over")
       discard waitFor victimFut
       discard waitFor unregFut

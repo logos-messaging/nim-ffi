@@ -1103,17 +1103,17 @@ proc generateCLibHeader*(
       "/* <lib>_set_<wire>_impl registers impl (NULL unregisters). With a release the"
     )
     lines.add(
-      "   library owns user_data: the call never waits, and release(user_data) runs"
+      "   library owns user_data, and release(user_data) runs once the replaced impl's"
     )
     lines.add(
-      "   once the replaced impl's last running invocation returns. With a NULL release"
+      "   last running invocation returns. With a NULL release the host keeps ownership"
     )
     lines.add(
-      "   the host keeps ownership and the call waits until no other thread runs the"
+      "   and the library never frees it: keep it valid until the context is destroyed."
     )
-    lines.add("   replaced impl. Returns NIMFFI_REVERSE_ACCEPTED, _INVALID_CTX, or")
+    lines.add("   The call never waits. Returns NIMFFI_REVERSE_ACCEPTED, _INVALID_CTX,")
     lines.add(
-      "   _WORKERS_FAILED when it could not be registered; on any error the caller"
+      "   _WORKERS_FAILED, _OUT_OF_MEMORY or _REGISTRY_FULL; on any error the caller"
     )
     lines.add("   still owns user_data and release is never called. */")
     for r in reverse:
@@ -1134,7 +1134,7 @@ proc generateCLibHeader*(
       "   already timed out, is dropped. Returns NIMFFI_REVERSE_ACCEPTED, _INVALID_CTX,"
     )
     lines.add(
-      "   _NOT_ACTIVE, _PAYLOAD_TOO_LARGE, _MAILBOX_FULL, or _INVALID_ARGUMENT (NULL"
+      "   _NOT_ACTIVE, _PAYLOAD_TOO_LARGE, _MAILBOX_FULL, _OUT_OF_MEMORY, or _INVALID_ARGUMENT (NULL"
     )
     lines.add("   reply_cbor with a non-zero reply_len). */")
     lines.add(

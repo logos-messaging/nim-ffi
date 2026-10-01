@@ -319,7 +319,7 @@ suite "reverse call failure modes":
       check "timed out" in callbackMsg(rsp)
 
 suite "registration semantics":
-  test "unregistering blocks until the in-flight invocation returns":
+  test "unregistering returns at once; the in-flight invocation still finishes":
     setupCallbackData(rsp)
     withPool(ctx):
       var box: SlowBox
@@ -338,8 +338,13 @@ suite "registration semantics":
       check box.entered.load()
       check not box.exited.load()
 
-      # Blocks until slowImpl returns, so its userData may be freed right after.
+      # Never waits: the running invocation keeps its entry until it returns.
       ctx[].reverse.setImpl("silent", nil, nil)
+      check not ctx[].reverse.hasImpl("silent")
+      for _ in 0 ..< 500:
+        if box.exited.load():
+          break
+        os.sleep(1)
       check box.exited.load()
 
       waitCallback(rsp) # the call itself then dies on its deadline

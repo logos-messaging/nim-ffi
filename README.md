@@ -335,14 +335,13 @@ int <lib>_reverse_reply(void* ctx, uint64_t call_id, int ret_code,
 int <lib>_emit_<wire>(void* ctx, const uint8_t* payload_cbor, size_t payload_len);
 ```
 
-`set_impl` with a `release` hands `user_data` to the library: the call never
-waits, and `release(user_data)` runs once the replaced implementation's last
-running invocation returns, on whichever thread that is. That makes replacing or
-clearing an implementation safe from any thread, including from inside the
-implementation itself. With a `NULL` release the host keeps ownership, and
-`set_impl` waits until no other thread runs the replaced implementation (never for
-the caller's own invocation). If `set_impl` fails, the caller still owns
-`user_data`. The status codes are `NIMFFI_REVERSE_*` in C and C++ and
+`set_impl` never waits. With a `release` it hands `user_data` to the library:
+`release(user_data)` runs once the replaced implementation's last running
+invocation returns, on whichever thread that is. That makes replacing or clearing
+an implementation safe from any thread, including from inside the implementation
+itself. With a `NULL` release the host keeps ownership and the library never frees
+it, so keep `user_data` valid until the context is destroyed. If `set_impl` fails,
+the caller still owns `user_data`. The status codes are `NIMFFI_REVERSE_*` in C and C++ and
 `REVERSE_*` in Rust.
 
 The C header adds typed helpers: `<lib>_ctx_set_<wire>_impl`,
@@ -383,7 +382,7 @@ ctx.emit_on_host_tick(7);            // reverse event, fire-and-forget
 | No reply before the deadline | The call fails after `ReverseCallTimeoutMs` (10 s) or the `timeout = ms` of the proc. |
 | Deadline or `cancelSoon()` while the call is queued | The worker skips the call, and the implementation never runs. |
 | Deadline or cancel while the implementation runs | The call fails at once, and the late reply is dropped by call id. |
-| `set_impl` while invocations run | With a `release`: returns at once, and the last running invocation releases the old `user_data`. With `NULL`: waits for other threads running the replaced implementation. |
+| `set_impl` while invocations run | Returns at once. With a `release`, the last running invocation releases the old `user_data`; with `NULL`, the host must keep it valid until the context is destroyed. |
 | Two replies for one call id | The first one completes the call; the second is dropped. |
 | A reply longer than the request limit, or `NULL` with a length | `NIMFFI_REVERSE_PAYLOAD_TOO_LARGE` or `NIMFFI_REVERSE_INVALID_ARGUMENT`; nothing is queued. |
 | Recycle or shutdown has begun | A new reverse call fails at once instead of parking. |

@@ -1941,9 +1941,7 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
     if `ctxIdent`.isNil():
       return REVERSE_INVALID_CTX
     # Refused: `userData` stays the caller's and `release` is never called for it.
-    if not setImpl(`ctxIdent`[].reverse, `wireNameLit`, impl, userData, release):
-      return REVERSE_WORKERS_FAILED
-    return REVERSE_ACCEPTED
+    return setImplStatus(`ctxIdent`[].reverse, `wireNameLit`, impl, userData, release)
 
   resultStmts.add(
     newProc(

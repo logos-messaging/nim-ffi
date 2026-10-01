@@ -193,16 +193,30 @@ suite "impl ownership (release callback)":
     deinitReverseState(st)
     check box.released.load() == 1
 
-  test "a nil release does not wait for the caller's own dispatch":
+  test "a nil release never waits and leaves userData to the host":
     var st: FFIReverseState
     initReverseState(st)
     defer:
       deinitReverseState(st)
     check st.setImpl("x", nopImpl, nil)
-    let entry = st.beginReverseDispatch("x") # this thread now runs "x"
-    check st.setImpl("x", nil, nil) # would deadlock if it waited for itself
+    let entry = st.beginReverseDispatch("x") # a dispatch still runs "x"
+    check st.setImpl("x", nil, nil) # returns at once
     check not st.hasImpl("x")
     st.endReverseDispatch(entry)
+
+  test "a full registry is REVERSE_REGISTRY_FULL and never calls the release":
+    var st: FFIReverseState
+    initReverseState(st)
+    defer:
+      deinitReverseState(st)
+    for i in 0 ..< ReverseMaxImpls:
+      check st.setImplStatus("impl" & $i, nopImpl, nil) == REVERSE_ACCEPTED
+    var box: ReleaseBox
+    check st.setImplStatus("one-too-many", nopImpl, addr box, countRelease) ==
+      REVERSE_REGISTRY_FULL
+    check box.released.load() == 0
+    check not st.hasImpl("one-too-many")
+    check st.setImplStatus("impl0", nil, nil) == REVERSE_ACCEPTED # a slot comes free
 
   test "an impl replacing itself on a worker is released after it returns":
     var st: FFIReverseState

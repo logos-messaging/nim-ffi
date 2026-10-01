@@ -120,7 +120,6 @@ type
     lock*: Lock
     impls: array[ReverseMaxImpls, ReverseImplSlot] # no GC memory: any thread may free
     dispatching*: int # invocations in flight on the workers
-    dispatchDone*: Cond # a dispatch ended: wakes a `setImpl` with a nil release
     nextCallId*: Atomic[uint64]
     mailbox, mailboxTail: ptr ReverseReply # FIFO: the first reply for a call id wins
     mailboxCount: int
@@ -141,8 +140,6 @@ type
 
 var onReverseWorker* {.threadvar.}: bool
 var myWorkerIdx {.threadvar.}: int # 1-based; 0 off a worker
-var currentDispatch {.threadvar.}: ptr ReverseImplEntry
-  # The entry this worker runs: a `setImpl` from inside it must not wait for itself.
 
 proc nowNs(): int64 =
   return getMonoTime().ticks
@@ -150,7 +147,6 @@ proc nowNs(): int64 =
 proc initReverseState*(st: var FFIReverseState) =
   ## Once, before any thread sees `st`: a second initLock is UB.
   st.lock.initLock()
-  st.dispatchDone.initCond()
   st.qLock.initLock()
   st.qCond.initCond()
   for i in 0 ..< ReverseMaxImpls:
@@ -285,16 +281,18 @@ proc clearImpls*(st: var FFIReverseState): int {.raises: [], gcsafe.} =
   ## A running invocation keeps its entry, and releases it when it returns.
   var entries: array[ReverseMaxImpls, ptr ReverseImplEntry]
   var names: array[ReverseMaxImpls, cstring]
+  var running = 0
   withLock st.lock:
     for i in 0 ..< ReverseMaxImpls:
       entries[i] = st.impls[i].entry
       names[i] = st.impls[i].name
       st.impls[i] = ReverseImplSlot()
-    result = st.dispatching
+    running = st.dispatching
   for i in 0 ..< ReverseMaxImpls:
     if not names[i].isNil():
       c_free(names[i])
     releaseEntry(entries[i])
+  return running
 
 proc deinitReverseState*(st: var FFIReverseState) =
   ## A stop that leaked a worker keeps the locks and the worker array alive for it.
@@ -311,12 +309,71 @@ proc deinitReverseState*(st: var FFIReverseState) =
     st.workers = nil
   st.qCond.deinitCond()
   st.qLock.deinitLock()
-  st.dispatchDone.deinitCond()
   st.lock.deinitLock()
 
 proc startReverseWorkers*(
   st: var FFIReverseState, n: int = 0
 ): bool {.raises: [], gcsafe.}
+
+proc setImplStatus*(
+    st: var FFIReverseState,
+    name: string,
+    fn: FFIReverseImpl,
+    userData: pointer,
+    release: FFIReverseRelease = nil,
+): cint {.raises: [], gcsafe.} =
+  ## Registers `fn` for `name`, or unregisters it when `fn` is nil. Never waits.
+  ##
+  ## With a `release`, Nim owns `userData`: the last invocation still running the
+  ## replaced entry calls its `release`. With a nil `release` the host keeps
+  ## ownership and Nim never frees `userData`: keep it valid while an invocation
+  ## may still run it, i.e. until the context is destroyed.
+  ##
+  ## REVERSE_ACCEPTED, or REVERSE_WORKERS_FAILED / REVERSE_OUT_OF_MEMORY /
+  ## REVERSE_REGISTRY_FULL; on an error the caller still owns `userData` and
+  ## `release` is never called for it.
+  if not fn.isNil() and not st.startReverseWorkers():
+    return REVERSE_WORKERS_FAILED
+
+  var fresh: ptr ReverseImplEntry = nil
+  if not fn.isNil():
+    fresh = cast[ptr ReverseImplEntry](c_malloc(csize_t(sizeof(ReverseImplEntry))))
+    if fresh.isNil():
+      return REVERSE_OUT_OF_MEMORY
+    fresh[].refs.store(1)
+    fresh[].fn = fn
+    fresh[].userData = userData
+    fresh[].release = release
+
+  var old: ptr ReverseImplEntry = nil
+  var oldName: cstring = nil
+  var status = REVERSE_ACCEPTED
+  withLock st.lock:
+    var idx = st.findSlot(cstring(name))
+    if idx < 0 and not fresh.isNil():
+      idx = st.freeSlot()
+      if idx < 0:
+        status = REVERSE_REGISTRY_FULL
+      else:
+        st.impls[idx].name = dupName(name)
+        if st.impls[idx].name.isNil():
+          idx = -1
+          status = REVERSE_OUT_OF_MEMORY
+    if idx >= 0:
+      old = st.impls[idx].entry
+      st.impls[idx].entry = fresh
+      if fresh.isNil():
+        oldName = st.impls[idx].name
+        st.impls[idx].name = nil
+    # idx < 0 with a nil `fn`: unregistering an absent name is not an error
+
+  if status != REVERSE_ACCEPTED:
+    c_free(fresh) # never published, so its release must not run
+    return status
+  if not oldName.isNil():
+    c_free(oldName)
+  releaseEntry(old)
+  return REVERSE_ACCEPTED
 
 proc setImpl*(
     st: var FFIReverseState,
@@ -325,59 +382,8 @@ proc setImpl*(
     userData: pointer,
     release: FFIReverseRelease = nil,
 ): bool {.discardable, raises: [], gcsafe.} =
-  ## Registers `fn` for `name`, or unregisters it when `fn` is nil.
-  ##
-  ## With a `release`, Nim owns `userData`: nothing waits, and the last invocation
-  ## still running the replaced entry calls its `release`. With a nil `release` the
-  ## host keeps ownership, so this waits until no other thread runs the replaced
-  ## entry, never for the caller's own invocation.
-  ##
-  ## False when the workers did not start or the registry is full; the caller then
-  ## still owns `userData` and `release` is never called for it.
-  if not fn.isNil() and not st.startReverseWorkers():
-    return false
-
-  var fresh: ptr ReverseImplEntry = nil
-  if not fn.isNil():
-    fresh = cast[ptr ReverseImplEntry](c_malloc(csize_t(sizeof(ReverseImplEntry))))
-    if fresh.isNil():
-      return false
-    fresh[].refs.store(1)
-    fresh[].fn = fn
-    fresh[].userData = userData
-    fresh[].release = release
-
-  var old: ptr ReverseImplEntry = nil
-  var oldName: cstring = nil
-  var registered = true
-  withLock st.lock:
-    var idx = st.findSlot(cstring(name))
-    if idx < 0 and not fresh.isNil():
-      idx = st.freeSlot()
-      if idx >= 0:
-        st.impls[idx].name = dupName(name)
-        if st.impls[idx].name.isNil():
-          idx = -1
-    if idx < 0:
-      registered = fresh.isNil() # unregistering an absent name is not an error
-    else:
-      old = st.impls[idx].entry
-      st.impls[idx].entry = fresh
-      if fresh.isNil():
-        oldName = st.impls[idx].name
-        st.impls[idx].name = nil
-      if not old.isNil() and old[].release.isNil():
-        let own = if currentDispatch == old: 1 else: 0
-        while old[].refs.load() > 1 + own:
-          wait(st.dispatchDone, st.lock)
-
-  if not registered:
-    c_free(fresh) # never published, so its release must not run
-    return false
-  if not oldName.isNil():
-    c_free(oldName)
-  releaseEntry(old)
-  return true
+  ## `setImplStatus` for Nim callers that only need success or failure.
+  return st.setImplStatus(name, fn, userData, release) == REVERSE_ACCEPTED
 
 proc hasImpl*(st: var FFIReverseState, name: string): bool {.raises: [], gcsafe.} =
   withLock st.lock:
@@ -399,21 +405,14 @@ proc beginReverseDispatch*(
     let entry = st.impls[idx].entry
     discard entry[].refs.fetchAdd(1)
     st.dispatching.inc()
-    currentDispatch = entry
     return entry
 
 proc endReverseDispatch*(
     st: var FFIReverseState, entry: ptr ReverseImplEntry
 ) {.raises: [], gcsafe.} =
-  currentDispatch = nil
-  var last = false
   withLock st.lock:
     st.dispatching.dec()
-    # Under the lock, so a `setImpl` waiting on this entry cannot miss the drop.
-    last = entry[].refs.fetchSub(1) == 1
-    broadcast(st.dispatchDone)
-  if last:
-    freeEntry(entry)
+  releaseEntry(entry)
 
 proc allocCallId*(st: var FFIReverseState): uint64 {.raises: [].} =
   ## Monotonic for the life of the slot; 0 is the invalid id.
@@ -425,7 +424,7 @@ proc pushReply*(
   ## Any thread. Wakes the FFI thread only when the mailbox was empty.
   let node = cast[ptr ReverseReply](c_malloc(csize_t(sizeof(ReverseReply))))
   if node.isNil():
-    return REVERSE_MAILBOX_FULL
+    return REVERSE_OUT_OF_MEMORY
 
   node[].callId = callId
   node[].retCode = retCode
@@ -436,7 +435,7 @@ proc pushReply*(
     let buf = cast[ptr UncheckedArray[byte]](c_malloc(csize_t(dataLen)))
     if buf.isNil():
       c_free(node)
-      return REVERSE_MAILBOX_FULL
+      return REVERSE_OUT_OF_MEMORY
     copyMem(buf, data, dataLen)
     node[].data = buf
     node[].dataLen = dataLen
