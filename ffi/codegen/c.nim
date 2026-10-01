@@ -698,6 +698,122 @@ proc emitListenerApi(
   lines.add("}")
   lines.add("")
 
+proc emitReverseMachinery(
+    lines: var seq[string],
+    reg: var CTypeReg,
+    ctxType, libName: string,
+    reverse: seq[FFIReverseMeta],
+    reverseEvents: seq[FFIReverseEventMeta],
+) =
+  if reverse.len == 0 and reverseEvents.len == 0:
+    return
+  lines.add("/* Reverse FFI helpers (typed sugar over the raw exports above) */")
+  if reverse.len > 0:
+    lines.add(
+      "static inline int " & libName & "_ctx_reverse_reply_err(const " & ctxType &
+        "* ctx, uint64_t call_id, const char* msg) {"
+    )
+    lines.add(
+      "    return " & libName &
+        "_reverse_reply(ctx->ptr, call_id, 1, (const uint8_t*)msg, msg ? strlen(msg) : 0);"
+    )
+    lines.add("}")
+    lines.add("")
+  for r in reverse:
+    let snake = r.wireName
+    lines.add(renderBlockDocComment(r.doc))
+    lines.add(
+      "static inline int " & libName & "_ctx_set_" & snake & "_impl(const " & ctxType &
+        "* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release) {"
+    )
+    lines.add(
+      "    return " & libName & "_set_" & snake &
+        "_impl(ctx->ptr, impl, user_data, release);"
+    )
+    lines.add("}")
+    if r.argsTypeName.len > 0:
+      let (argsC, _) = ensureCType(reg, r.argsTypeName)
+      # Same ownership rules as every other decoded value (see `freeStmt`).
+      let freeNote =
+        if argsC == CStrType:
+          "; free `*out` with free()"
+        elif argsC == "NimFfiBytes":
+          "; free `out` with nimffi_free_bytes()"
+        elif reg.owns.getOrDefault(argsC, false):
+          "; free `out` with " & libName & "_free_" & argsC & "()"
+        else:
+          ""
+      lines.add(
+        "/* Decode the args of a `" & snake & "` invocation" & freeNote & ". */"
+      )
+      lines.add(
+        "static inline int " & libName & "_decode_" & snake &
+          "_args(const uint8_t* args_cbor, size_t args_len, " & argsC &
+          "* out, char** err) {"
+      )
+      lines.add("    memset(out, 0, sizeof(*out));")
+      lines.add(
+        "    return nimffi_decode_from_buf(" & libName & "_decv_" & cToken(argsC) &
+          ", args_cbor, args_len, out, err);"
+      )
+      lines.add("}")
+    if r.replyTypeName.len > 0:
+      let (replyC, _) = ensureCType(reg, r.replyTypeName)
+      lines.add(
+        "static inline int " & libName & "_ctx_reverse_reply_" & snake & "(const " &
+          ctxType & "* ctx, uint64_t call_id, const " & replyC & "* reply) {"
+      )
+      lines.add("    uint8_t* buf = NULL;")
+      lines.add("    size_t len = 0;")
+      lines.add("    char* err = NULL;")
+      lines.add(
+        "    if (nimffi_encode_to_buf(" & libName & "_encv_" & cToken(replyC) &
+          ", reply, &buf, &len, &err) != 0) {"
+      )
+      lines.add("        free(err);")
+      lines.add("        return -1;")
+      lines.add("    }")
+      lines.add(
+        "    int rc = " & libName & "_reverse_reply(ctx->ptr, call_id, 0, buf, len);"
+      )
+      lines.add("    free(buf);")
+      lines.add("    return rc;")
+      lines.add("}")
+    else:
+      lines.add(
+        "static inline int " & libName & "_ctx_reverse_reply_" & snake & "(const " &
+          ctxType & "* ctx, uint64_t call_id) {"
+      )
+      lines.add(
+        "    return " & libName & "_reverse_reply(ctx->ptr, call_id, 0, NULL, 0);"
+      )
+      lines.add("}")
+    lines.add("")
+  for rev in reverseEvents:
+    let (reqC, _) = ensureCType(reg, rev.reqTypeName)
+    lines.add(renderBlockDocComment(rev.doc))
+    lines.add(
+      "static inline int " & libName & "_ctx_emit_" & rev.wireName & "(const " & ctxType &
+        "* ctx, const " & reqC & "* payload) {"
+    )
+    lines.add("    uint8_t* buf = NULL;")
+    lines.add("    size_t len = 0;")
+    lines.add("    char* err = NULL;")
+    lines.add(
+      "    if (nimffi_encode_to_buf(" & libName & "_encv_" & cToken(reqC) &
+        ", payload, &buf, &len, &err) != 0) {"
+    )
+    lines.add("        free(err);")
+    lines.add("        return -1;")
+    lines.add("    }")
+    lines.add(
+      "    int rc = " & libName & "_emit_" & rev.wireName & "(ctx->ptr, buf, len);"
+    )
+    lines.add("    free(buf);")
+    lines.add("    return rc;")
+    lines.add("}")
+    lines.add("")
+
 proc emitProcWrapper(
     lines: var seq[string],
     reg: var CTypeReg,
@@ -876,6 +992,8 @@ proc generateCLibHeader*(
     libName: string,
     events: seq[FFIEventMeta] = @[],
     consts: seq[FFIConstMeta] = @[],
+    reverse: seq[FFIReverseMeta] = @[],
+    reverseEvents: seq[FFIReverseEventMeta] = @[],
 ): string =
   ## The `<lib>.h` header: library structs, monomorphised codecs and async API.
   let classified = classifyProcs(procs)
@@ -886,6 +1004,17 @@ proc generateCLibHeader*(
   var reg = newCTypeReg(libName, libType, types, procs)
   let (reqTypes, respTypes) =
     monomorphiseAll(reg, types, procs, classified.replyProcs(), events)
+
+  # The host decodes reverse args and encodes replies, so these need the opposite adapters.
+  var revDecTypes: seq[string] = @[]
+  var revEncTypes: seq[string] = @[]
+  for r in reverse:
+    if r.argsTypeName.len > 0:
+      revDecTypes.add(ensureCType(reg, r.argsTypeName).cType)
+    if r.replyTypeName.len > 0:
+      revEncTypes.add(ensureCType(reg, r.replyTypeName).cType)
+  for rev in reverseEvents:
+    revEncTypes.add(ensureCType(reg, rev.reqTypeName).cType)
 
   let guard = "NIM_FFI_LIB_" & libName.toUpperAscii() & "_H_INCLUDED"
   var lines: seq[string] = @[]
@@ -942,6 +1071,90 @@ proc generateCLibHeader*(
   lines.add(
     "int " & libName & "_remove_event_listener(void* ctx, uint64_t listener_id);"
   )
+  if reverse.len > 0 or reverseEvents.len > 0:
+    lines.add("")
+    lines.add("/* Reverse FFI: host-implemented interfaces + host-emitted events */")
+  if reverse.len > 0:
+    lines.add("#ifndef NIM_FFI_REVERSE_IMPL_DEFINED")
+    lines.add("#define NIM_FFI_REVERSE_IMPL_DEFINED")
+    lines.add("/* Status of <lib>_set_<wire>_impl and <lib>_reverse_reply. */")
+    lines.add(cReverseCodeDefines())
+    lines.add(
+      "/* Runs on a reverse worker thread and may block. args_cbor is valid only until"
+    )
+    lines.add(
+      "   the impl returns: copy what a deferred reply needs. Answer, now or later"
+    )
+    lines.add("   and from any thread, via <lib>_reverse_reply. */")
+    lines.add(
+      "typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, " &
+        "size_t args_len, void* user_data);"
+    )
+    lines.add(
+      "/* Frees an impl's user_data once no invocation uses it. It runs on whichever"
+    )
+    lines.add(
+      "   thread drops the last reference (a reverse worker, the set_impl caller or"
+    )
+    lines.add("   the library's own thread at teardown), so it must be thread-safe. */")
+    lines.add("typedef void (*FFIReverseRelease)(void* user_data);")
+    lines.add("#endif")
+    lines.add(
+      "/* <lib>_set_<wire>_impl registers impl (NULL unregisters). With a release the"
+    )
+    lines.add(
+      "   library owns user_data, and release(user_data) runs once the replaced impl's"
+    )
+    lines.add(
+      "   last running invocation returns. With a NULL release the host keeps ownership"
+    )
+    lines.add(
+      "   and the library never frees it: keep it valid until the context is destroyed."
+    )
+    lines.add("   The call never waits. Returns NIMFFI_REVERSE_ACCEPTED, _INVALID_CTX,")
+    lines.add(
+      "   _WORKERS_FAILED, _OUT_OF_MEMORY or _REGISTRY_FULL; on any error the caller"
+    )
+    lines.add("   still owns user_data and release is never called. */")
+    for r in reverse:
+      lines.add(renderBlockDocComment(r.doc))
+      lines.add(
+        "int " & libName & "_set_" & r.wireName &
+          "_impl(void* ctx, FFIReverseImpl impl, void* user_data, " &
+          "FFIReverseRelease release);"
+      )
+    lines.add(
+      "/* Answers a reverse call from ANY thread. ret_code 0 = ok (reply_cbor is"
+    )
+    lines.add("   the CBOR reply), non-zero = error (reply_cbor is a UTF-8 message).")
+    lines.add(
+      "   The first reply for a call_id wins; a later one, or one for a call that"
+    )
+    lines.add(
+      "   already timed out, is dropped. Returns NIMFFI_REVERSE_ACCEPTED, _INVALID_CTX,"
+    )
+    lines.add(
+      "   _NOT_ACTIVE, _PAYLOAD_TOO_LARGE, _MAILBOX_FULL, _OUT_OF_MEMORY, or _INVALID_ARGUMENT (NULL"
+    )
+    lines.add("   reply_cbor with a non-zero reply_len). */")
+    lines.add(
+      "int " & libName & "_reverse_reply(void* ctx, uint64_t call_id, int ret_code, " &
+        "const uint8_t* reply_cbor, size_t reply_len);"
+    )
+  if reverseEvents.len > 0:
+    lines.add(
+      "/* <lib>_emit_<wire> queues a host event for the library's own thread and"
+    )
+    lines.add(
+      "   returns NIMFFI_RET_OK once queued; NIMFFI_RET_ERR for a bad ctx, a payload"
+    )
+    lines.add("   over the request limit, or NULL payload_cbor with a length. */")
+  for rev in reverseEvents:
+    lines.add(renderBlockDocComment(rev.doc))
+    lines.add(
+      "int " & libName & "_emit_" & rev.wireName &
+        "(void* ctx, const uint8_t* payload_cbor, size_t payload_len);"
+    )
   lines.add(renderBlockDocComment(ShutdownDoc))
   lines.add("int " & libName & "_shutdown(void);")
   lines.add("")
@@ -962,8 +1175,18 @@ proc generateCLibHeader*(
           "(CborEncoder* e, const void* v) { return " & reg.libName & "_enc_" & n &
           "(e, (const " & n & "*)v); }"
       )
+  for n in revEncTypes:
+    let tok = cToken(n)
+    if ("enc" & tok) notin adaptersDone:
+      adaptersDone.incl("enc" & tok)
+      lines.add(
+        "static inline CborError " & libName & "_encv_" & tok &
+          "(CborEncoder* e, const void* v) { return " & encFn(reg, n) & "(e, (const " & n &
+          "*)v); }"
+      )
   var respSet = respTypes
   respSet.add(CStrType) # ctor address payload
+  respSet.add(revDecTypes)
   for n in respSet:
     let tok = cToken(n)
     if ("dec" & tok) notin adaptersDone:
@@ -979,6 +1202,7 @@ proc generateCLibHeader*(
   emitConstructors(lines, reg, ctxType, libType, libName, ctors)
   emitDestructor(lines, ctxType, libName, classified.dtor, events)
   emitListenerApi(lines, ctxType, libType, libName, events)
+  emitReverseMachinery(lines, reg, ctxType, libName, reverse, reverseEvents)
   for m in classified.replyProcs():
     emitProcWrapper(lines, reg, ctxType, libType, libName, m)
 
@@ -1001,6 +1225,8 @@ proc generateCBindings*(
     nimSrcRelPath: string,
     events: seq[FFIEventMeta] = @[],
     consts: seq[FFIConstMeta] = @[],
+    reverse: seq[FFIReverseMeta] = @[],
+    reverseEvents: seq[FFIReverseEventMeta] = @[],
 ) =
   ## Emits the C binding for `libName`.
   ensureOutputDir(outputDir)
@@ -1008,7 +1234,7 @@ proc generateCBindings*(
   writeOutputFile(buildPath(outputDir, CborHeaderName), generateCCborHeader())
   writeOutputFile(
     buildPath(outputDir, libName & ".h"),
-    generateCLibHeader(procs, types, libName, events, consts),
+    generateCLibHeader(procs, types, libName, events, consts, reverse, reverseEvents),
   )
   writeOutputFile(
     buildPath(outputDir, "CMakeLists.txt"), generateCCMakeLists(libName, nimSrcRelPath)
