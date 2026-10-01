@@ -83,3 +83,12 @@ func cReverseCodeDefines*(): string =
     lines.add("#define NIMFFI_REVERSE_" & code.name & " " & $code.value)
 
   return lines
+
+func rustReverseCodeConsts*(): string =
+  var lines = ""
+  for code in ReverseCodes:
+    if lines.len > 0:
+      lines.add("\n")
+    lines.add("pub const REVERSE_" & code.name & ": c_int = " & $code.value & ";")
+
+  return lines

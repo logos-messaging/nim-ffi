@@ -2190,7 +2190,7 @@ when defined(ffiGenBindings):
     of "rust":
       generateRustCrate(
         genProcs, ffiTypeRegistry, libName, outDir, srcRel, ffiEventRegistry,
-        ffiConstRegistry,
+        ffiConstRegistry, ffiReverseRegistry, ffiReverseEventRegistry,
       )
     of "cpp", "c++":
       generateCppBindings(

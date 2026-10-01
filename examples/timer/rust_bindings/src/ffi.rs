@@ -32,4 +32,17 @@ extern "C" {
     /// static proc built the shared context.
     /// Returns 0 when every context stopped, 1 when one was left running.
     pub fn my_timer_shutdown() -> c_int;
+    pub fn my_timer_set_fetch_host_clock_impl(ctx: *mut c_void, imp: Option<FFIReverseImpl>, user_data: *mut c_void, release: Option<FFIReverseRelease>) -> c_int;
+    pub fn my_timer_reverse_reply(ctx: *mut c_void, call_id: u64, ret_code: c_int, reply_cbor: *const u8, reply_len: usize) -> c_int;
+    pub fn my_timer_emit_on_host_tick(ctx: *mut c_void, payload_cbor: *const u8, payload_len: usize) -> c_int;
 }
+
+/// Runs on a reverse worker thread and may block; answer via `<lib>_reverse_reply`.
+pub type FFIReverseImpl = unsafe extern "C" fn(
+    call_id: u64,
+    args_cbor: *const u8,
+    args_len: usize,
+    user_data: *mut c_void,
+);
+/// Frees an impl's `user_data` once no invocation uses it; runs on any thread.
+pub type FFIReverseRelease = unsafe extern "C" fn(user_data: *mut c_void);
