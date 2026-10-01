@@ -2195,7 +2195,7 @@ when defined(ffiGenBindings):
     of "cpp", "c++":
       generateCppBindings(
         genProcs, ffiTypeRegistry, libName, outDir, srcRel, ffiEventRegistry,
-        ffiConstRegistry,
+        ffiConstRegistry, ffiReverseRegistry, ffiReverseEventRegistry,
       )
     of "c":
       generateCBindings(
