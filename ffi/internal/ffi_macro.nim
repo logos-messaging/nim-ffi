@@ -2000,6 +2000,168 @@ macro ffiReverse*(args: varargs[untyped]): untyped =
     error("ffiReverse must be applied to a proc declaration")
   return buildFFIReverseProc(prc, args[0 ..^ 2])
 
+proc buildFFIReverseEventProc(
+    prc: NimNode, leading: seq[NimNode]
+): NimNode {.compileTime.} =
+  ## Emits the user proc, its request handler and the `<lib>_emit_<wire>` export.
+  let procName = prc[0]
+  var userProcName = procName
+  if procName.kind == nnkPostfix:
+    userProcName = procName[1]
+
+  let (wireName, abiSpecStart) = resolveEventWireName(leading, userProcName)
+  if leading.len > abiSpecStart:
+    error(
+      "`.ffiReverseEvent.`: unsupported argument " & leading[abiSpecStart].repr &
+        "; only an optional wire-name string literal is accepted"
+    )
+
+  let formalParams = prc[3]
+  if formalParams[0].kind != nnkEmpty:
+    error(
+      "`.ffiReverseEvent.` proc " & $userProcName & " must not declare a return type"
+    )
+  if not hasRealBody(prc):
+    error(
+      "`.ffiReverseEvent.` proc " & $userProcName &
+        " needs a body: it is the handler the host-emitted event runs on the " &
+        "FFI processing thread"
+    )
+
+  var paramNames: seq[NimNode] = @[]
+  var paramTypes: seq[NimNode] = @[]
+  for i in 1 ..< formalParams.len:
+    let p = formalParams[i]
+    for j in 0 ..< p.len - 2:
+      rejectRawPtrType(
+        p[^2], "`.ffiReverseEvent.` proc " & $userProcName & " parameter " & $p[j]
+      )
+      paramNames.add(p[j])
+      paramTypes.add(p[^2])
+
+  let resultStmts = newStmtList()
+  resultStmts.add(prc.copyNimTree())
+
+  let reqType = ident(snakeToPascalCase(wireName) & "Req")
+
+  # Codegen metadata only; registerReqFFI below emits the actual Req type.
+  var paramNameStrs: seq[string] = @[]
+  var paramMetas: seq[FFIParamMeta] = @[]
+  for i in 0 ..< paramNames.len:
+    paramNameStrs.add($paramNames[i])
+    paramMetas.add(
+      FFIParamMeta(name: $paramNames[i], typeName: nimTypeNameRepr(paramTypes[i]))
+    )
+  let metaTypeSection = buildReqTypeFromFields(reqType, paramNameStrs, paramTypes)
+  discard registerFFITypeInfo(metaTypeSection[0])
+
+  var lambdaParams = newSeq[NimNode]()
+  lambdaParams.add(
+    nnkBracketExpr.newTree(
+      ident("Future"),
+      nnkBracketExpr.newTree(ident("Result"), ident("void"), ident("string")),
+    )
+  )
+  for i in 0 ..< paramNames.len:
+    lambdaParams.add(newIdentDefs(paramNames[i], paramTypes[i]))
+
+  let callUser = newCall(userProcName)
+  for n in paramNames:
+    callUser.add(n)
+  let lambdaBody = newStmtList()
+  lambdaBody.add(callUser)
+  lambdaBody.add quote do:
+    return ok()
+  let lambdaNode = newProc(
+    name = newEmptyNode(),
+    params = lambdaParams,
+    body = lambdaBody,
+    procType = nnkLambda,
+    pragmas = nnkPragma.newTree(ident("async")),
+  )
+
+  let ctxHandlerName = ident("ffiCtxHandler")
+  let libTypeIdent = ident(currentLibType)
+  let ptrFFICtx =
+    nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("FFIContext"), libTypeIdent))
+  resultStmts.add quote do:
+    registerReqFFI(`reqType`, `ctxHandlerName`: `ptrFFICtx`):
+      `lambdaNode`
+
+  # The return code reports the enqueue, never the handler.
+  let emitName = currentLibName & "_emit_" & wireName
+  let poolIdent = ident(currentLibType & "FFIPool")
+  let ctxIdent = ident("ctx")
+  let ctxGenIdent = ident("ctxGen")
+  let reqNameLit = newLit($reqType)
+  let reqPtrIdent = genSym(nskLet, "reqPtr")
+  let sendResIdent = genSym(nskLet, "sendRes")
+  let emitBody = quote:
+    when declared(initializeLibrary):
+      initializeLibrary()
+    let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
+    if `ctxIdent`.isNil():
+      return RET_ERR
+    # Checked on the csize_t, before the int conversion can raise a RangeDefect.
+    if payloadLen > csize_t(MaxRequestPayloadBytes):
+      return RET_ERR
+    if payloadCbor.isNil() and payloadLen > 0:
+      return RET_ERR
+    let `ctxGenIdent` = ctxToken.tokenGeneration()
+    let `reqPtrIdent` = FFIThreadRequest.initFromPtr(
+      ffiNoopCallback, nil, cstring(`reqNameLit`), payloadCbor, int(payloadLen)
+    )
+    if `reqPtrIdent`.isNil():
+      return RET_ERR
+    let `sendResIdent` =
+      try:
+        ffi_context.sendRequestToFFIThread(`ctxIdent`, `reqPtrIdent`, `ctxGenIdent`)
+      except Exception as e:
+        Result[void, string].err("sendRequestToFFIThread exception: " & e.msg)
+    if `sendResIdent`.isErr():
+      return RET_ERR
+    return RET_OK
+
+  resultStmts.add(
+    newProc(
+      name = postfix(ident(emitName), "*"),
+      params = @[
+        ident("cint"),
+        newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
+        newIdentDefs(ident("payloadCbor"), nnkPtrTy.newTree(ident("byte"))),
+        newIdentDefs(ident("payloadLen"), ident("csize_t")),
+      ],
+      body = emitBody,
+      pragmas = cdeclExportPragma(emitName),
+    )
+  )
+
+  ffiReverseEventRegistry.add(
+    FFIReverseEventMeta(
+      wireName: wireName,
+      nimProcName: $userProcName,
+      libName: currentLibName,
+      reqTypeName: $reqType,
+      params: paramMetas,
+      doc: extractDocComment(prc),
+    )
+  )
+
+  when defined(ffiDumpMacros):
+    echo resultStmts.repr
+  return resultStmts
+
+macro ffiReverseEvent*(args: varargs[untyped]): untyped =
+  ## Declares a host-emitted event whose body runs on the FFI processing thread.
+  requireBeforeGenBindings("`.ffiReverseEvent.`")
+  requireLibraryDeclared("`.ffiReverseEvent.`")
+  if args.len < 1:
+    error("ffiReverseEvent must be applied to a proc declaration")
+  let prc = args[^1]
+  if prc.kind notin {nnkProcDef, nnkFuncDef}:
+    error("ffiReverseEvent must be applied to a proc declaration")
+  return buildFFIReverseEventProc(prc, args[0 ..^ 2])
+
 proc bindingsOutputDir(lang, explicit: string): string {.compileTime.} =
   ## Output dir for `lang`; defaults to `<lang>_bindings/` next to the compiled
   ## source. A relative -d:ffiOutputDir resolves against that same directory,

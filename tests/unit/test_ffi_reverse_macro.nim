@@ -26,6 +26,11 @@ proc notifyHost(
   note: string
 ): Future[Result[void, string]] {.ffiReverse("host_note", timeout = 300).}
 
+var pingSeen: Atomic[int]
+
+proc onHostPing(seqNo: int) {.ffiReverseEvent.} =
+  pingSeen.store(seqNo)
+
 static:
   doAssert ffiReverseRegistry.len == 2
   doAssert ffiReverseRegistry[0].wireName == "fetch_config"
@@ -37,6 +42,9 @@ static:
   doAssert ffiReverseRegistry[1].wireName == "host_note"
   doAssert ffiReverseRegistry[1].replyTypeName == ""
   doAssert ffiReverseRegistry[1].timeoutMs == 300
+  doAssert ffiReverseEventRegistry.len == 1
+  doAssert ffiReverseEventRegistry[0].wireName == "on_host_ping"
+  doAssert ffiReverseEventRegistry[0].reqTypeName == "OnHostPingReq"
 
 registerReqFFI(DriveFetchRequest, h: ptr FFIContext[RevMacroLib]):
   proc(): Future[Result[string, string]] {.async.} =
@@ -281,3 +289,35 @@ suite "set_impl ownership through the export":
       FFICtxToken(nil), silentImpl, addr a, countRelease
     ) == REVERSE_INVALID_CTX
     check a.load() == 0
+
+suite "{.ffiReverseEvent.} through the generated emit export":
+  test "host-encoded Req runs the handler on the FFI thread":
+    withLibCtx(ctx, token):
+      pingSeen.store(0)
+      let payload = cborEncode(OnHostPingReq(seqNo: 41))
+      check revmacro_emit_on_host_ping(
+        token, cast[ptr byte](unsafeAddr payload[0]), csize_t(payload.len)
+      ) == RET_OK
+
+      var delivered = false
+      for _ in 0 ..< 1000:
+        if pingSeen.load() == 41:
+          delivered = true
+          break
+        os.sleep(1)
+      check delivered
+
+  test "emit rejects an oversized, overflowing or NULL payload before reading it":
+    withLibCtx(ctx, token):
+      var b = [byte 0]
+      check revmacro_emit_on_host_ping(
+        token, addr b[0], csize_t(MaxRequestPayloadBytes + 1)
+      ) == RET_ERR
+      check revmacro_emit_on_host_ping(token, addr b[0], csize_t(high(uint))) == RET_ERR
+      check revmacro_emit_on_host_ping(token, nil, 4) == RET_ERR
+
+  test "emit with a stale token is rejected":
+    let payload = cborEncode(OnHostPingReq(seqNo: 1))
+    check revmacro_emit_on_host_ping(
+      FFICtxToken(nil), cast[ptr byte](unsafeAddr payload[0]), csize_t(payload.len)
+    ) == RET_ERR
