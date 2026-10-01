@@ -60,10 +60,30 @@ type
     payloadTypeName*: string
     doc*: string
 
+  FFIReverseMeta* = object ## Host-implemented interface from `{.ffiReverse.}`.
+    wireName*: string
+    nimProcName*: string
+    libName*: string
+    params*: seq[FFIParamMeta]
+    argsTypeName*: string ## synthesized args object, single param type, or ""
+    replyTypeName*: string ## "" when the proc returns Future[Result[void, string]]
+    timeoutMs*: int ## 0 = library default (ReverseCallTimeoutMs)
+    doc*: string
+
+  FFIReverseEventMeta* = object ## Host-emitted event from `{.ffiReverseEvent.}`.
+    wireName*: string
+    nimProcName*: string
+    libName*: string
+    reqTypeName*: string ## the Req object whose CBOR shape the host encodes
+    params*: seq[FFIParamMeta]
+    doc*: string
+
 var ffiProcRegistry* {.compileTime.}: seq[FFIProcMeta]
 var ffiTypeRegistry* {.compileTime.}: seq[FFITypeMeta]
 var ffiEventRegistry* {.compileTime.}: seq[FFIEventMeta]
 var ffiConstRegistry* {.compileTime.}: seq[FFIConstMeta]
+var ffiReverseRegistry* {.compileTime.}: seq[FFIReverseMeta]
+var ffiReverseEventRegistry* {.compileTime.}: seq[FFIReverseEventMeta]
 var currentLibName* {.compileTime.}: string
 
 # Set by `declareLibrary`; the FFI annotations require it.

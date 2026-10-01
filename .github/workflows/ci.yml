@@ -149,11 +149,12 @@ jobs:
 
   rust-bindings:
     # The examples are the only consumers of api.rs; build.rs shells out to `nim c`, hence the nimble job.
-    name: Run Rust examples
+    # `cargo test --tests` runs the wrapper-level reverse FFI tests; build.rs sets the rpath.
+    name: Run Rust examples and tests
     needs: versions
     uses: ./.github/workflows/nimble-job.yml
     with:
-      run: nimble run_examples_rust -y
+      run: nimble run_examples_rust -y && cargo test --locked --manifest-path examples/timer/rust_bindings/Cargo.toml --tests
       nim-versions:   ${{ needs.versions.outputs.nim-versions }}
       nimble-version: ${{ needs.versions.outputs.nimble }}
 

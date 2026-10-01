@@ -166,6 +166,71 @@ unsafe extern "C" fn on_job_scheduled_trampoline(
 #[derive(Debug, Clone, Copy)]
 pub struct ListenerHandle { pub id: u64 }
 
+/// Status of `set_*_impl` and a reverse reply, emitted from ffi/ret_codes.nim.
+pub const REVERSE_ACCEPTED: c_int = 0;
+pub const REVERSE_INVALID_CTX: c_int = 1;
+pub const REVERSE_NOT_ACTIVE: c_int = 2;
+pub const REVERSE_PAYLOAD_TOO_LARGE: c_int = 3;
+pub const REVERSE_MAILBOX_FULL: c_int = 4;
+pub const REVERSE_WORKERS_FAILED: c_int = 5;
+pub const REVERSE_INVALID_ARGUMENT: c_int = 6;
+pub const REVERSE_OUT_OF_MEMORY: c_int = 7;
+pub const REVERSE_REGISTRY_FULL: c_int = 8;
+
+/// Answer token for one `fetch_host_clock` call: a `Copy` {context token, call id} pair.
+/// Move it anywhere and reply once, from any thread, before the call's deadline;
+/// a late or second reply is dropped, and a reply after the context is gone
+/// returns false.
+#[derive(Debug, Clone, Copy)]
+pub struct FetchHostClockCall { ctx: usize, id: u64 }
+
+impl FetchHostClockCall {
+    pub fn reply(&self, r: &HostClock) -> bool {
+        match encode_cbor(r) {
+            Ok(b) => unsafe { ffi::my_timer_reverse_reply(self.ctx as *mut c_void, self.id, 0, b.as_ptr(), b.len()) == 0 },
+            Err(e) => self.fail(&e),
+        }
+    }
+    pub fn fail(&self, msg: &str) -> bool {
+        unsafe { ffi::my_timer_reverse_reply(self.ctx as *mut c_void, self.id, 1, msg.as_ptr(), msg.len()) == 0 }
+    }
+}
+
+struct FetchHostClockImplBox {
+    ctx: usize,
+    f: Box<dyn Fn(FetchHostClockCall, String) + Send + Sync>,
+}
+
+/// The library calls it once no invocation runs the box any more.
+unsafe extern "C" fn fetch_host_clock_impl_release(ud: *mut c_void) {
+    if !ud.is_null() { drop(Box::from_raw(ud as *mut FetchHostClockImplBox)); }
+}
+
+unsafe extern "C" fn fetch_host_clock_impl_trampoline(
+    call_id: u64, args: *const u8, len: usize, ud: *mut c_void,
+) {
+    if ud.is_null() { return; }
+    let b = &*(ud as *const FetchHostClockImplBox);
+    let call = FetchHostClockCall { ctx: b.ctx, id: call_id };
+    // A panic must not unwind into the library's worker thread: it would abort.
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let bytes = if args.is_null() || len == 0 {
+            &[][..]
+        } else {
+            slice::from_raw_parts(args, len)
+        };
+        match decode_cbor::<String>(bytes) {
+            Ok(a) => (b.f)(call, a),
+            Err(e) => {
+                let _ = call.fail(&format!("reverse args decode failed: {e}"));
+            }
+        }
+    }));
+    if r.is_err() {
+        let _ = call.fail("host impl panicked"); // dropped if it already replied
+    }
+}
+
 /// High-level context for `MyTimer`.
 pub struct MyTimerCtx {
     ptr: *mut c_void,
@@ -274,6 +339,37 @@ impl MyTimerCtx {
         rc == 0
     }
 
+    /// Asks the host for its wall clock; fails when no host implementation answers.
+    /// The closure runs on a reverse worker and owns its arguments, so a deferred
+    /// reply can move them to another thread.
+    pub fn set_fetch_host_clock_impl<F>(&self, f: F) -> bool
+    where F: Fn(FetchHostClockCall, String) + Send + Sync + 'static,
+    {
+        let raw = Box::into_raw(Box::new(FetchHostClockImplBox { ctx: self.ptr as usize, f: Box::new(f) })) as *mut c_void;
+        // The library owns the box now: it releases it once no invocation runs it.
+        let rc = unsafe {
+            ffi::my_timer_set_fetch_host_clock_impl(self.ptr, Some(fetch_host_clock_impl_trampoline), raw, Some(fetch_host_clock_impl_release))
+        };
+        if rc != 0 {
+            drop(unsafe { Box::from_raw(raw as *mut FetchHostClockImplBox) }); // refused: still ours
+            return false;
+        }
+        true
+    }
+
+    pub fn clear_fetch_host_clock_impl(&self) -> bool {
+        unsafe { ffi::my_timer_set_fetch_host_clock_impl(self.ptr, None, std::ptr::null_mut(), None) == 0 }
+    }
+
+    /// Records the tick number that the host emits.
+    pub fn emit_on_host_tick(&self, tick_no: i64) -> bool {
+        let payload = OnHostTickReq { tick_no };
+        match encode_cbor(&payload) {
+            Ok(b) => unsafe { ffi::my_timer_emit_on_host_tick(self.ptr, b.as_ptr(), b.len()) == 0 },
+            Err(_) => false,
+        }
+    }
+
     /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
     pub fn echo(&self, req: EchoRequest) -> Result<EchoResponse, String> {
         let req = MyTimerEchoReq { req };
@@ -354,6 +450,48 @@ impl MyTimerCtx {
             ffi::my_timer_schedule(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         }).await?;
         decode_cbor::<ScheduleResult>(&raw_bytes)
+    }
+
+    /// Calls the host-implemented `fetch_host_clock` interface and formats it.
+    pub fn host_clock(&self) -> Result<String, String> {
+        let req = MyTimerHostClockReq {};
+        let req_bytes = encode_cbor(&req)?;
+        let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
+            ffi::my_timer_host_clock(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        })?;
+        decode_cbor::<String>(&raw_bytes)
+    }
+
+    /// Calls the host-implemented `fetch_host_clock` interface and formats it.
+    pub async fn host_clock_async(&self) -> Result<String, String> {
+        let req = MyTimerHostClockReq {};
+        let req_bytes = encode_cbor(&req)?;
+        let ptr = self.ptr as usize;
+        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
+            ffi::my_timer_host_clock(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        }).await?;
+        decode_cbor::<String>(&raw_bytes)
+    }
+
+    /// Reads the last tick number the `on_host_tick` reverse event recorded.
+    pub fn last_host_tick(&self) -> Result<i64, String> {
+        let req = MyTimerLastHostTickReq {};
+        let req_bytes = encode_cbor(&req)?;
+        let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
+            ffi::my_timer_last_host_tick(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        })?;
+        decode_cbor::<i64>(&raw_bytes)
+    }
+
+    /// Reads the last tick number the `on_host_tick` reverse event recorded.
+    pub async fn last_host_tick_async(&self) -> Result<i64, String> {
+        let req = MyTimerLastHostTickReq {};
+        let req_bytes = encode_cbor(&req)?;
+        let ptr = self.ptr as usize;
+        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
+            ffi::my_timer_last_host_tick(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        }).await?;
+        decode_cbor::<i64>(&raw_bytes)
     }
 
     pub fn lib_version(timeout: Duration) -> Result<String, String> {
