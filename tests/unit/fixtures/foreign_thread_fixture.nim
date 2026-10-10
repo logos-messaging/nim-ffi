@@ -201,11 +201,31 @@ proc runScenario(tag: string, rounds: int): bool =
     return false
   return true
 
+proc runOverCapScenario(): bool =
+  ## The rejection builds its error text on the caller thread, so that thread needs a GC.
+  let ctx = makeCtx("overcap")
+  var d: ReplyData
+  initReplyData(d)
+  defer:
+    deinitReplyData(d)
+  var req = newSeq[byte](MaxRequestPayloadBytes + 1)
+
+  let rc = callOnForeignThread(ctx, req, addr d)
+  waitReply(d)
+  let text = cast[string](d.payload)
+  if rc != RET_ERR or d.retCode != RET_ERR or "byte cap" notin text:
+    echo "overcap: rc=", rc, " ret=", d.retCode, " text=", text
+    return false
+
+  ThreadLibFFIPool.destroyFFIContext(ThreadLibFFIPool.resolveCtx(ctx)).isOk()
+
 proc main(): int =
   # Several rounds prove the registration is per thread, not once per process.
   if not runScenario("single", 1):
     return 1
   if not runScenario("multi", 8):
+    return 1
+  if not runOverCapScenario():
     return 1
   return 0
 
