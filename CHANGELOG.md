@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **A rejected `{.ffi.}` call from a foreign thread returns `RET_ERR` under
+  `--mm:refc` instead of a segfault** (#225). The C wrapper set up the GC of
+  the caller thread only for a nil context. An over-cap payload, a full queue
+  or a recycle then built its error string on a thread with no GC. The wrapper
+  now calls `initializeLibrary()` before anything else.
 - **Cross-compiled `genBindings` no longer needs `-d:ffiSrcPath`.** The embedded
   source path was derived with `std/os.relativePath`, which judges absoluteness
   and joins separators by the TARGET's rules. Cross-compiling to Windows from a

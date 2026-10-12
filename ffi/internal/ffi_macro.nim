@@ -896,20 +896,16 @@ proc buildFFIProc(prc: NimNode, isStatic: bool): NimNode {.compileTime.} =
         return RET_MISSING_CALLBACK
       let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
       if `ctxIdent`.isNil():
-        # A nil or stale handle can be the host's first call, and `errStr` is a
-        # Nim allocation: without this the runtime is still down and it segfaults.
-        initializeLibrary()
         let errStr = "ctx is not a valid FFI context"
         callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
         return RET_ERR
       let `ctxGenIdent` = ctxToken.tokenGeneration()
 
   proc buildStaticCtxGuard(): NimNode =
-    ## Binds the library's static context; a static call may be the host's first entry, hence `initializeLibrary`.
+    ## Binds the library's static context.
     let ctxIdent = ident("ctx")
     let ctxGenIdent = ident("ctxGen")
     quote:
-      initializeLibrary()
       if callback.isNil():
         return RET_MISSING_CALLBACK
       let `ctxIdent` = `poolIdent`.staticFFIContext().valueOr:
@@ -935,11 +931,11 @@ proc buildFFIProc(prc: NimNode, isStatic: bool): NimNode {.compileTime.} =
       return RET_OK
 
   proc buildCExportProc(params: seq[NimNode], body: NimNode): NimNode =
-    ## The dynlib/exportc/cdecl C-ABI wrapper both wire paths emit.
+    ## The dynlib/exportc/cdecl C-ABI wrapper both wire paths emit. Its error replies allocate on a host thread, so it inits the runtime first.
     newProc(
       name = postfix(cExportProcName, "*"),
       params = params,
-      body = body,
+      body = newStmtList(newCall(ident("initializeLibrary")), body),
       pragmas = newTree(
         nnkPragma,
         ident("dynlib"),
