@@ -155,15 +155,25 @@ proc closeDispatcherHook() {.gcsafe, raises: [].} =
   ## chronos never closes a thread's dispatcher, and a library's `onThreadDestruction`
   ## hook can still poll it after the thread body returns (nim-brokers does). Nim
   ## runs the hooks in reverse, so registering this one first makes it run last.
-  try:
-    let diagnostic = closeThreadDispatcher()
-    if diagnostic.isSome():
-      error "a thread's chronos dispatcher did not close cleanly",
-        error = diagnostic.get()
-  except Defect as e:
-    # chronos asserts nothing is still registered; leak the dispatcher rather than abort the host.
-    error "a thread's chronos dispatcher still had work registered; it leaks",
-      error = e.msg
+  when declared(closeThreadDispatcher):
+    try:
+      let diagnostic = closeThreadDispatcher()
+      if diagnostic.isSome():
+        error "a thread's chronos dispatcher did not close cleanly",
+          error = diagnostic.get()
+    except Defect as e:
+      # chronos asserts nothing is still registered; leak the dispatcher rather than abort the host.
+      error "a thread's chronos dispatcher still had work registered; it leaks",
+        error = e.msg
+  elif defined(ignoreLeakCloseDispatcher):
+    warn "this chronos has no closeThreadDispatcher; the thread's dispatcher leaks"
+  else:
+    {.
+      error:
+        "this chronos has no closeThreadDispatcher, so each FFI thread leaks its dispatcher; " &
+        "pin the chronos of nimble.lock, or pass -d:ignoreLeakCloseDispatcher to accept the leak"
+    .}
+
   when defined(gcDestructors):
     # orc never frees the hook list; this is the last hook, so nothing reads it after.
     reset(nimThreadDestructionHandlers)

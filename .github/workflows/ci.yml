@@ -157,6 +157,28 @@ jobs:
       nim-versions:   ${{ needs.versions.outputs.nim-versions }}
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
+  unlocked-deps:
+    # A dependent project resolves ffi.nimble without nimble.lock, so no cache here: a restored nimbledeps/ would hide what the requires lines resolve to.
+    name: Build without nimble.lock
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Nimble installs the Nim that ffi.nimble requires, as for a consumer; no setup-nim.
+      - name: Install Nimble 0.26.0
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL --retry 3 https://github.com/nim-lang/nimble/releases/download/v0.26.0/nimble-linux_x64.tar.gz \
+            | tar -xz -C "$HOME/.local/bin" nimble
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Resolve and build
+        run: |
+          rm nimble.lock
+          nimble setup --localdeps -y
+          nimble c -d:ignoreLeakCloseDispatcher --mm:orc --app:lib --noMain ffi.nim
+
   unit-tests-all:
     # Catch-all: `nimble test` discovers and runs every test_*.nim under orc and refc, so a new file cannot ship with no run. Linux only: the double compile of ~40 files is the cost, and the jobs above carry the OS-sensitive files across the matrix.
     name: All unit tests (orc + refc)
