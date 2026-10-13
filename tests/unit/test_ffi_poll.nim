@@ -251,6 +251,22 @@ suite "tokens":
     withPool(ctx):
       check pollMsg(ctx, ctx.currentGeneration() + 2, 0).ret == RET_INVALID_CTX
 
+  test "a stale generation is refused at once, even while the live owner polls":
+    withPool(ctx):
+      var blocked = BlockedPoll(ctx: ctx, generation: ctx.currentGeneration())
+      blocked.ret.store(-1)
+      var th: Thread[ptr BlockedPoll]
+      createThread(th, blockedPollBody, addr blocked)
+      check waitFlag(blocked.entered)
+      os.sleep(100) # let it reach the wait, holding the poll lock
+
+      let start = Moment.now()
+      check pollMsg(ctx, ctx.currentGeneration() + 2, 0).ret == RET_INVALID_CTX
+      check Moment.now() - start < 1.seconds
+
+      submit(ctx, EmitRawBytesEventRequest)
+      joinThread(th)
+
   test "a nil message is an error":
     withPool(ctx):
       check pollContext(ctx, ctx.currentGeneration(), 0, nil) == RET_ERR

@@ -150,7 +150,10 @@ proc pollContext*[T](
   # never waits on anything, so a poller whose context is ending waits it out
   # rather than reporting another poller that is not there.
   if not outb.pollLock.tryAcquire():
-    if outb.closedGeneration.load() != generation and ctx.generation.load() == generation:
+    # A past owner's token must not wait behind the live owner's poller.
+    if ctx.generation.load() != generation:
+      return RET_INVALID_CTX
+    if outb.closedGeneration.load() != generation:
       return RET_BUSY
     outb.pollLock.acquire()
   defer:
