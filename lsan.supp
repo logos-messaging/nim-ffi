@@ -5,6 +5,7 @@
 # why the leak is unavoidable, and only for symbols inside the Nim
 # standard library, chronos, or chronicles. Anything in our own code
 # (ffi/*) or the generated bindings must be fixed, not suppressed.
+# A pattern matches a substring of any frame, file or library name: name one function, never a package.
 
 # Nim runtime initialisation — allocates global state freed at exit.
 leak:NimMain
@@ -21,8 +22,3 @@ leak:setupForeignThreadGc
 # (lib/system/arc.nim), so a foreign thread's table lives until process exit.
 leak:registerCycle
 leak:rememberCycle
-
-# Async / logging library globals (event loop singletons, logger
-# registries) — owned for the process lifetime.
-leak:chronos
-leak:chronicles
