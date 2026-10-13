@@ -324,7 +324,8 @@ worker. The host answers, now or later and from any thread, through
 `<lib>_reverse_reply`; the first reply for a call id wins. Workers start on the
 first `set_impl`; `-d:ffiReverseWorkers` sets the count (default 1), so by
 default a blocked implementation holds every other reverse call of that context
-until it returns or their deadlines fire.
+until it returns or their deadlines fire. At most `-d:ffiReverseQueueDepth`
+calls (default 1024) wait for a worker; one more fails at once.
 
 ```c
 typedef void (*FFIReverseRelease)(void* user_data);

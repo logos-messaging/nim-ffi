@@ -541,6 +541,28 @@ suite "ffiReverseCall":
       failPendingReverse("done")
       check (waitFor blocker).isErr()
 
+  test "a call past ReverseQueueDepth fails at once":
+    withReverseHarness(st, 1):
+      var g: GateBox
+      g.lock.initLock()
+      g.cond.initCond()
+      check st.setImpl("gate", gateImpl, addr g)
+      let blocker = ffiReverseCall("gate", @[], 60_000)
+      g.waitEntered(1) # the only worker is busy: every further call waits in the queue
+      var queued = newSeq[typeof(blocker)]()
+      for _ in 0 ..< ReverseQueueDepth:
+        queued.add(ffiReverseCall("gate", @[], 60_000))
+      check st.queueLen() == ReverseQueueDepth
+      let overflow = waitFor ffiReverseCall("gate", @[], 60_000)
+      check overflow.isErr()
+      check "queue full" in overflow.error
+      check ffiPendingReverseLen() == ReverseQueueDepth + 1 # the overflow never parked
+      g.open()
+      failPendingReverse("done")
+      check (waitFor blocker).isErr()
+      for f in queued:
+        check (waitFor f).isErr()
+
   test "two workers run two blocking impls concurrently":
     withReverseHarness(st, 2):
       var g: GateBox

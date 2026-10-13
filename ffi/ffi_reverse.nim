@@ -9,6 +9,10 @@ const ReverseMailboxDepth* {.intdefine: "ffiReverseMailboxDepth".} = 1024
   ## Replies parked between two FFI-thread drains; a full mailbox rejects the reply,
   ## so the caller's future then times out. Override `-d:ffiReverseMailboxDepth=<n>`.
 
+const ReverseQueueDepth* {.intdefine: "ffiReverseQueueDepth".} = 1024
+  ## Calls waiting for a free reverse worker; a call past it fails at once.
+  ## Override `-d:ffiReverseQueueDepth=<n>`.
+
 const ReverseCallTimeoutMs* {.intdefine: "ffiReverseCallTimeoutMs".} = 10000
   ## Default deadline of one `{.ffiReverse.}` call; `timeout = N` overrides it per proc.
   ## Override the default with `-d:ffiReverseCallTimeoutMs=<ms>`.
@@ -33,6 +37,7 @@ const ReverseWorkerJoinTimeoutMs* {.intdefine: "ffiReverseWorkerJoinTimeoutMs".}
 static:
   doAssert ReverseWorkersDefault >= 1, "-d:ffiReverseWorkers must be at least 1"
   doAssert ReverseMailboxDepth >= 1, "-d:ffiReverseMailboxDepth must be at least 1"
+  doAssert ReverseQueueDepth >= 1, "-d:ffiReverseQueueDepth must be at least 1"
   doAssert ReverseCallTimeoutMs > 0, "-d:ffiReverseCallTimeoutMs must be positive"
   doAssert ReverseMaxImpls >= 1, "-d:ffiReverseMaxImpls must be at least 1"
 
@@ -491,8 +496,11 @@ proc allocInvocation(
 
 proc pushInvocation(
     st: var FFIReverseState, rec: ptr ReverseInvocation
-) {.raises: [].} =
+): bool {.raises: [].} =
+  ## False when `ReverseQueueDepth` calls already wait; the record is then not queued.
   withLock st.qLock:
+    if st.qCount >= ReverseQueueDepth:
+      return false
     if st.qTail.isNil():
       st.qHead = rec
     else:
@@ -500,6 +508,7 @@ proc pushInvocation(
     st.qTail = rec
     st.qCount.inc()
     signal(st.qCond)
+  return true
 
 proc popInvocation(st: var FFIReverseState): ptr ReverseInvocation {.raises: [].} =
   ## Blocks until a record is queued or `stopping` is set; nil means stop.
@@ -776,9 +785,12 @@ proc ffiReverseCall*(
   if rec.isNil():
     return err("out of memory: could not queue reverse call " & name)
 
+  if not st[].pushInvocation(rec):
+    destroy(rec) # neither the queue nor a pending entry holds it
+    return err("reverse call queue full (" & $ReverseQueueDepth & " waiting): " & name)
+  # No await since the push, so no reply for `callId` is drained before this.
   let fut = newFuture[Result[seq[byte], string]]("ffiReverseCall")
   ffiPendingReverse[callId] = PendingReverse(fut: fut, rec: rec)
-  st[].pushInvocation(rec)
 
   var completed = false
   try:
