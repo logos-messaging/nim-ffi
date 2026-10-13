@@ -182,14 +182,17 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
       )
     )
 
+    # {libraryName}_poll_fd. A fixed width, not `int`: the value is an fd on POSIX
+    # and a HANDLE on Windows, and a host must not truncate it to a C `int`.
     let pollFdName = libraryName & "_poll_fd"
     let pollFdBody = quote:
-      return pollContextHandle(`poolIdent`.resolveCtx(ctxToken))
+      return int64(pollContextHandle(`poolIdent`.resolveCtx(ctxToken)))
 
     stmts.add(
       newProc(
         name = ident(pollFdName),
-        params = @[ident("int"), newIdentDefs(ident("ctxToken"), ident("FFICtxToken"))],
+        params =
+          @[ident("int64"), newIdentDefs(ident("ctxToken"), ident("FFICtxToken"))],
         body = pollFdBody,
         pragmas = cdeclExportPragma,
       )
