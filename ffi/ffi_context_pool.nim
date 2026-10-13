@@ -123,6 +123,12 @@ proc destroyFFIContext*[T](
   # Destroying it would release the slot while `staticState` still points at it.
   if pool.isStaticCtx(ctx):
     return err("destroyFFIContext(pool): the {.ffiStatic.} context outlives every ctx")
+  # Its own threads would wait on themselves, then leak the slot.
+  if servedCtx == pointer(ctx):
+    return err(
+      "destroyFFIContext(pool): a callback cannot destroy its own context; " &
+        "destroy it from a host thread"
+    )
   ctx.stopAndJoinThreads().isOkOr:
     error "context threads did not exit; the pool slot and its resources leak " &
       "(a free under live threads is unsafe)", reason = error
