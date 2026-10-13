@@ -140,7 +140,8 @@ proc ffiTeardownHook*[T](): var FFITeardownProc[T] =
   hook
 
 proc reverseWakeHook[T](ud: pointer) {.nimcall, gcsafe, raises: [].} =
-  ## A failed wake is harmless: the FFI loop polls every 100ms.
+  ## Any host thread, maybe one without a Nim GC under refc, so no logging here. A
+  ## failed wake needs no handling: the reply is queued and the FFI loop polls every 100ms.
   discard cast[ptr FFIContext[T]](ud).reqSignal.fireSync()
 
 proc reverseGenerationHook[T](ud: pointer): uint {.nimcall, gcsafe, raises: [].} =

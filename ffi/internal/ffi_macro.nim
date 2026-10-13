@@ -136,8 +136,8 @@ proc registerFFIEnumInfo(typeDef: NimNode, typeNameStr: string) {.compileTime.} 
     FFITypeMeta(name: typeNameStr, enumValues: enumValueMetas(typeDef[2], typeNameStr))
   )
 
-proc registerFFITypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
-  ## Registers the type in ffiTypeRegistry and returns the clean typeDef.
+proc registerFFITypeMeta(typeDef: NimNode) {.compileTime.} =
+  ## Registers the type in ffiTypeRegistry.
   let typeName =
     if typeDef[0].kind == nnkPostfix:
       typeDef[0][1]
@@ -147,7 +147,7 @@ proc registerFFITypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
 
   if typeDef[2].kind == nnkEnumTy:
     registerFFIEnumInfo(typeDef, typeNameStr)
-    return typeDef
+    return
 
   var fieldMetas: seq[FFIFieldMeta] = @[]
   let objTy = typeDef[2]
@@ -170,6 +170,10 @@ proc registerFFITypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
             fieldMetas.add(FFIFieldMeta(name: $identDef[i], typeName: fieldTypeName))
 
   ffiTypeRegistry.add(FFITypeMeta(name: typeNameStr, fields: fieldMetas))
+
+proc registerFFITypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
+  ## Registers the type in ffiTypeRegistry and returns the clean typeDef.
+  registerFFITypeMeta(typeDef)
   return typeDef
 
 func extractDocComment(prc: NimNode): string {.compileTime.} =
@@ -1881,7 +1885,7 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
     for n in paramNames:
       paramNameStrs.add($n)
     let typeSection = buildReqTypeFromFields(argsType, paramNameStrs, paramTypes)
-    discard registerFFITypeInfo(typeSection[0])
+    registerFFITypeMeta(typeSection[0])
     resultStmts.add(typeSection)
     let envelope = nnkObjConstr.newTree(argsType)
     for i in 0 ..< paramNames.len:
@@ -2053,7 +2057,7 @@ proc buildFFIReverseEventProc(
       FFIParamMeta(name: $paramNames[i], typeName: nimTypeNameRepr(paramTypes[i]))
     )
   let metaTypeSection = buildReqTypeFromFields(reqType, paramNameStrs, paramTypes)
-  discard registerFFITypeInfo(metaTypeSection[0])
+  registerFFITypeMeta(metaTypeSection[0])
 
   var lambdaParams = newSeq[NimNode]()
   lambdaParams.add(
