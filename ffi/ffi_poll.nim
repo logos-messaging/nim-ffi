@@ -92,8 +92,12 @@ proc checkLiveness[T](
 
   # The age of the last beat, not whether the value moved since the last poll:
   # a host that polls rarely would otherwise hear of a stall one poll late.
+  # A thread that never beat has been silent since the watch began.
   let lastBeat = ctx.ffiHeartbeat.load()
-  let stale = lastBeat != 0 and (now.ticks - lastBeat) div 1_000_000 > HeartbeatStaleMs
+  var silentMs = msBetween(watch.startedAt, now)
+  if lastBeat != 0:
+    silentMs = (now.ticks - lastBeat) div 1_000_000
+  let stale = silentMs > HeartbeatStaleMs
   if not stale:
     if watch.notifiedStale:
       watch.notifiedStale = false
