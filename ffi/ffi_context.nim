@@ -192,10 +192,10 @@ proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Mirror of `initContextResources`. Threads MUST be joined, and only their owner may call it.
   deinitRequestQueue(ctx[].reqQueueBank)
   deinitEventRegistry(ctx[].eventRegistry)
-  deinitReverseState(ctx[].reverse)
+  let reverseRes = deinitReverseState(ctx[].reverse)
   deinitHandleRegistry(ctx[].handles)
   deinitEventQueue(ctx[].eventQueue)
-  ok()
+  return reverseRes
 
 proc drainSignal(sig: ThreadSignalPtr) =
   ## A reused slot inherits the fires of its last cycle; they wake the new threads for nothing.

@@ -181,7 +181,7 @@ template withReverseHarness(stIdent: untyped, workers: int, body: untyped) =
     check stIdent.startReverseWorkers(workers)
   defer:
     ffiCurrentReverseState = nil
-    deinitReverseState(stIdent)
+    check deinitReverseState(stIdent).isOk()
   body
 
 proc pumpUntil(fut: FutureBase, ms: int) =

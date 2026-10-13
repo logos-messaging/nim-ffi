@@ -289,15 +289,20 @@ proc clearImpls*(st: var FFIReverseState): int {.raises: [], gcsafe.} =
     decRef(entries[i])
   return running
 
-proc deinitReverseState*(st: var FFIReverseState) =
-  ## A stop that leaked a worker keeps the locks and the worker array alive for it.
+proc deinitReverseState*(st: var FFIReverseState): Result[void, string] =
+  ## Err while a leaked worker or a running impl may still take the locks: they and
+  ## the worker array then stay alive, and a later call may free them.
   if not st.stopFn.isNil() and st.workerCount > 0:
+    # A worker that does not exit in time is counted in `leakedWorkers`.
     discard st.stopFn(st, ReverseWorkerJoinTimeoutMs)
   st.purgeQueue()
   st.freeAllReplies()
-  discard st.clearImpls()
-  if st.leakedWorkers > 0:
-    return
+  let running = st.clearImpls()
+  if st.leakedWorkers > 0 or running > 0:
+    return err(
+      "reverse state kept alive: " & $st.leakedWorkers & " leaked worker(s), " & $running &
+        " impl(s) still running"
+    )
 
   if not st.workers.isNil():
     c_free(st.workers)
@@ -305,6 +310,7 @@ proc deinitReverseState*(st: var FFIReverseState) =
   st.qCond.deinitCond()
   st.qLock.deinitLock()
   st.lock.deinitLock()
+  return ok()
 
 proc startReverseWorkers*(
   st: var FFIReverseState, n: int = 0

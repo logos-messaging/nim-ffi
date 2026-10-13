@@ -94,7 +94,7 @@ suite "FFIReverseState registry":
     var st: FFIReverseState
     initReverseState(st)
     defer:
-      deinitReverseState(st)
+      check deinitReverseState(st).isOk()
 
     check not st.hasImpl("fetch")
     st.setImpl("fetch", nopImpl, nil)
@@ -114,7 +114,7 @@ suite "FFIReverseState registry":
     var st: FFIReverseState
     initReverseState(st)
     defer:
-      deinitReverseState(st)
+      check deinitReverseState(st).isOk()
 
     check st.allocCallId() == 1'u64
     check st.allocCallId() == 2'u64
@@ -147,7 +147,7 @@ suite "impl ownership (release callback)":
     var st: FFIReverseState
     initReverseState(st)
     defer:
-      deinitReverseState(st)
+      check deinitReverseState(st).isOk()
     var box: ReleaseBox
     check st.setImpl("x", nopImpl, addr box, countRelease)
     let entry = st.beginReverseDispatch("x")
@@ -160,7 +160,7 @@ suite "impl ownership (release callback)":
     var st: FFIReverseState
     initReverseState(st)
     defer:
-      deinitReverseState(st)
+      check deinitReverseState(st).isOk()
     var a, b: ReleaseBox
     check st.setImpl("x", nopImpl, addr a, countRelease)
     check st.setImpl("x", nopImpl, addr b, countRelease)
@@ -173,7 +173,7 @@ suite "impl ownership (release callback)":
     var st: FFIReverseState
     initReverseState(st)
     defer:
-      deinitReverseState(st)
+      check deinitReverseState(st).isOk()
     var idle, running: ReleaseBox
     check st.setImpl("idle", nopImpl, addr idle, countRelease)
     check st.setImpl("running", nopImpl, addr running, countRelease)
@@ -190,14 +190,25 @@ suite "impl ownership (release callback)":
     initReverseState(st)
     var box: ReleaseBox
     check st.setImpl("x", nopImpl, addr box, countRelease)
-    deinitReverseState(st)
+    check deinitReverseState(st).isOk()
     check box.released.load() == 1
+
+  test "deinit keeps the locks alive while an impl still runs":
+    var st: FFIReverseState
+    initReverseState(st)
+    var box: ReleaseBox
+    check st.setImpl("x", nopImpl, addr box, countRelease)
+    let entry = st.beginReverseDispatch("x")
+    check deinitReverseState(st).isErr() # the dispatch below still takes the lock
+    st.endReverseDispatch(entry)
+    check box.released.load() == 1
+    check deinitReverseState(st).isOk()
 
   test "a nil release never waits and leaves userData to the host":
     var st: FFIReverseState
     initReverseState(st)
     defer:
-      deinitReverseState(st)
+      check deinitReverseState(st).isOk()
     check st.setImpl("x", nopImpl, nil)
     let entry = st.beginReverseDispatch("x") # a dispatch still runs "x"
     check st.setImpl("x", nil, nil) # returns at once
@@ -208,7 +219,7 @@ suite "impl ownership (release callback)":
     var st: FFIReverseState
     initReverseState(st)
     defer:
-      deinitReverseState(st)
+      check deinitReverseState(st).isOk()
     for i in 0 ..< ReverseMaxImpls:
       check st.setImplStatus("impl" & $i, nopImpl, nil) == REVERSE_ACCEPTED
     var box: ReleaseBox
@@ -224,7 +235,7 @@ suite "impl ownership (release callback)":
     ffiCurrentReverseState = addr st
     defer:
       ffiCurrentReverseState = nil
-      deinitReverseState(st)
+      check deinitReverseState(st).isOk()
     var box = ReleaseBox(st: addr st)
     box.releasedInside.store(-1)
     check st.setImpl("self", selfReplaceImpl, addr box, countRelease)
@@ -246,7 +257,7 @@ suite "reply mailbox":
     var st: FFIReverseState
     initReverseState(st)
     defer:
-      deinitReverseState(st)
+      check deinitReverseState(st).isOk()
 
     var payload = [byte 0xAA, 0xBB]
     check st.pushReply(7'u64, RET_OK, addr payload[0], payload.len) == REVERSE_ACCEPTED
@@ -279,7 +290,7 @@ suite "reply mailbox":
     var st: FFIReverseState
     initReverseState(st)
     defer:
-      deinitReverseState(st)
+      check deinitReverseState(st).isOk()
 
     for i in 0 ..< ReverseMailboxDepth:
       check st.pushReply(uint64(i + 1), RET_OK, nil, 0) == REVERSE_ACCEPTED
@@ -292,7 +303,7 @@ suite "reply mailbox":
     var st: FFIReverseState
     initReverseState(st)
     defer:
-      deinitReverseState(st)
+      check deinitReverseState(st).isOk()
     var wakes = 0
     proc countWake(ud: pointer) {.nimcall, gcsafe, raises: [].} =
       cast[ptr int](ud)[].inc()
@@ -326,7 +337,7 @@ suite "worker pool lifecycle":
     var st: FFIReverseState
     initReverseState(st)
     defer:
-      deinitReverseState(st)
+      check deinitReverseState(st).isOk()
 
     check not st.workersStarted()
     check st.startReverseWorkers(3)
@@ -350,7 +361,7 @@ suite "worker pool lifecycle":
       let stop = stopReverseWorkers(st)
       check stop.stopped == 2
       check stop.leaked == 0
-      deinitReverseState(st)
+      check deinitReverseState(st).isOk()
 
   test "a start while a stop is joining the pool is refused":
     initReverseState(claimSt)
@@ -373,7 +384,7 @@ suite "worker pool lifecycle":
     check claimSt.startReverseWorkers(1) # the stop finished: a fresh pool may start
     failPendingReverse("done")
     discard waitFor blocker
-    deinitReverseState(claimSt)
+    check deinitReverseState(claimSt).isOk()
 
   leakingTest(
     "worker pool lifecycle",
@@ -411,7 +422,7 @@ template withReverseHarness(stIdent: untyped, workers: int, body: untyped) =
     check stIdent.startReverseWorkers(workers)
   defer:
     ffiCurrentReverseState = nil
-    deinitReverseState(stIdent)
+    check deinitReverseState(stIdent).isOk()
   body
 
 suite "ffiReverseCall":
