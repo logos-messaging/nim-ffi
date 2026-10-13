@@ -430,7 +430,13 @@ proc stopAndJoinThreads*[T](
     joinThread(ctx.eventThread)
   else:
     # A poller is a host thread, so there is nothing to join; it is told the
-    # context ended and its queues are dropped once it leaves `poll`.
+    # context ended and its queues are dropped once it leaves `poll`. A host
+    # that is polling gets a bounded window to collect what is still queued,
+    # what the teardown emitted on the way out included.
     closeForPoller()
+    if ctx[].outbound.polledGeneration.load() == ctx.generation.load():
+      let deadline = Moment.now() + timeout
+      while ctx[].eventQueue.hasEvents() and Moment.now() < deadline:
+        os.sleep(1)
     ctx[].outbound.dropQueuedMessages(ctx[].eventQueue)
   ok()

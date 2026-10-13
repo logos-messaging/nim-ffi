@@ -357,6 +357,10 @@ proc popEventInto*(
     q.count.dec()
   return true
 
+proc hasEvents*(q: var EventQueue): bool {.raises: [], gcsafe.} =
+  withLock q.lock:
+    return q.count > 0
+
 proc headSeq*(q: var EventQueue): uint64 {.raises: [], gcsafe.} =
   ## The order mark of the oldest queued event, 0 when there is none. The poller
   ## is the only consumer, so what this returns cannot be taken from under it.

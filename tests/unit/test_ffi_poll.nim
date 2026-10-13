@@ -337,3 +337,33 @@ suite "event queue overflow":
         lastSeq = got.seqNum
         events.inc()
       check events >= EventQueueCapacity
+
+type SlowPoller = object
+  ctx: ptr FFIContext[TestPollLib]
+  generation: uint
+  events: Atomic[int]
+
+proc slowPollerBody(args: ptr SlowPoller) {.thread.} =
+  ## Collects until the context ends, a little slower than the library produces.
+  var msg: ptr NimFfiMsg
+  while pollContext(args.ctx, args.generation, 2000, addr msg) == RET_OK:
+    if msg.kind == MsgEvent:
+      args.events.atomicInc()
+    os.sleep(2)
+
+suite "destroy":
+  test "a poller still collects what was queued before the context ended":
+    const Count = 200
+    var pool: FFIContextPool[TestPollLib]
+    let created = pool.createFFIContext()
+    check created.isOk()
+    if created.isOk():
+      let ctx = created.value
+      var poller = SlowPoller(ctx: ctx, generation: ctx.currentGeneration())
+      var th: Thread[ptr SlowPoller]
+      createThread(th, slowPollerBody, addr poller)
+      request(ctx, BurstEmit, Count)
+
+      check pool.destroyFFIContext(ctx).isOk()
+      joinThread(th)
+      check poller.events.load() == Count
