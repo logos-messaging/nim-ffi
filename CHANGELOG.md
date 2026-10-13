@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **A project that depends on nim-ffi without its lock file can compile again.**
+  Without the lock file, nimble resolves a chronos tag, and no tag (v4.4.1
+  included) has the `closeThreadDispatcher` that `ffi_context.nim` calls. With
+  such a chronos, the build stops with an error that names the fix. Pass
+  `-d:ignoreLeakCloseDispatcher` to accept the leak: each FFI thread then leaks
+  its dispatcher at thread exit, and a warning says so. A new CI job builds
+  without `nimble.lock`.
 - **A rejected `{.ffi.}` call from a foreign thread returns `RET_ERR` under
   `--mm:refc` instead of a segfault** (#225). The C wrapper set up the GC of
   the caller thread only for a nil context. An over-cap payload, a full queue
