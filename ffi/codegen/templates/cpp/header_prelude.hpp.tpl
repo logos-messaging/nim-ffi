@@ -24,6 +24,7 @@
 #include <optional>
 #include <type_traits>
 #include <cstring>
+#include <exception>
 #include <cassert>
 #include <limits>
 #include <thread>
