@@ -118,9 +118,13 @@ proc handle*(w: WakeSignal): int =
     return cast[int](w.event)
 
 proc hostHandle*(w: WakeSignal): int {.raises: [].} =
-  ## A copy the host owns and closes (`close`, or `CloseHandle` on Windows). It can
-  ## only be waited on, so a host that closes or leaks it cannot make `fire` write
-  ## into a descriptor number the host has since reused. `WakeNoHandle` on failure.
+  ## A copy the host owns and closes (`close`, or `CloseHandle` on Windows), so a
+  ## host that closes or leaks it cannot make `fire` write into a descriptor
+  ## number the host has since reused. `WakeNoHandle` on failure.
+  ## The epoll and Event copies can only be waited on. The kqueue copy is a `dup`
+  ## of the library's own kqueue: a host may wait on it but must not `kevent`
+  ## changes into it. A kqueue of its own watching ours is not an option, since
+  ## `select` on a nested kqueue keeps reporting it ready after a `clear`.
   if not w.ready:
     return WakeNoHandle
   when wakeEventFd:
