@@ -112,7 +112,8 @@ proc releaseHeld(outb: var FFIOutbound) =
 
 proc hasMessage[T](ctx: ptr FFIContext[T]): bool =
   let outb = addr ctx[].outbound
-  return outb.queueLive and ctx[].eventQueue.headSeq() != 0
+  # The count, not `headSeq() != 0`: an event nobody numbered has seqNum 0.
+  return outb.queueLive and ctx[].eventQueue.hasEvents()
 
 proc takeMessage[T](ctx: ptr FFIContext[T], msg: ptr ptr NimFfiMsg): bool =
   let outb = addr ctx[].outbound
