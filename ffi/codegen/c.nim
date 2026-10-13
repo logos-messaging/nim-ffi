@@ -23,6 +23,15 @@ const
   CborHelpersTpl = staticRead("templates/c/cbor_helpers.h.tpl")
   CMakeListsTpl = staticRead("templates/c/CMakeLists.txt.tpl")
   FindRepoRootTpl = staticRead("templates/find_repo_root.cmake.part")
+  ReverseDeclsTpl = staticRead("templates/c/reverse_decls.h.tpl")
+  ReverseReplyDeclTpl = staticRead("templates/c/reverse_reply_decl.h.tpl")
+  ReverseEmitDocTpl = staticRead("templates/c/reverse_emit_doc.h.tpl")
+  ReverseReplyErrTpl = staticRead("templates/c/reverse_reply_err.h.tpl")
+  ReverseSetImplTpl = staticRead("templates/c/reverse_set_impl.h.tpl")
+  ReverseDecodeArgsTpl = staticRead("templates/c/reverse_decode_args.h.tpl")
+  ReverseReplyTpl = staticRead("templates/c/reverse_reply.h.tpl")
+  ReverseReplyVoidTpl = staticRead("templates/c/reverse_reply_void.h.tpl")
+  ReverseEmitTpl = staticRead("templates/c/reverse_emit.h.tpl")
 
   # Shared header names; must match the include guards baked into the templates.
   PreludeHeaderName* = "nim_ffi_prelude.h"
@@ -698,6 +707,10 @@ proc emitListenerApi(
   lines.add("}")
   lines.add("")
 
+func fillTpl(tpl: string, subs: varargs[(string, string)]): string =
+  ## A `.tpl` with its `{{NAME}}` placeholders filled, minus its final newline.
+  tpl.multiReplace(subs).strip(leading = false, chars = {'\n'})
+
 proc emitReverseMachinery(
     lines: var seq[string],
     reg: var CTypeReg,
@@ -709,28 +722,15 @@ proc emitReverseMachinery(
     return
   lines.add("/* Reverse FFI helpers (typed sugar over the raw exports above) */")
   if reverse.len > 0:
-    lines.add(
-      "static inline int " & libName & "_ctx_reverse_reply_err(const " & ctxType &
-        "* ctx, uint64_t call_id, const char* msg) {"
-    )
-    lines.add(
-      "    return " & libName &
-        "_reverse_reply(ctx->ptr, call_id, 1, (const uint8_t*)msg, msg ? strlen(msg) : 0);"
-    )
-    lines.add("}")
+    lines.add(ReverseReplyErrTpl.fillTpl(("{{LIB}}", libName), ("{{CTX}}", ctxType)))
     lines.add("")
   for r in reverse:
-    let snake = r.wireName
     lines.add(renderBlockDocComment(r.doc))
     lines.add(
-      "static inline int " & libName & "_ctx_set_" & snake & "_impl(const " & ctxType &
-        "* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release) {"
+      ReverseSetImplTpl.fillTpl(
+        ("{{LIB}}", libName), ("{{WIRE}}", r.wireName), ("{{CTX}}", ctxType)
+      )
     )
-    lines.add(
-      "    return " & libName & "_set_" & snake &
-        "_impl(ctx->ptr, impl, user_data, release);"
-    )
-    lines.add("}")
     if r.argsTypeName.len > 0:
       let (argsC, _) = ensureCType(reg, r.argsTypeName)
       # Same ownership rules as every other decoded value (see `freeStmt`).
@@ -744,74 +744,44 @@ proc emitReverseMachinery(
         else:
           ""
       lines.add(
-        "/* Decode the args of a `" & snake & "` invocation" & freeNote & ". */"
+        ReverseDecodeArgsTpl.fillTpl(
+          ("{{WIRE}}", r.wireName),
+          ("{{FREE_NOTE}}", freeNote),
+          ("{{LIB}}", libName),
+          ("{{ARGS}}", argsC),
+          ("{{TOKEN}}", cToken(argsC)),
+        )
       )
-      lines.add(
-        "static inline int " & libName & "_decode_" & snake &
-          "_args(const uint8_t* args_cbor, size_t args_len, " & argsC &
-          "* out, char** err) {"
-      )
-      lines.add("    memset(out, 0, sizeof(*out));")
-      lines.add(
-        "    return nimffi_decode_from_buf(" & libName & "_decv_" & cToken(argsC) &
-          ", args_cbor, args_len, out, err);"
-      )
-      lines.add("}")
     if r.replyTypeName.len > 0:
       let (replyC, _) = ensureCType(reg, r.replyTypeName)
       lines.add(
-        "static inline int " & libName & "_ctx_reverse_reply_" & snake & "(const " &
-          ctxType & "* ctx, uint64_t call_id, const " & replyC & "* reply) {"
+        ReverseReplyTpl.fillTpl(
+          ("{{LIB}}", libName),
+          ("{{WIRE}}", r.wireName),
+          ("{{CTX}}", ctxType),
+          ("{{REPLY}}", replyC),
+          ("{{TOKEN}}", cToken(replyC)),
+        )
       )
-      lines.add("    uint8_t* buf = NULL;")
-      lines.add("    size_t len = 0;")
-      lines.add("    char* err = NULL;")
-      lines.add(
-        "    if (nimffi_encode_to_buf(" & libName & "_encv_" & cToken(replyC) &
-          ", reply, &buf, &len, &err) != 0) {"
-      )
-      lines.add("        free(err);")
-      lines.add("        return -1;")
-      lines.add("    }")
-      lines.add(
-        "    int rc = " & libName & "_reverse_reply(ctx->ptr, call_id, 0, buf, len);"
-      )
-      lines.add("    free(buf);")
-      lines.add("    return rc;")
-      lines.add("}")
     else:
       lines.add(
-        "static inline int " & libName & "_ctx_reverse_reply_" & snake & "(const " &
-          ctxType & "* ctx, uint64_t call_id) {"
+        ReverseReplyVoidTpl.fillTpl(
+          ("{{LIB}}", libName), ("{{WIRE}}", r.wireName), ("{{CTX}}", ctxType)
+        )
       )
-      lines.add(
-        "    return " & libName & "_reverse_reply(ctx->ptr, call_id, 0, NULL, 0);"
-      )
-      lines.add("}")
     lines.add("")
   for rev in reverseEvents:
     let (reqC, _) = ensureCType(reg, rev.reqTypeName)
     lines.add(renderBlockDocComment(rev.doc))
     lines.add(
-      "static inline int " & libName & "_ctx_emit_" & rev.wireName & "(const " & ctxType &
-        "* ctx, const " & reqC & "* payload) {"
+      ReverseEmitTpl.fillTpl(
+        ("{{LIB}}", libName),
+        ("{{WIRE}}", rev.wireName),
+        ("{{CTX}}", ctxType),
+        ("{{REQ}}", reqC),
+        ("{{TOKEN}}", cToken(reqC)),
+      )
     )
-    lines.add("    uint8_t* buf = NULL;")
-    lines.add("    size_t len = 0;")
-    lines.add("    char* err = NULL;")
-    lines.add(
-      "    if (nimffi_encode_to_buf(" & libName & "_encv_" & cToken(reqC) &
-        ", payload, &buf, &len, &err) != 0) {"
-    )
-    lines.add("        free(err);")
-    lines.add("        return -1;")
-    lines.add("    }")
-    lines.add(
-      "    int rc = " & libName & "_emit_" & rev.wireName & "(ctx->ptr, buf, len);"
-    )
-    lines.add("    free(buf);")
-    lines.add("    return rc;")
-    lines.add("}")
     lines.add("")
 
 proc emitProcWrapper(
@@ -1075,51 +1045,7 @@ proc generateCLibHeader*(
     lines.add("")
     lines.add("/* Reverse FFI: host-implemented interfaces + host-emitted events */")
   if reverse.len > 0:
-    lines.add("#ifndef NIM_FFI_REVERSE_IMPL_DEFINED")
-    lines.add("#define NIM_FFI_REVERSE_IMPL_DEFINED")
-    lines.add("/* Status of <lib>_set_<wire>_impl and <lib>_reverse_reply. */")
-    lines.add(cReverseCodeDefines())
-    lines.add(
-      "/* Runs on a reverse worker thread and may block. args is valid only until"
-    )
-    lines.add(
-      "   the impl returns: copy what a deferred reply needs. Answer, now or later"
-    )
-    lines.add("   and from any thread, via <lib>_reverse_reply. */")
-    lines.add(
-      "typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args, " &
-        "size_t args_len, void* user_data);"
-    )
-    lines.add(
-      "/* Frees an impl's user_data once no invocation uses it. It runs on whichever"
-    )
-    lines.add(
-      "   thread drops the last reference (a reverse worker, the set_impl caller or"
-    )
-    lines.add("   the library's own thread at teardown), so it must be thread-safe. */")
-    lines.add("typedef void (*FFIReverseRelease)(void* user_data);")
-    lines.add("#endif")
-    lines.add(
-      "/* Destroying a context from inside one of its own impls fails at once with"
-    )
-    lines.add("   RET_ERR: that destroy would wait for the very impl that calls it. */")
-    lines.add(
-      "/* <lib>_set_<wire>_impl registers impl (NULL unregisters). With a release the"
-    )
-    lines.add(
-      "   library owns user_data, and release(user_data) runs once the replaced impl's"
-    )
-    lines.add(
-      "   last running invocation returns. With a NULL release the host keeps ownership"
-    )
-    lines.add(
-      "   and the library never frees it: keep it valid until the context is destroyed."
-    )
-    lines.add("   The call never waits. Returns NIMFFI_REVERSE_ACCEPTED, _INVALID_CTX,")
-    lines.add(
-      "   _WORKERS_FAILED, _OUT_OF_MEMORY or _REGISTRY_FULL; on any error the caller"
-    )
-    lines.add("   still owns user_data and release is never called. */")
+    lines.add(ReverseDeclsTpl.fillTpl(("{{REVERSE_CODES}}", cReverseCodeDefines())))
     for r in reverse:
       lines.add(renderBlockDocComment(r.doc))
       lines.add(
@@ -1127,32 +1053,9 @@ proc generateCLibHeader*(
           "_impl(void* ctx, FFIReverseImpl impl, void* user_data, " &
           "FFIReverseRelease release);"
       )
-    lines.add(
-      "/* Answers a reverse call from ANY thread. ret_code 0 = ok (reply_cbor is"
-    )
-    lines.add("   the CBOR reply), non-zero = error (reply_cbor is a UTF-8 message).")
-    lines.add(
-      "   The first reply for a call_id wins; a later one, or one for a call that"
-    )
-    lines.add(
-      "   already timed out, is dropped. Returns NIMFFI_REVERSE_ACCEPTED, _INVALID_CTX,"
-    )
-    lines.add(
-      "   _NOT_ACTIVE, _PAYLOAD_TOO_LARGE, _MAILBOX_FULL, _OUT_OF_MEMORY, or _INVALID_ARGUMENT (NULL"
-    )
-    lines.add("   reply_cbor with a non-zero reply_len). */")
-    lines.add(
-      "int " & libName & "_reverse_reply(void* ctx, uint64_t call_id, int ret_code, " &
-        "const uint8_t* reply_cbor, size_t reply_len);"
-    )
+    lines.add(ReverseReplyDeclTpl.fillTpl(("{{LIB}}", libName)))
   if reverseEvents.len > 0:
-    lines.add(
-      "/* <lib>_emit_<wire> queues a host event for the library's own thread and"
-    )
-    lines.add(
-      "   returns NIMFFI_RET_OK once queued; NIMFFI_RET_ERR for a bad ctx, a payload"
-    )
-    lines.add("   over the request limit, or NULL payload_cbor with a length. */")
+    lines.add(ReverseEmitDocTpl.fillTpl())
   for rev in reverseEvents:
     lines.add(renderBlockDocComment(rev.doc))
     lines.add(

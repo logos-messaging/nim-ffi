@@ -24,6 +24,16 @@ const
   ContextRuleOf5Tpl = staticRead("templates/cpp/context_rule_of_5.hpp.tpl")
   CMakeListsTpl = staticRead("templates/cpp/CMakeLists.txt.tpl")
   FindRepoRootTpl = staticRead("templates/find_repo_root.cmake.part")
+  ReverseCallTpl = staticRead("templates/cpp/reverse_call.hpp.tpl")
+  ReverseCallReplyTpl = staticRead("templates/cpp/reverse_call_reply.hpp.tpl")
+  ReverseCallReplyVoidTpl = staticRead("templates/cpp/reverse_call_reply_void.hpp.tpl")
+  ReverseBorrowedArgsTpl = staticRead("templates/cpp/reverse_borrowed_args.hpp.tpl")
+  ReverseSetImplTpl = staticRead("templates/cpp/reverse_set_impl.hpp.tpl")
+  ReverseEmitTpl = staticRead("templates/cpp/reverse_emit.hpp.tpl")
+  ReverseDecodeArgsTpl = staticRead("templates/cpp/reverse_decode_args.hpp.tpl")
+  ReverseTrampolineTpl = staticRead("templates/cpp/reverse_trampoline.hpp.tpl")
+  ReverseInvokeTpl = staticRead("templates/cpp/reverse_invoke.hpp.tpl")
+  ReverseInvokeNoArgsTpl = staticRead("templates/cpp/reverse_invoke_no_args.hpp.tpl")
 
 func cppScalar(s: ScalarKind): string =
   case s
@@ -247,6 +257,10 @@ func reverseImplFnType(r: FFIReverseMeta): string =
   else:
     "std::function<void($1, const $2&)>" % [reverseCallStruct(r), argsCpp]
 
+func fillTpl(tpl: string, subs: varargs[(string, string)]): string =
+  ## A `.tpl` with its `{{NAME}}` placeholders filled, minus its final newline.
+  tpl.multiReplace(subs).strip(leading = false, chars = {'\n'})
+
 proc emitReverseApi(
     lines: var seq[string],
     ctxTypeName, libName: string,
@@ -258,109 +272,56 @@ proc emitReverseApi(
       "    // ── Reverse FFI: host-implemented interfaces ────────────"
     )
     for r in reverse:
-      let callStruct = reverseCallStruct(r)
+      let reply =
+        if r.replyTypeName.len > 0:
+          ReverseCallReplyTpl.fillTpl(
+            ("{{REPLY_TYPE}}", nimTypeToCpp(r.replyTypeName)), ("{{LIB}}", libName)
+          )
+        else:
+          ReverseCallReplyVoidTpl.fillTpl(("{{LIB}}", libName))
       lines.add(
-        "    // Answer token for one `$1` call: a trivially copyable {context token," %
-          [r.wireName]
-      )
-      lines.add(
-        "    // call id} pair. Copy it anywhere and reply once, from any thread, before the"
-      )
-      lines.add(
-        "    // call's deadline; a late or second reply is dropped, and a reply after the"
-      )
-      lines.add("    // context is gone returns false.")
-      lines.add("    struct $1 {" % [callStruct])
-      lines.add("        void* ctx = nullptr;")
-      lines.add("        std::uint64_t id = 0;")
-      if r.replyTypeName.len > 0:
-        let replyCpp = nimTypeToCpp(r.replyTypeName)
-        lines.add("        bool reply(const $1& r) const {" % [replyCpp])
-        lines.add("            auto enc = encodeCborFFI(r);")
-        lines.add("            if (enc.isErr()) return fail(enc.error());")
-        lines.add("            const auto& b = enc.value();")
-        lines.add(
-          "            return $1_reverse_reply(ctx, id, 0, b.data(), b.size()) == 0;" %
-            [libName]
+        ReverseCallTpl.fillTpl(
+          ("{{WIRE}}", r.wireName),
+          ("{{CALL}}", reverseCallStruct(r)),
+          ("{{REPLY}}", reply),
+          ("{{LIB}}", libName),
         )
-        lines.add("        }")
-      else:
-        lines.add("        bool reply() const {")
-        lines.add(
-          "            return $1_reverse_reply(ctx, id, 0, nullptr, 0) == 0;" % [
-            libName
-          ]
-        )
-        lines.add("        }")
-      lines.add("        bool fail(const std::string& msg) const {")
-      lines.add(
-        "            return $1_reverse_reply(ctx, id, 1, reinterpret_cast<const std::uint8_t*>(msg.data()), msg.size()) == 0;" %
-          [libName]
       )
-      lines.add("        }")
-      lines.add("        // Allocation-free, for reporting from a catch block.")
-      lines.add("        bool failRaw(const char* msg) const noexcept {")
-      lines.add(
-        "            return $1_reverse_reply(ctx, id, 1, reinterpret_cast<const std::uint8_t*>(msg), msg ? std::strlen(msg) : 0) == 0;" %
-          [libName]
-      )
-      lines.add("        }")
-      lines.add("    };")
       lines.add("")
     for r in reverse:
-      let pascal = capitalizeFirstLetter(r.nimProcName)
       lines.add(renderMemberDocComment(r.doc))
       if reverseArgsCpp(r).len > 0:
-        lines.add(
-          "    // `fn` runs on a reverse worker. Its arguments are borrowed: valid only until"
+        lines.add(ReverseBorrowedArgsTpl.fillTpl())
+      lines.add(
+        ReverseSetImplTpl.fillTpl(
+          ("{{PASCAL}}", capitalizeFirstLetter(r.nimProcName)),
+          ("{{FN_TYPE}}", reverseImplFnType(r)),
+          ("{{BOX}}", reverseBoxStruct(r)),
+          ("{{LIB}}", libName),
+          ("{{WIRE}}", r.wireName),
+          ("{{CTX}}", ctxTypeName),
+          ("{{NAME}}", r.nimProcName),
         )
-        lines.add("    // `fn` returns, so a deferred reply must copy what it needs.")
-      lines.add("    bool set$1Impl($2 fn) {" % [pascal, reverseImplFnType(r)])
-      lines.add(
-        "        auto* raw = new $1{ptr_, std::move(fn)};" % [reverseBoxStruct(r)]
       )
-      lines.add(
-        "        // The library owns the box now: it deletes it once no invocation runs it."
-      )
-      lines.add(
-        "        if ($1_set_$2_impl(ptr_, &$3::$4ImplTrampoline, raw, &$3::$4ImplRelease) != 0) {" %
-          [libName, r.wireName, ctxTypeName, r.nimProcName]
-      )
-      lines.add("            delete raw; // refused: still ours")
-      lines.add("            return false;")
-      lines.add("        }")
-      lines.add("        return true;")
-      lines.add("    }")
-      lines.add("")
-      lines.add("    bool clear$1Impl() {" % [pascal])
-      lines.add(
-        "        return $1_set_$2_impl(ptr_, nullptr, nullptr, nullptr) == 0;" %
-          [libName, r.wireName]
-      )
-      lines.add("    }")
       lines.add("")
   if reverseEvents.len > 0:
     lines.add("    // ── Reverse FFI: host-emitted events (fire-and-forget) ──")
     for rev in reverseEvents:
-      let pascal = capitalizeFirstLetter(rev.nimProcName)
       var params: seq[string] = @[]
       var names: seq[string] = @[]
       for p in rev.params:
         params.add("const $1& $2" % [nimTypeToCpp(p.typeName), p.name])
         names.add(p.name)
       lines.add(renderMemberDocComment(rev.doc))
-      lines.add("    bool emit$1($2) const {" % [pascal, params.join(", ")])
       lines.add(
-        "        const auto payload_ = $1;" % [cppBracedInit(rev.reqTypeName, names)]
+        ReverseEmitTpl.fillTpl(
+          ("{{PASCAL}}", capitalizeFirstLetter(rev.nimProcName)),
+          ("{{PARAMS}}", params.join(", ")),
+          ("{{PAYLOAD}}", cppBracedInit(rev.reqTypeName, names)),
+          ("{{LIB}}", libName),
+          ("{{WIRE}}", rev.wireName),
+        )
       )
-      lines.add("        auto enc = encodeCborFFI(payload_);")
-      lines.add("        if (enc.isErr()) return false;")
-      lines.add("        const auto& b = enc.value();")
-      lines.add(
-        "        return $1_emit_$2(ptr_, b.data(), b.size()) == 0;" %
-          [libName, rev.wireName]
-      )
-      lines.add("    }")
       lines.add("")
 
 proc emitReverseMachinery(
@@ -368,58 +329,24 @@ proc emitReverseMachinery(
 ) =
   if reverse.len == 0:
     return
-  lines.add("    template <class T>")
-  lines.add(
-    "    static CborError decodeReverseArgs_(const std::uint8_t* data, std::size_t len, T& out) {"
-  )
-  lines.add("        CborParser parser; CborValue it;")
-  lines.add("        CborError err = cbor_parser_init(data, len, 0, &parser, &it);")
-  lines.add("        if (err) return err;")
-  lines.add("        return decode_cbor(it, out);")
-  lines.add("    }")
+  lines.add(ReverseDecodeArgsTpl.fillTpl())
   lines.add("")
   for r in reverse:
-    let box = reverseBoxStruct(r)
-    let callStruct = reverseCallStruct(r)
     let argsCpp = reverseArgsCpp(r)
-    lines.add("    struct $1 {" % [box])
-    lines.add("        void* ctx = nullptr;")
-    lines.add("        $1 fn;" % [reverseImplFnType(r)])
-    lines.add("    };")
-    lines.add("    static void $1ImplRelease(void* ud) {" % [r.nimProcName])
-    lines.add("        delete static_cast<$1*>(ud);" % [box])
-    lines.add("    }")
+    let invoke =
+      if argsCpp.len == 0:
+        ReverseInvokeNoArgsTpl.fillTpl()
+      else:
+        ReverseInvokeTpl.fillTpl(("{{ARGS}}", argsCpp))
     lines.add(
-      "    // noexcept: an exception must not unwind into the library's worker thread."
+      ReverseTrampolineTpl.fillTpl(
+        ("{{BOX}}", reverseBoxStruct(r)),
+        ("{{FN_TYPE}}", reverseImplFnType(r)),
+        ("{{NAME}}", r.nimProcName),
+        ("{{CALL}}", reverseCallStruct(r)),
+        ("{{INVOKE}}", invoke),
+      )
     )
-    lines.add(
-      "    static void $1ImplTrampoline(std::uint64_t call_id, const std::uint8_t* args, std::size_t len, void* ud) noexcept {" %
-        [r.nimProcName]
-    )
-    lines.add("        auto* box = static_cast<$1*>(ud);" % [box])
-    lines.add("        $1 call{box->ctx, call_id};" % [callStruct])
-    lines.add("        try {")
-    lines.add(
-      "            if (!box->fn) { call.failRaw(\"no C++ impl callable\"); return; }"
-    )
-    if argsCpp.len == 0:
-      lines.add("            (void)args; (void)len;")
-      lines.add("            box->fn(call);")
-    else:
-      lines.add("            $1 a{};" % [argsCpp])
-      lines.add("            if (decodeReverseArgs_(args, len, a) != CborNoError) {")
-      lines.add("                call.failRaw(\"reverse args decode failed\");")
-      lines.add("                return;")
-      lines.add("            }")
-      lines.add("            box->fn(call, a);")
-    lines.add("        } catch (const std::exception& e) {")
-    lines.add(
-      "            call.failRaw(e.what()); // dropped if the impl already replied"
-    )
-    lines.add("        } catch (...) {")
-    lines.add("            call.failRaw(\"host impl threw\");")
-    lines.add("        }")
-    lines.add("    }")
     lines.add("")
 
 proc generateCppHeader*(
