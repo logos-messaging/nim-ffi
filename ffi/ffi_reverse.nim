@@ -68,7 +68,7 @@ type
   ReverseReply* = object
     callId*: uint64
     retCode*: cint
-    data*: ptr UncheckedArray[byte] # c_malloc'd; freed by the draining thread
+    data*: ptr UncheckedArray[byte] # nil, or the bytes right after the node
     dataLen*: int
     next*: ptr ReverseReply
 
@@ -179,11 +179,7 @@ func installContextHooks*(
   st.hooks = ReverseContextHooks(wake: wake, generation: gen, ctx: ud)
 
 proc freeReply*(r: ptr ReverseReply) {.raises: [].} =
-  if r.isNil():
-    return
-
-  if not r[].data.isNil():
-    c_free(r[].data)
+  ## One allocation holds the node and its payload.
   c_free(r)
 
 proc destroy(r: ptr ReverseInvocation) {.raises: [].} =
@@ -421,23 +417,21 @@ proc pushReply*(
     st: var FFIReverseState, callId: uint64, retCode: cint, data: pointer, dataLen: int
 ): cint {.raises: [], gcsafe.} =
   ## Any thread. Wakes the FFI thread only when the mailbox was empty.
-  let node = cast[ptr ReverseReply](c_malloc(csize_t(sizeof(ReverseReply))))
+  let payloadLen = if dataLen > 0 and not data.isNil(): dataLen else: 0
+  let node =
+    cast[ptr ReverseReply](c_malloc(csize_t(sizeof(ReverseReply) + payloadLen)))
   if node.isNil():
     return REVERSE_OUT_OF_MEMORY
 
   node[].callId = callId
   node[].retCode = retCode
   node[].data = nil
-  node[].dataLen = 0
+  node[].dataLen = payloadLen
   node[].next = nil
-  if dataLen > 0 and not data.isNil():
-    let buf = cast[ptr UncheckedArray[byte]](c_malloc(csize_t(dataLen)))
-    if buf.isNil():
-      c_free(node)
-      return REVERSE_OUT_OF_MEMORY
-    copyMem(buf, data, dataLen)
-    node[].data = buf
-    node[].dataLen = dataLen
+  if payloadLen > 0:
+    node[].data =
+      cast[ptr UncheckedArray[byte]](cast[uint](node) + uint(sizeof(ReverseReply)))
+    copyMem(node[].data, data, payloadLen)
 
   var wasEmpty = false
   withLock st.lock:
