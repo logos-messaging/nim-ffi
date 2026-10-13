@@ -208,6 +208,8 @@ proc pollContext*[T](
 proc pollContextHandle*[T](ctx: ptr FFIContext[T]): int {.raises: [], gcsafe.} =
   ## A wake handle the host owns: ready while a message waits or the context is
   ## closed. The host waits on it, then polls with a timeout of 0 until `RET_TIMEOUT`.
+  ## Every call makes a new handle, and the host closes each one it was given:
+  ## ask once per context and keep it.
   if ctx.isNil():
     return WakeNoHandle
   return ctx[].outbound.wake.hostHandle()
