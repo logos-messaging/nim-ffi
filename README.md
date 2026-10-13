@@ -391,7 +391,8 @@ ctx.emit_on_host_tick(7);            // reverse event, fire-and-forget
 | A worker inside one implementation past `ReverseWorkerStallMs` | `reverse_worker_blocked` fires, then `reverse_worker_recovered` when it returns. |
 | Recycle while an implementation runs | Waits `RecycleTimeout`, then quarantines the slot with `RecycleFailure.ReverseImplBlocked`. |
 | Destroy, park or `<lib>_shutdown` with a stuck worker | The stuck worker leaks with the slot, and so does its `user_data`: `release` never runs under it. |
-| A host implementation calls a teardown export | The call returns; the worker that runs it leaks and is not joined. |
+| A host implementation destroys its own context | `<lib>_destroy` fails at once with `RET_ERR`, and the context stays usable: destroy it from another thread. |
+| A host implementation calls `<lib>_shutdown` | The call returns; the worker that runs it leaks and is not joined. |
 | `{.ffiReverseEvent.}` emit | The return code reports the enqueue only. |
 
 A reverse call takes no `{.ffiHandle.}` parameter, and only an `{.ffi.}` handler

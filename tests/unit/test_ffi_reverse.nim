@@ -130,6 +130,13 @@ registerReqFFI(CallGateRequest, lib: ptr TestRevLib):
       return err(r.error)
     return ok("unexpected success")
 
+registerReqFFI(CallSelfDestroyRequest, lib: ptr TestRevLib):
+  proc(): Future[Result[string, string]] {.async.} =
+    let r = await ffiReverseCall("self_destroy", @[], 10_000)
+    if r.isErr():
+      return err(r.error)
+    return ok("still alive")
+
 ## Host implementations (run on the event dispatch thread).
 
 proc echoImpl(
@@ -329,7 +336,50 @@ suite "registration semantics":
       waitCallback(rsp) # the call itself then dies on its deadline
       check rsp.retCode == RET_ERR
 
+## A destroy from inside an impl must not wait for the impl that calls it.
+type SelfDestroyBox = object
+  ctx: ptr FFIContext[TestRevLib]
+  refused: Atomic[bool]
+  elapsedMs: Atomic[int64]
+  returned: Atomic[bool]
+
+proc selfDestroyImpl(
+    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
+) {.cdecl, gcsafe, raises: [].} =
+  let p = cast[ptr SelfDestroyBox](userData)
+  let started = getMonoTime()
+  {.cast(gcsafe).}:
+    let res = gPool.recycleFFIContext(p[].ctx)
+  p[].elapsedMs.store((getMonoTime() - started).inMilliseconds)
+  p[].refused.store(res.isErr())
+  discard submitReverseReply(p[].ctx, callId, RET_OK, nil, 0)
+  p[].returned.store(true)
+
 suite "teardown with a reverse call in flight":
+  test "a destroy from inside its own impl is refused at once; the slot stays usable":
+    setupCallbackData(rsp)
+    let ctx = gPool.createFFIContext().valueOr:
+      check false
+      return
+    var box = SelfDestroyBox(ctx: ctx)
+    check ctx[].reverse.setImpl("self_destroy", selfDestroyImpl, addr box)
+
+    check sendRequestToFFIThread(
+      ctx, CallSelfDestroyRequest.ffiNewReq(captureCb, addr rsp)
+    )
+      .isOk()
+    waitCallback(rsp)
+    for _ in 0 ..< 10_000:
+      if box.returned.load():
+        break
+      os.sleep(1)
+    check box.returned.load()
+    check rsp.retCode == RET_OK # the recycle did not fail the call under the impl
+    check box.refused.load()
+    check box.elapsedMs.load() < 500 # not RecycleTimeout, and no quarantine
+    check ctx.lifecycle.load() == CtxLifecycle.Active
+    check gPool.recycleFFIContext(ctx).isOk()
+
   test "recycle fails the parked call instead of waiting out its deadline":
     ## A 30 s deadline outlasts RecycleWaitTimeout, so a timely destroy proves the unpark.
     setupCallbackData(rsp)

@@ -1100,6 +1100,10 @@ proc generateCLibHeader*(
     lines.add("typedef void (*FFIReverseRelease)(void* user_data);")
     lines.add("#endif")
     lines.add(
+      "/* Destroying a context from inside one of its own impls fails at once with"
+    )
+    lines.add("   RET_ERR: that destroy would wait for the very impl that calls it. */")
+    lines.add(
       "/* <lib>_set_<wire>_impl registers impl (NULL unregisters). With a release the"
     )
     lines.add(

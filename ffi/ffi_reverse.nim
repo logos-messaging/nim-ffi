@@ -149,6 +149,11 @@ type
 
 var onReverseWorker* {.threadvar.}: bool
 var myWorkerIdx {.threadvar.}: int # 1-based; 0 off a worker
+var myReverseState {.threadvar.}: ptr FFIReverseState # nil off a worker
+
+proc onOwnReverseWorker*(st: var FFIReverseState): bool {.raises: [], gcsafe.} =
+  ## True on a worker of `st`: tearing its context down from here waits on this very impl.
+  return onReverseWorker and myReverseState == addr st
 
 proc nowNs(): int64 =
   return getMonoTime().ticks
@@ -573,9 +578,11 @@ proc reverseWorkerBody(arg: ReverseWorkerArg) {.thread.} =
   let me = arg.me
   onReverseWorker = true
   myWorkerIdx = arg.idx + 1
+  myReverseState = st
   defer:
     onReverseWorker = false
     myWorkerIdx = 0
+    myReverseState = nil
     me[].exited.store(true)
 
   while true:

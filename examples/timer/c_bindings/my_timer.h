@@ -1021,6 +1021,8 @@ typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args, size_t arg
    the library's own thread at teardown), so it must be thread-safe. */
 typedef void (*FFIReverseRelease)(void* user_data);
 #endif
+/* Destroying a context from inside one of its own impls fails at once with
+   RET_ERR: that destroy would wait for the very impl that calls it. */
 /* <lib>_set_<wire>_impl registers impl (NULL unregisters). With a release the
    library owns user_data, and release(user_data) runs once the replaced impl's
    last running invocation returns. With a NULL release the host keeps ownership
