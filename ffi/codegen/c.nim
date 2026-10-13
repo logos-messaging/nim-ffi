@@ -23,6 +23,15 @@ const
   CborHelpersTpl = staticRead("templates/c/cbor_helpers.h.tpl")
   CMakeListsTpl = staticRead("templates/c/CMakeLists.txt.tpl")
   FindRepoRootTpl = staticRead("templates/find_repo_root.cmake.part")
+  ReverseDeclsTpl = staticRead("templates/c/reverse_decls.h.tpl")
+  ReverseReplyDeclTpl = staticRead("templates/c/reverse_reply_decl.h.tpl")
+  ReverseEmitDocTpl = staticRead("templates/c/reverse_emit_doc.h.tpl")
+  ReverseReplyErrTpl = staticRead("templates/c/reverse_reply_err.h.tpl")
+  ReverseSetImplTpl = staticRead("templates/c/reverse_set_impl.h.tpl")
+  ReverseDecodeArgsTpl = staticRead("templates/c/reverse_decode_args.h.tpl")
+  ReverseReplyTpl = staticRead("templates/c/reverse_reply.h.tpl")
+  ReverseReplyVoidTpl = staticRead("templates/c/reverse_reply_void.h.tpl")
+  ReverseEmitTpl = staticRead("templates/c/reverse_emit.h.tpl")
 
   # Shared header names; must match the include guards baked into the templates.
   PreludeHeaderName* = "nim_ffi_prelude.h"
@@ -700,6 +709,83 @@ proc emitListenerApi(
   lines.add("}")
   lines.add("")
 
+func fillTpl(tpl: string, subs: varargs[(string, string)]): string =
+  ## A `.tpl` with its `{{NAME}}` placeholders filled, minus its final newline.
+  tpl.multiReplace(subs).strip(leading = false, chars = {'\n'})
+
+proc emitReverseMachinery(
+    lines: var seq[string],
+    reg: var CTypeReg,
+    ctxType, libName: string,
+    reverse: seq[FFIReverseMeta],
+    reverseEvents: seq[FFIReverseEventMeta],
+) =
+  if reverse.len == 0 and reverseEvents.len == 0:
+    return
+  lines.add("/* Reverse FFI helpers (typed sugar over the raw exports above) */")
+  if reverse.len > 0:
+    lines.add(ReverseReplyErrTpl.fillTpl(("{{LIB}}", libName), ("{{CTX}}", ctxType)))
+    lines.add("")
+  for r in reverse:
+    lines.add(renderBlockDocComment(r.doc))
+    lines.add(
+      ReverseSetImplTpl.fillTpl(
+        ("{{LIB}}", libName), ("{{WIRE}}", r.wireName), ("{{CTX}}", ctxType)
+      )
+    )
+    if r.argsTypeName.len > 0:
+      let (argsC, _) = ensureCType(reg, r.argsTypeName)
+      # Same ownership rules as every other decoded value (see `freeStmt`).
+      let freeNote =
+        if argsC == CStrType:
+          "; free `*out` with free()"
+        elif argsC == "NimFfiBytes":
+          "; free `out` with nimffi_free_bytes()"
+        elif reg.owns.getOrDefault(argsC, false):
+          "; free `out` with " & libName & "_free_" & argsC & "()"
+        else:
+          ""
+      lines.add(
+        ReverseDecodeArgsTpl.fillTpl(
+          ("{{WIRE}}", r.wireName),
+          ("{{FREE_NOTE}}", freeNote),
+          ("{{LIB}}", libName),
+          ("{{ARGS}}", argsC),
+          ("{{TOKEN}}", cToken(argsC)),
+        )
+      )
+    if r.replyTypeName.len > 0:
+      let (replyC, _) = ensureCType(reg, r.replyTypeName)
+      lines.add(
+        ReverseReplyTpl.fillTpl(
+          ("{{LIB}}", libName),
+          ("{{WIRE}}", r.wireName),
+          ("{{CTX}}", ctxType),
+          ("{{REPLY}}", replyC),
+          ("{{TOKEN}}", cToken(replyC)),
+        )
+      )
+    else:
+      lines.add(
+        ReverseReplyVoidTpl.fillTpl(
+          ("{{LIB}}", libName), ("{{WIRE}}", r.wireName), ("{{CTX}}", ctxType)
+        )
+      )
+    lines.add("")
+  for rev in reverseEvents:
+    let (reqC, _) = ensureCType(reg, rev.reqTypeName)
+    lines.add(renderBlockDocComment(rev.doc))
+    lines.add(
+      ReverseEmitTpl.fillTpl(
+        ("{{LIB}}", libName),
+        ("{{WIRE}}", rev.wireName),
+        ("{{CTX}}", ctxType),
+        ("{{REQ}}", reqC),
+        ("{{TOKEN}}", cToken(reqC)),
+      )
+    )
+    lines.add("")
+
 proc emitProcWrapper(
     lines: var seq[string],
     reg: var CTypeReg,
@@ -878,6 +964,8 @@ proc generateCLibHeader*(
     libName: string,
     events: seq[FFIEventMeta] = @[],
     consts: seq[FFIConstMeta] = @[],
+    reverse: seq[FFIReverseMeta] = @[],
+    reverseEvents: seq[FFIReverseEventMeta] = @[],
 ): string =
   ## The `<lib>.h` header: library structs, monomorphised codecs and async API.
   let classified = classifyProcs(procs)
@@ -888,6 +976,17 @@ proc generateCLibHeader*(
   var reg = newCTypeReg(libName, libType, types, procs)
   let (reqTypes, respTypes) =
     monomorphiseAll(reg, types, procs, classified.replyProcs(), events)
+
+  # The host decodes reverse args and encodes replies, so these need the opposite adapters.
+  var revDecTypes: seq[string] = @[]
+  var revEncTypes: seq[string] = @[]
+  for r in reverse:
+    if r.argsTypeName.len > 0:
+      revDecTypes.add(ensureCType(reg, r.argsTypeName).cType)
+    if r.replyTypeName.len > 0:
+      revEncTypes.add(ensureCType(reg, r.replyTypeName).cType)
+  for rev in reverseEvents:
+    revEncTypes.add(ensureCType(reg, rev.reqTypeName).cType)
 
   let guard = "NIM_FFI_LIB_" & libName.toUpperAscii() & "_H_INCLUDED"
   var lines: seq[string] = @[]
@@ -944,6 +1043,27 @@ proc generateCLibHeader*(
   lines.add(
     "int " & libName & "_remove_event_listener(void* ctx, uint64_t listener_id);"
   )
+  if reverse.len > 0 or reverseEvents.len > 0:
+    lines.add("")
+    lines.add("/* Reverse FFI: host-implemented interfaces + host-emitted events */")
+  if reverse.len > 0:
+    lines.add(ReverseDeclsTpl.fillTpl(("{{REVERSE_CODES}}", cReverseCodeDefines())))
+    for r in reverse:
+      lines.add(renderBlockDocComment(r.doc))
+      lines.add(
+        "int " & libName & "_set_" & r.wireName &
+          "_impl(void* ctx, FFIReverseImpl impl, void* user_data, " &
+          "FFIReverseRelease release);"
+      )
+    lines.add(ReverseReplyDeclTpl.fillTpl(("{{LIB}}", libName)))
+  if reverseEvents.len > 0:
+    lines.add(ReverseEmitDocTpl.fillTpl())
+  for rev in reverseEvents:
+    lines.add(renderBlockDocComment(rev.doc))
+    lines.add(
+      "int " & libName & "_emit_" & rev.wireName &
+        "(void* ctx, const uint8_t* payload_cbor, size_t payload_len);"
+    )
   lines.add(renderBlockDocComment(ShutdownDoc))
   lines.add("int " & libName & "_shutdown(void);")
   lines.add("")
@@ -964,8 +1084,18 @@ proc generateCLibHeader*(
           "(CborEncoder* e, const void* v) { return " & reg.libName & "_enc_" & n &
           "(e, (const " & n & "*)v); }"
       )
+  for n in revEncTypes:
+    let tok = cToken(n)
+    if ("enc" & tok) notin adaptersDone:
+      adaptersDone.incl("enc" & tok)
+      lines.add(
+        "static inline CborError " & libName & "_encv_" & tok &
+          "(CborEncoder* e, const void* v) { return " & encFn(reg, n) & "(e, (const " & n &
+          "*)v); }"
+      )
   var respSet = respTypes
   respSet.add(CStrType) # ctor address payload
+  respSet.add(revDecTypes)
   for n in respSet:
     let tok = cToken(n)
     if ("dec" & tok) notin adaptersDone:
@@ -981,6 +1111,7 @@ proc generateCLibHeader*(
   emitConstructors(lines, reg, ctxType, libType, libName, ctors)
   emitDestructor(lines, ctxType, libName, classified.dtor, events)
   emitListenerApi(lines, ctxType, libType, libName, events)
+  emitReverseMachinery(lines, reg, ctxType, libName, reverse, reverseEvents)
   for m in classified.replyProcs():
     emitProcWrapper(lines, reg, ctxType, libType, libName, m)
 
@@ -1003,6 +1134,8 @@ proc generateCBindings*(
     nimSrcRelPath: string,
     events: seq[FFIEventMeta] = @[],
     consts: seq[FFIConstMeta] = @[],
+    reverse: seq[FFIReverseMeta] = @[],
+    reverseEvents: seq[FFIReverseEventMeta] = @[],
 ) =
   ## Emits the C binding for `libName`.
   ensureOutputDir(outputDir)
@@ -1010,7 +1143,7 @@ proc generateCBindings*(
   writeOutputFile(buildPath(outputDir, CborHeaderName), generateCCborHeader())
   writeOutputFile(
     buildPath(outputDir, libName & ".h"),
-    generateCLibHeader(procs, types, libName, events, consts),
+    generateCLibHeader(procs, types, libName, events, consts, reverse, reverseEvents),
   )
   writeOutputFile(
     buildPath(outputDir, "CMakeLists.txt"), generateCCMakeLists(libName, nimSrcRelPath)
