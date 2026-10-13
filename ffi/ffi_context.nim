@@ -119,8 +119,12 @@ const
   RecycleDonePollInterval* = 50.milliseconds
     ## How often a recycle caller checks if its claim ended.
   EventThreadTickInterval* = 1.seconds
-  FFIHeartbeatStartDelay* = 10.seconds
   FFIHeartbeatStaleThreshold* = 1.seconds
+
+const FFIHeartbeatStartDelayMs* {.intdefine: "ffiHeartbeatStartDelayMs".} = 10_000
+  ## Grace after a watch starts before a silent FFI thread is reported. Override
+  ## with `-d:ffiHeartbeatStartDelayMs=<ms>`.
+const FFIHeartbeatStartDelay* = FFIHeartbeatStartDelayMs.milliseconds
 
 const StaleWarnIntervalMs* {.intdefine: "ffiStaleWarnIntervalMs".} = 5000
   ## `RET_STALE_WARN` cadence; handlers are never timed out.
