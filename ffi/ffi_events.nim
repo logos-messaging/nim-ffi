@@ -418,6 +418,9 @@ var ffiNextEventSeqNum* {.threadvar.}: proc(): uint64 {.gcsafe, raises: [].}
 var ffiCurrentHostPolls* {.threadvar.}: proc(): bool {.gcsafe, raises: [].}
   # Whether anyone is collecting this context's events. Nil means someone is.
 
+var ffiEventDropLogged {.threadvar.}: bool
+  # A full queue stays full for every event that follows; log the first drop only.
+
 template enqueueOrMarkStuck(eventName: string, src: pointer, dataLen: int) =
   ## Enqueues into the reused slot buffers; on queue-full sets the sticky stuck
   ## flag and wakes the event thread (firing onNotResponding here would run the
@@ -433,8 +436,10 @@ template enqueueOrMarkStuck(eventName: string, src: pointer, dataLen: int) =
     if not q[].tryEnqueueEvent(
       cstring(eventName), nameId(eventName), seqNum, src, dataLen
     ):
-      chronicles.error "event queue full; library marked stuck",
-        event = eventName, capacity = EventQueueCapacity
+      if not ffiEventDropLogged:
+        ffiEventDropLogged = true
+        chronicles.error "event queue full; dropping events until it drains",
+          event = eventName, capacity = EventQueueCapacity
       # A host that never collects this context's events did not ask for them:
       # dropping them is its choice, and must not wedge the library's requests.
       let collected = ffiCurrentHostPolls.isNil() or ffiCurrentHostPolls()
@@ -443,6 +448,7 @@ template enqueueOrMarkStuck(eventName: string, src: pointer, dataLen: int) =
       if not ffiCurrentNotifyEventEnqueued.isNil():
         ffiCurrentNotifyEventEnqueued()
       break enqueueBlock
+    ffiEventDropLogged = false
     if not ffiCurrentNotifyEventEnqueued.isNil():
       ffiCurrentNotifyEventEnqueued()
 
