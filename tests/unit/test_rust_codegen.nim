@@ -95,3 +95,52 @@ suite "generateTypesRs: seq[byte] rides as a CBOR byte string":
     ]
     check not needsSerdeBytes(plain, @[])
     check "serde_bytes" notin generateCargoToml("lib", needsSerdeBytes(plain, @[]))
+
+suite "reverse FFI: the Rust wrapper hands the impl box to the library":
+  setup:
+    let procs = @[
+      FFIProcMeta(
+        procName: "timer_create",
+        libName: "timer",
+        kind: FFIKind.CTOR,
+        libTypeName: "Timer",
+        extraParams: @[],
+        returnTypeName: "Timer",
+      )
+    ]
+    let reverse = @[
+      FFIReverseMeta(
+        wireName: "host_note",
+        nimProcName: "notifyHost",
+        libName: "timer",
+        argsTypeName: "string",
+        replyTypeName: "",
+      )
+    ]
+    let api = generateApiRs(procs, "timer", @[], reverse)
+    let ffiRs = generateFFIRs(procs, reverse)
+
+  test "set_impl passes a release that reclaims the box; no wrapper-side slot":
+    check "Box::into_raw(Box::new(NotifyHostImplBox" in api
+    check "Some(notify_host_impl_release)" in api
+    check "drop(Box::from_raw(ud as *mut NotifyHostImplBox))" in api
+    check "_impl: std::sync::Mutex" notin api
+
+  test "the docs say the token is Copy and the closure owns its arguments":
+    check "a `Copy` {context token, call id} pair" in api
+    check "owns its arguments" in api
+
+  test "the trampoline catches a panic instead of unwinding into the library":
+    check "std::panic::catch_unwind" in api
+    check "host impl panicked" in api
+
+  test "the status codes and the release type are emitted":
+    check "pub const REVERSE_INVALID_ARGUMENT: c_int = 6;" in api
+    check "release: Option<FFIReverseRelease>" in ffiRs
+    check "pub type FFIReverseRelease" in ffiRs
+    check "start_reverse_workers" notin ffiRs
+
+  test "build.rs sets an rpath and rebuilds on a runtime change":
+    let buildRs = generateBuildRs("timer", "../timer.nim")
+    check "cargo:rustc-link-arg=-Wl,-rpath," in buildRs
+    check "repo_root.join(\"ffi\")" in buildRs
