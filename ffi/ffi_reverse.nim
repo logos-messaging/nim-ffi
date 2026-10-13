@@ -50,8 +50,8 @@ type FFIReverseImpl* = proc(
   ## Runs on a reverse worker and may block; answers through `<lib>_reverse_reply`.
 
 type FFIReverseRelease* = proc(userData: pointer) {.cdecl, gcsafe, raises: [].}
-  ## Frees an impl's `userData` once no invocation uses it. Runs on whichever thread
-  ## drops the last reference: a reverse worker, a `setImpl` caller or the FFI thread.
+  ## Frees an impl's `userData`. Runs on whichever thread drops the last
+  ## reference: a reverse worker, a `setImpl` caller or the FFI thread.
 
 type
   ReverseImplEntry* = object
@@ -112,6 +112,16 @@ type
 
   ReverseWakeFn* = proc(ud: pointer) {.nimcall, gcsafe, raises: [].}
   ReverseGenerationFn* = proc(ud: pointer): uint {.nimcall, gcsafe, raises: [].}
+
+  ReverseContextHooks = object ## set once by `installContextHooks`
+    wake: ReverseWakeFn
+    generation: ReverseGenerationFn
+    ctx: pointer # the FFIContext
+
+  ReverseMailbox = object ## FIFO of host replies: the first reply for a call id wins
+    head, tail: ptr ReverseReply
+    count: int
+
   ReverseStopFn* = proc(st: var FFIReverseState, timeoutMs: int): ReverseStopResult {.
     nimcall, gcsafe, raises: []
   .}
@@ -121,11 +131,8 @@ type
     impls: array[ReverseMaxImpls, ReverseImplSlot] # no GC memory: any thread may free
     dispatching*: int # invocations in flight on the workers
     nextCallId*: Atomic[uint64]
-    mailbox, mailboxTail: ptr ReverseReply # FIFO: the first reply for a call id wins
-    mailboxCount: int
-    wakeFn*: ReverseWakeFn
-    generationFn*: ReverseGenerationFn
-    hookUd*: pointer # the FFIContext
+    mailbox: ReverseMailbox
+    hooks: ReverseContextHooks
     qLock*: Lock
     qCond*: Cond
     qHead, qTail: ptr ReverseInvocation
@@ -153,12 +160,8 @@ proc initReverseState*(st: var FFIReverseState) =
     st.impls[i] = ReverseImplSlot()
   st.dispatching = 0
   st.nextCallId.store(0'u64)
-  st.mailbox = nil
-  st.mailboxTail = nil
-  st.mailboxCount = 0
-  st.wakeFn = nil
-  st.generationFn = nil
-  st.hookUd = nil
+  st.mailbox = ReverseMailbox()
+  st.hooks = ReverseContextHooks()
   st.qHead = nil
   st.qTail = nil
   st.qCount = 0
@@ -170,12 +173,10 @@ proc initReverseState*(st: var FFIReverseState) =
   st.leakedWorkers = 0
   st.stopFn = nil
 
-proc installContextHooks*(
+func installContextHooks*(
     st: var FFIReverseState, wake: ReverseWakeFn, gen: ReverseGenerationFn, ud: pointer
-) =
-  st.wakeFn = wake
-  st.generationFn = gen
-  st.hookUd = ud
+) {.raises: [].} =
+  st.hooks = ReverseContextHooks(wake: wake, generation: gen, ctx: ud)
 
 proc freeReply*(r: ptr ReverseReply) {.raises: [].} =
   if r.isNil():
@@ -185,7 +186,7 @@ proc freeReply*(r: ptr ReverseReply) {.raises: [].} =
     c_free(r[].data)
   c_free(r)
 
-proc freeInvocation(r: ptr ReverseInvocation) {.raises: [].} =
+proc destroy(r: ptr ReverseInvocation) {.raises: [].} =
   if r.isNil():
     return
 
@@ -195,20 +196,18 @@ proc freeInvocation(r: ptr ReverseInvocation) {.raises: [].} =
     c_free(r[].args)
   c_free(r)
 
-proc releaseInvocation*(r: ptr ReverseInvocation) {.raises: [].} =
+proc decRef*(r: ptr ReverseInvocation) {.raises: [].} =
   if r.isNil():
     return
 
   if r[].refs.fetchSub(1) == 1:
-    freeInvocation(r)
+    destroy(r)
 
 proc takeReplies*(st: var FFIReverseState): ptr ReverseReply {.raises: [], gcsafe.} =
   ## Detaches the mailbox; the caller frees every node.
   withLock st.lock:
-    let head = st.mailbox
-    st.mailbox = nil
-    st.mailboxTail = nil
-    st.mailboxCount = 0
+    let head = st.mailbox.head
+    st.mailbox = ReverseMailbox()
     return head
 
 proc freeAllReplies*(st: var FFIReverseState) {.raises: [], gcsafe.} =
@@ -228,7 +227,7 @@ proc purgeQueue*(st: var FFIReverseState) {.raises: [], gcsafe.} =
 
   while not node.isNil():
     let next = node[].next
-    releaseInvocation(node)
+    decRef(node)
     node = next
 
 proc queueLen*(st: var FFIReverseState): int {.raises: [], gcsafe.} =
@@ -249,27 +248,27 @@ proc dupName(name: string): cstring {.raises: [].} =
   buf[name.len] = '\0'
   return cast[cstring](buf)
 
-proc freeEntry(e: ptr ReverseImplEntry) {.raises: [], gcsafe.} =
+proc destroy(e: ptr ReverseImplEntry) {.raises: [], gcsafe.} =
   if not e[].release.isNil():
     e[].release(e[].userData)
   c_free(e)
 
-proc releaseEntry(e: ptr ReverseImplEntry) {.raises: [], gcsafe.} =
+proc decRef(e: ptr ReverseImplEntry) {.raises: [], gcsafe.} =
   ## Drops one reference; the last one hands `userData` back to the host.
   if e.isNil():
     return
 
   if e[].refs.fetchSub(1) == 1:
-    freeEntry(e)
+    destroy(e)
 
-proc findSlot(st: var FFIReverseState, name: cstring): int {.raises: [].} =
+func findSlotByName(st: FFIReverseState, name: cstring): int {.raises: [].} =
   ## Call with `st.lock` held; -1 when `name` has no impl.
   for i in 0 ..< ReverseMaxImpls:
     if not st.impls[i].name.isNil() and c_strcmp(st.impls[i].name, name) == 0:
       return i
   return -1
 
-proc freeSlot(st: var FFIReverseState): int {.raises: [].} =
+func findEmptySlot(st: FFIReverseState): int {.raises: [].} =
   ## Call with `st.lock` held; -1 when the registry is full.
   for i in 0 ..< ReverseMaxImpls:
     if st.impls[i].name.isNil():
@@ -291,7 +290,7 @@ proc clearImpls*(st: var FFIReverseState): int {.raises: [], gcsafe.} =
   for i in 0 ..< ReverseMaxImpls:
     if not names[i].isNil():
       c_free(names[i])
-    releaseEntry(entries[i])
+    decRef(entries[i])
   return running
 
 proc deinitReverseState*(st: var FFIReverseState) =
@@ -349,9 +348,9 @@ proc setImplStatus*(
   var oldName: cstring = nil
   var status = REVERSE_ACCEPTED
   withLock st.lock:
-    var idx = st.findSlot(cstring(name))
+    var idx = st.findSlotByName(cstring(name))
     if idx < 0 and not fresh.isNil():
-      idx = st.freeSlot()
+      idx = st.findEmptySlot()
       if idx < 0:
         status = REVERSE_REGISTRY_FULL
       else:
@@ -372,7 +371,7 @@ proc setImplStatus*(
     return status
   if not oldName.isNil():
     c_free(oldName)
-  releaseEntry(old)
+  decRef(old)
   return REVERSE_ACCEPTED
 
 proc setImpl*(
@@ -387,7 +386,7 @@ proc setImpl*(
 
 proc hasImpl*(st: var FFIReverseState, name: string): bool {.raises: [], gcsafe.} =
   withLock st.lock:
-    return st.findSlot(cstring(name)) >= 0
+    return st.findSlotByName(cstring(name)) >= 0
 
 proc inFlight*(st: var FFIReverseState): int {.raises: [], gcsafe.} =
   withLock st.lock:
@@ -398,7 +397,7 @@ proc beginReverseDispatch*(
 ): ptr ReverseImplEntry {.raises: [], gcsafe.} =
   ## Nil when `name` has no impl; pair every other result with `endReverseDispatch`.
   withLock st.lock:
-    let idx = st.findSlot(name)
+    let idx = st.findSlotByName(name)
     if idx < 0:
       return nil
 
@@ -412,7 +411,7 @@ proc endReverseDispatch*(
 ) {.raises: [], gcsafe.} =
   withLock st.lock:
     st.dispatching.dec()
-  releaseEntry(entry)
+  decRef(entry)
 
 proc allocCallId*(st: var FFIReverseState): uint64 {.raises: [].} =
   ## Monotonic for the life of the slot; 0 is the invalid id.
@@ -442,24 +441,24 @@ proc pushReply*(
 
   var wasEmpty = false
   withLock st.lock:
-    if st.mailboxCount >= ReverseMailboxDepth:
+    if st.mailbox.count >= ReverseMailboxDepth:
       freeReply(node)
       return REVERSE_MAILBOX_FULL
-    wasEmpty = st.mailboxCount == 0
-    if st.mailboxTail.isNil():
-      st.mailbox = node
+    wasEmpty = st.mailbox.count == 0
+    if st.mailbox.tail.isNil():
+      st.mailbox.head = node
     else:
-      st.mailboxTail[].next = node
-    st.mailboxTail = node
-    st.mailboxCount.inc()
+      st.mailbox.tail[].next = node
+    st.mailbox.tail = node
+    st.mailbox.count.inc()
 
-  if wasEmpty and not st.wakeFn.isNil():
-    st.wakeFn(st.hookUd)
+  if wasEmpty and not st.hooks.wake.isNil():
+    st.hooks.wake(st.hooks.ctx)
   return REVERSE_ACCEPTED
 
 proc mailboxLen*(st: var FFIReverseState): int {.raises: [], gcsafe.} =
   withLock st.lock:
-    return st.mailboxCount
+    return st.mailbox.count
 
 proc allocInvocation(
     callId: uint64, generation: uint, deadlineNs: int64, name: string, args: seq[byte]
@@ -486,7 +485,7 @@ proc allocInvocation(
   if args.len > 0:
     let buf = cast[ptr UncheckedArray[byte]](c_malloc(csize_t(args.len)))
     if buf.isNil():
-      freeInvocation(rec)
+      destroy(rec)
       return nil
     copyMem(buf, unsafeAddr args[0], args.len)
     rec[].args = buf
@@ -531,8 +530,9 @@ proc runInvocation(
 ) {.raises: [].} =
   ## Skips a stale, expired or cancelled record; releases the queue's reference either way.
   defer:
-    releaseInvocation(rec)
-  if not st.generationFn.isNil() and rec[].generation != st.generationFn(st.hookUd):
+    decRef(rec)
+  if not st.hooks.generation.isNil() and
+      rec[].generation != st.hooks.generation(st.hooks.ctx):
     return
   if nowNs() > rec[].deadlineNs:
     # The FFI thread's timer may not have fired yet; the future fails there.
@@ -716,7 +716,7 @@ proc drainReverseReplies*() {.gcsafe, raises: [].} =
     let fut = pending.fut
     if not fut.isNil():
       ffiPendingReverse.del(node[].callId)
-      releaseInvocation(pending.rec)
+      decRef(pending.rec)
     if not fut.isNil() and not fut.finished():
       if node[].retCode == RET_OK:
         var bytes = newSeq[byte](node[].dataLen)
@@ -738,7 +738,7 @@ proc failPendingReverse*(reason: string) {.gcsafe, raises: [].} =
   for _, p in ffiPendingReverse.mpairs:
     if not p.rec.isNil():
       discard cancelInvocation(p.rec)
-      releaseInvocation(p.rec)
+      decRef(p.rec)
     if not p.fut.finished():
       p.fut.complete(Result[seq[byte], string].err(reason))
   ffiPendingReverse.clear()
@@ -750,7 +750,7 @@ proc abandonCall(callId: uint64) =
 
   if not p.rec.isNil():
     discard cancelInvocation(p.rec)
-    releaseInvocation(p.rec)
+    decRef(p.rec)
   ffiPendingReverse.del(callId)
 
 proc ffiReverseCall*(
@@ -769,10 +769,10 @@ proc ffiReverseCall*(
     return err("reverse workers could not be started for " & name)
 
   let generation =
-    if st[].generationFn.isNil():
+    if st[].hooks.generation.isNil():
       0'u
     else:
-      st[].generationFn(st[].hookUd)
+      st[].hooks.generation(st[].hooks.ctx)
   let callId = st[].allocCallId()
   let deadlineNs = nowNs() + int64(timeoutMs) * 1_000_000'i64
   let rec = allocInvocation(callId, generation, deadlineNs, name, argsCbor)
