@@ -413,13 +413,17 @@ proc stopAndJoinThreads*[T](
     ctx: ptr FFIContext[T], timeout = ThreadExitTimeout
 ): Result[void, string] =
   ## On timeout, returns err and skips remaining joins (leaves threads live); caller cleans up.
-  when defined(ffiPollMode):
-    defer:
+  template closeForPoller() =
+    when defined(ffiPollMode):
       ctx[].outbound.closeOutbound(ctx.generation.load())
+
   ctx.signalStop().isOkOr:
+    closeForPoller()
     return err("signalStop failed: " & $error)
 
-  ?ctx.threadExitSignal.waitExitOrErr("FFI thread", timeout)
+  ctx.threadExitSignal.waitExitOrErr("FFI thread", timeout).isOkOr:
+    closeForPoller()
+    return err("FFI thread did not stop: " & error)
   joinThread(ctx.ffiThread)
   when not defined(ffiPollMode):
     ?ctx.eventThreadExitSignal.waitExitOrErr("event thread", timeout)
@@ -427,6 +431,6 @@ proc stopAndJoinThreads*[T](
   else:
     # A poller is a host thread, so there is nothing to join; it is told the
     # context ended and its queues are dropped once it leaves `poll`.
-    ctx[].outbound.closeOutbound(ctx.generation.load())
+    closeForPoller()
     ctx[].outbound.dropQueuedMessages(ctx[].eventQueue)
   ok()
