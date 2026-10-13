@@ -917,7 +917,7 @@ uint64_t my_timer_add_event_listener(void* ctx, const char* event_name, FFICallb
 int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
 
 // Reverse FFI: host-implemented interfaces + host-emitted events
-typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, size_t args_len, void* user_data);
+typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args, size_t args_len, void* user_data);
 typedef void (*FFIReverseRelease)(void* user_data);
 #ifndef NIMFFI_REVERSE_ACCEPTED
 #define NIMFFI_REVERSE_ACCEPTED 0

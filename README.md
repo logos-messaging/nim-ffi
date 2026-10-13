@@ -318,7 +318,7 @@ proc onHostTick(tickNo: int) {.ffiReverseEvent.} =
 
 An `{.ffi.}` handler awaits `fetchHostClock(...)` like any async proc. The call
 goes to the per-context reverse worker threads, which call the host
-implementation with `(call_id, args_cbor, len, user_data)`. `args_cbor` is
+implementation with `(call_id, args, len, user_data)`. `args` is
 valid only until the implementation returns. The implementation may block its
 worker. The host answers, now or later and from any thread, through
 `<lib>_reverse_reply`; the first reply for a call id wins. Workers start on the
@@ -356,7 +356,7 @@ thread and answer once, before the call's deadline; a late or second reply is
 dropped, and a reply after the context is gone returns `false`. The arguments
 differ by language: C++ receives them by `const&`, borrowed until the
 implementation returns, so a deferred reply captures a copy. Rust closures own
-theirs and move them. C gets `args_cbor`, also valid only until it returns.
+theirs and move them. C gets `args`, also valid only until it returns.
 
 ```cpp
 ctx->setFetchHostClockImpl([](MyTimerCtx::FetchHostClockCall call, const std::string& precision) {

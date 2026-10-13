@@ -123,15 +123,12 @@ type TokenBox = object
   token: FFICtxToken
 
 proc fetchConfigImpl(
-    callId: uint64,
-    argsCbor: ptr UncheckedArray[byte],
-    argsLen: csize_t,
-    userData: pointer,
+    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
   # Nim code that touches the pool global is not gcsafe; a C host has no such check.
   {.cast(gcsafe).}:
     let box = cast[ptr TokenBox](userData)
-    let decoded = cborDecodePtr(argsCbor, int(argsLen), FetchConfigArgs).valueOr:
+    let decoded = cborDecodePtr(args, int(argsLen), FetchConfigArgs).valueOr:
       let msg = "args decode failed"
       discard revmacro_reverse_reply(
         box[].token,
@@ -152,10 +149,7 @@ proc fetchConfigImpl(
     )
 
 proc ackNoteImpl(
-    callId: uint64,
-    argsCbor: ptr UncheckedArray[byte],
-    argsLen: csize_t,
-    userData: pointer,
+    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
   {.cast(gcsafe).}:
     let box = cast[ptr TokenBox](userData)
@@ -165,10 +159,7 @@ proc countRelease(userData: pointer) {.cdecl, gcsafe, raises: [].} =
   cast[ptr Atomic[int]](userData)[].atomicInc()
 
 proc silentImpl(
-    callId: uint64,
-    argsCbor: ptr UncheckedArray[byte],
-    argsLen: csize_t,
-    userData: pointer,
+    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
   discard
 

@@ -556,7 +556,7 @@ proc generateCppHeader*(
     lines.add("// Reverse FFI: host-implemented interfaces + host-emitted events")
   if reverse.len > 0:
     lines.add(
-      "typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, size_t args_len, void* user_data);"
+      "typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args, size_t args_len, void* user_data);"
     )
     lines.add("typedef void (*FFIReverseRelease)(void* user_data);")
     lines.add("#ifndef NIMFFI_REVERSE_ACCEPTED")

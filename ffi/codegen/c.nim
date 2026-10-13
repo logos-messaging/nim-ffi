@@ -1080,14 +1080,14 @@ proc generateCLibHeader*(
     lines.add("/* Status of <lib>_set_<wire>_impl and <lib>_reverse_reply. */")
     lines.add(cReverseCodeDefines())
     lines.add(
-      "/* Runs on a reverse worker thread and may block. args_cbor is valid only until"
+      "/* Runs on a reverse worker thread and may block. args is valid only until"
     )
     lines.add(
       "   the impl returns: copy what a deferred reply needs. Answer, now or later"
     )
     lines.add("   and from any thread, via <lib>_reverse_reply. */")
     lines.add(
-      "typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, " &
+      "typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args, " &
         "size_t args_len, void* user_data);"
     )
     lines.add(

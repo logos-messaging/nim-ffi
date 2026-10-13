@@ -305,7 +305,7 @@ proc generateFFIRs*(
     )
     lines.add("pub type FFIReverseImpl = unsafe extern \"C\" fn(")
     lines.add("    call_id: u64,")
-    lines.add("    args_cbor: *const u8,")
+    lines.add("    args: *const u8,")
     lines.add("    args_len: usize,")
     lines.add("    user_data: *mut c_void,")
     lines.add(");")

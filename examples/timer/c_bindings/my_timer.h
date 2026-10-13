@@ -1012,10 +1012,10 @@ int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
 #define NIMFFI_REVERSE_INVALID_ARGUMENT 6
 #define NIMFFI_REVERSE_OUT_OF_MEMORY 7
 #define NIMFFI_REVERSE_REGISTRY_FULL 8
-/* Runs on a reverse worker thread and may block. args_cbor is valid only until
+/* Runs on a reverse worker thread and may block. args is valid only until
    the impl returns: copy what a deferred reply needs. Answer, now or later
    and from any thread, via <lib>_reverse_reply. */
-typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, size_t args_len, void* user_data);
+typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args, size_t args_len, void* user_data);
 /* Frees an impl's user_data once no invocation uses it. It runs on whichever
    thread drops the last reference (a reverse worker, the set_impl caller or
    the library's own thread at teardown), so it must be thread-safe. */

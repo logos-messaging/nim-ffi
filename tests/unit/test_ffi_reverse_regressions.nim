@@ -38,10 +38,7 @@ proc runChild(mode: string): tuple[output: string, exitCode: int] =
 ## Host impls and their boxes.
 
 proc nopImpl(
-    callId: uint64,
-    argsCbor: ptr UncheckedArray[byte],
-    argsLen: csize_t,
-    userData: pointer,
+    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
   discard
 
@@ -57,10 +54,7 @@ proc initGate(g: var GateBox) =
   g.cond.initCond()
 
 proc gateImpl(
-    callId: uint64,
-    argsCbor: ptr UncheckedArray[byte],
-    argsLen: csize_t,
-    userData: pointer,
+    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
   ## Parks the worker until the test releases it: a blocking host impl.
   let g = cast[ptr GateBox](userData)
@@ -108,10 +102,7 @@ type UnregBox = object
   done: Atomic[bool]
 
 proc unregImpl(
-    callId: uint64,
-    argsCbor: ptr UncheckedArray[byte],
-    argsLen: csize_t,
-    userData: pointer,
+    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
   ## Unregisters "victim" from inside a dispatch, then reports what set_impl left.
   let b = cast[ptr UnregBox](userData)
@@ -125,10 +116,7 @@ type TwiceBox = object
   st: ptr FFIReverseState
 
 proc replyTwiceImpl(
-    callId: uint64,
-    argsCbor: ptr UncheckedArray[byte],
-    argsLen: csize_t,
-    userData: pointer,
+    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
   let b = cast[ptr TwiceBox](userData)
   var first = [byte 1]

@@ -15,10 +15,7 @@ type ProbeBox = object
   sawWorkerFlag: Atomic[bool]
 
 proc probeImpl(
-    callId: uint64,
-    argsCbor: ptr UncheckedArray[byte],
-    argsLen: csize_t,
-    userData: pointer,
+    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
   ## Reports the thread marker the pool's idle reap reads, then answers.
   let p = cast[ptr ProbeBox](userData)
@@ -99,10 +96,7 @@ type SuicideBox = object
   returned: Atomic[bool]
 
 proc suicideImpl(
-    callId: uint64,
-    argsCbor: ptr UncheckedArray[byte],
-    argsLen: csize_t,
-    userData: pointer,
+    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
   let p = cast[ptr SuicideBox](userData)
   discard submitReverseReply(p[].ctx, callId, RET_OK, nil, 0)

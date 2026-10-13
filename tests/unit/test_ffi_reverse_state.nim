@@ -7,10 +7,7 @@ import ffi
 import ./reverse_leak_child
 
 proc nopImpl(
-    callId: uint64,
-    argsCbor: ptr UncheckedArray[byte],
-    argsLen: csize_t,
-    userData: pointer,
+    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
   discard
 
@@ -18,23 +15,17 @@ type EchoBox = object
   st: ptr FFIReverseState
 
 proc echoImpl(
-    callId: uint64,
-    argsCbor: ptr UncheckedArray[byte],
-    argsLen: csize_t,
-    userData: pointer,
+    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
   ## Answers inline with the args echoed back, straight into the mailbox.
   let box = cast[ptr EchoBox](userData)
-  discard box[].st[].pushReply(callId, RET_OK, argsCbor, int(argsLen))
+  discard box[].st[].pushReply(callId, RET_OK, args, int(argsLen))
 
 type CountBox = object
   invoked: Atomic[int]
 
 proc countImpl(
-    callId: uint64,
-    argsCbor: ptr UncheckedArray[byte],
-    argsLen: csize_t,
-    userData: pointer,
+    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
   cast[ptr CountBox](userData)[].invoked.atomicInc()
 
@@ -45,10 +36,7 @@ type GateBox = object
   release: bool
 
 proc gateImpl(
-    callId: uint64,
-    argsCbor: ptr UncheckedArray[byte],
-    argsLen: csize_t,
-    userData: pointer,
+    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
   ## Parks the worker until the test releases it: models a blocking host impl.
   let g = cast[ptr GateBox](userData)
@@ -64,16 +52,13 @@ type ArgsAfterTimeoutBox = object
   argsIntact: Atomic[bool]
 
 proc argsAfterTimeoutImpl(
-    callId: uint64,
-    argsCbor: ptr UncheckedArray[byte],
-    argsLen: csize_t,
-    userData: pointer,
+    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
   ## Outlives the caller's deadline, then reads its args: the worker's reference keeps them.
   let box = cast[ptr ArgsAfterTimeoutBox](userData)
   os.sleep(100)
   box[].argsIntact.store(
-    argsLen == 3 and argsCbor[0] == 7 and argsCbor[1] == 8 and argsCbor[2] == 9
+    argsLen == 3 and args[0] == 7 and args[1] == 8 and args[2] == 9
   )
   box[].done.store(true)
 
@@ -130,10 +115,7 @@ proc countRelease(userData: pointer) {.cdecl, gcsafe, raises: [].} =
   cast[ptr ReleaseBox](userData)[].released.atomicInc()
 
 proc selfReplaceImpl(
-    callId: uint64,
-    argsCbor: ptr UncheckedArray[byte],
-    argsLen: csize_t,
-    userData: pointer,
+    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
   ## Replaces its own entry, then reads whether its userData was already released.
   let b = cast[ptr ReleaseBox](userData)

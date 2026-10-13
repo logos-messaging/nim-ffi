@@ -42,10 +42,7 @@ proc ffiNoopCallback*(
   discard
 
 type FFIReverseImpl* = proc(
-  callId: uint64,
-  argsCbor: ptr UncheckedArray[byte],
-  argsLen: csize_t,
-  userData: pointer,
+  callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].}
   ## Runs on a reverse worker and may block; answers through `<lib>_reverse_reply`.
 

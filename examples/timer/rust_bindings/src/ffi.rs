@@ -40,7 +40,7 @@ extern "C" {
 /// Runs on a reverse worker thread and may block; answer via `<lib>_reverse_reply`.
 pub type FFIReverseImpl = unsafe extern "C" fn(
     call_id: u64,
-    args_cbor: *const u8,
+    args: *const u8,
     args_len: usize,
     user_data: *mut c_void,
 );

@@ -400,7 +400,7 @@ suite "generateCLibHeader: reverse FFI":
       generateCLibHeader(procs, types, "timer", @[], @[], reverse, reverseEvents)
 
   test "raw reverse exports are declared with the impl typedef":
-    check "typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args_cbor, size_t args_len, void* user_data);" in
+    check "typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args, size_t args_len, void* user_data);" in
       header
     check "int timer_set_fetch_config_impl(void* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release);" in
       header
@@ -418,7 +418,7 @@ suite "generateCLibHeader: reverse FFI":
       header
 
   test "the header states the args lifetime and the user_data ownership rules":
-    check "args_cbor is valid only until" in header
+    check "args is valid only until" in header
     check "release(user_data) runs" in header
     check "release is never called" in header
     check "The first reply for a call_id wins" in header
