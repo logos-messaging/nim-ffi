@@ -41,6 +41,8 @@ type RecycleFailure* {.pure.} = enum
   TeardownTimeout ## TeardownTimeout cancelled the `{.ffiDtor.}` body
   TeardownRaised ## the `{.ffiDtor.}` body raised
   CallerAbandoned ## the caller's own wait expired before the recycle finished
+  ReverseImplBlocked
+    ## a reverse worker was still inside a host impl after the drain round
 
 func reason*(failure: RecycleFailure): string =
   ## The `requestRecycle` error text for a quarantine.
@@ -55,6 +57,8 @@ func reason*(failure: RecycleFailure): string =
     "the {.ffiDtor.} teardown raised"
   of RecycleFailure.CallerAbandoned:
     "the teardown outlasted the caller's wait"
+  of RecycleFailure.ReverseImplBlocked:
+    "a host reverse implementation did not return"
 
 type FFIContext*[T] = object
   myLib*: ptr T # main library object (Waku, LibP2P, SDS, …)
@@ -90,6 +94,7 @@ type FFIContext*[T] = object
   eventThreadExitSignal: ThreadSignalPtr
   userData*: pointer
   eventRegistry*: FFIEventRegistry
+  reverse*: FFIReverseState
   handles*: FFIHandleRegistry
   eventQueue*: EventQueue
   outbound*: FFIOutbound
@@ -141,6 +146,14 @@ proc ffiTeardownHook*[T](): var FFITeardownProc[T] =
   ## Runtime slot not an overload: an overload would bind the no-op default before the dtor is visible.
   var hook {.global.}: FFITeardownProc[T]
   hook
+
+proc reverseWakeHook[T](ud: pointer) {.nimcall, gcsafe, raises: [].} =
+  ## Any host thread, maybe one without a Nim GC under refc, so no logging here. A
+  ## failed wake needs no handling: the reply is queued and the FFI loop polls every 100ms.
+  discard cast[ptr FFIContext[T]](ud).reqSignal.fireSync()
+
+proc reverseGenerationHook[T](ud: pointer): uint {.nimcall, gcsafe, raises: [].} =
+  return cast[ptr FFIContext[T]](ud).generation.load()
 
 proc unregisterWaitedSignal(signal: ThreadSignalPtr) =
   ## `wait` leaves the signal's fd registered in this thread's dispatcher, and
@@ -199,6 +212,7 @@ proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   deinitRequestQueue(ctx[].reqQueueBank)
   when not defined(ffiPollMode):
     deinitEventRegistry(ctx[].eventRegistry)
+  let reverseRes = deinitReverseState(ctx[].reverse)
   deinitHandleRegistry(ctx[].handles)
   # A poller must not be inside the queue while it is freed, and must find it
   # gone rather than freed under it when it comes back.
@@ -206,7 +220,7 @@ proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     ctx[].outbound.queueLive = false
     releaseHeldEvent(ctx[].outbound.held)
     deinitEventQueue(ctx[].eventQueue)
-  ok()
+  return reverseRes
 
 proc drainSignal(sig: ThreadSignalPtr) =
   ## A reused slot inherits the fires of its last cycle; they wake the new threads for nothing.
@@ -272,6 +286,8 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   # FFI thread is the one that clears it.
   when not defined(ffiPollMode):
     initEventRegistry(ctx[].eventRegistry)
+  initReverseState(ctx[].reverse)
+  ctx[].reverse.installContextHooks(reverseWakeHook[T], reverseGenerationHook[T], ctx)
   initHandleRegistry(ctx[].handles)
 
   # Armed before the first step that can fail, so every early return cleans up.
@@ -425,6 +441,19 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     return err("requestRecycle: the slot did not come free")
   ok()
 
+proc submitReverseReply*[T](
+    ctx: ptr FFIContext[T], callId: uint64, retCode: cint, data: pointer, dataLen: int
+): cint =
+  ## Any host thread. Returns a REVERSE_* status.
+  if ctx.lifecycle.load() != CtxLifecycle.Active:
+    return REVERSE_NOT_ACTIVE
+  if MaxRequestPayloadBytes > 0 and dataLen > MaxRequestPayloadBytes:
+    return REVERSE_PAYLOAD_TOO_LARGE
+  if data.isNil() and dataLen > 0:
+    return REVERSE_INVALID_ARGUMENT
+
+  return ctx[].reverse.pushReply(callId, retCode, data, dataLen)
+
 const ThreadExitTimeoutMs* {.intdefine: "ffiThreadExitTimeoutMs".} = 1500
   ## Per-thread exit wait; past it stopAndJoinThreads leaks the ctx rather than hangs.
 const ThreadExitTimeout* = ThreadExitTimeoutMs.milliseconds
@@ -462,4 +491,12 @@ proc stopAndJoinThreads*[T](
       while ctx[].eventQueue.hasEvents() and Moment.now() < deadline:
         os.sleep(1)
     ctx[].outbound.dropQueuedMessages(ctx[].eventQueue)
+  # Both modes: the reverse workers are ours whether or not a host polls.
+  if not ctx[].reverse.stopFn.isNil():
+    let stop = ctx[].reverse.stopFn(ctx[].reverse, timeout.milliseconds.int)
+    if stop.leaked > 0:
+      return err(
+        "did not exit in time: " & $stop.leaked &
+          " reverse worker(s) still inside a host impl (leaking ctx to avoid hang)"
+      )
   ok()
