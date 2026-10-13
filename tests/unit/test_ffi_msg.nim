@@ -21,8 +21,8 @@ suite "the wire name is carried as a number":
 suite "the struct is declared once per translation unit":
   test "the C declaration is guarded and lists every kind":
     let decl = cMsgDecl()
-    check decl.startsWith("#ifndef NIMFFI_MSG_DECLARED")
-    check decl.endsWith("#endif /* NIMFFI_MSG_DECLARED */")
+    check decl.startsWith("#ifndef NIMFFI_POLL_RESULT_DECLARED")
+    check decl.endsWith("#endif /* NIMFFI_POLL_RESULT_DECLARED */")
     for k in MsgKinds:
       check decl.contains("#define NIMFFI_MSG_" & k.name & " " & $k.value)
 

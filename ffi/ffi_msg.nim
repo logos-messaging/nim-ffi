@@ -3,10 +3,10 @@
 
 import std/strutils
 
-type NimFfiMsg* {.bycopy.} = object
+type PollResult* {.bycopy.} = object
   ## `poll` hands out a pointer to it. Owned by the library and valid until the
   ## next poll on the same context.
-  structSize*: uint32 ## `sizeof(NimFfiMsg)` of the library; fields are only appended.
+  structSize*: uint32 ## `sizeof(PollResult)` of the library; fields are only appended.
   kind*: uint32
   seqNum*: uint64 ## Production order within the context.
   id*: uint64 ## Reply, Stale: the request id. Otherwise 0.
@@ -79,8 +79,9 @@ func nameIdLiteral*(wireName: string): string =
 func cMsgDecl*(): string =
   # Guarded: a C and a C++ binding can meet in one translation unit, in any order.
   var lines = @[
-    "#ifndef NIMFFI_MSG_DECLARED", "#define NIMFFI_MSG_DECLARED", "typedef struct {",
-    "  uint32_t struct_size;   /* sizeof(NimFfiMsg) of the library; fields are only appended */",
+    "#ifndef NIMFFI_POLL_RESULT_DECLARED", "#define NIMFFI_POLL_RESULT_DECLARED",
+    "typedef struct {",
+    "  uint32_t struct_size;   /* sizeof(PollResult) of the library; fields are only appended */",
     "  uint32_t kind;          /* NIMFFI_MSG_* */",
     "  uint64_t seq_num;       /* production order within the context */",
     "  uint64_t id;            /* REPLY, STALE: the request id. Otherwise 0 */",
@@ -88,17 +89,17 @@ func cMsgDecl*(): string =
     "  uint64_t duration_ms;   /* STALE: ms in flight; REVERSE_CALL: ms left to answer */",
     "  int32_t  ret_code;", "  uint32_t flags;          /* reserved; zero today */",
     "  const uint8_t* payload; /* bare CBOR value; never NULL */", "  size_t   len;",
-    "} NimFfiMsg;", "",
+    "} PollResult;", "",
   ]
   for k in MsgKinds:
     lines.add("#define NIMFFI_MSG_" & k.name & " " & $k.value & "  /* " & k.doc & " */")
   lines.add("")
-  lines.add("#endif /* NIMFFI_MSG_DECLARED */")
+  lines.add("#endif /* NIMFFI_POLL_RESULT_DECLARED */")
   return lines.join("\n")
 
 func rustMsgDecl*(): string =
   var lines = @[
-    "#[repr(C)]", "pub struct NimFfiMsg {", "    pub struct_size: u32,",
+    "#[repr(C)]", "pub struct PollResult {", "    pub struct_size: u32,",
     "    pub kind: u32,", "    pub seq_num: u64,", "    pub id: u64,",
     "    pub name_id: u64,", "    pub duration_ms: u64,", "    pub ret_code: i32,",
     "    pub flags: u32,", "    pub payload: *const u8,", "    pub len: usize,", "}", "",

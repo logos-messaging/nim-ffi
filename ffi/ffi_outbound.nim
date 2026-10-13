@@ -29,9 +29,9 @@ type
     queueLive*: bool
       # Guarded by `pollLock`: false while the event queue and `held` are torn down.
     held*: HeldEvent
-    heldMsg*: array[2, NimFfiMsg]
+    heldMsg*: array[2, PollResult]
       # What `poll` hands out. The library owns it, so appending a field to
-      # `NimFfiMsg` never writes past a struct an older host allocated. Two of
+      # `PollResult` never writes past a struct an older host allocated. Two of
       # them, used in turn: a slot outlives its owners, and the next owner's first
       # message must not land in the one the last owner is still reading.
     heldMsgSlot*: int
