@@ -123,6 +123,11 @@ proc destroyFFIContext*[T](
   # Destroying it would release the slot while `staticState` still points at it.
   if pool.isStaticCtx(ctx):
     return err("destroyFFIContext(pool): the {.ffiStatic.} context outlives every ctx")
+  if ctx[].reverse.onOwnReverseWorker():
+    return err(
+      "destroyFFIContext(pool): called from a host impl of this context; " &
+        "destroy it from another thread"
+    )
   ctx.stopAndJoinThreads().isOkOr:
     error "context threads did not exit; the pool slot and its resources leak " &
       "(a free under live threads is unsafe)", reason = error
@@ -196,6 +201,12 @@ proc recycleFFIContext*[T](
   # Recycling it would release the slot while `staticState` still points at it.
   if pool.isStaticCtx(ctx):
     return err("recycleFFIContext(pool): the {.ffiStatic.} context outlives every ctx")
+  # The recycle would wait for this impl to return, so it would always time out.
+  if ctx[].reverse.onOwnReverseWorker():
+    return err(
+      "recycleFFIContext(pool): called from a host impl of this context; " &
+        "destroy it from another thread"
+    )
   ?ctx.requestRecycle()
 
   pool.reapIfIdle()
