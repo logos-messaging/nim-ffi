@@ -97,16 +97,16 @@ suite "FFIReverseState registry":
       check deinitReverseState(st).isOk()
 
     check not st.hasImpl("fetch")
-    st.setImpl("fetch", nopImpl, nil)
+    check st.setImpl("fetch", nopImpl, nil)
     check st.hasImpl("fetch")
     var marker = 0
-    st.setImpl("fetch", nopImpl, addr marker) # replace keeps the name registered
+    check st.setImpl("fetch", nopImpl, addr marker) # replace keeps the name registered
     check st.hasImpl("fetch")
     let entry = st.beginReverseDispatch("fetch")
     check not entry.isNil()
     check entry[].userData == addr marker
     st.endReverseDispatch(entry)
-    st.setImpl("fetch", nil, nil) # nil fn unregisters
+    check st.setImpl("fetch", nil, nil) # nil fn unregisters
     check not st.hasImpl("fetch")
     check st.beginReverseDispatch("fetch").isNil()
 
@@ -137,7 +137,7 @@ proc selfReplaceImpl(
 ) {.cdecl, gcsafe, raises: [].} =
   ## Replaces its own entry, then reads whether its userData was already released.
   let b = cast[ptr ReleaseBox](userData)
-  b[].st[].setImpl("self", nopImpl, nil)
+  doAssert b[].st[].setImpl("self", nopImpl, nil)
   b[].releasedInside.store(b[].released.load())
   discard b[].st[].pushReply(callId, RET_OK, nil, 0)
   b[].done.store(true)
@@ -367,7 +367,7 @@ suite "worker pool lifecycle":
     initReverseState(claimSt)
     initGate(claimGate)
     check claimSt.startReverseWorkers(1)
-    claimSt.setImpl("gate", gateImpl, addr claimGate)
+    check claimSt.setImpl("gate", gateImpl, addr claimGate)
     ffiCurrentReverseState = addr claimSt
     defer:
       ffiCurrentReverseState = nil
@@ -397,7 +397,7 @@ suite "worker pool lifecycle":
     g.cond.initCond()
     # Exactly one worker, or `setImpl` starts the default count.
     check st.startReverseWorkers(1)
-    st.setImpl("gate", gateImpl, addr g)
+    check st.setImpl("gate", gateImpl, addr g)
     ffiCurrentReverseState = addr st
     defer:
       ffiCurrentReverseState = nil
@@ -428,7 +428,7 @@ template withReverseHarness(stIdent: untyped, workers: int, body: untyped) =
 suite "ffiReverseCall":
   test "fails fast once the context is closing, without queueing":
     withReverseHarness(st, 0):
-      st.setImpl("echo", nopImpl, nil)
+      check st.setImpl("echo", nopImpl, nil)
       st.closing.store(true)
       let res = waitFor ffiReverseCall("echo", @[], 1000)
       check res.isErr()
@@ -447,7 +447,7 @@ suite "ffiReverseCall":
   test "roundtrip: worker runs the impl, reply completes the future":
     withReverseHarness(st, 1):
       var box = EchoBox(st: addr st)
-      st.setImpl("echo", echoImpl, addr box)
+      check st.setImpl("echo", echoImpl, addr box)
       let args = @[byte 1, 2, 3]
       var res = Result[seq[byte], string].err("not yet")
       # Poll the drain the way the FFI loop does.
@@ -464,7 +464,7 @@ suite "ffiReverseCall":
   test "workers not started yet are started by the first call":
     withReverseHarness(st, 0):
       var box = EchoBox(st: addr st)
-      st.setImpl("echo", echoImpl, addr box)
+      check st.setImpl("echo", echoImpl, addr box)
       let callFut = ffiReverseCall("echo", @[byte 9], 2000)
       check st.workersStarted()
       while not callFut.finished():
@@ -477,7 +477,7 @@ suite "ffiReverseCall":
       var g: GateBox
       g.lock.initLock()
       g.cond.initCond()
-      st.setImpl("gate", gateImpl, addr g)
+      check st.setImpl("gate", gateImpl, addr g)
       let callFut = ffiReverseCall("gate", @[], 50)
       g.waitEntered(1) # the impl is Running when the deadline fires
       let res = waitFor callFut
@@ -494,7 +494,7 @@ suite "ffiReverseCall":
   test "args stay readable for the whole impl, even after the caller timed out":
     withReverseHarness(st, 1):
       var box: ArgsAfterTimeoutBox
-      st.setImpl("slow_args", argsAfterTimeoutImpl, addr box)
+      check st.setImpl("slow_args", argsAfterTimeoutImpl, addr box)
       let args = @[byte 7, 8, 9]
       let res = waitFor ffiReverseCall("slow_args", args, 30)
       check res.isErr()
@@ -513,8 +513,8 @@ suite "ffiReverseCall":
       g.lock.initLock()
       g.cond.initCond()
       var counted: CountBox
-      st.setImpl("gate", gateImpl, addr g)
-      st.setImpl("count", countImpl, addr counted)
+      check st.setImpl("gate", gateImpl, addr g)
+      check st.setImpl("count", countImpl, addr counted)
 
       let blocker = ffiReverseCall("gate", @[], 60_000)
       g.waitEntered(1)
@@ -540,8 +540,8 @@ suite "ffiReverseCall":
       g.lock.initLock()
       g.cond.initCond()
       var counted: CountBox
-      st.setImpl("gate", gateImpl, addr g)
-      st.setImpl("count", countImpl, addr counted)
+      check st.setImpl("gate", gateImpl, addr g)
+      check st.setImpl("count", countImpl, addr counted)
 
       let blocker = ffiReverseCall("gate", @[], 60_000)
       g.waitEntered(1)
@@ -564,7 +564,7 @@ suite "ffiReverseCall":
       var g: GateBox
       g.lock.initLock()
       g.cond.initCond()
-      st.setImpl("gate", gateImpl, addr g)
+      check st.setImpl("gate", gateImpl, addr g)
       let a = ffiReverseCall("gate", @[], 60_000)
       let b = ffiReverseCall("gate", @[], 60_000)
       g.waitEntered(2) # both impls are inside at the same time
@@ -579,7 +579,7 @@ suite "ffiReverseCall":
       var g: GateBox
       g.lock.initLock()
       g.cond.initCond()
-      st.setImpl("gate", gateImpl, addr g)
+      check st.setImpl("gate", gateImpl, addr g)
       let blocker = ffiReverseCall("gate", @[], 60_000)
       g.waitEntered(1)
       os.sleep(5)
@@ -602,7 +602,7 @@ suite "ffiReverseCall":
 
   test "failPendingReverse fails every parked call and cancels queued ones":
     withReverseHarness(st, 0):
-      st.setImpl("parked", nopImpl, nil)
+      check st.setImpl("parked", nopImpl, nil)
       let callFut = ffiReverseCall("parked", @[], 5000)
       check ffiPendingReverseLen() == 1
       failPendingReverse("context is recycling")

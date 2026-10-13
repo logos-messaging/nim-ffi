@@ -260,7 +260,7 @@ suite "reverse call roundtrip":
   test "impl replying inline on the event thread completes the handler":
     setupCallbackData(rsp)
     withPool(ctx):
-      ctx[].reverse.setImpl("echo", echoImpl, ctx)
+      check ctx[].reverse.setImpl("echo", echoImpl, ctx)
       check sendRequestToFFIThread(ctx, CallEchoRequest.ffiNewReq(captureCb, addr rsp))
         .isOk()
       waitCallback(rsp)
@@ -277,7 +277,7 @@ suite "reverse call roundtrip":
         box.cond.deinitCond()
         box.lock.deinitLock()
 
-      ctx[].reverse.setImpl("parked", parkImpl, addr box)
+      check ctx[].reverse.setImpl("parked", parkImpl, addr box)
       check sendRequestToFFIThread(
         ctx, CallParkedRequest.ffiNewReq(captureCb, addr rsp)
       )
@@ -309,7 +309,7 @@ suite "reverse call failure modes":
   test "an impl that never answers trips the call deadline":
     setupCallbackData(rsp)
     withPool(ctx):
-      ctx[].reverse.setImpl("silent", silentImpl, nil)
+      check ctx[].reverse.setImpl("silent", silentImpl, nil)
       check sendRequestToFFIThread(
         ctx, CallSilentRequest.ffiNewReq(captureCb, addr rsp)
       )
@@ -325,7 +325,7 @@ suite "registration semantics":
       var box: SlowBox
       box.entered.store(false)
       box.exited.store(false)
-      ctx[].reverse.setImpl("silent", slowImpl, addr box)
+      check ctx[].reverse.setImpl("silent", slowImpl, addr box)
       check sendRequestToFFIThread(
         ctx, CallSilentRequest.ffiNewReq(captureCb, addr rsp)
       )
@@ -339,7 +339,7 @@ suite "registration semantics":
       check not box.exited.load()
 
       # Never waits: the running invocation keeps its entry until it returns.
-      ctx[].reverse.setImpl("silent", nil, nil)
+      check ctx[].reverse.setImpl("silent", nil, nil)
       check not ctx[].reverse.hasImpl("silent")
       for _ in 0 ..< 500:
         if box.exited.load():
@@ -365,7 +365,7 @@ suite "teardown with a reverse call in flight":
       box.cond.deinitCond()
       box.lock.deinitLock()
 
-    ctx[].reverse.setImpl("abandoned", parkImpl, addr box)
+    check ctx[].reverse.setImpl("abandoned", parkImpl, addr box)
     check sendRequestToFFIThread(
       ctx, CallAbandonedRequest.ffiNewReq(captureCb, addr rsp)
     )
@@ -389,7 +389,7 @@ suite "teardown with a reverse call in flight":
     g.lock.initLock()
     g.cond.initCond()
 
-    ctx[].reverse.setImpl("gate", gateImpl, addr g)
+    check ctx[].reverse.setImpl("gate", gateImpl, addr g)
     check sendRequestToFFIThread(ctx, CallGateRequest.ffiNewReq(captureCb, addr rsp))
       .isOk()
     g.waitEntered(1)
@@ -415,7 +415,7 @@ suite "teardown with a reverse call in flight":
     g.lock.initLock()
     g.cond.initCond()
 
-    ctx[].reverse.setImpl("gate", gateImpl, addr g)
+    check ctx[].reverse.setImpl("gate", gateImpl, addr g)
     check sendRequestToFFIThread(ctx, CallGateRequest.ffiNewReq(captureCb, addr rsp))
       .isOk()
     g.waitEntered(1)
@@ -438,7 +438,7 @@ suite "reverse calls run concurrently":
     withPool(ctx):
       var box = SleepyBox(ctx: ctx, ms: 150)
       check ctx[].reverse.startReverseWorkers(2)
-      ctx[].reverse.setImpl("sleepy", sleepyImpl, addr box)
+      check ctx[].reverse.setImpl("sleepy", sleepyImpl, addr box)
       let t0 = getMonoTime()
       check sendRequestToFFIThread(
         ctx, CallSleepyRequest.ffiNewReq(captureCb, addr rspA)

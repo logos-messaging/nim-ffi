@@ -69,7 +69,7 @@ suite "reverse workers follow the slot's threads":
       check false
       return
     var probe = ProbeBox(ctx: ctx)
-    ctx[].reverse.setImpl("probe", probeImpl, addr probe)
+    check ctx[].reverse.setImpl("probe", probeImpl, addr probe)
     check ctx[].reverse.workersStarted()
 
     check gPool.recycleFFIContext(ctx).isOk()
@@ -84,7 +84,7 @@ suite "reverse workers follow the slot's threads":
     # A parked slot comes back with no workers until an impl is registered.
     check not ctx[].reverse.workersStarted()
     var probe = ProbeBox(ctx: ctx)
-    ctx[].reverse.setImpl("probe", probeImpl, addr probe)
+    check ctx[].reverse.setImpl("probe", probeImpl, addr probe)
     check ctx[].reverse.workersStarted()
 
     check sendRequestToFFIThread(ctx, ProbeRequest.ffiNewReq(waiterCb, addr w)).isOk()
@@ -128,7 +128,7 @@ suite "a teardown reached from inside a host impl":
       check false
       return
     var box = SuicideBox(ctx: ctx)
-    ctx[].reverse.setImpl("suicide", suicideImpl, addr box)
+    check ctx[].reverse.setImpl("suicide", suicideImpl, addr box)
 
     check sendRequestToFFIThread(ctx, SuicideRequest.ffiNewReq(waiterCb, addr w)).isOk()
     w.await()

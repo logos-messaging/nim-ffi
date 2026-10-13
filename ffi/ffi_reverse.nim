@@ -382,7 +382,7 @@ proc setImpl*(
     fn: FFIReverseImpl,
     userData: pointer,
     release: FFIReverseRelease = nil,
-): bool {.discardable, raises: [], gcsafe.} =
+): bool {.raises: [], gcsafe.} =
   ## `setImplStatus` for Nim callers that only need success or failure.
   return st.setImplStatus(name, fn, userData, release) == REVERSE_ACCEPTED
 
