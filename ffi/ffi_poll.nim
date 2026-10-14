@@ -113,63 +113,17 @@ proc releaseHeld(outb: var FFIOutbound) =
   ## Ends the host's use of the message it last polled.
   if outb.queueLive:
     releaseHeldEvent(outb.held)
-  if not outb.heldReplyReq.isNil():
-    outb.retireRequest(outb.heldReplyReq)
-    outb.heldReplyReq = nil
 
 proc hasMessage[T](ctx: ptr FFIContext[T]): bool =
   let outb = addr ctx[].outbound
   # The count, not `headSeq() != 0`: an event nobody numbered has seqNum 0.
-  if outb.queueLive and ctx[].eventQueue.hasEvents():
-    return true
-  return outb[].replyHeadSeq() != 0 or outb[].staleHeadSeq() != 0
+  return outb.queueLive and ctx[].eventQueue.hasEvents()
 
-func earliest(firstSeq, secondSeq: uint64): uint64 =
-  ## A `seqNum` is the ticket a message takes when it becomes visible to the
-  ## host: one counter per context, handed out by `nextSeq`, so a smaller number
-  ## means the library produced it earlier. Tickets are never reused and never 0,
-  ## which is why 0 can stand for "that queue has nothing".
-  ##
-  ## Returns the older of the two.
-  if firstSeq == 0:
-    return secondSeq
-  if secondSeq == 0:
-    return firstSeq
-  if firstSeq < secondSeq:
-    return firstSeq
-  return secondSeq
-
-proc takeReply(msg: ptr ptr PollResult, outb: var FFIOutbound): bool =
-  ## The request stays alive until the next poll: `msg.payload` points into it.
-  let reply = outb.popReply()
-  if reply.isNil():
-    return false
-  outb.heldReplyReq = reply
-  fill(
-    msg,
-    outb,
-    MsgReply,
-    seqNum = reply[].seqNum,
-    id = reply[].id,
-    retCode = reply[].retCode,
-    payload = reply[].data,
-    len = reply[].dataLen,
-  )
-  return true
-
-proc takeStaleReq(msg: ptr ptr PollResult, outb: var FFIOutbound): bool =
-  ## Only the figures travel; the request itself is still with the FFI thread.
-  var reqId, seqNum: uint64
-  var elapsedMs: int64
-  if not outb.popStaleReq(reqId, seqNum, elapsedMs):
-    return false
-  fill(msg, outb, MsgStale, seqNum = seqNum, id = reqId, durationMs = uint64(elapsedMs))
-  return true
-
-proc takeEvent[T](msg: ptr ptr PollResult, ctx: ptr FFIContext[T]): bool =
-  ## Moves the oldest event into `held`, which frees its ring slot at once.
+proc takeMessage[T](ctx: ptr FFIContext[T], msg: ptr ptr PollResult): bool =
   let outb = addr ctx[].outbound
-  if not outb.queueLive or not ctx[].eventQueue.popEventInto(outb.held):
+  if not outb.queueLive:
+    return false
+  if not ctx[].eventQueue.popEventInto(outb.held):
     return false
   let ev = outb.held.event
   fill(
@@ -182,34 +136,6 @@ proc takeEvent[T](msg: ptr ptr PollResult, ctx: ptr FFIContext[T]): bool =
     len = ev.dataLen,
   )
   return true
-
-proc takeMessage[T](ctx: ptr FFIContext[T], msg: ptr ptr PollResult): bool =
-  ## Hands out the oldest of what the context has ready — a queued reply, a
-  ## pending stale request, or an event — so the host sees the order the library
-  ## produced and no source starves another.
-  ##
-  ## Each source is asked for its ticket, then the winner is asked to take its
-  ## message. Looking and taking need not be one atomic step: this thread is the
-  ## only consumer, so the FFI thread can add messages in between but never
-  ## remove the one that was chosen.
-  let outb = addr ctx[].outbound
-
-  var eventSeq = 0'u64
-  if outb.queueLive:
-    eventSeq = ctx[].eventQueue.headSeq()
-  let replySeq = outb[].replyHeadSeq()
-  let staleSeq = outb[].staleHeadSeq()
-
-  let oldest = earliest(earliest(eventSeq, replySeq), staleSeq)
-  if oldest == 0:
-    # An event nobody numbered still has to come out, and it is the only
-    # message a context can hold without a ticket.
-    return takeEvent(msg, ctx)
-  if oldest == replySeq:
-    return takeReply(msg, outb[])
-  if oldest == staleSeq:
-    return takeStaleReq(msg, outb[])
-  return takeEvent(msg, ctx)
 
 proc pollContext*[T](
     ctx: ptr FFIContext[T], generation: uint, timeoutMs: int, msg: ptr ptr PollResult
