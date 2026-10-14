@@ -77,7 +77,7 @@ type PolledMsg = object
 proc pollMsg[T](
     ctx: ptr FFIContext[T], generation: uint, timeoutMs: int
 ): PolledMsg {.gcsafe.} =
-  var msg: ptr NimFfiMsg
+  var msg: ptr PollResult
   var got = PolledMsg(ret: pollContext(ctx, generation, timeoutMs, addr msg))
   if not msg.isNil():
     got.kind = msg.kind
@@ -207,7 +207,7 @@ suite "message lifetime":
     withPool(ctx):
       submit(ctx, EmitRawBytesEventRequest)
 
-      var msg: ptr NimFfiMsg
+      var msg: ptr PollResult
       check pollContext(ctx, ctx.currentGeneration(), 1000, addr msg) == RET_OK
       check msg.kind == MsgEvent
       # The producer now reuses the ring slot the held event came from.
@@ -226,7 +226,7 @@ type BlockedPoll = object
   ret: Atomic[int]
 
 proc blockedPollBody(args: ptr BlockedPoll) {.thread.} =
-  var msg: ptr NimFfiMsg
+  var msg: ptr PollResult
   args.entered.store(true)
   args.ret.store(int(pollContext(args.ctx, args.generation, 5000, addr msg)))
 
@@ -345,7 +345,7 @@ type SlowPoller = object
 
 proc slowPollerBody(args: ptr SlowPoller) {.thread.} =
   ## Collects until the context ends, a little slower than the library produces.
-  var msg: ptr NimFfiMsg
+  var msg: ptr PollResult
   while pollContext(args.ctx, args.generation, 2000, addr msg) == RET_OK:
     if msg.kind == MsgEvent:
       args.events.atomicInc()

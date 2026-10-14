@@ -174,7 +174,7 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
           newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
           newIdentDefs(ident("timeoutMs"), ident("int32")),
           newIdentDefs(
-            ident("msg"), newTree(nnkPtrTy, newTree(nnkPtrTy, ident("NimFfiMsg")))
+            ident("msg"), newTree(nnkPtrTy, newTree(nnkPtrTy, ident("PollResult")))
           ),
         ],
         body = pollBody,

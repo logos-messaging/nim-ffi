@@ -19,7 +19,7 @@ const QuarantineReasons = block:
   texts
 
 proc fill(
-    msg: ptr ptr NimFfiMsg,
+    msg: ptr ptr PollResult,
     outb: var FFIOutbound,
     kind: uint32,
     seqNum: uint64 = 0,
@@ -34,8 +34,8 @@ proc fill(
   if data.isNil() or len <= 0:
     data = cast[pointer](emptyListenerPayload)
   outb.heldMsgSlot = 1 - outb.heldMsgSlot
-  outb.heldMsg[outb.heldMsgSlot] = NimFfiMsg(
-    structSize: uint32(sizeof(NimFfiMsg)),
+  outb.heldMsg[outb.heldMsgSlot] = PollResult(
+    structSize: uint32(sizeof(PollResult)),
     kind: kind,
     seqNum: seqNum,
     id: id,
@@ -48,7 +48,7 @@ proc fill(
   )
   msg[] = addr outb.heldMsg[outb.heldMsgSlot]
 
-proc fillClosed[T](msg: ptr ptr NimFfiMsg, ctx: ptr FFIContext[T]) =
+proc fillClosed[T](msg: ptr ptr PollResult, ctx: ptr FFIContext[T]) =
   let seqNum = ctx[].outbound.nextSeq()
   if ctx.lifecycle.load() != CtxLifecycle.RecycleFailed:
     fill(msg, ctx[].outbound, MsgClosed, seqNum = seqNum)
@@ -68,7 +68,7 @@ proc msBetween(earlier, later: MonoTime): int64 =
   return (later - earlier).inMilliseconds
 
 proc checkLiveness[T](
-    ctx: ptr FFIContext[T], generation: uint, msg: ptr ptr NimFfiMsg
+    ctx: ptr FFIContext[T], generation: uint, msg: ptr ptr PollResult
 ): bool =
   ## True when `msg` was filled with a liveness report. Each report latches once
   ## per episode. The watchdog lives here because the host's own thread is the
@@ -119,7 +119,7 @@ proc hasMessage[T](ctx: ptr FFIContext[T]): bool =
   # The count, not `headSeq() != 0`: an event nobody numbered has seqNum 0.
   return outb.queueLive and ctx[].eventQueue.hasEvents()
 
-proc takeMessage[T](ctx: ptr FFIContext[T], msg: ptr ptr NimFfiMsg): bool =
+proc takeMessage[T](ctx: ptr FFIContext[T], msg: ptr ptr PollResult): bool =
   let outb = addr ctx[].outbound
   if not outb.queueLive:
     return false
@@ -138,7 +138,7 @@ proc takeMessage[T](ctx: ptr FFIContext[T], msg: ptr ptr NimFfiMsg): bool =
   return true
 
 proc pollContext*[T](
-    ctx: ptr FFIContext[T], generation: uint, timeoutMs: int, msg: ptr ptr NimFfiMsg
+    ctx: ptr FFIContext[T], generation: uint, timeoutMs: int, msg: ptr ptr PollResult
 ): cint {.raises: [], gcsafe.} =
   ## `generation` is the claim the caller's token was issued under. 0 never
   ## blocks, a negative timeout waits until a message or the end of the context.

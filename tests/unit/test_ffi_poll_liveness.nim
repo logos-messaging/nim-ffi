@@ -19,7 +19,7 @@ registerReqFFI(WedgeRequest, lib: ptr LivenessLib):
     return ok("done")
 
 proc pollKind(ctx: ptr FFIContext[LivenessLib], generation: uint): (cint, uint32) =
-  var msg: ptr NimFfiMsg
+  var msg: ptr PollResult
   let ret = pollContext(ctx, generation, 0, addr msg)
   var kind = 0'u32
   if not msg.isNil():

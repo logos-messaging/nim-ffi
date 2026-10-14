@@ -49,7 +49,7 @@ suite "a quarantined context still ends for its poller":
       check pool.recycleFFIContext(ctx).isErr()
       check ctx.lifecycle.load() == CtxLifecycle.RecycleFailed
 
-      var msg: ptr NimFfiMsg
+      var msg: ptr PollResult
       var ret = RET_OK
       # Whatever the owner produced first still arrives; the end comes last.
       for _ in 0 ..< 16:
@@ -82,7 +82,7 @@ suite "a context whose FFI thread will not stop still ends for its poller":
 
       check pool.destroyFFIContext(ctx).isErr()
 
-      var msg: ptr NimFfiMsg
+      var msg: ptr PollResult
       var ret = RET_OK
       for _ in 0 ..< 16:
         ret = pollContext(ctx, generation, 2000, addr msg)
