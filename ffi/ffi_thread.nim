@@ -47,22 +47,10 @@ proc sendRequestToFFIThread*(
         $MaxRequestPayloadBytes & " byte cap"
     )
 
-  when defined(ffiPollMode):
-    # The reply waits in the library until the host takes it out, so a host that
-    # stops polling must not be able to grow it without bound.
-    if not ctx[].outbound.claimOutstanding():
-      deleteRequest(ffiRequest)
-      return
-        err("too many requests are waiting to be collected: " & $MaxOutstandingRequests)
-    ffiRequest[].id = ctx[].outbound.nextRequestId()
-
   # Wake only when the push found the queue empty: waking per submit kills scaling, and a skipped wake just waits the consumer's 100ms poll.
   case ctx.reqQueueBank.pushRequest(ffiRequest)
   of QueueFull:
-    when defined(ffiPollMode):
-      ctx[].outbound.retireRequest(ffiRequest)
-    else:
-      deleteRequest(ffiRequest)
+    deleteRequest(ffiRequest)
     return err("request queue full: " & $RequestQueueDepth & " requests already queued")
   of Queued:
     discard
@@ -85,7 +73,6 @@ proc awaitWithStaleWarnings(
     request: ptr FFIThreadRequest,
     interval: Duration,
     reqId: string,
-    outb: ptr FFIOutbound,
 ): Future[Result[seq[byte], string]] {.async.} =
   ## Pings RET_STALE_WARN every `interval` while the handler runs, then returns
   ## its real result. Never cancels the handler: a hard-cancel mid-call could
@@ -112,24 +99,8 @@ proc awaitWithStaleWarnings(
     elapsed += intervalMs
     warn "ffi request still in flight; caller notified via RET_STALE_WARN",
       reqId = reqId, elapsedMs = elapsed
-    when defined(ffiPollMode):
-      outb[].enqueueStaleReq(request, elapsed)
-    else:
-      fireStaleWarn(request, elapsed)
+    fireStaleWarn(request, elapsed)
   return await retFut
-
-proc answerRequest[T](
-    ctx: ptr FFIContext[T],
-    res: Result[seq[byte], string],
-    request: ptr FFIThreadRequest,
-) =
-  ## The one place a request ends: handed to the host's callback, or queued for
-  ## the host to poll for, and freed only once it cannot be read any more.
-  when defined(ffiPollMode):
-    request.setReply(res)
-    ctx[].outbound.enqueueReply(request)
-  else:
-    handleRes(res, request)
 
 proc processRequest[T](
     request: ptr FFIThreadRequest, ctx: ptr FFIContext[T]
@@ -148,18 +119,16 @@ proc processRequest[T](
   # One try over warn-loop + handler so a shutdown-drain cancel still reaches the response-and-free below.
   let res =
     try:
-      await awaitWithStaleWarnings(
-        retFut, request, ctx.staleWarnInterval, reqId, addr ctx[].outbound
-      )
+      await awaitWithStaleWarnings(retFut, request, ctx.staleWarnInterval, reqId)
     except CatchableError as e:
       Result[seq[byte], string].err(
         "Error in processRequest for " & reqId & ": " & e.msg
       )
 
   try:
-    answerRequest(ctx, res, request)
+    handleRes(res, request)
   except Exception as e:
-    error "Unexpected exception while answering a request", error = e.msg
+    error "Unexpected exception in handleRes", error = e.msg
 
 proc freeLib[T](ctx: ptr FFIContext[T]) {.gcsafe.} =
   ## Releases the library object the ctor stored in ctx.myLib. Only owned libs
@@ -206,7 +175,7 @@ proc rejectQueuedRequests[T](ctx: ptr FFIContext[T], ownerGen: uint) =
       request = nextRequest
       continue
     try:
-      answerRequest(ctx, Result[seq[byte], string].err(RecycledReason), request)
+      handleRes(Result[seq[byte], string].err(RecycledReason), request)
     except Exception as e:
       error "rejecting a queued request raised", error = e.msg
     request = nextRequest
