@@ -311,9 +311,8 @@ An annotation that expands *after* `genBindings()` is now a **compile error**
 
 nim-ffi does not cap request payloads by default: the caller's buffer already
 lives in the host's memory. A host that forwards untrusted bytes must bound
-them, either before the FFI boundary or with
-`ctx.setMaxRequestPayloadBytes(n)` (per context, runtime; `0` = unlimited), or
-build-wide with `-d:ffiMaxRequestPayloadBytes=<n>`. Like the `abi = c`
+them, either before the FFI boundary or build-wide with
+`-d:ffiMaxRequestPayloadBytes=<n>` (`0` = unlimited). Like the `abi = c`
 trusted-caller assumption, this is the host's call.
 
 ## Building — the two-compile model

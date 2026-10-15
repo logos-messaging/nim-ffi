@@ -63,7 +63,7 @@ suite "request ingress limits":
     check spinUntil(gAnswered.load() == RequestQueueDepth + 1)
     check sendRequestToFFIThread(ctx, echoReq("after the drain")).isOk()
 
-  test "a payload over the opt-in cap is rejected at the submit":
+  test "a payload over the cap is rejected at the submit":
     var pool: FFIContextPool[TestLib]
     let ctx = pool.createFFIContext().valueOr:
       assert false, "createFFIContext failed: " & $error
@@ -71,10 +71,9 @@ suite "request ingress limits":
     defer:
       discard pool.destroyFFIContext(ctx)
 
-    check sendRequestToFFIThread(ctx, echoReq(repeat('x', 4096))).isOk()
-
-    ctx.setMaxRequestPayloadBytes(1024)
-    let oversized = sendRequestToFFIThread(ctx, echoReq(repeat('x', 4096)))
-    check oversized.isErr() and "exceeds the 1024 byte cap" in oversized.error
+    let oversized =
+      sendRequestToFFIThread(ctx, echoReq(repeat('x', MaxRequestPayloadBytes + 1)))
+    check oversized.isErr() and
+      "exceeds the " & $MaxRequestPayloadBytes & " byte cap" in oversized.error
 
     check sendRequestToFFIThread(ctx, echoReq("small")).isOk()

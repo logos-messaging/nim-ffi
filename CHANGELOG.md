@@ -6,8 +6,7 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 - **The request payload cap is opt-in.** `-d:ffiMaxRequestPayloadBytes` now
-  defaults to `0` (unlimited) instead of 8 MiB, and a host can set it per
-  context at runtime with `setMaxRequestPayloadBytes(ctx, n)`. The size bound
+  defaults to `0` (unlimited) instead of 8 MiB. The size bound
   is a host responsibility, like the trusted-caller note for `abi = c`: a host
   that forwards untrusted bytes must cap them. This relaxes the SEC-08 default
   by choice. The queue-depth and CBOR element limits are unchanged.

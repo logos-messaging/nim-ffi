@@ -208,8 +208,7 @@ proc runOverCapScenario(): bool =
   initReplyData(d)
   defer:
     deinitReplyData(d)
-  ThreadLibFFIPool.resolveCtx(ctx).setMaxRequestPayloadBytes(1024)
-  var req = newSeq[byte](1025)
+  var req = newSeq[byte](MaxRequestPayloadBytes + 1)
 
   let rc = callOnForeignThread(ctx, req, addr d)
   waitReply(d)
