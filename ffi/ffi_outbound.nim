@@ -140,6 +140,8 @@ proc initOutbound*(outb: var FFIOutbound): Result[void, string] =
   initHeldEvent(outb.held)
   outb.replyQueue.kind = ReplyLink
   outb.staleQueue.kind = StaleLink
+  outb.msgSeq.store(1)
+  outb.reqIdSeq.store(1)
   outb.queueLive = true
   outb.ready = true
   return ok()
@@ -149,10 +151,10 @@ proc nextSeq*(outb: var FFIOutbound): uint64 {.raises: [], gcsafe.} =
   ## stale warning when first raised, an event when enqueued. One counter per
   ## context, so a lower number was produced earlier; `poll` returns the lowest
   ## across the three queues. Starts at 1 so a queue can report 0 for "empty".
-  return outb.msgSeq.fetchAdd(1) + 1
+  return outb.msgSeq.fetchAdd(1)
 
 proc nextRequestId*(outb: var FFIOutbound): uint64 {.raises: [], gcsafe.} =
-  return outb.reqIdSeq.fetchAdd(1) + 1
+  return outb.reqIdSeq.fetchAdd(1)
 
 proc notifyOutbound*(outb: var FFIOutbound) {.raises: [], gcsafe.} =
   ## Producer side, after an enqueue. One syscall per burst: the poller disarms, then re-checks the queues, then waits
