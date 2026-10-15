@@ -10,9 +10,8 @@ import ./ffi_types, ./alloc, ./cbor_serial
 const EmptyErrorMarker = "unknown error"
   ## RET_ERR fallback message; keeps the callback msg ptr non-nil.
 
-const MaxRequestPayloadBytes* {.intdefine: "ffiMaxRequestPayloadBytes".} =
-  8 * 1024 * 1024
-  ## Largest CBOR `data` a submit accepts. Override with
+const MaxRequestPayloadBytes* {.intdefine: "ffiMaxRequestPayloadBytes".} = 0
+  ## Largest CBOR `data` a submit accepts; 0 = unlimited. Opt in with
   ## `-d:ffiMaxRequestPayloadBytes=<n>`.
 
 type FFIThreadRequest* = object

@@ -307,6 +307,14 @@ once at the bottom of the top-level root file.
 An annotation that expands *after* `genBindings()` is now a **compile error**
 (previously it was silently dropped from the bindings).
 
+### Request payload size (host responsibility)
+
+nim-ffi does not cap request payloads by default: the caller's buffer already
+lives in the host's memory. A host that forwards untrusted bytes must bound
+them, either before the FFI boundary or build-wide with
+`-d:ffiMaxRequestPayloadBytes=<n>` (`0` = unlimited). Like the `abi = c`
+trusted-caller assumption, this is the host's call.
+
 ## Building — the two-compile model
 
 A nim-ffi library ships from **two separate compiles of the same source**,
