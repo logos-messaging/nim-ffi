@@ -243,7 +243,7 @@ proc cExportedParams(withCtx = true): seq[NimNode] =
   params.add(newIdentDefs(ident("reqCbor"), nnkPtrTy.newTree(ident("byte"))))
   params.add(newIdentDefs(ident("reqCborLen"), ident("csize_t")))
   when defined(ffiPollMode):
-    params.add(newIdentDefs(ident("reqIdOut"), nnkPtrTy.newTree(ident("uint64"))))
+    params.add(newIdentDefs(ident("reqId"), nnkPtrTy.newTree(ident("uint64"))))
   return params
 
 proc buildReqTypeFromFields(
@@ -895,71 +895,38 @@ proc buildFFIProc(prc: NimNode, isStatic: bool): NimNode {.compileTime.} =
 
   let poolIdent = ident($libTypeName & "FFIPool")
 
+  let targetIdent = ident("replyTo")
+
   proc buildCtxGuard(): NimNode =
-    ## Nil-checks callback and resolves the host token, replying `RET_ERR` before build. `ctxIdent`/`ctxGenIdent` are substituted so the send below sees them (`quote` gensyms).
+    ## Binds the reply target and resolves the host token, refusing before a request exists. `ctxIdent`/`ctxGenIdent` are substituted so the send below sees them (`quote` gensyms).
     let ctxIdent = ident("ctx")
     let ctxGenIdent = ident("ctxGen")
-    when defined(ffiPollMode):
-      return quote:
-        if not reqIdOut.isNil():
-          reqIdOut[] = 0
-        let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
-        if `ctxIdent`.isNil():
-          setLastError("ctx is not a valid FFI context")
-          return RET_INVALID_CTX
-        let `ctxGenIdent` = ctxToken.tokenGeneration()
-    else:
-      return quote:
-        if callback.isNil:
-          return RET_MISSING_CALLBACK
-        let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
-        if `ctxIdent`.isNil():
-          let errStr = "ctx is not a valid FFI context"
-          callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
-          return RET_ERR
-        let `ctxGenIdent` = ctxToken.tokenGeneration()
+    return quote:
+      let `targetIdent` = replyTarget(reqId, callback, userData)
+      if `targetIdent`.missing():
+        return RET_MISSING_CALLBACK
+      let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
+      if `ctxIdent`.isNil():
+        return `targetIdent`.reject(RET_INVALID_CTX, "ctx is not a valid FFI context")
+      let `ctxGenIdent` = ctxToken.tokenGeneration()
 
   proc buildStaticCtxGuard(): NimNode =
-    ## Binds the library's static context.
+    ## Binds the reply target and the library's static context.
     let ctxIdent = ident("ctx")
     let ctxGenIdent = ident("ctxGen")
-    when defined(ffiPollMode):
-      return quote:
-        if not reqIdOut.isNil():
-          reqIdOut[] = 0
-        let `ctxIdent` = `poolIdent`.staticFFIContext().valueOr:
-          setLastError("ffiStatic: " & error)
-          return RET_ERR
-        # No token to carry a claim: the static context holds its slot for the life of the library.
-        let `ctxGenIdent` = `ctxIdent`.currentGeneration()
-    else:
-      return quote:
-        if callback.isNil():
-          return RET_MISSING_CALLBACK
-        let `ctxIdent` = `poolIdent`.staticFFIContext().valueOr:
-          let errStr = "ffiStatic: " & error
-          callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
-          return RET_ERR
-        # No token to carry a claim: the static context holds its slot for the life of the library.
-        let `ctxGenIdent` = `ctxIdent`.currentGeneration()
+    return quote:
+      let `targetIdent` = replyTarget(reqId, callback, userData)
+      if `targetIdent`.missing():
+        return RET_MISSING_CALLBACK
+      let `ctxIdent` = `poolIdent`.staticFFIContext().valueOr:
+        return `targetIdent`.reject(RET_ERR, "ffiStatic: " & error)
+      # No token to carry a claim: the static context holds its slot for the life of the library.
+      let `ctxGenIdent` = `ctxIdent`.currentGeneration()
 
   proc buildSendAndReply(reqPtrIdent: NimNode): NimNode =
     ## Hands `reqPtrIdent` to the FFI thread and maps the outcome to a C return code.
-    let sendResIdent = genSym(nskLet, "sendRes")
-    when defined(ffiPollMode):
-      return quote:
-        return ffi_context.submitRequest(ctx, `reqPtrIdent`, ctxGen, reqIdOut)
     return quote:
-      let `sendResIdent` =
-        try:
-          ffi_context.sendRequestToFFIThread(ctx, `reqPtrIdent`, ctxGen)
-        except Exception as exc:
-          Result[void, string].err("sendRequestToFFIThread exception: " & exc.msg)
-      if `sendResIdent`.isErr():
-        let errStr = "error in sendRequestToFFIThread: " & `sendResIdent`.error
-        callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
-        return RET_ERR
-      return RET_OK
+      return `targetIdent`.send(ctx, `reqPtrIdent`, ctxGen)
 
   proc buildCExportProc(params: seq[NimNode], body: NimNode): NimNode =
     ## The dynlib/exportc/cdecl C-ABI wrapper both wire paths emit. Its error replies allocate on a host thread, so it inits the runtime first.
@@ -1051,16 +1018,9 @@ proc buildFFIProc(prc: NimNode, isStatic: bool): NimNode {.compileTime.} =
 
     let reqPtrIdent = genSym(nskLet, "reqPtr")
     let reqNameLit = newLit($unwrapPostfix(reqTypeName))
-    when defined(ffiPollMode):
-      ffiBody.add quote do:
-        let `reqPtrIdent` = FFIThreadRequest.initFromPtr(
-          nil, nil, cstring(`reqNameLit`), reqCbor, int(reqCborLen)
-        )
-    else:
-      ffiBody.add quote do:
-        let `reqPtrIdent` = FFIThreadRequest.initFromPtr(
-          callback, userData, cstring(`reqNameLit`), reqCbor, int(reqCborLen)
-        )
+    ffiBody.add quote do:
+      let `reqPtrIdent` =
+        `targetIdent`.newRequest(cstring(`reqNameLit`), reqCbor, int(reqCborLen))
     ffiBody.add buildSendAndReply(reqPtrIdent)
 
     let ffiProc = buildCExportProc(exportedParams, ffiBody)
@@ -1432,7 +1392,7 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
   let addToReg = addCtorRequestToRegistry(reqTypeName, libTypeName)
 
   # C-exported proc: (reqCbor, reqCborLen, callback, userData) -> ctx token, or,
-  # in poll mode, (reqCbor, reqCborLen, ctxOut, reqIdOut) -> code. There the token
+  # in poll mode, (reqCbor, reqCborLen, ctxOut, reqId) -> code. There the token
   # is handed out at once, so the host can poll the context for the constructor's
   # own reply.
   var exportedParams = newSeq[NimNode]()
@@ -1443,9 +1403,7 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
     exportedParams.add(
       newIdentDefs(ident("ctxOut"), nnkPtrTy.newTree(ident("FFICtxToken")))
     )
-    exportedParams.add(
-      newIdentDefs(ident("reqIdOut"), nnkPtrTy.newTree(ident("uint64")))
-    )
+    exportedParams.add(newIdentDefs(ident("reqId"), nnkPtrTy.newTree(ident("uint64"))))
   else:
     exportedParams.add(ident("FFICtxToken"))
     exportedParams.add(newIdentDefs(ident("reqCbor"), nnkPtrTy.newTree(ident("byte"))))
@@ -1464,11 +1422,11 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
 
   when defined(ffiPollMode):
     ffiBody.add quote do:
-      if ctxOut.isNil() or reqIdOut.isNil():
-        setLastError("ctx_out and req_id_out must not be NULL")
+      if ctxOut.isNil() or reqId.isNil():
+        setLastError("ctx_out and req_id must not be NULL")
         return RET_ERR
       ctxOut[] = FFICtxToken(nil)
-      reqIdOut[] = 0
+      reqId[] = 0
       let `ctxSym` = `poolIdent`.createFFIContext().valueOr:
         setLastError("ffiCtor: failed to create FFIContext: " & $error)
         return RET_ERR
@@ -1491,7 +1449,7 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
       newCall(ident("ffiNewReq"), reqTypeName, ident("reqCbor"), ident("reqCborLen"))
     ffiBody.add quote do:
       let submitRes = ffi_context.submitRequest(
-        `ctxSym`, `pollReqCall`, `ctxSym`.currentGeneration(), reqIdOut
+        `ctxSym`, `pollReqCall`, `ctxSym`.currentGeneration(), reqId
       )
       if submitRes != RET_OK:
         # Nothing will answer for this context, so it is not the host's to destroy.

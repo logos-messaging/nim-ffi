@@ -35,9 +35,9 @@ proc submit(
     ctx: ptr FFIContext,
     ffiRequest: ptr FFIThreadRequest,
     generation: uint,
-    reqIdOut: ptr uint64 = nil,
+    reqId: ptr uint64 = nil,
 ): Result[void, Refusal] =
-  ## `generation` is the claim the caller resolved its token under; the request carries it so a slot that changes owner between the resolve and the dispatch answers nobody. `reqIdOut`, when given, receives the id the reply will carry.
+  ## `generation` is the claim the caller resolved its token under; the request carries it so a slot that changes owner between the resolve and the dispatch answers nobody. `reqId`, when given, receives the id the reply will carry.
 
   # A nil request means the allocator failed; report it instead of dereferencing.
   if ffiRequest.isNil():
@@ -88,16 +88,16 @@ proc submit(
       )
     # Before the push: the reply can reach a poller before this call returns.
     ffiRequest[].id = ctx[].outbound.nextRequestId()
-  if not reqIdOut.isNil():
-    reqIdOut[] = ffiRequest[].id
+  if not reqId.isNil():
+    reqId[] = ffiRequest[].id
 
   # Wake only when the push found the queue empty: waking per submit kills scaling, and a skipped wake just waits the consumer's 100ms poll.
   case ctx.reqQueueBank.pushRequest(ffiRequest)
   of QueueFull:
     ctx.dropRequest(ffiRequest)
     # The id was handed out for a reply that will not come; take it back.
-    if not reqIdOut.isNil():
-      reqIdOut[] = 0
+    if not reqId.isNil():
+      reqId[] = 0
     return refused(
       RET_QUEUE_FULL,
       "request queue full: " & $RequestQueueDepth & " requests already queued",
@@ -116,11 +116,11 @@ proc sendRequestToFFIThread*(
     ctx: ptr FFIContext,
     ffiRequest: ptr FFIThreadRequest,
     generation: uint,
-    reqIdOut: ptr uint64 = nil,
+    reqId: ptr uint64 = nil,
 ): Result[void, string] =
   ## Poll-mode submit for a Nim caller that wants the text, not the code: a C export
   ## goes through `submitRequest`. A refusal also lands in `lastError()`.
-  submit(ctx, ffiRequest, generation, reqIdOut).isOkOr:
+  submit(ctx, ffiRequest, generation, reqId).isOkOr:
     setLastError(error.why)
     return err("request refused: " & error.why)
   return ok()
@@ -130,19 +130,53 @@ when defined(ffiPollMode):
       ctx: ptr FFIContext,
       ffiRequest: ptr FFIThreadRequest,
       generation: uint,
-      reqIdOut: ptr uint64,
+      reqId: ptr uint64,
   ): cint =
     ## What a C export calls. `RET_OK` promises exactly one reply carrying
-    ## `reqIdOut[]`, unless the context closes first; any other code means no
+    ## `reqId[]`, unless the context closes first; any other code means no
     ## reply comes, and `lastError()` says why.
-    if reqIdOut.isNil():
+    if reqId.isNil():
       freeRequest(ffiRequest)
-      setLastError("req_id_out is NULL: the reply could not be matched")
+      setLastError("req_id is NULL: the reply could not be matched")
       return RET_ERR
-    reqIdOut[] = 0
-    submit(ctx, ffiRequest, generation, reqIdOut).isOkOr:
+    reqId[] = 0
+    submit(ctx, ffiRequest, generation, reqId).isOkOr:
       setLastError(error.why)
       return error.code
+    return RET_OK
+
+proc newRequest*(
+    target: ReplyTarget, name: cstring, data: ptr byte, dataLen: int
+): ptr FFIThreadRequest =
+  ## The request a C export builds from the host's bytes.
+  when defined(ffiPollMode):
+    return FFIThreadRequest.initFromPtr(nil, nil, name, data, dataLen)
+  else:
+    return FFIThreadRequest.initFromPtr(
+      target.callback, target.userData, name, data, dataLen
+    )
+
+proc send*(
+    target: ReplyTarget,
+    ctx: ptr FFIContext,
+    ffiRequest: ptr FFIThreadRequest,
+    generation: uint,
+): cint =
+  ## Hands the request to the FFI thread and maps the outcome to a C return code.
+  when defined(ffiPollMode):
+    return submitRequest(ctx, ffiRequest, generation, target.reqId)
+  else:
+    let sendRes =
+      try:
+        sendRequestToFFIThread(ctx, ffiRequest, generation)
+      except Exception as exc:
+        Result[void, string].err("sendRequestToFFIThread exception: " & exc.msg)
+    if sendRes.isErr():
+      let errStr = "error in sendRequestToFFIThread: " & sendRes.error
+      target.callback(
+        RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), target.userData
+      )
+      return RET_ERR
     return RET_OK
 
 proc sendRequestToFFIThread*(

@@ -9,12 +9,13 @@ import
   ./ffi_events,
   ./ffi_handles,
   ./ffi_last_error,
+  ./ffi_reply_target,
   ./ffi_outbound,
   ./ffi_thread_request,
   ./ffi_request_queue,
   ./cbor_serial
 
-export ffi_events, ffi_handles, ffi_last_error, ffi_outbound
+export ffi_events, ffi_handles, ffi_last_error, ffi_outbound, ffi_reply_target
 export ffi_request_queue.RequestQueueDepth
 
 type FFICtxToken* = distinct pointer

@@ -6,8 +6,8 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 - **Poll-mode C exports return a request id instead of taking a callback.** A
-  request export is `(ctx, req, len, req_id_out)` and returns a code; a ctor is
-  `(req, len, ctx_out, req_id_out)` and hands the token back at once. A refusal
+  request export is `(ctx, req, len, req_id)` and returns a code; a ctor is
+  `(req, len, ctx_out, req_id)` and hands the token back at once. A refusal
   says why through the new `<lib>_last_error()` (thread-local), and
   `<lib>_static_ctx()` names the context `{.ffiStatic.}` replies arrive on.
   `{.ffiRaw.}` is a compile error under `-d:ffiPollMode`.
