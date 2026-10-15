@@ -66,11 +66,10 @@ proc initOutbound*(outb: var FFIOutbound): Result[void, string] =
   return ok()
 
 proc nextSeq*(outb: var FFIOutbound): uint64 {.raises: [], gcsafe.} =
-  ## The ticket a message takes when it becomes visible to the host: a reply
-  ## when it is queued, a stale report when it is first raised, an event when it
-  ## is enqueued. One counter per context, so a smaller number means the library
-  ## produced it earlier, and `poll` hands out the smallest it can find. Never
-  ## reused and never 0, which lets 0 mean "this queue has nothing".
+  ## Numbers a message the moment it becomes pollable: a reply when queued, a
+  ## stale warning when first raised, an event when enqueued. One counter per
+  ## context, so a lower number was produced earlier; `poll` returns the lowest
+  ## across the three queues. Starts at 1 so a queue can report 0 for "empty".
   return outb.msgSeq.fetchAdd(1) + 1
 
 proc nextRequestId*(outb: var FFIOutbound): uint64 {.raises: [], gcsafe.} =
