@@ -451,11 +451,11 @@ suite "a host that stops collecting":
         let res = sendRequestToFFIThread(ctx, Ping.ffiNewReq(noopCallback, nil))
         if res.isOk():
           continue
-        if res.error.contains("waiting to be collected"):
+        if res.error.contains("wait for the host to poll"):
           refused = res.error
           break
         os.sleep(1)
-      check refused.contains("waiting to be collected")
+      check refused.contains("wait for the host to poll")
 
       # Collecting frees the room again.
       var drained = 0

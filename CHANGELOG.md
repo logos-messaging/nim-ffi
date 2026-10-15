@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Changed
+- **Poll-mode C exports return a request id instead of taking a callback.** A
+  request export is `(ctx, req, len, req_id_out)` and returns a code; a ctor is
+  `(req, len, ctx_out, req_id_out)` and hands the token back at once. A refusal
+  says why through the new `<lib>_last_error()` (thread-local), and
+  `<lib>_static_ctx()` names the context `{.ffiStatic.}` replies arrive on.
+  `{.ffiRaw.}` is a compile error under `-d:ffiPollMode`.
 - **The request payload cap is opt-in.** `-d:ffiMaxRequestPayloadBytes` now
   defaults to `0` (unlimited) instead of 8 MiB. The size bound
   is a host responsibility, like the trusted-caller note for `abi = c`: a host
