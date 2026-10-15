@@ -40,11 +40,12 @@ proc sendRequestToFFIThread*(
     return err("FFI context was recycled; the token names an owner that is gone")
 
   let payloadLen = ffiRequest[].dataLen
-  if payloadLen > MaxRequestPayloadBytes:
+  let payloadCap = ctx.maxRequestPayloadBytes.load()
+  if payloadCap > 0 and payloadLen > payloadCap:
     deleteRequest(ffiRequest)
     return err(
       "request payload of " & $payloadLen & " bytes exceeds the " &
-        $MaxRequestPayloadBytes & " byte cap"
+        $payloadCap & " byte cap"
     )
 
   # Wake only when the push found the queue empty: waking per submit kills scaling, and a skipped wake just waits the consumer's 100ms poll.

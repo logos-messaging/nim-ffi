@@ -1,6 +1,6 @@
 import std/[atomics, sysatomics]
 import chronicles, results
-import ./ffi_context
+import ./ffi_context, ./ffi_thread_request
 
 const MaxFFIContexts* = 32
 
@@ -82,6 +82,7 @@ proc createFFIContext*[T](
     if not ctx.tryClaim():
       continue
     ctx.token = makeToken(i, ctx.generation.load())
+    ctx.maxRequestPayloadBytes.store(MaxRequestPayloadBytes)
     if pool.initialized[i].load():
       # Reused slot: a prior recycle drained and released it, keeping its resources.
       ctx.markAsActive()

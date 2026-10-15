@@ -89,6 +89,8 @@ type FFIContext*[T] = object
   handles*: FFIHandleRegistry
   eventQueue*: EventQueue
   outbound*: FFIOutbound
+  maxRequestPayloadBytes*: Atomic[int]
+    ## Largest request payload a submit accepts; 0 = unlimited. Set to `MaxRequestPayloadBytes` when the slot is claimed.
   ffiHeartbeat*: Atomic[int64]
     ## `MonoTime` ticks of the FFI thread's last beat; 0 before the first.
   eventQueueStuck*: Atomic[bool]
@@ -336,6 +338,11 @@ proc ffiToken*[T](ctx: ptr FFIContext[T]): FFICtxToken =
 proc releaseClaim*[T](ctx: ptr FFIContext[T]) =
   ## Back to even, which is a generation no token was ever issued under.
   ctx.generation.atomicInc()
+
+proc setMaxRequestPayloadBytes*[T](ctx: ptr FFIContext[T], maxBytes: int) =
+  ## Caps the request payload this context accepts; 0 = unlimited. A host that
+  ## forwards untrusted bytes sets it, since the library does not by default.
+  ctx.maxRequestPayloadBytes.store(max(maxBytes, 0))
 
 proc isInUse*[T](ctx: ptr FFIContext[T]): bool =
   (ctx.generation.load() and 1) == 1
