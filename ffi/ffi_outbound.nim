@@ -15,6 +15,16 @@ const MaxOutstandingRequests* {.intdefine: "ffiMaxOutstandingRequests".} =
   ## Override `-d:ffiMaxOutstandingRequests=N`.
 
 type
+  LinkKind = enum
+    ReplyLink
+    StaleLink
+
+  RequestQueue* = object
+    ## Requests waiting for the poller, linked through the `QueueLink` of
+    ## `kind`. Guarded by `FFIOutbound.lock`.
+    head, tail: ptr FFIThreadRequest
+    kind: LinkKind
+
   HeartbeatWatch* = object
     ## Poller-side view of the FFI thread's heartbeat. Guarded by `pollLock`.
     generation*: uint
@@ -35,16 +45,13 @@ type
     polledGeneration*: Atomic[uint] # The last claim a host polled under.
     queueLive*: bool
       # Guarded by `pollLock`: false while the event queue and `held` are torn down.
-    lock*: Lock # Guards the reply and the stale-request lists.
-    replyReqHead*, replyReqTail*: ptr FFIThreadRequest
-      # Answered requests waiting for the host, linked through `next`.
-    staleReqHead*, staleReqTail*: ptr FFIThreadRequest
-      # Requests running long enough to report, linked through `staleNext`.
-    numNotCollectedReq*: Atomic[int] # Submitted requests the host has not collected yet.
+    lock*: Lock # Guards `replyQueue` and `staleQueue`.
+    replyQueue*: RequestQueue # Answered requests waiting for the host.
+    staleQueue*: RequestQueue # Requests running long enough to report.
+    outstanding*: Atomic[int] # Submitted requests the host has not collected yet.
     reqIdSeq*: Atomic[uint64] # Request ids of this slot, over all of its owners.
     held*: HeldEvent
-    heldReplyReq*: ptr FFIThreadRequest
-      # The reply the host reads; freed at the next poll.
+    heldReply*: ptr FFIThreadRequest # The reply the host reads; freed at the next poll.
     heldMsg*: array[2, PollResult]
       # What `poll` hands out. The library owns it, so appending a field to
       # `PollResult` never writes past a struct an older host allocated. Two of
@@ -52,6 +59,76 @@ type
       # message must not land in the one the last owner is still reading.
     heldMsgSlot*: int
     watch*: HeartbeatWatch
+
+proc link(request: ptr FFIThreadRequest, kind: LinkKind): ptr QueueLink =
+  case kind
+  of ReplyLink:
+    return addr request[].reply
+  of StaleLink:
+    return addr request[].stale
+
+proc push(q: var RequestQueue, request: ptr FFIThreadRequest, seqNum: uint64) =
+  ## Appends `request`, stamped with `seqNum`. Call with `outb.lock` held.
+  let l = request.link(q.kind)
+  l[].next = nil
+  l[].seqNum = seqNum
+  l[].queued = true
+  if q.tail.isNil():
+    q.head = request
+  else:
+    q.tail.link(q.kind)[].next = request
+  q.tail = request
+
+proc headSeq(q: RequestQueue): uint64 =
+  ## Ticket (see `nextSeq`) of the oldest request, 0 when there is none.
+  if q.head.isNil():
+    return 0'u64
+  return q.head.link(q.kind)[].seqNum
+
+proc pop(q: var RequestQueue): ptr FFIThreadRequest =
+  ## The oldest request, or nil.
+  let request = q.head
+  if request.isNil():
+    return nil
+  let l = request.link(q.kind)
+  q.head = l[].next
+  if q.head.isNil():
+    q.tail = nil
+  l[].next = nil
+  l[].queued = false
+  return request
+
+proc unlink(q: var RequestQueue, request: ptr FFIThreadRequest) =
+  ## Takes `request` out of the queue, wherever it sits; the request itself is
+  ## untouched. The queue is singly linked, so the predecessor is found by
+  ## walking: the stale queue holds one entry per request that is currently
+  ## slow, which is normally none.
+  let l = request.link(q.kind)
+  if not l[].queued:
+    return
+  var prev: ptr FFIThreadRequest = nil
+  var cur = q.head
+  while not cur.isNil() and cur != request:
+    prev = cur
+    cur = cur.link(q.kind)[].next
+  if not cur.isNil():
+    if prev.isNil():
+      q.head = l[].next
+    else:
+      prev.link(q.kind)[].next = l[].next
+    if q.tail == cur:
+      # `prev` is nil when that was the only entry, which empties the queue.
+      q.tail = prev
+  # Also when the walk found nothing: the flag must never outlive the link.
+  l[].next = nil
+  l[].queued = false
+
+proc detach(q: var RequestQueue): ptr FFIThreadRequest =
+  ## Empties the queue, handing back the chain through its `QueueLink`s.
+  let head = q.head
+  q.head = nil
+  q.tail = nil
+  return head
 
 proc initOutbound*(outb: var FFIOutbound): Result[void, string] =
   ## Idempotent: a rebuilt slot keeps its outbound (re-initLock is UB).
@@ -61,6 +138,8 @@ proc initOutbound*(outb: var FFIOutbound): Result[void, string] =
   outb.pollLock.initLock()
   outb.lock.initLock()
   initHeldEvent(outb.held)
+  outb.replyQueue.kind = ReplyLink
+  outb.staleQueue.kind = StaleLink
   outb.queueLive = true
   outb.ready = true
   return ok()
@@ -85,67 +164,35 @@ proc closeOutbound*(outb: var FFIOutbound, generation: uint) {.raises: [], gcsaf
   outb.closedGeneration.store(generation)
   outb.wake.fire()
 
-proc claimOutstanding*(outb: var FFIOutbound): bool {.raises: [], gcsafe.} =
+proc tryClaimRequest*(outb: var FFIOutbound): bool {.raises: [], gcsafe.} =
   ## Counts a submit in, or refuses it because the host is not collecting.
-  if outb.numNotCollectedReq.fetchAdd(1) >= MaxOutstandingRequests:
-    outb.numNotCollectedReq.atomicDec()
+  if outb.outstanding.fetchAdd(1) >= MaxOutstandingRequests:
+    outb.outstanding.atomicDec()
     return false
   return true
 
-proc retireRequest*(
+proc deleteRequest*(
     outb: var FFIOutbound, request: ptr FFIThreadRequest
 ) {.raises: [], gcsafe.} =
-  ## Frees a request that was counted in: answered and collected, or dropped.
+  ## Frees a request that `tryClaimRequest` counted in: answered and collected,
+  ## or dropped. The only way to free one, or the count drifts.
   if request.isNil():
     return
-  deleteRequest(request)
-  outb.numNotCollectedReq.atomicDec()
-
-proc unlinkStaleReq(outb: var FFIOutbound, request: ptr FFIThreadRequest) =
-  ## Takes `request` off the stale-request queue: either the host has just been
-  ## told it is slow, or its reply arrived and says more than that would. The
-  ## request itself is untouched — only the note about it goes away.
-  ##
-  ## The queue is singly linked, so the predecessor has to be found by walking.
-  ## It holds one entry per request that is currently slow, which is normally
-  ## none. Call with `outb.lock` held.
-  if not request[].staleQueued:
-    return
-  var prev: ptr FFIThreadRequest = nil
-  var cur = outb.staleReqHead
-  while not cur.isNil() and cur != request:
-    prev = cur
-    cur = cur[].staleNext
-  if not cur.isNil():
-    if prev.isNil():
-      outb.staleReqHead = cur[].staleNext
-    else:
-      prev[].staleNext = cur[].staleNext
-    if outb.staleReqTail == cur:
-      # `prev` is nil when that was the only entry, which empties the queue.
-      outb.staleReqTail = prev
-  # Also when the walk found nothing: the flag must never outlive the link.
-  request[].staleNext = nil
-  request[].staleQueued = false
+  freeRequest(request)
+  outb.outstanding.atomicDec()
 
 proc enqueueReply*(
     outb: var FFIOutbound, request: ptr FFIThreadRequest
 ) {.raises: [], gcsafe.} =
   ## Queues the answered request for the host to take out of its next `poll`.
   ## FFI thread. `request` already carries its reply (`setReply`).
-  request[].next = nil
   withLock outb.lock:
     # The reply says more than "still running" about the same request.
-    outb.unlinkStaleReq(request)
-    request[].seqNum = outb.nextSeq()
-    if outb.replyReqTail.isNil():
-      outb.replyReqHead = request
-    else:
-      outb.replyReqTail[].next = request
-    outb.replyReqTail = request
+    outb.staleQueue.unlink(request)
+    outb.replyQueue.push(request, outb.nextSeq())
   outb.notifyOutbound()
 
-proc enqueueStaleReq*(
+proc enqueueStaleWarn*(
     outb: var FFIOutbound, request: ptr FFIThreadRequest, elapsedMs: int64
 ) {.raises: [], gcsafe.} =
   ## Reports that `request` has been running for `elapsedMs`, for the host to
@@ -155,58 +202,37 @@ proc enqueueStaleReq*(
   ## FFI thread.
   withLock outb.lock:
     request[].staleElapsedMs = elapsedMs
-    if request[].staleQueued:
+    if request[].stale.queued:
       return
-    request[].staleQueued = true
-    request[].staleSeqNum = outb.nextSeq()
-    request[].staleNext = nil
-    if outb.staleReqTail.isNil():
-      outb.staleReqHead = request
-    else:
-      outb.staleReqTail[].staleNext = request
-    outb.staleReqTail = request
+    outb.staleQueue.push(request, outb.nextSeq())
   outb.notifyOutbound()
 
 proc replyHeadSeq*(outb: var FFIOutbound): uint64 {.raises: [], gcsafe.} =
-  ## Ticket (see `nextSeq`) of the oldest queued reply, 0 when there is none.
   withLock outb.lock:
-    if outb.replyReqHead.isNil():
-      return 0'u64
-    return outb.replyReqHead[].seqNum
+    return outb.replyQueue.headSeq()
 
 proc staleHeadSeq*(outb: var FFIOutbound): uint64 {.raises: [], gcsafe.} =
-  ## Ticket (see `nextSeq`) of the oldest pending stale request, 0 when none.
   withLock outb.lock:
-    if outb.staleReqHead.isNil():
-      return 0'u64
-    return outb.staleReqHead[].staleSeqNum
+    return outb.staleQueue.headSeq()
 
-proc popReply*(outb: var FFIOutbound): ptr FFIThreadRequest {.raises: [], gcsafe.} =
+proc popRequest*(outb: var FFIOutbound): ptr FFIThreadRequest {.raises: [], gcsafe.} =
   ## The oldest answered request, or nil. Only the poller pops, so what
   ## `replyHeadSeq` reported cannot have gone away under it.
   withLock outb.lock:
-    let request = outb.replyReqHead
-    if request.isNil():
-      return nil
-    outb.replyReqHead = request[].next
-    if outb.replyReqHead.isNil():
-      outb.replyReqTail = nil
-    request[].next = nil
-    return request
+    return outb.replyQueue.pop()
 
-proc popStaleReq*(
+proc popStaleWarn*(
     outb: var FFIOutbound, reqId: var uint64, seqNum: var uint64, elapsedMs: var int64
 ): bool {.raises: [], gcsafe.} =
   ## Copies the figures out: the request itself stays with the FFI thread, which
   ## still owes a reply for it.
   withLock outb.lock:
-    let request = outb.staleReqHead
+    let request = outb.staleQueue.pop()
     if request.isNil():
       return false
     reqId = request[].id
-    seqNum = request[].staleSeqNum
+    seqNum = request[].stale.seqNum
     elapsedMs = request[].staleElapsedMs
-    outb.unlinkStaleReq(request)
     return true
 
 proc dropQueuedMessages*(
@@ -218,13 +244,10 @@ proc dropQueuedMessages*(
     clearEventQueue(q)
     var replies: ptr FFIThreadRequest = nil
     withLock outb.lock:
-      replies = outb.replyReqHead
-      outb.replyReqHead = nil
-      outb.replyReqTail = nil
+      replies = outb.replyQueue.detach()
       # Every request pending here was drained or rejected by now.
-      outb.staleReqHead = nil
-      outb.staleReqTail = nil
+      discard outb.staleQueue.detach()
     while not replies.isNil():
-      let nextReply = replies[].next
-      outb.retireRequest(replies)
+      let nextReply = replies[].reply.next
+      outb.deleteRequest(replies)
       replies = nextReply

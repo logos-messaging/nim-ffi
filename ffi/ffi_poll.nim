@@ -113,9 +113,9 @@ proc releaseHeld(outb: var FFIOutbound) =
   ## Ends the host's use of the message it last polled.
   if outb.queueLive:
     releaseHeldEvent(outb.held)
-  if not outb.heldReplyReq.isNil():
-    outb.retireRequest(outb.heldReplyReq)
-    outb.heldReplyReq = nil
+  if not outb.heldReply.isNil():
+    outb.deleteRequest(outb.heldReply)
+    outb.heldReply = nil
 
 proc hasMessage[T](ctx: ptr FFIContext[T]): bool =
   let outb = addr ctx[].outbound
@@ -136,15 +136,15 @@ func earliest(firstSeq, secondSeq: uint64): uint64 =
 
 proc takeReply(msg: ptr ptr PollResult, outb: var FFIOutbound): bool =
   ## The request stays alive until the next poll: `msg.payload` points into it.
-  let reply = outb.popReply()
+  let reply = outb.popRequest()
   if reply.isNil():
     return false
-  outb.heldReplyReq = reply
+  outb.heldReply = reply
   fill(
     msg,
     outb,
     MsgReply,
-    seqNum = reply[].seqNum,
+    seqNum = reply[].reply.seqNum,
     id = reply[].id,
     retCode = reply[].retCode,
     payload = reply[].data,
@@ -152,11 +152,11 @@ proc takeReply(msg: ptr ptr PollResult, outb: var FFIOutbound): bool =
   )
   return true
 
-proc takeStaleReq(msg: ptr ptr PollResult, outb: var FFIOutbound): bool =
+proc takeStaleWarn(msg: ptr ptr PollResult, outb: var FFIOutbound): bool =
   ## Only the figures travel; the request itself is still with the FFI thread.
   var reqId, seqNum: uint64
   var elapsedMs: int64
-  if not outb.popStaleReq(reqId, seqNum, elapsedMs):
+  if not outb.popStaleWarn(reqId, seqNum, elapsedMs):
     return false
   fill(msg, outb, MsgStale, seqNum = seqNum, id = reqId, durationMs = uint64(elapsedMs))
   return true
@@ -203,7 +203,7 @@ proc takeMessage[T](ctx: ptr FFIContext[T], msg: ptr ptr PollResult): bool =
   if oldest == replySeq:
     return takeReply(msg, outb[])
   if oldest == staleSeq:
-    return takeStaleReq(msg, outb[])
+    return takeStaleWarn(msg, outb[])
   return takeEvent(msg, ctx)
 
 proc pollContext*[T](

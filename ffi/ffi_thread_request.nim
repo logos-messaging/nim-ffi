@@ -15,31 +15,39 @@ const MaxRequestPayloadBytes* {.intdefine: "ffiMaxRequestPayloadBytes".} =
   ## Largest CBOR `data` a submit accepts. Override with
   ## `-d:ffiMaxRequestPayloadBytes=<n>`.
 
-type FFIThreadRequest* = object
-  callback*: FFICallBack
-  userData*: pointer
-  reqId*: cstring ## Req type name used to look up the handler.
-  data*: ptr UncheckedArray[byte] ## Owned, CBOR-encoded request payload.
-  dataLen*: int
-  next*: ptr FFIThreadRequest
-    ## Intrusive queue link; request doubles as its own node so enqueue needs no
-    ## ORC-heap alloc.
-  responded*: bool
-    ## De-dupes the callback across timeout/completion; both on FFI thread, no race.
-  generation*: uint
-    ## Claim the submitter resolved its context under; the FFI thread drops the request when the slot has since changed owner.
-  id*: uint64
-    ## What the host was handed at submit; the reply it polls carries the same
-    ## number. 0 for a request nobody can wait for.
-  retCode*: cint ## Set with the reply, for a host that polls for it.
-  seqNum*: uint64 ## Place of that reply among the context's messages.
-  staleNext*: ptr FFIThreadRequest
-  staleQueued*: bool
-    ## A stale report waits for the poller. One per request: a newer one overwrites it.
-  staleElapsedMs*: int64
-  staleSeqNum*: uint64
+type
+  QueueLink* = object
+    ## Where a request sits in one outbound queue; it is its own node, so a
+    ## queue needs no allocation. A request has one per queue it can be in.
+    next*: ptr FFIThreadRequest
+    seqNum*: uint64 ## Place among the context's messages (see `nextSeq`).
+    queued*: bool
 
-proc deleteRequest*(request: ptr FFIThreadRequest) =
+  FFIThreadRequest* = object
+    callback*: FFICallBack
+    userData*: pointer
+    reqId*: cstring ## Req type name used to look up the handler.
+    data*: ptr UncheckedArray[byte] ## Owned, CBOR-encoded request payload.
+    dataLen*: int
+    next*: ptr FFIThreadRequest
+      ## Intrusive queue link; request doubles as its own node so enqueue needs no
+      ## ORC-heap alloc.
+    responded*: bool
+      ## De-dupes the callback across timeout/completion; both on FFI thread, no race.
+    generation*: uint
+      ## Claim the submitter resolved its context under; the FFI thread drops the request when the slot has since changed owner.
+    id*: uint64
+      ## What the host was handed at submit; the reply it polls carries the same
+      ## number. 0 for a request nobody can wait for.
+    retCode*: cint ## Set with the reply, for a host that polls for it.
+    reply*: QueueLink ## The answered request waiting for the host.
+    stale*: QueueLink
+      ## A stale report waits for the poller. One per request: a newer one overwrites it.
+    staleElapsedMs*: int64
+
+proc freeRequest*(request: ptr FFIThreadRequest) =
+  ## Frees the envelope only. A request counted against the outstanding limit
+  ## goes through `deleteRequest` on its outbound instead.
   if request.isNil():
     return
   if not request[].data.isNil:
@@ -100,7 +108,7 @@ proc initFromPtr*(
   if ret.isNil():
     return nil
   if not copySharedPayload(ret, data, dataLen):
-    deleteRequest(ret)
+    freeRequest(ret)
     return nil
   return ret
 
@@ -127,7 +135,7 @@ proc initFromOwnedShared*(
     data: ptr UncheckedArray[byte],
     dataLen: int,
 ): ptr type T =
-  ## Adopts an already-c_malloc'd buffer (no copy); `deleteRequest` c_frees it.
+  ## Adopts an already-c_malloc'd buffer (no copy); `freeRequest` c_frees it.
   ## Pass `(nil, 0)` for an empty payload. Nil when the allocation fails, in which
   ## case it frees the adopted buffer: nobody else owns it any more.
   var ret = allocBaseRequest(callback, userData, reqId)
@@ -224,7 +232,7 @@ proc setReply*(
 proc handleRes*(res: Result[seq[byte], string], request: ptr FFIThreadRequest) =
   ## Terminal step: delivers the response and frees the request exactly once.
   defer:
-    deleteRequest(request)
+    freeRequest(request)
   fireCallback(res, request)
 
 proc nilProcess*(reqId: cstring): Future[Result[seq[byte], string]] {.async.} =

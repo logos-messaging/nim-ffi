@@ -10,6 +10,13 @@ var registeredRequests*: Table[cstring, FFIRequestProc]
 let registeredRequestsPtr = addr registeredRequests
   ## Read path of every FFI thread; the pointer keeps a `{.gcsafe.}` handler off the GC'ed global, which nothing writes after init.
 
+template dropRequest(ctx, request: untyped) =
+  ## Frees a request that was submitted and will never be answered.
+  when defined(ffiPollMode):
+    ctx[].outbound.deleteRequest(request)
+  else:
+    freeRequest(request)
+
 proc sendRequestToFFIThread*(
     ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, generation: uint
 ): Result[void, string] =
@@ -20,28 +27,28 @@ proc sendRequestToFFIThread*(
     return err("out of memory: could not allocate the FFI request")
 
   if ctx.eventQueueStuck.load():
-    deleteRequest(ffiRequest)
+    freeRequest(ffiRequest)
     return err("event queue stuck - library cannot accept new requests")
 
   if onFFIThread:
     # A handler re-dispatching onto its own FFI thread would deadlock; reject.
-    deleteRequest(ffiRequest)
+    freeRequest(ffiRequest)
     return err(
       "reentrant ffi call: a handler invoked sendRequestToFFIThread on its own context"
     )
 
   if ctx.lifecycle.load() != CtxLifecycle.Active:
-    deleteRequest(ffiRequest)
+    freeRequest(ffiRequest)
     return err("FFI context is not accepting requests (being recycled)")
 
   ffiRequest.generation = generation
   if generation != ctx.currentGeneration():
-    deleteRequest(ffiRequest)
+    freeRequest(ffiRequest)
     return err("FFI context was recycled; the token names an owner that is gone")
 
   let payloadLen = ffiRequest[].dataLen
   if payloadLen > MaxRequestPayloadBytes:
-    deleteRequest(ffiRequest)
+    freeRequest(ffiRequest)
     return err(
       "request payload of " & $payloadLen & " bytes exceeds the " &
         $MaxRequestPayloadBytes & " byte cap"
@@ -50,8 +57,8 @@ proc sendRequestToFFIThread*(
   when defined(ffiPollMode):
     # The reply waits in the library until the host takes it out, so a host that
     # stops polling must not be able to grow it without bound.
-    if not ctx[].outbound.claimOutstanding():
-      deleteRequest(ffiRequest)
+    if not ctx[].outbound.tryClaimRequest():
+      freeRequest(ffiRequest)
       return
         err("too many requests are waiting to be collected: " & $MaxOutstandingRequests)
     ffiRequest[].id = ctx[].outbound.nextRequestId()
@@ -59,10 +66,7 @@ proc sendRequestToFFIThread*(
   # Wake only when the push found the queue empty: waking per submit kills scaling, and a skipped wake just waits the consumer's 100ms poll.
   case ctx.reqQueueBank.pushRequest(ffiRequest)
   of QueueFull:
-    when defined(ffiPollMode):
-      ctx[].outbound.retireRequest(ffiRequest)
-    else:
-      deleteRequest(ffiRequest)
+    dropRequest(ctx, ffiRequest)
     return err("request queue full: " & $RequestQueueDepth & " requests already queued")
   of Queued:
     discard
@@ -113,7 +117,7 @@ proc awaitWithStaleWarnings(
     warn "ffi request still in flight; caller notified via RET_STALE_WARN",
       reqId = reqId, elapsedMs = elapsed
     when defined(ffiPollMode):
-      outb[].enqueueStaleReq(request, elapsed)
+      outb[].enqueueStaleWarn(request, elapsed)
     else:
       fireStaleWarn(request, elapsed)
   return await retFut
@@ -202,7 +206,7 @@ proc rejectQueuedRequests[T](ctx: ptr FFIContext[T], ownerGen: uint) =
         continue
     elif request[].generation < ownerGen:
       # An owner older than the one being recycled: its caller is long gone.
-      deleteRequest(request)
+      dropRequest(ctx, request)
       request = nextRequest
       continue
     try:
@@ -410,7 +414,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
           ctx.proveAlive()
           if request[].generation != ctx.currentGeneration():
             # A past owner submitted this; its callback carries userData that host frees once its recycle returns ok, so drop it unanswered.
-            deleteRequest(request)
+            dropRequest(ctx, request)
             request = nextRequest
             continue
           if ctx.myLib.isNil():
