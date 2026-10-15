@@ -63,7 +63,7 @@ proc deinitRequestQueue*(bank: var RequestQueueBank) {.raises: [].} =
     var request = queue.head
     while not request.isNil():
       let nextRequest = request[].next
-      deleteRequest(request)
+      freeRequest(request)
       request = nextRequest
     queue.head = nil
     queue.tail = nil
