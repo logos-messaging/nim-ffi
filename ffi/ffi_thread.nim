@@ -66,7 +66,7 @@ proc sendRequestToFFIThread*(
   # Wake only when the push found the queue empty: waking per submit kills scaling, and a skipped wake just waits the consumer's 100ms poll.
   case ctx.reqQueueBank.pushRequest(ffiRequest)
   of QueueFull:
-    dropRequest(ctx, ffiRequest)
+    ctx.dropRequest(ffiRequest)
     return err("request queue full: " & $RequestQueueDepth & " requests already queued")
   of Queued:
     discard
