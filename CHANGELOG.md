@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **The request payload cap is opt-in.** `-d:ffiMaxRequestPayloadBytes` now
+  defaults to `0` (unlimited) instead of 8 MiB. The size bound
+  is a host responsibility, like the trusted-caller note for `abi = c`: a host
+  that forwards untrusted bytes must cap them. This relaxes the SEC-08 default
+  by choice. The queue-depth and CBOR element limits are unchanged.
+
 ### Fixed
 - **A project that depends on nim-ffi without its lock file can compile again.**
   Without the lock file, nimble resolves a chronos tag, and no tag (v4.4.1

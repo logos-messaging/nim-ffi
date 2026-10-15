@@ -47,7 +47,7 @@ proc sendRequestToFFIThread*(
     return err("FFI context was recycled; the token names an owner that is gone")
 
   let payloadLen = ffiRequest[].dataLen
-  if payloadLen > MaxRequestPayloadBytes:
+  if MaxRequestPayloadBytes > 0 and payloadLen > MaxRequestPayloadBytes:
     freeRequest(ffiRequest)
     return err(
       "request payload of " & $payloadLen & " bytes exceeds the " &
