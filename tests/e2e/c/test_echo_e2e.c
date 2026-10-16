@@ -40,7 +40,8 @@ static void test_shout(EchoCtx* ctx) {
     ReplyWaiter w;
     memset(&w, 0, sizeof(w));
     ShoutRequest req = {"hello"};
-    echo_ctx_shout(ctx, &req, on_shout, &w);
+    int rc = echo_ctx_shout(ctx, &req, on_shout, &w);
+    assert(rc == 0);
     wait_done(&w.done);
     assert(w.err_code == 0);
     assert(strcmp(w.text_a, "X-ECHO: HELLO") == 0);
@@ -82,7 +83,8 @@ static void test_nil_ctx_first_call(void) {
     ReplyWaiter w;
     memset(&w, 0, sizeof(w));
     ShoutRequest req = {"hello"};
-    echo_ctx_shout(&nil_ctx, &req, on_shout, &w);
+    int rc = echo_ctx_shout(&nil_ctx, &req, on_shout, &w);
+    assert(rc != 0);
     wait_done(&w.done);
     assert(w.err_code != 0);
     assert(strstr(w.err, "not a valid FFI context") != NULL);

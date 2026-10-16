@@ -18,6 +18,12 @@ All notable changes to this project are documented in this file.
   by choice. The queue-depth and CBOR element limits are unchanged.
 
 ### Fixed
+- **A generated C wrapper returns non-zero when the send fails.** The method
+  wrapper returned 0 after the Nim side had rejected the request and fired the
+  error reply. A caller thus could not tell a sent request from a failed one.
+  The wrapper now returns the `RET_*` code. `<lib>_ctx_create` returns -1 when
+  the constructor gives back no context. In both cases the reply has already
+  fired, so the caller must not release its `user_data` again.
 - **A project that depends on nim-ffi without its lock file can compile again.**
   Without the lock file, nimble resolves a chronos tag, and no tag (v4.4.1
   included) has the `closeThreadDispatcher` that `ffi_context.nim` calls. With

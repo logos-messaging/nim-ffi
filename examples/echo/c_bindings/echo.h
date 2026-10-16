@@ -361,9 +361,9 @@ static inline int echo_ctx_create(const EchoConfig* config, EchoCreateFn on_crea
     }
     box->fn = on_created;
     box->user_data = user_data;
-    (void)echo_create(req_buf, req_len, echo_create_trampoline, box);
+    void* tok = echo_create(req_buf, req_len, echo_create_trampoline, box);
     free(req_buf);
-    return 0;
+    return tok ? 0 : -1;
 }
 
 /** Releases the echo context. */
@@ -435,7 +435,7 @@ static inline int echo_ctx_shout(const EchoCtx* ctx, const ShoutRequest* req, Ec
         free(box);
         return -1;
     }
-    return 0;
+    return ret;
 }
 
 typedef void (*EchoVersionReplyFn)(int err_code, const char* const* reply, const char* err_msg, void* user_data);
@@ -497,7 +497,7 @@ static inline int echo_ctx_version(const EchoCtx* ctx, EchoVersionReplyFn on_rep
         free(box);
         return -1;
     }
-    return 0;
+    return ret;
 }
 
 typedef void (*EchoLibVersionReplyFn)(int err_code, const char* const* reply, const char* err_msg, void* user_data);
@@ -558,7 +558,7 @@ static inline int echo_static_lib_version(EchoLibVersionReplyFn on_reply, void* 
         free(box);
         return -1;
     }
-    return 0;
+    return ret;
 }
 
 typedef void (*EchoShoutAnonReplyFn)(int err_code, const ShoutResponse* reply, const char* err_msg, void* user_data);
@@ -620,7 +620,7 @@ static inline int echo_static_shout_anon(const ShoutRequest* req, EchoShoutAnonR
         free(box);
         return -1;
     }
-    return 0;
+    return ret;
 }
 
 #endif /* NIM_FFI_LIB_ECHO_H_INCLUDED */

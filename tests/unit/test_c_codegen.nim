@@ -151,6 +151,16 @@ static inline int timer_ctx_destroy(TimerCtx* ctx) {
     check "timer_ctx_create(const EchoRequest* config, TimerCreateFn on_created, void* user_data)" in
       header
 
+  test "a method wrapper returns the RET code of the send":
+    check "    }\n    return ret;\n}" in header
+    check "    return 0;\n}" notin header
+
+  test "the constructor wrapper returns -1 when the ctor gives back a NULL token":
+    check "void* tok = timer_create(req_buf, req_len, timer_create_trampoline, box);" in
+      header
+    check "    return tok ? 0 : -1;" in header
+    check "(void)timer_create(" notin header
+
   test "no blocking sync-call machinery or per-call timeout survives":
     check "nimffi_wait_result" notin header
     check "NimFfiCallState" notin header
