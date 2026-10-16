@@ -1039,9 +1039,9 @@ static inline int my_timer_ctx_create(const TimerConfig* config, MyTimerCreateFn
     }
     box->fn = on_created;
     box->user_data = user_data;
-    (void)my_timer_create(req_buf, req_len, my_timer_create_trampoline, box);
+    void* tok = my_timer_create(req_buf, req_len, my_timer_create_trampoline, box);
     free(req_buf);
-    return 0;
+    return tok ? 0 : -1;
 }
 
 /** Tears down the FFI context; blocks until FFI + watchdog threads join. */
@@ -1182,7 +1182,7 @@ static inline int my_timer_ctx_echo(const MyTimerCtx* ctx, const EchoRequest* re
         free(box);
         return -1;
     }
-    return 0;
+    return ret;
 }
 
 typedef void (*MyTimerVersionReplyFn)(int err_code, const char* const* reply, const char* err_msg, void* user_data);
@@ -1244,7 +1244,7 @@ static inline int my_timer_ctx_version(const MyTimerCtx* ctx, MyTimerVersionRepl
         free(box);
         return -1;
     }
-    return 0;
+    return ret;
 }
 
 typedef void (*MyTimerComplexReplyFn)(int err_code, const ComplexResponse* reply, const char* err_msg, void* user_data);
@@ -1306,7 +1306,7 @@ static inline int my_timer_ctx_complex(const MyTimerCtx* ctx, const ComplexReque
         free(box);
         return -1;
     }
-    return 0;
+    return ret;
 }
 
 typedef void (*MyTimerScheduleReplyFn)(int err_code, const ScheduleResult* reply, const char* err_msg, void* user_data);
@@ -1371,7 +1371,7 @@ static inline int my_timer_ctx_schedule(const MyTimerCtx* ctx, const JobSpec* jo
         free(box);
         return -1;
     }
-    return 0;
+    return ret;
 }
 
 typedef void (*MyTimerLibVersionReplyFn)(int err_code, const char* const* reply, const char* err_msg, void* user_data);
@@ -1432,7 +1432,7 @@ static inline int my_timer_static_lib_version(MyTimerLibVersionReplyFn on_reply,
         free(box);
         return -1;
     }
-    return 0;
+    return ret;
 }
 
 #endif /* NIM_FFI_LIB_MY_TIMER_H_INCLUDED */

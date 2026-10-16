@@ -599,9 +599,11 @@ proc emitConstructors(
     lines.add("    }")
     lines.add("    box->fn = on_created;")
     lines.add("    box->user_data = user_data;")
-    lines.add("    (void)" & ctor.procName & "(req_buf, req_len, " & tramp & ", box);")
+    lines.add(
+      "    void* tok = " & ctor.procName & "(req_buf, req_len, " & tramp & ", box);"
+    )
     lines.add("    free(req_buf);")
-    lines.add("    return 0;")
+    lines.add("    return tok ? 0 : -1;")
     lines.add("}")
     lines.add("")
 
@@ -797,7 +799,7 @@ proc emitProcWrapper(
   lines.add("        free(box);")
   lines.add("        return -1;")
   lines.add("    }")
-  lines.add("    return 0;")
+  lines.add("    return ret;")
   lines.add("}")
   lines.add("")
 
