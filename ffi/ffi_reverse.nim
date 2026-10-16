@@ -761,6 +761,11 @@ proc failPendingReverse*(reason: string) {.gcsafe, raises: [].} =
       p.fut.complete(Result[seq[byte], string].err(reason))
   ffiPendingReverse.clear()
 
+proc releasePendingReverse*() {.gcsafe, raises: [].} =
+  ## FFI thread exit: under ORC a threadvar outlives its thread, so free the table's storage.
+  failPendingReverse("FFI thread exited; the reverse call was abandoned")
+  reset(ffiPendingReverse)
+
 proc abandonCall(callId: uint64) =
   let p = ffiPendingReverse.getOrDefault(callId)
   if p.fut.isNil():
