@@ -142,3 +142,19 @@ suite "{.ffi.} call after a failed constructor":
     check ret == RET_OK
     check waitCalled(callState)
     check callState.retCode.load() == int(RET_OK)
+
+suite "{.ffiCtor.} with a NULL callback":
+  test "the ctor refuses a NULL callback, claims no slot, and does not crash":
+    var cfg =
+      cborEncode(FailedctorCreateCtorReq(config: FailedCtorConfig(shouldFail: false)))
+    for _ in 0 ..< MaxFFIContexts * 2:
+      check failedctor_create(encodedPtr(cfg), cfg.len.csize_t, nil, nil).isNil()
+    check $lastError() == "callback must not be NULL"
+
+    var s: CallbackState
+    resetState(s)
+    let later =
+      failedctor_create(encodedPtr(cfg), cfg.len.csize_t, recordingCallback, addr s)
+    check not later.isNil()
+    check waitCalled(s)
+    check s.retCode.load() == int(RET_OK)
