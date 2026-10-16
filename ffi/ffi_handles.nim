@@ -17,10 +17,15 @@ type
     byHandle*: Table[uint64, FFIHandleEntry]
 
 proc initHandleRegistry*(reg: var FFIHandleRegistry) =
+  ## The table is left unallocated on purpose: `register` runs on the FFI thread,
+  ## and under refc a table allocated on the creating thread would be freed from
+  ## the FFI thread, or outlive the heap of a host thread that has since exited.
   reg.nextId = 0'u64
-  reg.byHandle = initTable[uint64, FFIHandleEntry]()
 
 proc deinitHandleRegistry*(reg: var FFIHandleRegistry) =
+  ## Runs on the thread that destroys the context, once the FFI thread has been
+  ## joined: `releaseAll` left the table empty, so this drops no reference that
+  ## belongs to that thread's heap.
   reg.byHandle = default(Table[uint64, FFIHandleEntry])
   reg.nextId = 0'u64
 
@@ -57,8 +62,10 @@ proc release*(
   return true
 
 proc releaseAll*(reg: var FFIHandleRegistry) =
-  ## Must run on the FFI thread that allocated the refs.
-  reg.byHandle.clear()
+  ## Must run on the FFI thread that allocated the refs, and drops the table with
+  ## them: under refc its storage belongs to that thread, so no other thread may
+  ## be left holding the last reference to it.
+  reg.byHandle = default(Table[uint64, FFIHandleEntry])
 
 proc encodeHandle*(id: uint64): seq[byte] =
   ## Single ABI seam for the handle-id wire format.

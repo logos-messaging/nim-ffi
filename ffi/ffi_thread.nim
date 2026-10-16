@@ -17,57 +17,91 @@ template dropRequest(ctx, request: untyped) =
   else:
     freeRequest(request)
 
-proc sendRequestToFFIThread*(
-    ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest, generation: uint
-): Result[void, string] =
-  ## `generation` is the claim the caller resolved its token under; the request carries it so a slot that changes owner between the resolve and the dispatch answers nobody.
+type Refusal = object
+  code: cint ## What a C export returns.
+  why: string
+
+proc refuse(
+    request: ptr FFIThreadRequest, code: cint, why: string
+): Result[void, Refusal] =
+  ## Ends a request that was never counted in or queued: nothing else will answer it. A nil request (the allocator failed) has nothing to free.
+  freeRequest(request)
+  return err(Refusal(code: code, why: why))
+
+proc submit(
+    ctx: ptr FFIContext,
+    ffiRequest: ptr FFIThreadRequest,
+    generation: uint,
+    reqId: ptr uint64 = nil,
+): Result[void, Refusal] =
+  ## `generation` is the claim the caller resolved its token under; the request carries it so a slot that changes owner between the resolve and the dispatch answers nobody. `reqId`, when given, receives the id the reply will carry.
 
   # A nil request means the allocator failed; report it instead of dereferencing.
   if ffiRequest.isNil():
-    return err("out of memory: could not allocate the FFI request")
+    return
+      refuse(ffiRequest, RET_ERR, "out of memory: could not allocate the FFI request")
 
   if ctx.eventQueueStuck.load():
-    freeRequest(ffiRequest)
-    return err("event queue stuck - library cannot accept new requests")
+    return refuse(
+      ffiRequest, RET_QUEUE_FULL,
+      "event queue stuck - library cannot accept new requests",
+    )
 
   if onFFIThread:
     # A handler re-dispatching onto its own FFI thread would deadlock; reject.
-    freeRequest(ffiRequest)
-    return err(
-      "reentrant ffi call: a handler invoked sendRequestToFFIThread on its own context"
+    return refuse(
+      ffiRequest, RET_ERR,
+      "reentrant ffi call: a handler invoked sendRequestToFFIThread on its own context",
     )
 
   if ctx.lifecycle.load() != CtxLifecycle.Active:
-    freeRequest(ffiRequest)
-    return err("FFI context is not accepting requests (being recycled)")
+    return refuse(
+      ffiRequest, RET_ERR, "FFI context is not accepting requests (being recycled)"
+    )
 
   ffiRequest.generation = generation
   if generation != ctx.currentGeneration():
-    freeRequest(ffiRequest)
-    return err("FFI context was recycled; the token names an owner that is gone")
+    return refuse(
+      ffiRequest, RET_INVALID_CTX,
+      "FFI context was recycled; the token names an owner that is gone",
+    )
 
   let payloadLen = ffiRequest[].dataLen
   if MaxRequestPayloadBytes > 0 and payloadLen > MaxRequestPayloadBytes:
-    freeRequest(ffiRequest)
-    return err(
+    return refuse(
+      ffiRequest,
+      RET_TOO_LARGE,
       "request payload of " & $payloadLen & " bytes exceeds the " &
-        $MaxRequestPayloadBytes & " byte cap"
+        $MaxRequestPayloadBytes & " byte cap",
     )
 
   when defined(ffiPollMode):
     # The reply waits in the library until the host takes it out, so a host that
     # stops polling must not be able to grow it without bound.
     if not ctx[].outbound.tryClaimRequest():
-      freeRequest(ffiRequest)
-      return
-        err("too many requests are waiting to be collected: " & $MaxOutstandingRequests)
+      return refuse(
+        ffiRequest,
+        RET_QUEUE_FULL,
+        $MaxOutstandingRequests & " requests wait for the host to poll their replies",
+      )
+    # Before the push: the reply can reach a poller before this call returns.
     ffiRequest[].id = ctx[].outbound.nextRequestId()
+  if not reqId.isNil():
+    reqId[] = ffiRequest[].id
 
   # Wake only when the push found the queue empty: waking per submit kills scaling, and a skipped wake just waits the consumer's 100ms poll.
   case ctx.reqQueueBank.pushRequest(ffiRequest)
   of QueueFull:
     ctx.dropRequest(ffiRequest)
-    return err("request queue full: " & $RequestQueueDepth & " requests already queued")
+    # The id was handed out for a reply that will not come; take it back.
+    if not reqId.isNil():
+      reqId[] = 0
+    return err(
+      Refusal(
+        code: RET_QUEUE_FULL,
+        why: "request queue full: " & $RequestQueueDepth & " requests already queued",
+      )
+    )
   of Queued:
     discard
   of QueuedWake:
@@ -77,6 +111,73 @@ proc sendRequestToFFIThread*(
         error = error
 
   ok()
+
+proc sendRequestToFFIThread*(
+    ctx: ptr FFIContext,
+    ffiRequest: ptr FFIThreadRequest,
+    generation: uint,
+    reqId: ptr uint64 = nil,
+): Result[void, string] =
+  ## Poll-mode submit for a Nim caller that wants the text, not the code: a C export
+  ## goes through `submitRequest`. A refusal also lands in `lastError()`.
+  submit(ctx, ffiRequest, generation, reqId).isOkOr:
+    setLastError(error.why)
+    return err("request refused: " & error.why)
+  return ok()
+
+when defined(ffiPollMode):
+  proc submitRequest*(
+      ctx: ptr FFIContext,
+      ffiRequest: ptr FFIThreadRequest,
+      generation: uint,
+      reqId: ptr uint64,
+  ): cint =
+    ## What a C export calls. `RET_OK` promises exactly one reply carrying
+    ## `reqId[]`, unless the context closes first; any other code means no
+    ## reply comes, and `lastError()` says why.
+    if reqId.isNil():
+      freeRequest(ffiRequest)
+      setLastError("req_id is NULL: the reply could not be matched")
+      return RET_ERR
+    reqId[] = 0
+    submit(ctx, ffiRequest, generation, reqId).isOkOr:
+      setLastError(error.why)
+      return error.code
+    return RET_OK
+
+proc newRequest*(
+    target: ReplyTarget, name: cstring, data: ptr byte, dataLen: int
+): ptr FFIThreadRequest =
+  ## The request a C export builds from the host's bytes.
+  when defined(ffiPollMode):
+    return FFIThreadRequest.initFromPtr(nil, nil, name, data, dataLen)
+  else:
+    return FFIThreadRequest.initFromPtr(
+      target.callback, target.userData, name, data, dataLen
+    )
+
+proc send*(
+    target: ReplyTarget,
+    ctx: ptr FFIContext,
+    ffiRequest: ptr FFIThreadRequest,
+    generation: uint,
+): cint =
+  ## Hands the request to the FFI thread and maps the outcome to a C return code.
+  when defined(ffiPollMode):
+    return submitRequest(ctx, ffiRequest, generation, target.reqId)
+  else:
+    let sendRes =
+      try:
+        sendRequestToFFIThread(ctx, ffiRequest, generation)
+      except Exception as exc:
+        Result[void, string].err("sendRequestToFFIThread exception: " & exc.msg)
+    if sendRes.isErr():
+      let errStr = "error in sendRequestToFFIThread: " & sendRes.error
+      target.callback(
+        RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), target.userData
+      )
+      return RET_ERR
+    return RET_OK
 
 proc sendRequestToFFIThread*(
     ctx: ptr FFIContext, ffiRequest: ptr FFIThreadRequest
@@ -255,7 +356,8 @@ proc drainOngoing(ongoing: ptr seq[Future[void]]): Future[bool] {.async.} =
 
 proc resetForNextOwner[T](ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]) =
   freeLib(ctx)
-  clearListeners(ctx[].eventRegistry)
+  when not defined(ffiPollMode):
+    clearListeners(ctx[].eventRegistry)
   when defined(ffiPollMode):
     # The host polling this claim is told it ended, and what it never collected
     # is dropped: the next owner of the slot must not be handed it.
