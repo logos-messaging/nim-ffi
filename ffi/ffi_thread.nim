@@ -24,7 +24,7 @@ type Refusal = object
 proc refuse(
     request: ptr FFIThreadRequest, code: cint, why: string
 ): Result[void, Refusal] =
-  ## Ends a request that was never counted in or queued: nothing else will answer it.
+  ## Ends a request that was never counted in or queued: nothing else will answer it. A nil request (the allocator failed) has nothing to free.
   freeRequest(request)
   return err(Refusal(code: code, why: why))
 
@@ -38,9 +38,8 @@ proc submit(
 
   # A nil request means the allocator failed; report it instead of dereferencing.
   if ffiRequest.isNil():
-    return err(
-      Refusal(code: RET_ERR, why: "out of memory: could not allocate the FFI request")
-    )
+    return
+      refuse(ffiRequest, RET_ERR, "out of memory: could not allocate the FFI request")
 
   if ctx.eventQueueStuck.load():
     return refuse(
