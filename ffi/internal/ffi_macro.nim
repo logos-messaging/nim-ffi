@@ -1458,11 +1458,14 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
         return submitRes
       return RET_OK
   else:
+    let replyTo = genSym(nskLet, "replyTo")
     ffiBody.add quote do:
+      let `replyTo` = replyTarget(nil, callback, userData)
+      if `replyTo`.missing():
+        setLastError("callback must not be NULL")
+        return FFICtxToken(nil)
       let `ctxSym` = `poolIdent`.createFFIContext().valueOr:
-        if not callback.isNil:
-          let errStr = "ffiCtor: failed to create FFIContext: " & $error
-          callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
+        `replyTo`.refuse("ffiCtor: failed to create FFIContext: " & $error)
         return FFICtxToken(nil)
 
     # Early validation: decode the CBOR payload to verify it parses cleanly.
@@ -1476,9 +1479,7 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
           # to destroy it. The callback carries the real error; a failure here has
           # no channel left of its own.
           discard `poolIdent`.recycleFFIContext(`ctxSym`)
-          if not callback.isNil:
-            let errStr = "ffiCtor: failed to decode request: " & $validateRes.error
-            callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
+          `replyTo`.refuse("ffiCtor: failed to decode request: " & $validateRes.error)
           return FFICtxToken(nil)
 
     let newReqCall = newCall(
@@ -1502,9 +1503,7 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
           Result[void, string].err("sendRequestToFFIThread exception: " & exc.msg)
       if `sendResIdent`.isErr():
         discard `poolIdent`.recycleFFIContext(`ctxSym`)
-        if not callback.isNil:
-          let errStr = "ffiCtor: failed to send request: " & $`sendResIdent`.error
-          callback(RET_ERR, unsafeAddr errStr[0], cast[csize_t](errStr.len), userData)
+        `replyTo`.refuse("ffiCtor: failed to send request: " & $`sendResIdent`.error)
         return FFICtxToken(nil)
 
     ffiBody.add quote do:

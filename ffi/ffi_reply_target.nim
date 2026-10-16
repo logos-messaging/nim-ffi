@@ -15,11 +15,14 @@ when defined(ffiPollMode):
   proc missing*(t: ReplyTarget): bool =
     return false
 
-  proc reject*(t: ReplyTarget, code: cint, msg: string): cint =
+  proc refuse*(t: ReplyTarget, msg: string) =
     ## Refuses the call before a request exists: no id, and the text says why.
     if not t.reqId.isNil():
       t.reqId[] = 0
     setLastError(msg)
+
+  proc reject*(t: ReplyTarget, code: cint, msg: string): cint =
+    t.refuse(msg)
     return code
 
 else:
@@ -34,7 +37,10 @@ else:
   proc missing*(t: ReplyTarget): bool =
     return t.callback.isNil()
 
-  proc reject*(t: ReplyTarget, code: cint, msg: string): cint =
+  proc refuse*(t: ReplyTarget, msg: string) =
     ## Refuses the call before a request exists, through the callback.
     t.callback(RET_ERR, unsafeAddr msg[0], cast[csize_t](msg.len), t.userData)
+
+  proc reject*(t: ReplyTarget, code: cint, msg: string): cint =
+    t.refuse(msg)
     return RET_ERR

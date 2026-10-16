@@ -18,6 +18,9 @@ All notable changes to this project are documented in this file.
   by choice. The queue-depth and CBOR element limits are unchanged.
 
 ### Fixed
+- **A callback-mode ctor refuses a NULL callback.** `<lib>_create(req, len,
+  NULL, NULL)` returned a token, and the FFI thread later called address 0.
+  The ctor now returns NULL and claims no slot.
 - **A generated C wrapper returns non-zero when the send fails.** The method
   wrapper returned 0 after the Nim side had rejected the request and fired the
   error reply. A caller thus could not tell a sent request from a failed one.
