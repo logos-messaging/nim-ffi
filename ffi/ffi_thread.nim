@@ -21,15 +21,12 @@ type Refusal = object
   code: cint ## What a C export returns.
   why: string
 
-proc refused(code: cint, why: string): Result[void, Refusal] =
-  return err(Refusal(code: code, why: why))
-
 proc refuse(
     request: ptr FFIThreadRequest, code: cint, why: string
 ): Result[void, Refusal] =
   ## Ends a request that was never counted in or queued: nothing else will answer it.
   freeRequest(request)
-  return refused(code, why)
+  return err(Refusal(code: code, why: why))
 
 proc submit(
     ctx: ptr FFIContext,
@@ -41,7 +38,9 @@ proc submit(
 
   # A nil request means the allocator failed; report it instead of dereferencing.
   if ffiRequest.isNil():
-    return refused(RET_ERR, "out of memory: could not allocate the FFI request")
+    return err(
+      Refusal(code: RET_ERR, why: "out of memory: could not allocate the FFI request")
+    )
 
   if ctx.eventQueueStuck.load():
     return refuse(
@@ -98,9 +97,11 @@ proc submit(
     # The id was handed out for a reply that will not come; take it back.
     if not reqId.isNil():
       reqId[] = 0
-    return refused(
-      RET_QUEUE_FULL,
-      "request queue full: " & $RequestQueueDepth & " requests already queued",
+    return err(
+      Refusal(
+        code: RET_QUEUE_FULL,
+        why: "request queue full: " & $RequestQueueDepth & " requests already queued",
+      )
     )
   of Queued:
     discard
