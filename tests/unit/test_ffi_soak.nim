@@ -286,5 +286,6 @@ suite "many contexts at once":
     check w.replies.load() > 0
     let avgMs = float(w.replyNs.load() div max(w.replies.load(), 1)) / 1e6
     echo "churn: replies=", w.replies.load(), " avg reply=", avgMs, "ms"
-    # A reply must not wait for a poll slice to expire.
-    check avgMs < 20.0
+    # A reply must not wait for a timed-out wait (100 ms on the FFI thread, 1 s in
+    # poll), which averages ~50 ms or more; sanitizer builds average up to ~20 ms.
+    check avgMs < 40.0
