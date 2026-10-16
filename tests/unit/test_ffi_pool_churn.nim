@@ -120,7 +120,8 @@ when not defined(gcRefc):
       check c.replies.load() == workers * c.iters
 
       # A reply must not wait for the FFI thread's fallback timeout: a reused slot
-      # is woken by the submit that made it active again.
+      # is woken by the submit that made it active again. A missed wake averages
+      # ~50 ms (half the 100 ms timeout); sanitizer builds average up to ~20 ms.
       let avgMs = float(c.replyNs.load() div max(c.replies.load(), 1)) / 1e6
       echo "churn: replies=", c.replies.load(), " avg reply=", avgMs, "ms"
-      check avgMs < 20.0
+      check avgMs < 40.0
