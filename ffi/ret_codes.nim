@@ -51,3 +51,14 @@ func rustRetCodeConsts*(): string =
     lines.add("const NIMFFI_RET_" & code.name & ": c_int = " & $code.value & ";")
 
   return lines
+
+const
+  REVERSE_ACCEPTED*: cint = 0
+  REVERSE_INVALID_CTX*: cint = 1
+  REVERSE_NOT_ACTIVE*: cint = 2
+  REVERSE_PAYLOAD_TOO_LARGE*: cint = 3
+  REVERSE_MAILBOX_FULL*: cint = 4
+  REVERSE_WORKERS_FAILED*: cint = 5
+  REVERSE_INVALID_ARGUMENT*: cint = 6
+  REVERSE_OUT_OF_MEMORY*: cint = 7
+  REVERSE_REGISTRY_FULL*: cint = 8
