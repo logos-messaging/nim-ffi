@@ -1,4 +1,4 @@
-## Unit tests for ffi/ffi_reverse.nim on a bare FFIReverseState, with no FFI context.
+## Unit tests for ffi/ffi_reverse.nim on a bare FFIReverseContext, with no FFI context.
 
 import std/[atomics, locks, os, strutils]
 import unittest2
@@ -10,12 +10,12 @@ proc nopImpl(
 ) {.cdecl, gcsafe, raises: [].} =
   discard
 
-suite "FFIReverseState registry":
+suite "FFIReverseContext registry":
   test "set, has, replace and unregister":
-    var st: FFIReverseState
-    initReverseState(st)
+    var st: FFIReverseContext
+    initReverseContext(st)
     defer:
-      check deinitReverseState(st).isOk()
+      check deinitReverseContext(st).isOk()
 
     check not st.isRegistered("fetch")
     check st.registerImpl("fetch", nopImpl, nil).isOk()
@@ -34,17 +34,17 @@ suite "FFIReverseState registry":
     check st.beginReverseDispatch("fetch").isNil()
 
   test "call ids start at 1 and are monotonic":
-    var st: FFIReverseState
-    initReverseState(st)
+    var st: FFIReverseContext
+    initReverseContext(st)
     defer:
-      check deinitReverseState(st).isOk()
+      check deinitReverseContext(st).isOk()
 
     check st.allocCallId() == 1'u64
     check st.allocCallId() == 2'u64
     check st.allocCallId() == 3'u64
 
 type ReleaseBox = object
-  st: ptr FFIReverseState
+  st: ptr FFIReverseContext
   released: Atomic[int]
   releasedInside: Atomic[int] # -1 until the impl recorded it
   done: Atomic[bool]
@@ -53,7 +53,7 @@ proc countRelease(userData: pointer) {.cdecl, gcsafe, raises: [].} =
   cast[ptr ReleaseBox](userData)[].released.atomicInc()
 
 type InFlightProbe = object
-  st: ptr FFIReverseState
+  st: ptr FFIReverseContext
   seen: Atomic[int]
 
 proc inFlightRelease(userData: pointer) {.cdecl, gcsafe, raises: [].} =
@@ -63,10 +63,10 @@ proc inFlightRelease(userData: pointer) {.cdecl, gcsafe, raises: [].} =
 
 suite "impl ownership (release callback)":
   test "a dispatch still counts as in flight while its release runs":
-    var st: FFIReverseState
-    initReverseState(st)
+    var st: FFIReverseContext
+    initReverseContext(st)
     defer:
-      check deinitReverseState(st).isOk()
+      check deinitReverseContext(st).isOk()
     var probe = InFlightProbe(st: addr st)
     probe.seen.store(-1)
     check st.registerImpl("x", nopImpl, addr probe, inFlightRelease).isOk()
@@ -78,10 +78,10 @@ suite "impl ownership (release callback)":
     check probe.seen.load() == 1
 
   test "the release runs once, after the last dispatch of the replaced impl":
-    var st: FFIReverseState
-    initReverseState(st)
+    var st: FFIReverseContext
+    initReverseContext(st)
     defer:
-      check deinitReverseState(st).isOk()
+      check deinitReverseContext(st).isOk()
     var box: ReleaseBox
     check st.registerImpl("x", nopImpl, addr box, countRelease).isOk()
     let entry = st.beginReverseDispatch("x")
@@ -91,10 +91,10 @@ suite "impl ownership (release callback)":
     check box.released.load() == 1
 
   test "an idle impl is released as soon as it is replaced or unregistered":
-    var st: FFIReverseState
-    initReverseState(st)
+    var st: FFIReverseContext
+    initReverseContext(st)
     defer:
-      check deinitReverseState(st).isOk()
+      check deinitReverseContext(st).isOk()
     var a, b: ReleaseBox
     check st.registerImpl("x", nopImpl, addr a, countRelease).isOk()
     check st.registerImpl("x", nopImpl, addr b, countRelease).isOk()
@@ -104,10 +104,10 @@ suite "impl ownership (release callback)":
     st.unregisterImpl("absent") # unregistering an unknown name is a no-op
 
   test "clearImpls releases idle impls and defers the running ones":
-    var st: FFIReverseState
-    initReverseState(st)
+    var st: FFIReverseContext
+    initReverseContext(st)
     defer:
-      check deinitReverseState(st).isOk()
+      check deinitReverseContext(st).isOk()
     var idle, running: ReleaseBox
     check st.registerImpl("idle", nopImpl, addr idle, countRelease).isOk()
     check st.registerImpl("running", nopImpl, addr running, countRelease).isOk()
@@ -120,29 +120,29 @@ suite "impl ownership (release callback)":
     check running.released.load() == 1
 
   test "deinit releases every impl still registered":
-    var st: FFIReverseState
-    initReverseState(st)
+    var st: FFIReverseContext
+    initReverseContext(st)
     var box: ReleaseBox
     check st.registerImpl("x", nopImpl, addr box, countRelease).isOk()
-    check deinitReverseState(st).isOk()
+    check deinitReverseContext(st).isOk()
     check box.released.load() == 1
 
   test "deinit keeps the locks alive while an impl still runs":
-    var st: FFIReverseState
-    initReverseState(st)
+    var st: FFIReverseContext
+    initReverseContext(st)
     var box: ReleaseBox
     check st.registerImpl("x", nopImpl, addr box, countRelease).isOk()
     let entry = st.beginReverseDispatch("x")
-    check deinitReverseState(st).isErr() # the dispatch below still takes the lock
+    check deinitReverseContext(st).isErr() # the dispatch below still takes the lock
     st.endReverseDispatch(entry)
     check box.released.load() == 1
-    check deinitReverseState(st).isOk()
+    check deinitReverseContext(st).isOk()
 
   test "a nil release never waits and leaves userData to the host":
-    var st: FFIReverseState
-    initReverseState(st)
+    var st: FFIReverseContext
+    initReverseContext(st)
     defer:
-      check deinitReverseState(st).isOk()
+      check deinitReverseContext(st).isOk()
     check st.registerImpl("x", nopImpl, nil).isOk()
     let entry = st.beginReverseDispatch("x") # a dispatch still runs "x"
     st.unregisterImpl("x") # returns at once
@@ -150,10 +150,10 @@ suite "impl ownership (release callback)":
     st.endReverseDispatch(entry)
 
   test "a full registry is RegistryFull and never calls the release":
-    var st: FFIReverseState
-    initReverseState(st)
+    var st: FFIReverseContext
+    initReverseContext(st)
     defer:
-      check deinitReverseState(st).isOk()
+      check deinitReverseContext(st).isOk()
     for i in 0 ..< ReverseMaxImpls:
       check st.registerImpl("impl" & $i, nopImpl, nil).isOk()
     var box: ReleaseBox
@@ -166,10 +166,10 @@ suite "impl ownership (release callback)":
 
 suite "reply mailbox":
   test "push and take returns every parked reply":
-    var st: FFIReverseState
-    initReverseState(st)
+    var st: FFIReverseContext
+    initReverseContext(st)
     defer:
-      check deinitReverseState(st).isOk()
+      check deinitReverseContext(st).isOk()
 
     var payload = [byte 0xAA, 0xBB]
     check st.pushReply(7'u64, RET_OK, addr payload[0], payload.len) == REVERSE_ACCEPTED
@@ -199,10 +199,10 @@ suite "reply mailbox":
     freeReply(single)
 
   test "mailbox rejects pushes past ReverseMailboxDepth":
-    var st: FFIReverseState
-    initReverseState(st)
+    var st: FFIReverseContext
+    initReverseContext(st)
     defer:
-      check deinitReverseState(st).isOk()
+      check deinitReverseContext(st).isOk()
 
     for i in 0 ..< ReverseMailboxDepth:
       check st.pushReply(uint64(i + 1), RET_OK, nil, 0) == REVERSE_ACCEPTED
@@ -212,10 +212,10 @@ suite "reply mailbox":
     check st.mailboxLen() == 0
 
   test "the wake hook fires once per empty-to-non-empty transition":
-    var st: FFIReverseState
-    initReverseState(st)
+    var st: FFIReverseContext
+    initReverseContext(st)
     defer:
-      check deinitReverseState(st).isOk()
+      check deinitReverseContext(st).isOk()
     var wakes = 0
     proc countWake(ud: pointer) {.nimcall, gcsafe, raises: [].} =
       cast[ptr int](ud)[].inc()

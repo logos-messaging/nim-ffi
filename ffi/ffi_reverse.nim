@@ -81,7 +81,7 @@ type
     head, tail: ptr ReverseReply
     count: int
 
-  FFIReverseState* = object
+  FFIReverseContext* = object
     lock*: Lock
     impls: array[ReverseMaxImpls, ReverseImplSlot] # no GC memory: any thread may free
     dispatching*: int # invocations in flight on the workers
@@ -89,27 +89,30 @@ type
     mailbox: ReverseMailbox
     hooks: ReverseContextHooks
 
-proc initReverseState*(st: var FFIReverseState) =
+proc initReverseContext*(st: var FFIReverseContext) =
   ## Once, before any thread sees `st`: a second initLock is UB.
-  st = FFIReverseState()
+  st = FFIReverseContext()
   st.lock.initLock()
 
 func installContextHooks*(
-    st: var FFIReverseState, wake: ReverseWakeFn, gen: ReverseGenerationFn, ud: pointer
+    st: var FFIReverseContext,
+    wake: ReverseWakeFn,
+    gen: ReverseGenerationFn,
+    ud: pointer,
 ) {.raises: [].} =
   st.hooks = ReverseContextHooks(wake: wake, generation: gen, ffiCtx: ud)
 
 proc freeReply*(r: ptr ReverseReply) {.raises: [].} =
   c_free(r)
 
-proc takeReplies*(st: var FFIReverseState): ptr ReverseReply {.raises: [], gcsafe.} =
+proc takeReplies*(st: var FFIReverseContext): ptr ReverseReply {.raises: [], gcsafe.} =
   ## Detaches the mailbox; the caller frees every node.
   withLock st.lock:
     let head = st.mailbox.head
     st.mailbox = ReverseMailbox()
     return head
 
-proc freeAllReplies*(st: var FFIReverseState) {.raises: [], gcsafe.} =
+proc freeAllReplies*(st: var FFIReverseContext) {.raises: [], gcsafe.} =
   var node = st.takeReplies()
   while not node.isNil():
     let next = node[].next
@@ -144,21 +147,21 @@ proc free(slot: ReverseImplSlot) {.raises: [], gcsafe.} =
     c_free(slot.name)
   decRef(slot.entry)
 
-func findSlotByName(st: FFIReverseState, name: cstring): int {.raises: [].} =
+func findSlotByName(st: FFIReverseContext, name: cstring): int {.raises: [].} =
   ## Call with `st.lock` held; -1 when `name` has no impl.
   for i in 0 ..< ReverseMaxImpls:
     if not st.impls[i].name.isNil() and c_strcmp(st.impls[i].name, name) == 0:
       return i
   return -1
 
-func findEmptySlot(st: FFIReverseState): int {.raises: [].} =
+func findEmptySlot(st: FFIReverseContext): int {.raises: [].} =
   ## Call with `st.lock` held; -1 when the registry is full.
   for i in 0 ..< ReverseMaxImpls:
     if st.impls[i].name.isNil():
       return i
   return -1
 
-proc clearImpls*(st: var FFIReverseState): int {.raises: [], gcsafe.} =
+proc clearImpls*(st: var FFIReverseContext): int {.raises: [], gcsafe.} =
   ## Unregisters every impl without waiting; returns the invocations still running.
   ## A running invocation keeps its entry, and releases it when it returns.
   var old: typeof(st.impls)
@@ -170,13 +173,13 @@ proc clearImpls*(st: var FFIReverseState): int {.raises: [], gcsafe.} =
     free(slot)
   return running
 
-proc deinitReverseState*(st: var FFIReverseState): Result[void, string] =
+proc deinitReverseContext*(st: var FFIReverseContext): Result[void, string] =
   ## Err while a running impl may still take the lock: it then stays alive, and a
   ## later call may free it.
   st.freeAllReplies()
   let running = st.clearImpls()
   if running > 0:
-    return err("reverse state kept alive: " & $running & " impl(s) still running")
+    return err("reverse context kept alive: " & $running & " impl(s) still running")
 
   st.lock.deinitLock()
   return ok()
@@ -192,7 +195,7 @@ func toRetCode*(e: ReverseError): cint =
   of ReverseError.RegistryFull: REVERSE_REGISTRY_FULL
 
 proc registerImpl*(
-    st: var FFIReverseState,
+    st: var FFIReverseContext,
     name: string,
     fn: FFIReverseImpl,
     userData: pointer,
@@ -232,7 +235,7 @@ proc registerImpl*(
   decRef(old)
   return ok()
 
-proc unregisterImpl*(st: var FFIReverseState, name: string) {.raises: [], gcsafe.} =
+proc unregisterImpl*(st: var FFIReverseContext, name: string) {.raises: [], gcsafe.} =
   ## Removes the impl of `name`, if any. Never waits: an invocation still running
   ## it keeps its entry and releases it when it returns.
   var old: ReverseImplSlot
@@ -242,16 +245,18 @@ proc unregisterImpl*(st: var FFIReverseState, name: string) {.raises: [], gcsafe
       swap(old, st.impls[idx])
   free(old)
 
-proc isRegistered*(st: var FFIReverseState, name: string): bool {.raises: [], gcsafe.} =
+proc isRegistered*(
+    st: var FFIReverseContext, name: string
+): bool {.raises: [], gcsafe.} =
   withLock st.lock:
     return st.findSlotByName(cstring(name)) >= 0
 
-proc inFlight*(st: var FFIReverseState): int {.raises: [], gcsafe.} =
+proc inFlight*(st: var FFIReverseContext): int {.raises: [], gcsafe.} =
   withLock st.lock:
     return st.dispatching
 
 proc beginReverseDispatch*(
-    st: var FFIReverseState, name: cstring
+    st: var FFIReverseContext, name: cstring
 ): ptr ReverseImplEntry {.raises: [], gcsafe.} =
   ## Nil when `name` has no impl; pair every other result with `endReverseDispatch`.
   withLock st.lock:
@@ -265,19 +270,23 @@ proc beginReverseDispatch*(
     return entry
 
 proc endReverseDispatch*(
-    st: var FFIReverseState, entry: ptr ReverseImplEntry
+    st: var FFIReverseContext, entry: ptr ReverseImplEntry
 ) {.raises: [], gcsafe.} =
   # Release first: the dispatch counts as in flight until the host's `release` has run.
   decRef(entry)
   withLock st.lock:
     st.dispatching.dec()
 
-proc allocCallId*(st: var FFIReverseState): uint64 {.raises: [].} =
+proc allocCallId*(st: var FFIReverseContext): uint64 {.raises: [].} =
   ## Monotonic for the life of the slot; 0 is the invalid id.
   return st.nextCallId.fetchAdd(1'u64) + 1'u64
 
 proc pushReply*(
-    st: var FFIReverseState, callId: uint64, retCode: cint, data: pointer, dataLen: int
+    st: var FFIReverseContext,
+    callId: uint64,
+    retCode: cint,
+    data: pointer,
+    dataLen: int,
 ): cint {.raises: [], gcsafe.} =
   ## Any thread. Wakes the FFI thread only when the mailbox was empty.
   let payloadLen = if dataLen > 0 and not data.isNil(): dataLen else: 0
@@ -313,6 +322,6 @@ proc pushReply*(
     st.hooks.wake(st.hooks.ffiCtx)
   return REVERSE_ACCEPTED
 
-proc mailboxLen*(st: var FFIReverseState): int {.raises: [], gcsafe.} =
+proc mailboxLen*(st: var FFIReverseContext): int {.raises: [], gcsafe.} =
   withLock st.lock:
     return st.mailbox.count
