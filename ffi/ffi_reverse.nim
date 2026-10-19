@@ -92,7 +92,7 @@ type
     next*: ptr ReverseInvocation
 
   ReverseWorkerArg = object
-    st: ptr FFIReverseState
+    st: ptr FFIReverseContext
     me: ptr FFIReverseWorker # fixed at creation: a claimed stop clears `st.workers`
     idx: int
 
@@ -124,7 +124,7 @@ type
     head, tail: ptr ReverseReply
     count: int
 
-  ReverseStopFn* = proc(st: var FFIReverseState, timeoutMs: int): ReverseStopResult {.
+  ReverseStopFn* = proc(st: var FFIReverseContext, timeoutMs: int): ReverseStopResult {.
     nimcall, gcsafe, raises: []
   .}
 
@@ -149,9 +149,9 @@ type
 
 var onReverseWorker* {.threadvar.}: bool
 var myWorkerIdx {.threadvar.}: int # 1-based; 0 off a worker
-var myReverseState {.threadvar.}: ptr FFIReverseState # nil off a worker
+var myReverseState {.threadvar.}: ptr FFIReverseContext # nil off a worker
 
-proc onOwnReverseWorker*(st: var FFIReverseState): bool {.raises: [], gcsafe.} =
+proc onOwnReverseWorker*(st: var FFIReverseContext): bool {.raises: [], gcsafe.} =
   ## True on a worker of `st`: tearing its context down from here waits on this very impl.
   return onReverseWorker and myReverseState == addr st
 
@@ -207,7 +207,7 @@ proc freeAllReplies*(st: var FFIReverseContext) {.raises: [], gcsafe.} =
     freeReply(node)
     node = next
 
-proc purgeQueue*(st: var FFIReverseState) {.raises: [], gcsafe.} =
+proc purgeQueue*(st: var FFIReverseContext) {.raises: [], gcsafe.} =
   var node: ptr ReverseInvocation
   withLock st.qLock:
     node = st.qHead
@@ -220,11 +220,11 @@ proc purgeQueue*(st: var FFIReverseState) {.raises: [], gcsafe.} =
     decRef(node)
     node = next
 
-proc queueLen*(st: var FFIReverseState): int {.raises: [], gcsafe.} =
+proc queueLen*(st: var FFIReverseContext): int {.raises: [], gcsafe.} =
   withLock st.qLock:
     return st.qCount
 
-proc workersStarted*(st: var FFIReverseState): bool {.raises: [], gcsafe.} =
+proc workersStarted*(st: var FFIReverseContext): bool {.raises: [], gcsafe.} =
   withLock st.qLock:
     return st.workerCount > 0
 
@@ -293,8 +293,8 @@ proc deinitReverseContext*(st: var FFIReverseContext): Result[void, string] =
   let running = st.clearImpls()
   if st.leakedWorkers > 0 or running > 0:
     return err(
-      "reverse state kept alive: " & $st.leakedWorkers & " leaked worker(s), " & $running &
-        " impl(s) still running"
+      "reverse context kept alive: " & $st.leakedWorkers & " leaked worker(s), " &
+        $running & " impl(s) still running"
     )
 
   if not st.workers.isNil():
@@ -306,7 +306,7 @@ proc deinitReverseContext*(st: var FFIReverseContext): Result[void, string] =
   return ok()
 
 proc startReverseWorkers*(
-  st: var FFIReverseState, n: int = 0
+  st: var FFIReverseContext, n: int = 0
 ): bool {.raises: [], gcsafe.}
 
 type ReverseError* {.pure.} = enum
@@ -488,7 +488,7 @@ proc allocInvocation(
   return rec
 
 proc pushInvocation(
-    st: var FFIReverseState, rec: ptr ReverseInvocation
+    st: var FFIReverseContext, rec: ptr ReverseInvocation
 ): bool {.raises: [].} =
   ## False when `ReverseQueueDepth` calls already wait; the record is then not queued.
   withLock st.qLock:
@@ -503,7 +503,7 @@ proc pushInvocation(
     signal(st.qCond)
   return true
 
-proc popInvocation(st: var FFIReverseState): ptr ReverseInvocation {.raises: [].} =
+proc popInvocation(st: var FFIReverseContext): ptr ReverseInvocation {.raises: [].} =
   ## Blocks until a record is queued or `stopping` is set; nil means stop.
   withLock st.qLock:
     while st.qHead.isNil() and not st.stopping.load():
@@ -525,7 +525,7 @@ proc cancelInvocation*(rec: ptr ReverseInvocation): bool {.raises: [].} =
   return rec[].state.compareExchange(expected, ReverseCallState.Cancelled)
 
 proc runInvocation(
-    st: var FFIReverseState, me: ptr FFIReverseWorker, rec: ptr ReverseInvocation
+    st: var FFIReverseContext, me: ptr FFIReverseWorker, rec: ptr ReverseInvocation
 ) {.raises: [].} =
   ## Skips a stale, expired or cancelled record; releases the queue's reference either way.
   defer:
@@ -580,7 +580,7 @@ proc reverseWorkerBody(arg: ReverseWorkerArg) {.thread.} =
     st[].runInvocation(me, rec)
 
 proc stopReverseWorkers*(
-    st: var FFIReverseState, timeoutMs: int = ReverseWorkerJoinTimeoutMs
+    st: var FFIReverseContext, timeoutMs: int = ReverseWorkerJoinTimeoutMs
 ): ReverseStopResult {.nimcall, gcsafe, raises: [].} =
   ## Idempotent. The caller that claims the pool joins it within one `timeoutMs`; a
   ## worker still inside an impl then leaks. A concurrent second call returns empty.
@@ -624,7 +624,7 @@ proc stopReverseWorkers*(
   return ReverseStopResult(stopped: stopped, leaked: leaked)
 
 proc startReverseWorkers*(
-    st: var FFIReverseState, n: int = 0
+    st: var FFIReverseContext, n: int = 0
 ): bool {.raises: [], gcsafe.} =
   ## Idempotent: a running pool keeps its size. `n <= 0` starts `ReverseWorkersDefault`.
   let count = if n <= 0: ReverseWorkersDefault else: n
@@ -665,7 +665,7 @@ proc startReverseWorkers*(
   return true
 
 proc scanReverseWorkers*(
-    st: var FFIReverseState, stallNs: int64
+    st: var FFIReverseContext, stallNs: int64
 ): seq[ReverseWorkerTransition] {.raises: [], gcsafe.} =
   ## Event thread only: reports once each worker that just stalled or just recovered.
   var count = 0
@@ -692,7 +692,7 @@ proc scanReverseWorkers*(
       transitions.add(ReverseWorkerTransition(idx: i, blocked: false))
   return transitions
 
-var ffiCurrentReverseState* {.threadvar.}: ptr FFIReverseState
+var ffiCurrentReverseContext* {.threadvar.}: ptr FFIReverseContext
 
 type PendingReverse = object
   fut: Future[Result[seq[byte], string]]
@@ -706,7 +706,7 @@ proc ffiPendingReverseLen*(): int =
 
 proc drainReverseReplies*() {.gcsafe, raises: [].} =
   ## FFI thread only: completes parked futures; a reply with an unknown call id is dropped.
-  let st = ffiCurrentReverseState
+  let st = ffiCurrentReverseContext
   if st.isNil():
     return
 
@@ -758,7 +758,7 @@ proc ffiReverseCall*(
     name: string, argsCbor: seq[byte], timeoutMs: int
 ): Future[Result[seq[byte], string]] {.async.} =
   ## FFI thread only: queues the call for the workers and awaits the reply under `timeoutMs`.
-  let st = ffiCurrentReverseState
+  let st = ffiCurrentReverseContext
   if st.isNil():
     return err("reverse call " & name & " outside an FFI processing thread")
   if st[].closing.load():

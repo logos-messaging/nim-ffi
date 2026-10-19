@@ -11,7 +11,7 @@ proc nopImpl(
   discard
 
 type EchoBox = object
-  st: ptr FFIReverseState
+  st: ptr FFIReverseContext
 
 proc echoImpl(
     callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
@@ -273,10 +273,10 @@ suite "reply mailbox":
 
 suite "worker pool lifecycle":
   test "start is lazy, idempotent and explicit stop joins every worker":
-    var st: FFIReverseState
-    initReverseState(st)
+    var st: FFIReverseContext
+    initReverseContext(st)
     defer:
-      check deinitReverseState(st).isOk()
+      check deinitReverseContext(st).isOk()
 
     check not st.workersStarted()
     check st.startReverseWorkers(3)
@@ -294,23 +294,23 @@ suite "worker pool lifecycle":
   test "a stop right after the start does not strand a worker that has not run yet":
     # The claimed stop clears `workers`; each worker got its own slot at creation.
     for _ in 0 ..< 200:
-      var st: FFIReverseState
-      initReverseState(st)
+      var st: FFIReverseContext
+      initReverseContext(st)
       check st.startReverseWorkers(2)
       let stop = stopReverseWorkers(st)
       check stop.stopped == 2
       check stop.leaked == 0
-      check deinitReverseState(st).isOk()
+      check deinitReverseContext(st).isOk()
 
 template withReverseHarness(stIdent: untyped, workers: int, body: untyped) =
-  var stIdent: FFIReverseState
-  initReverseState(stIdent)
-  ffiCurrentReverseState = addr stIdent
+  var stIdent: FFIReverseContext
+  initReverseContext(stIdent)
+  ffiCurrentReverseContext = addr stIdent
   if workers > 0:
     check stIdent.startReverseWorkers(workers)
   defer:
-    ffiCurrentReverseState = nil
-    check deinitReverseState(stIdent).isOk()
+    ffiCurrentReverseContext = nil
+    check deinitReverseContext(stIdent).isOk()
   body
 
 suite "ffiReverseCall":
