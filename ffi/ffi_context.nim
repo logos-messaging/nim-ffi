@@ -94,7 +94,7 @@ type FFIContext*[T] = object
   eventThreadExitSignal: ThreadSignalPtr
   userData*: pointer
   eventRegistry*: FFIEventRegistry
-  reverse*: FFIReverseState
+  reverse*: FFIReverseContext
   handles*: FFIHandleRegistry
   eventQueue*: EventQueue
   outbound*: FFIOutbound
@@ -212,7 +212,7 @@ proc deinitContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   deinitRequestQueue(ctx[].reqQueueBank)
   when not defined(ffiPollMode):
     deinitEventRegistry(ctx[].eventRegistry)
-  let reverseRes = deinitReverseState(ctx[].reverse)
+  let reverseRes = deinitReverseContext(ctx[].reverse)
   deinitHandleRegistry(ctx[].handles)
   # A poller must not be inside the queue while it is freed, and must find it
   # gone rather than freed under it when it comes back.
@@ -286,7 +286,7 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   # FFI thread is the one that clears it.
   when not defined(ffiPollMode):
     initEventRegistry(ctx[].eventRegistry)
-  initReverseState(ctx[].reverse)
+  initReverseContext(ctx[].reverse)
   ctx[].reverse.installContextHooks(reverseWakeHook[T], reverseGenerationHook[T], ctx)
   initHandleRegistry(ctx[].handles)
 

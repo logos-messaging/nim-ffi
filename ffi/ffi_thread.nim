@@ -486,7 +486,7 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ffiCurrentEventRegistry = addr ctx[].eventRegistry
   ffiCurrentEventQueue = addr ctx[].eventQueue
   ffiCurrentEventQueueStuck = addr ctx[].eventQueueStuck
-  ffiCurrentReverseState = addr ctx[].reverse
+  ffiCurrentReverseContext = addr ctx[].reverse
   # A parked slot served again: the previous thread's shutdown left it closing.
   ctx[].reverse.closing.store(false)
   ffiEventQueueSignalPtr = ctx.eventQueueSignal
