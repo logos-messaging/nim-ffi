@@ -95,7 +95,7 @@ proc countVictimRelease(userData: pointer) {.cdecl, gcsafe, raises: [].} =
     victimReleased.atomicInc()
 
 type UnregBox = object
-  st: ptr FFIReverseState
+  st: ptr FFIReverseContext
   gate: ptr GateBox
   victimInsideAtReturn: Atomic[int] # -1 until set_impl returned
   releasedAtReturn: Atomic[int] # -1 until set_impl returned
@@ -113,7 +113,7 @@ proc unregImpl(
   b[].done.store(true)
 
 type TwiceBox = object
-  st: ptr FFIReverseState
+  st: ptr FFIReverseContext
 
 proc replyTwiceImpl(
     callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
@@ -124,7 +124,7 @@ proc replyTwiceImpl(
   discard b[].st[].pushReply(callId, RET_OK, addr first[0], 1)
   discard b[].st[].pushReply(callId, RET_OK, addr second[0], 1)
 
-var raceSt: FFIReverseState
+var raceSt: FFIReverseContext
 var raceGate: GateBox
 var raceStopped: Atomic[int]
 
@@ -135,13 +135,13 @@ proc concurrentStop(timeoutMs: int) {.thread.} =
 
 proc concurrentStopProbe(): int =
   ## Two stops race over two wedged workers that are then released together.
-  initReverseState(raceSt)
+  initReverseContext(raceSt)
   initGate(raceGate)
   if not raceSt.startReverseWorkers(2):
     return 2
   if raceSt.registerImpl("gate", gateImpl, addr raceGate).isErr():
     return 4
-  ffiCurrentReverseState = addr raceSt
+  ffiCurrentReverseContext = addr raceSt
   let a = ffiReverseCall("gate", @[], 60_000)
   let b = ffiReverseCall("gate", @[], 60_000)
   raceGate.waitEntered(2)
@@ -163,14 +163,14 @@ if getEnv(ChildEnv) == "concurrent_stop":
   quit(concurrentStopProbe())
 
 template withReverseHarness(stIdent: untyped, workers: int, body: untyped) =
-  var stIdent: FFIReverseState
-  initReverseState(stIdent)
-  ffiCurrentReverseState = addr stIdent
+  var stIdent: FFIReverseContext
+  initReverseContext(stIdent)
+  ffiCurrentReverseContext = addr stIdent
   if workers > 0:
     check stIdent.startReverseWorkers(workers)
   defer:
-    ffiCurrentReverseState = nil
-    check deinitReverseState(stIdent).isOk()
+    ffiCurrentReverseContext = nil
+    check deinitReverseContext(stIdent).isOk()
   body
 
 proc pumpUntil(fut: FutureBase, ms: int) =
@@ -287,7 +287,7 @@ suite "F2: recycle vs a reverse call started mid-drain":
 
 ## F4 leaks its states on purpose (wedged workers), so they live at module level.
 
-var stopSt: FFIReverseState
+var stopSt: FFIReverseContext
 var stopGate: GateBox
 
 suite "F4: worker stop":
@@ -295,13 +295,13 @@ suite "F4: worker stop":
     "F4: worker stop",
     "stop honours one deadline for the whole pool, not one per worker",
   ):
-    initReverseState(stopSt)
+    initReverseContext(stopSt)
     initGate(stopGate)
     check stopSt.startReverseWorkers(2)
     check stopSt.registerImpl("gate", gateImpl, addr stopGate).isOk()
-    ffiCurrentReverseState = addr stopSt
+    ffiCurrentReverseContext = addr stopSt
     defer:
-      ffiCurrentReverseState = nil
+      ffiCurrentReverseContext = nil
     let a = ffiReverseCall("gate", @[], 60_000)
     let b = ffiReverseCall("gate", @[], 60_000)
     stopGate.waitEntered(2)

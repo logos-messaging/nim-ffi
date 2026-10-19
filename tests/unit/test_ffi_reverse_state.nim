@@ -239,12 +239,12 @@ suite "impl ownership (release callback)":
     check st.registerImpl("one-too-many", nopImpl, nil).isOk()
 
   test "an impl replacing itself on a worker is released after it returns":
-    var st: FFIReverseState
-    initReverseState(st)
-    ffiCurrentReverseState = addr st
+    var st: FFIReverseContext
+    initReverseContext(st)
+    ffiCurrentReverseContext = addr st
     defer:
-      ffiCurrentReverseState = nil
-      check deinitReverseState(st).isOk()
+      ffiCurrentReverseContext = nil
+      check deinitReverseContext(st).isOk()
     var box = ReleaseBox(st: addr st)
     box.releasedInside.store(-1)
     check st.registerImpl("self", selfReplaceImpl, addr box, countRelease).isOk()
@@ -333,7 +333,7 @@ proc initGate(g: var GateBox) =
   g.cond.initCond()
 
 # Shared with a stopping thread, so module level.
-var claimSt: FFIReverseState
+var claimSt: FFIReverseContext
 var claimGate: GateBox
 var claimStopped: Atomic[int]
 
@@ -373,13 +373,13 @@ suite "worker pool lifecycle":
       check deinitReverseContext(st).isOk()
 
   test "a start while a stop is joining the pool is refused":
-    initReverseState(claimSt)
+    initReverseContext(claimSt)
     initGate(claimGate)
     check claimSt.startReverseWorkers(1)
     check claimSt.registerImpl("gate", gateImpl, addr claimGate).isOk()
-    ffiCurrentReverseState = addr claimSt
+    ffiCurrentReverseContext = addr claimSt
     defer:
-      ffiCurrentReverseState = nil
+      ffiCurrentReverseContext = nil
     let blocker = ffiReverseCall("gate", @[], 60_000)
     claimGate.waitEntered(1)
 
@@ -393,23 +393,23 @@ suite "worker pool lifecycle":
     check claimSt.startReverseWorkers(1) # the stop finished: a fresh pool may start
     failPendingReverse("done")
     discard waitFor blocker
-    check deinitReverseState(claimSt).isOk()
+    check deinitReverseContext(claimSt).isOk()
 
   leakingTest(
     "worker pool lifecycle",
     "a worker blocked in a host impl is leaked at stop, not joined",
   ):
-    var st: FFIReverseState
-    initReverseState(st)
+    var st: FFIReverseContext
+    initReverseContext(st)
     var g: GateBox
     g.lock.initLock()
     g.cond.initCond()
     # Exactly one worker, or `registerImpl` starts the default count.
     check st.startReverseWorkers(1)
     check st.registerImpl("gate", gateImpl, addr g).isOk()
-    ffiCurrentReverseState = addr st
+    ffiCurrentReverseContext = addr st
     defer:
-      ffiCurrentReverseState = nil
+      ffiCurrentReverseContext = nil
 
     let callFut = ffiReverseCall("gate", @[], 60_000)
     g.waitEntered(1)
