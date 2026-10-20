@@ -115,7 +115,11 @@ type TokenBox = object
   token: FFICtxToken
 
 proc fetchConfigImpl(
-    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
+    ctx: pointer,
+    callId: uint64,
+    args: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   # Nim code that touches the pool global is not gcsafe; a C host has no such check.
   {.cast(gcsafe).}:
@@ -141,17 +145,25 @@ proc fetchConfigImpl(
     )
 
 proc ackNoteImpl(
-    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
+    ctx: pointer,
+    callId: uint64,
+    args: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
+  # Replies with the token it is handed, not one the host kept.
   {.cast(gcsafe).}:
-    let box = cast[ptr TokenBox](userData)
-    discard revmacro_reverse_reply(box[].token, callId, RET_OK, nil, 0)
+    discard revmacro_reverse_reply(FFICtxToken(ctx), callId, RET_OK, nil, 0)
 
 proc countRelease(userData: pointer) {.cdecl, gcsafe, raises: [].} =
   cast[ptr Atomic[int]](userData)[].atomicInc()
 
 proc silentImpl(
-    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
+    ctx: pointer,
+    callId: uint64,
+    args: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   discard
 
@@ -174,9 +186,7 @@ suite "{.ffiReverse.} through the generated exports":
   test "void-reply call under a custom wire name":
     setupCallbackData(rsp)
     withLibCtx(ctx, token):
-      var box = TokenBox(token: token)
-      check revmacro_set_host_note_impl(token, ackNoteImpl, addr box, nil) ==
-        REVERSE_ACCEPTED
+      check revmacro_set_host_note_impl(token, ackNoteImpl, nil, nil) == REVERSE_ACCEPTED
 
       check sendRequestToFFIThread(
         ctx, DriveNotifyRequest.ffiNewReq(captureCb, addr rsp)
