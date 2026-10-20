@@ -33,7 +33,11 @@ type CountBox = object
   invoked: Atomic[int]
 
 proc countImpl(
-    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
+    ctx: pointer,
+    callId: uint64,
+    args: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   cast[ptr CountBox](userData)[].invoked.atomicInc()
 
@@ -64,7 +68,11 @@ type ArgsAfterTimeoutBox = object
   argsIntact: Atomic[bool]
 
 proc argsAfterTimeoutImpl(
-    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
+    ctx: pointer,
+    callId: uint64,
+    args: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   ## Outlives the caller's deadline, then reads its args: the worker's reference keeps them.
   let box = cast[ptr ArgsAfterTimeoutBox](userData)
@@ -173,7 +181,11 @@ proc inFlightRelease(userData: pointer) {.cdecl, gcsafe, raises: [].} =
   p[].seen.store(p[].st[].inFlight())
 
 proc selfReplaceImpl(
-    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
+    ctx: pointer,
+    callId: uint64,
+    args: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   ## Replaces its own entry, then reads whether its userData was already released.
   let b = cast[ptr ReleaseBox](userData)
