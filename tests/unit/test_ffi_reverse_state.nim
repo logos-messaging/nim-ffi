@@ -77,6 +77,26 @@ proc tokenImpl(
   box[].seen.store(ctx)
   discard box[].st[].pushReply(callId, RET_OK, nil, 0)
 
+type StopOtherBox = object
+  st: ptr FFIReverseContext
+  other: ptr FFIReverseContext
+  stopped: int
+  leaked: int
+
+proc stopOtherImpl(
+    ctx: pointer,
+    callId: uint64,
+    args: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
+) {.cdecl, gcsafe, raises: [].} =
+  ## Tears down another context's pool from this context's worker.
+  let box = cast[ptr StopOtherBox](userData)
+  let stop = stopReverseWorkers(box[].other[])
+  box[].stopped = stop.stopped
+  box[].leaked = stop.leaked
+  discard box[].st[].pushReply(callId, RET_OK, nil, 0)
+
 suite "FFIReverseContext registry":
   test "set, has, replace and unregister":
     var st: FFIReverseContext
@@ -442,6 +462,24 @@ suite "ffiReverseCall":
         waitFor sleepAsync(chronos.milliseconds(1))
       check (waitFor callFut).isOk()
       check box.seen.load() == cast[pointer](0xC0FFEE)
+
+  test "an impl stopping another context's pool joins all of its workers":
+    # Worker 1 of A must not mistake B's worker 0 for itself.
+    var b: FFIReverseContext
+    initReverseContext(b)
+    check b.startReverseWorkers(1)
+    withReverseHarness(st, 1):
+      var box = StopOtherBox(st: addr st, other: addr b)
+      check st.registerImpl("stop_other", stopOtherImpl, addr box).isOk()
+      let callFut = ffiReverseCall("stop_other", @[], 5000)
+      while not callFut.finished():
+        drainReverseReplies()
+        waitFor sleepAsync(chronos.milliseconds(1))
+      check (waitFor callFut).isOk()
+      check box.stopped == 1
+      check box.leaked == 0
+    check b.leakedWorkers == 0
+    check deinitReverseContext(b).isOk()
 
   test "a worker reads idle by the time inFlight drops to 0":
     withReverseHarness(st, 1):

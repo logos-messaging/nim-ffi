@@ -622,7 +622,7 @@ proc stopReverseWorkers*(
   let deadline = nowNs() + int64(max(timeoutMs, 0)) * 1_000_000'i64
   for i in 0 ..< count:
     let w = addr workers[i]
-    if onReverseWorker and myWorkerIdx == i + 1:
+    if st.onOwnReverseWorker() and myWorkerIdx == i + 1:
       # A host impl called a teardown export on this worker: a self-join would hang.
       leaked.inc()
       continue
