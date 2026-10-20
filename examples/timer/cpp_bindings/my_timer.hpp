@@ -917,7 +917,7 @@ uint64_t my_timer_add_event_listener(void* ctx, const char* event_name, FFICallb
 int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
 
 // Reverse FFI: host-implemented interfaces + host-emitted events
-typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args, size_t args_len, void* user_data);
+typedef void (*FFIReverseImpl)(void* ctx, uint64_t call_id, const uint8_t* args, size_t args_len, void* user_data);
 typedef void (*FFIReverseRelease)(void* user_data);
 #ifndef NIMFFI_REVERSE_ACCEPTED
 #define NIMFFI_REVERSE_ACCEPTED 0
@@ -1129,7 +1129,7 @@ public:
     // `fn` runs on a reverse worker. Its arguments are borrowed: valid only until
     // `fn` returns, so a deferred reply must copy what it needs.
     bool setFetchHostClockImpl(std::function<void(FetchHostClockCall, const std::string&)> fn) {
-        auto* raw = new FetchHostClockImplBox{ptr_, std::move(fn)};
+        auto* raw = new FetchHostClockImplBox{std::move(fn)};
         // The library owns the box now: it deletes it once no invocation runs it.
         if (my_timer_set_fetch_host_clock_impl(ptr_, &MyTimerCtx::fetchHostClockImplTrampoline, raw, &MyTimerCtx::fetchHostClockImplRelease) != 0) {
             delete raw; // refused: still ours
@@ -1309,16 +1309,15 @@ private:
     }
 
     struct FetchHostClockImplBox {
-        void* ctx = nullptr;
         std::function<void(FetchHostClockCall, const std::string&)> fn;
     };
     static void fetchHostClockImplRelease(void* ud) {
         delete static_cast<FetchHostClockImplBox*>(ud);
     }
     // noexcept: an exception must not unwind into the library's worker thread.
-    static void fetchHostClockImplTrampoline(std::uint64_t call_id, const std::uint8_t* args, std::size_t len, void* ud) noexcept {
+    static void fetchHostClockImplTrampoline(void* ctx, std::uint64_t call_id, const std::uint8_t* args, std::size_t len, void* ud) noexcept {
         auto* box = static_cast<FetchHostClockImplBox*>(ud);
-        FetchHostClockCall call{box->ctx, call_id};
+        FetchHostClockCall call{ctx, call_id}; // the calling owner's token, not one captured at set time
         try {
             if (!box->fn) { call.failRaw("no C++ impl callable"); return; }
             std::string a{};
