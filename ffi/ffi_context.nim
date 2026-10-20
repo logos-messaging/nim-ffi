@@ -155,6 +155,10 @@ proc reverseWakeHook[T](ud: pointer) {.nimcall, gcsafe, raises: [].} =
 proc reverseGenerationHook[T](ud: pointer): uint {.nimcall, gcsafe, raises: [].} =
   return cast[ptr FFIContext[T]](ud).generation.load()
 
+proc reverseTokenHook[T](ud: pointer): pointer {.nimcall, gcsafe, raises: [].} =
+  ## FFI thread: the token of the owner the thread now serves, handed to a reverse impl.
+  return pointer(cast[ptr FFIContext[T]](ud).token)
+
 proc unregisterWaitedSignal(signal: ThreadSignalPtr) =
   ## `wait` leaves the signal's fd registered in this thread's dispatcher, and
   ## `closeThreadDispatcher` refuses to close a dispatcher that still has one.
@@ -287,7 +291,9 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   when not defined(ffiPollMode):
     initEventRegistry(ctx[].eventRegistry)
   initReverseContext(ctx[].reverse)
-  ctx[].reverse.installContextHooks(reverseWakeHook[T], reverseGenerationHook[T], ctx)
+  ctx[].reverse.installContextHooks(
+    reverseWakeHook[T], reverseGenerationHook[T], ctx, reverseTokenHook[T]
+  )
   initHandleRegistry(ctx[].handles)
 
   # Armed before the first step that can fail, so every early return cleans up.
