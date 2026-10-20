@@ -26,8 +26,10 @@ proc notifyHost(
   note: string
 ): Future[Result[void, string]] {.ffiReverse("host_note", timeout = 300).}
 
+proc pingHost(): Future[Result[void, string]] {.ffiReverse.}
+
 static:
-  doAssert ffiReverseRegistry.len == 2
+  doAssert ffiReverseRegistry.len == 3
   doAssert ffiReverseRegistry[0].wireName == "fetch_config"
   doAssert ffiReverseRegistry[0].argsTypeName == "FetchConfigArgs"
   doAssert ffiReverseRegistry[0].replyTypeName == "RevConfig"
@@ -37,6 +39,8 @@ static:
   doAssert ffiReverseRegistry[1].wireName == "host_note"
   doAssert ffiReverseRegistry[1].replyTypeName == ""
   doAssert ffiReverseRegistry[1].timeoutMs == 300
+  doAssert ffiReverseRegistry[2].wireName == "ping_host"
+  doAssert ffiReverseRegistry[2].argsTypeName == ""
 
 registerReqFFI(DriveFetchRequest, h: ptr FFIContext[RevMacroLib]):
   proc(): Future[Result[string, string]] {.async.} =
@@ -155,6 +159,25 @@ proc ackNoteImpl(
   {.cast(gcsafe).}:
     discard revmacro_reverse_reply(FFICtxToken(ctx), callId, RET_OK, nil, 0)
 
+var gPingArgs: array[2, Atomic[int]] # argsLen, first byte
+
+proc pingImpl(
+    ctx: pointer,
+    callId: uint64,
+    args: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
+) {.cdecl, gcsafe, raises: [].} =
+  {.cast(gcsafe).}:
+    gPingArgs[0].store(int(argsLen))
+    gPingArgs[1].store(
+      if argsLen > 0:
+        int(args[0])
+      else:
+        -1
+    )
+    discard revmacro_reverse_reply(FFICtxToken(ctx), callId, RET_OK, nil, 0)
+
 proc countRelease(userData: pointer) {.cdecl, gcsafe, raises: [].} =
   cast[ptr Atomic[int]](userData)[].atomicInc()
 
@@ -166,6 +189,12 @@ proc silentImpl(
     userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   discard
+
+registerReqFFI(DrivePingRequest, h: ptr FFIContext[RevMacroLib]):
+  proc(): Future[Result[string, string]] {.async.} =
+    (await pingHost()).isOkOr:
+      return err(error)
+    return ok("pinged")
 
 suite "{.ffiReverse.} through the generated exports":
   test "multi-param call: synthesized args object and typed reply roundtrip":
@@ -195,6 +224,17 @@ suite "{.ffiReverse.} through the generated exports":
       waitCallback(rsp)
       check rsp.retCode == RET_OK
       check "notified" in callbackMsg(rsp)
+
+  test "a parameterless call sends an empty CBOR map":
+    setupCallbackData(rsp)
+    withLibCtx(ctx, token):
+      check revmacro_set_ping_host_impl(token, pingImpl, nil, nil) == REVERSE_ACCEPTED
+      check sendRequestToFFIThread(ctx, DrivePingRequest.ffiNewReq(captureCb, addr rsp))
+        .isOk()
+      waitCallback(rsp)
+      check rsp.retCode == RET_OK
+      check gPingArgs[0].load() == 1
+      check gPingArgs[1].load() == 0xa0
 
   test "pragma-level timeout override fires":
     setupCallbackData(rsp)
