@@ -1012,10 +1012,13 @@ int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
 #define NIMFFI_REVERSE_INVALID_ARGUMENT 6
 #define NIMFFI_REVERSE_OUT_OF_MEMORY 7
 #define NIMFFI_REVERSE_REGISTRY_FULL 8
-/* Runs on a reverse worker thread and may block. args is valid only until
-   the impl returns: copy what a deferred reply needs. Answer, now or later
-   and from any thread, via <lib>_reverse_reply. */
-typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args, size_t args_len, void* user_data);
+/* Runs on a reverse worker thread and may block. ctx is the token of the
+   context that made the call: answer with it, now or later and from any
+   thread, via <lib>_reverse_reply or <lib>_reverse_reply_<wire>; it stays
+   safe to use after the context is destroyed (the reply then fails with
+   _INVALID_CTX). args is valid only until the impl returns: copy what a
+   deferred reply needs. */
+typedef void (*FFIReverseImpl)(void* ctx, uint64_t call_id, const uint8_t* args, size_t args_len, void* user_data);
 /* Frees an impl's user_data once no invocation uses it. It runs on whichever
    thread drops the last reference (a reverse worker, the set_impl caller or
    the library's own thread at teardown), so it must be thread-safe. */
@@ -1278,8 +1281,12 @@ static inline bool my_timer_ctx_remove_event_listener(MyTimerCtx* ctx, uint64_t 
 }
 
 /* Reverse FFI helpers (typed sugar over the raw exports above) */
+static inline int my_timer_reverse_reply_err(void* ctx, uint64_t call_id, const char* msg) {
+    return my_timer_reverse_reply(ctx, call_id, 1, (const uint8_t*)msg, msg ? strlen(msg) : 0);
+}
+/* Only while ctx is alive: a deferred reply uses the impl's ctx token. */
 static inline int my_timer_ctx_reverse_reply_err(const MyTimerCtx* ctx, uint64_t call_id, const char* msg) {
-    return my_timer_reverse_reply(ctx->ptr, call_id, 1, (const uint8_t*)msg, msg ? strlen(msg) : 0);
+    return my_timer_reverse_reply_err(ctx->ptr, call_id, msg);
 }
 
 /** Asks the host for its wall clock; fails when no host implementation answers. */
@@ -1291,7 +1298,7 @@ static inline int my_timer_decode_fetch_host_clock_args(const uint8_t* args_cbor
     memset(out, 0, sizeof(*out));
     return nimffi_decode_from_buf(my_timer_decv_Str, args_cbor, args_len, out, err);
 }
-static inline int my_timer_ctx_reverse_reply_fetch_host_clock(const MyTimerCtx* ctx, uint64_t call_id, const HostClock* reply) {
+static inline int my_timer_reverse_reply_fetch_host_clock(void* ctx, uint64_t call_id, const HostClock* reply) {
     uint8_t* buf = NULL;
     size_t len = 0;
     char* err = NULL;
@@ -1299,9 +1306,13 @@ static inline int my_timer_ctx_reverse_reply_fetch_host_clock(const MyTimerCtx* 
         free(err);
         return -1;
     }
-    int rc = my_timer_reverse_reply(ctx->ptr, call_id, 0, buf, len);
+    int rc = my_timer_reverse_reply(ctx, call_id, 0, buf, len);
     free(buf);
     return rc;
+}
+/* Only while ctx is alive: a deferred reply uses the impl's ctx token. */
+static inline int my_timer_ctx_reverse_reply_fetch_host_clock(const MyTimerCtx* ctx, uint64_t call_id, const HostClock* reply) {
+    return my_timer_reverse_reply_fetch_host_clock(ctx->ptr, call_id, reply);
 }
 
 /** Records the tick number that the host emits. */

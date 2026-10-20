@@ -318,7 +318,9 @@ proc onHostTick(tickNo: int) {.ffiReverseEvent.} =
 
 An `{.ffi.}` handler awaits `fetchHostClock(...)` like any async proc. The call
 goes to the per-context reverse worker threads, which call the host
-implementation with `(call_id, args, len, user_data)`. `args` is
+implementation with `(ctx, call_id, args, len, user_data)`; host code never runs
+on the FFI thread, so an implementation cannot stall it. `ctx` is the token of
+the context that made the call. `args` is
 valid only until the implementation returns. The implementation may block its
 worker. The host answers, now or later and from any thread, through
 `<lib>_reverse_reply`; the first reply for a call id wins. Workers start on the
@@ -328,6 +330,8 @@ until it returns or their deadlines fire. At most `-d:ffiReverseQueueDepth`
 calls (default 1024) wait for a worker; one more fails at once.
 
 ```c
+typedef void (*FFIReverseImpl)(void* ctx, uint64_t call_id, const uint8_t* args,
+                               size_t args_len, void* user_data);
 typedef void (*FFIReverseRelease)(void* user_data);
 int <lib>_set_<wire>_impl(void* ctx, FFIReverseImpl impl, void* user_data,
                           FFIReverseRelease release);   /* impl == NULL unregisters */
@@ -345,8 +349,12 @@ it, so keep `user_data` valid until the context is destroyed. If `set_impl` fail
 the caller still owns `user_data`. The status codes are `NIMFFI_REVERSE_*` in C.
 
 The C header adds typed helpers: `<lib>_ctx_set_<wire>_impl`,
-`<lib>_decode_<wire>_args`, `<lib>_ctx_reverse_reply_<wire>`,
-`<lib>_ctx_reverse_reply_err` and `<lib>_ctx_emit_<wire>`.
+`<lib>_decode_<wire>_args`, `<lib>_reverse_reply_<wire>`,
+`<lib>_reverse_reply_err` and `<lib>_ctx_emit_<wire>`. The reply helpers take
+the `ctx` token the implementation is handed, so a reply deferred past the
+context's destroy fails with `NIMFFI_REVERSE_INVALID_CTX` instead of reading a
+freed `<Ctx>` wrapper. The `<lib>_ctx_reverse_reply_*` variants take the
+wrapper and are safe only while it is alive.
 | Situation | Behavior |
 | --- | --- |
 | No implementation registered | The call fails at once. |

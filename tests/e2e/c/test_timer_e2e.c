@@ -222,21 +222,39 @@ static void test_event(MyTimerCtx* ctx) {
     assert(my_timer_ctx_remove_event_listener(ctx, handle) == true);
 }
 
-/* Runs on a reverse worker: decodes the typed args and answers inline. */
-static void host_clock_impl(uint64_t call_id, const uint8_t* args, size_t len,
-                            void* ud) {
-    MyTimerCtx* ctx = (MyTimerCtx*)ud;
+/* Runs on a reverse worker: decodes the typed args and answers inline with
+   the ctx token it is handed. */
+static void host_clock_impl(void* ctx, uint64_t call_id, const uint8_t* args,
+                            size_t len, void* ud) {
+    (void)ud;
     const char* precision = NULL;
     char* err = NULL;
     if (my_timer_decode_fetch_host_clock_args(args, len, &precision, &err) != 0) {
-        my_timer_ctx_reverse_reply_err(ctx, call_id, err ? err : "args decode failed");
+        my_timer_reverse_reply_err(ctx, call_id, err ? err : "args decode failed");
         free(err);
         return;
     }
     assert(precision && strcmp(precision, "ms") == 0);
     free((void*)precision);
     HostClock clock = {1700000123456LL, "UTC"};
-    assert(my_timer_ctx_reverse_reply_fetch_host_clock(ctx, call_id, &clock) == 0);
+    int rc = my_timer_reverse_reply_fetch_host_clock(ctx, call_id, &clock);
+    assert(rc == NIMFFI_REVERSE_ACCEPTED);
+    (void)rc;
+}
+
+/* Keeps the call to answer it later, the way a deferred host does. */
+static void* g_deferred_ctx = NULL;
+static uint64_t g_deferred_call = 0;
+static atomic_int g_deferred_ready = 0;
+
+static void deferring_impl(void* ctx, uint64_t call_id, const uint8_t* args,
+                           size_t len, void* ud) {
+    (void)args;
+    (void)len;
+    (void)ud;
+    g_deferred_ctx = ctx;
+    g_deferred_call = call_id;
+    atomic_store_explicit(&g_deferred_ready, 1, memory_order_release);
 }
 
 static void test_reverse_missing_impl(MyTimerCtx* ctx) {
@@ -249,7 +267,7 @@ static void test_reverse_missing_impl(MyTimerCtx* ctx) {
 }
 
 static void test_reverse_host_clock(MyTimerCtx* ctx) {
-    assert(my_timer_ctx_set_fetch_host_clock_impl(ctx, host_clock_impl, ctx, NULL) == 0);
+    assert(my_timer_ctx_set_fetch_host_clock_impl(ctx, host_clock_impl, NULL, NULL) == 0);
 
     ReplyWaiter w;
     memset(&w, 0, sizeof(w));
@@ -294,6 +312,23 @@ static void test_reverse_event(MyTimerCtx* ctx) {
     assert(seen == 42);
 }
 
+/* A reply deferred past the context's destroy uses the impl's token, which the
+   destroy invalidated; the freed MyTimerCtx is never read. */
+static void test_reverse_reply_after_destroy(void) {
+    MyTimerCtx* ctx = make_ctx();
+    assert(my_timer_ctx_set_fetch_host_clock_impl(ctx, deferring_impl, NULL, NULL) == 0);
+    ReplyWaiter w;
+    memset(&w, 0, sizeof(w));
+    my_timer_ctx_host_clock(ctx, on_str, &w);
+    wait_done(&g_deferred_ready);
+    assert(my_timer_ctx_destroy(ctx) == NIMFFI_RET_OK);
+    wait_done(&w.done); /* the destroy failed the parked call */
+    assert(w.err_code != 0);
+    HostClock clock = {1, "late"};
+    assert(my_timer_reverse_reply_fetch_host_clock(g_deferred_ctx, g_deferred_call, &clock) ==
+           NIMFFI_REVERSE_INVALID_CTX);
+}
+
 int main(void) {
     MyTimerCtx* ctx = make_ctx();
     test_version(ctx);
@@ -307,6 +342,7 @@ int main(void) {
     test_reverse_host_clock(ctx);
     test_reverse_event(ctx);
     assert(my_timer_ctx_destroy(ctx) == NIMFFI_RET_OK);
+    test_reverse_reply_after_destroy();
     printf("all C e2e checks passed\n");
     return 0;
 }

@@ -2,10 +2,13 @@
 #define NIM_FFI_REVERSE_IMPL_DEFINED
 /* Status of <lib>_set_<wire>_impl and <lib>_reverse_reply. */
 {{REVERSE_CODES}}
-/* Runs on a reverse worker thread and may block. args is valid only until
-   the impl returns: copy what a deferred reply needs. Answer, now or later
-   and from any thread, via <lib>_reverse_reply. */
-typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args, size_t args_len, void* user_data);
+/* Runs on a reverse worker thread and may block. ctx is the token of the
+   context that made the call: answer with it, now or later and from any
+   thread, via <lib>_reverse_reply or <lib>_reverse_reply_<wire>; it stays
+   safe to use after the context is destroyed (the reply then fails with
+   _INVALID_CTX). args is valid only until the impl returns: copy what a
+   deferred reply needs. */
+typedef void (*FFIReverseImpl)(void* ctx, uint64_t call_id, const uint8_t* args, size_t args_len, void* user_data);
 /* Frees an impl's user_data once no invocation uses it. It runs on whichever
    thread drops the last reference (a reverse worker, the set_impl caller or
    the library's own thread at teardown), so it must be thread-safe. */
