@@ -42,9 +42,14 @@ proc ffiNoopCallback*(
   discard
 
 type FFIReverseImpl* = proc(
-  callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
+  ctx: pointer,
+  callId: uint64,
+  args: ptr UncheckedArray[byte],
+  argsLen: csize_t,
+  userData: pointer,
 ) {.cdecl, gcsafe, raises: [].}
   ## Runs on a reverse worker and may block; answers through `<lib>_reverse_reply`.
+  ## `ctx` is the token of the owner that made the call: reply with it, from any thread.
 
 type FFIReverseRelease* = proc(userData: pointer) {.cdecl, gcsafe, raises: [].}
   ## Frees an impl's `userData`. Runs on whichever thread drops the last
