@@ -100,7 +100,8 @@ type FFIContext*[T] = object
   staleWarnInterval*: Duration
 
 var onFFIThread* {.threadvar.}: bool
-var onEventThread* {.threadvar.}: bool
+var servedCtx* {.threadvar.}: pointer
+  ## On a ctx's FFI thread and event thread, that ctx; nil on every other thread.
 
 const RecycleTimeoutMs* {.intdefine: "ffiRecycleTimeoutMs".} = 1500
   ## Bounds one drain round of the recycle handler. The handler runs at most two

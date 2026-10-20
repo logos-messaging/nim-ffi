@@ -230,6 +230,12 @@ overruns its teardown will exhaust the pool. `FFIContextPool.quarantinedSlots()`
 reports the count from Nim, every quarantine is logged at `error`, and so is the
 pool-exhausted error once any slot has been quarantined.
 
+A callback must not destroy its own context: a result callback runs on the FFI
+thread and a listener on the event thread, and the recycle waits for both.
+`<lib>_ctx_destroy` from such a callback returns `RET_ERR` at once and leaves the
+context live, so destroy it later from a host thread. A callback may destroy a
+different context.
+
 ### Process exit
 
 `<lib>_ctx_destroy` recycles: the slot's FFI and event thread pair stays up for

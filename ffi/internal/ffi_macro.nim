@@ -1692,7 +1692,9 @@ macro ffiDtor*(args: varargs[untyped]): untyped =
   ## the recycle and the shutdown path. The wrapper blocks its caller until the
   ## body finishes, up to `RecycleWaitTimeout` (15 s by default). Keep the body
   ## cancellable: one that ignores `TeardownTimeout` holds the recycle. RET_ERR
-  ## on null/invalid ctx. `{.ffi.}` reaches the same path from the shape alone.
+  ## on null/invalid ctx, and at once from a callback of the same ctx: a callback
+  ## must not destroy its own context. `{.ffi.}` reaches the same path from the
+  ## shape alone.
   requireBeforeGenBindings("`.ffiDtor.`")
   requireLibraryDeclared("`.ffiDtor.`")
   let prc = args[^1]
