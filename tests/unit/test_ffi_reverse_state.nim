@@ -442,3 +442,18 @@ suite "ffiReverseCall":
         waitFor sleepAsync(chronos.milliseconds(1))
       check (waitFor callFut).isOk()
       check box.seen.load() == cast[pointer](0xC0FFEE)
+
+  test "a worker reads idle by the time inFlight drops to 0":
+    withReverseHarness(st, 1):
+      var box = EchoBox(st: addr st)
+      check st.registerImpl("echo", echoImpl, addr box).isOk()
+      for _ in 0 ..< 200:
+        let callFut = ffiReverseCall("echo", @[byte 1], 2000)
+        while not callFut.finished():
+          drainReverseReplies()
+          waitFor sleepAsync(chronos.milliseconds(0))
+        check (waitFor callFut).isOk()
+        while st.inFlight() > 0:
+          sleep(0)
+        # A stall threshold of 0 flags any worker still marked busy.
+        check st.scanReverseWorkers(0).len == 0

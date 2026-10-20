@@ -559,11 +559,14 @@ proc runInvocation(
 
   me[].currentCall.store(rec[].callId)
   me[].busySinceNs.store(nowNs())
+  let entry = st.beginReverseDispatch(rec[].name)
+  # One defer, idle first: once `inFlight()` reads 0, the worker already reads idle.
   defer:
     me[].busySinceNs.store(0'i64)
     me[].currentCall.store(0'u64)
+    if not entry.isNil():
+      st.endReverseDispatch(entry)
 
-  let entry = st.beginReverseDispatch(rec[].name)
   if entry.isNil():
     let msg =
       "host implementation for " & $rec[].name & " was unregistered before dispatch"
@@ -571,8 +574,6 @@ proc runInvocation(
       st.pushReply(rec[].callId, RET_ERR, cast[pointer](unsafeAddr msg[0]), msg.len)
     return
 
-  defer:
-    st.endReverseDispatch(entry)
   foreignThreadGc:
     entry[].fn(
       rec[].token, rec[].callId, rec[].args, csize_t(rec[].argsLen), entry[].userData
