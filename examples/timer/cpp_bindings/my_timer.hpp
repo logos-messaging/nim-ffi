@@ -832,8 +832,7 @@ uint64_t my_timer_add_event_listener(void* ctx, const char* event_name, FFICallb
  * A call from another thread returns after the last delivery to that listener,
  * so its user data is then safe to free.
  * A call from inside a listener callback returns at once, and the dispatch in
- * flight can still deliver to a listener that you remove that way. Keep the user
- * data of that listener alive until the dispatch ends.
+ * flight then skips the listener that you removed.
  */
 int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
 /**
@@ -995,9 +994,6 @@ public:
     }
 
     /// Unregister a listener and release the box that holds the handler.
-    /// Call it from inside a listener callback only for the listener that runs.
-    /// A remove of a different listener releases a box that the dispatch in flight can
-    /// still call.
     bool removeEventListener(ListenerHandle handle) {
         if (handle.id == 0) return false;
         const auto rc = my_timer_remove_event_listener(ptr_, handle.id);

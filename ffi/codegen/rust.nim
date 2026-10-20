@@ -703,7 +703,6 @@ proc generateApiRs*(
     # Remove by handle; drops the Box after the C ABI confirms unregistration.
     lines.add("    /// Remove a previously-registered listener by handle. Returns true")
     lines.add("    /// if the listener existed and was removed; false otherwise.")
-    lines.add(renderMemberDocComment(RemoveListenerBoxDoc))
     lines.add(
       "    pub fn remove_event_listener(&self, handle: ListenerHandle) -> bool {"
     )

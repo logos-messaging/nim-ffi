@@ -98,7 +98,7 @@ proc addEventListener*(
   assigned
 
 proc removeEventListener*(reg: var FFIEventRegistry, id: uint64): bool {.raises: [].} =
-  ## Waits an in-flight delivery out, except for a caller inside a dispatch: that one returns first, so the `userData` it drops must outlive the dispatch.
+  ## Waits an in-flight delivery out, except from inside a dispatch, which then skips the removed listener.
   if id == 0'u64:
     return false
 
@@ -380,10 +380,23 @@ proc clearEventQueue*(q: var EventQueue) {.raises: [], gcsafe.} =
     q.head = 0
     q.tail = 0
 
+proc isRegistered(
+    reg: var FFIEventRegistry, eventName: string, id: uint64
+): bool {.raises: [].} =
+  withLock reg.lock:
+    reg.byEvent.withValue(eventName, listeners):
+      return listeners[].anyIt(it.id == id)
+  return false
+
 proc notifyListeners*(
-    listeners: seq[FFIEventListener], retCode: cint, data: pointer, dataLen: int
+    reg: var FFIEventRegistry,
+    eventName: string,
+    listeners: openArray[FFIEventListener],
+    retCode: cint,
+    data: pointer,
+    dataLen: int,
 ) =
-  ## Empty payloads use `emptyListenerPayload` so consumers never see a nil ptr.
+  ## Calls each listener still registered; an empty payload goes out as `emptyListenerPayload`, never nil.
   let n = max(dataLen, 0)
   let dataPtr =
     if n > 0 and not data.isNil():
@@ -391,15 +404,22 @@ proc notifyListeners*(
     else:
       cast[ptr cchar](emptyListenerPayload)
   for listener in listeners:
+    if not reg.isRegistered(eventName, listener.id):
+      continue
     listener.callback(retCode, dataPtr, cast[csize_t](n), listener.userData)
 
-proc notifyListenersErr*(listeners: seq[FFIEventListener], msg: string) =
+proc notifyListenersErr*(
+    reg: var FFIEventRegistry,
+    eventName: string,
+    listeners: openArray[FFIEventListener],
+    msg: string,
+) =
   let p =
     if msg.len > 0:
       cast[pointer](unsafeAddr msg[0])
     else:
       cast[pointer](emptyListenerPayload)
-  notifyListeners(listeners, RET_ERR, p, msg.len)
+  reg.notifyListeners(eventName, listeners, RET_ERR, p, msg.len)
 
 var ffiCurrentEventRegistry* {.threadvar.}: ptr FFIEventRegistry
 
