@@ -6,7 +6,11 @@ import results
 import ffi
 
 proc nopImpl(
-    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
+    ctx: pointer,
+    callId: uint64,
+    args: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   discard
 
