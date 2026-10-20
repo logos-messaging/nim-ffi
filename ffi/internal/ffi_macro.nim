@@ -1934,8 +1934,9 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
   var argsTypeName = ""
   var encodeExpr: NimNode
   if paramNames.len == 0:
+    # An empty CBOR map: the args stay valid CBOR with nothing to decode.
     encodeExpr = quote:
-      newSeq[byte]()
+      @[0xa0'u8]
   elif paramNames.len == 1:
     argsTypeName = nimTypeNameRepr(paramTypes[0])
     let p0 = paramNames[0]
