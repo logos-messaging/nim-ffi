@@ -410,7 +410,7 @@ suite "generateCLibHeader: reverse FFI":
       generateCLibHeader(procs, types, "timer", @[], @[], reverse, reverseEvents)
 
   test "raw reverse exports are declared with the impl typedef":
-    check "typedef void (*FFIReverseImpl)(uint64_t call_id, const uint8_t* args, size_t args_len, void* user_data);" in
+    check "typedef void (*FFIReverseImpl)(void* ctx, uint64_t call_id, const uint8_t* args, size_t args_len, void* user_data);" in
       header
     check "int timer_set_fetch_config_impl(void* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release);" in
       header
@@ -446,6 +446,15 @@ suite "generateCLibHeader: reverse FFI":
       header
     check "static inline int timer_ctx_reverse_reply_err(const TimerCtx* ctx, uint64_t call_id, const char* msg)" in
       header
+
+  test "reply helpers take the impl's ctx token; the ctx-wrapper ones delegate":
+    check "static inline int timer_reverse_reply_fetch_config(void* ctx, uint64_t call_id, const RevConfig* reply)" in
+      header
+    check "static inline int timer_reverse_reply_err(void* ctx, uint64_t call_id, const char* msg)" in
+      header
+    check "static inline int timer_reverse_reply_host_note(void* ctx, uint64_t call_id)" in
+      header
+    check "return timer_reverse_reply_fetch_config(ctx->ptr, call_id, reply);" in header
 
   test "a void reply gets the payload-less reply helper":
     check "static inline int timer_ctx_reverse_reply_host_note(const TimerCtx* ctx, uint64_t call_id)" in
