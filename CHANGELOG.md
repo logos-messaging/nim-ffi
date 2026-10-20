@@ -67,7 +67,10 @@ All notable changes to this project are documented in this file.
   `{.ffiReverseEvent.}` declares a handler that runs when the host calls
   `<lib>_emit_<wire>`. The C, C++ and Rust bindings get typed helpers.
 - Host implementations run on per-context reverse worker threads
-  (`-d:ffiReverseWorkers`, default 1) and may block; at most
+  (`-d:ffiReverseWorkers`, default 1), never on the FFI thread, and may block.
+  An implementation is called with `(ctx, call_id, args, args_len, user_data)`,
+  where `ctx` is the token of the context that made the call; the C reply
+  helpers take it, so a reply deferred past a destroy fails cleanly. At most
   `-d:ffiReverseQueueDepth` calls (default 1024) wait for one. A worker stuck past
   `ReverseWorkerStallMs` emits `reverse_worker_blocked`, and a recycle that
   outlasts a running implementation quarantines the slot with

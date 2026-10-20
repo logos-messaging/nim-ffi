@@ -197,7 +197,6 @@ impl FetchHostClockCall {
 }
 
 struct FetchHostClockImplBox {
-    ctx: usize,
     f: Box<dyn Fn(FetchHostClockCall, String) + Send + Sync>,
 }
 
@@ -207,11 +206,11 @@ unsafe extern "C" fn fetch_host_clock_impl_release(ud: *mut c_void) {
 }
 
 unsafe extern "C" fn fetch_host_clock_impl_trampoline(
-    call_id: u64, args: *const u8, len: usize, ud: *mut c_void,
+    ctx: *mut c_void, call_id: u64, args: *const u8, len: usize, ud: *mut c_void,
 ) {
     if ud.is_null() { return; }
     let b = &*(ud as *const FetchHostClockImplBox);
-    let call = FetchHostClockCall { ctx: b.ctx, id: call_id };
+    let call = FetchHostClockCall { ctx: ctx as usize, id: call_id };
     // A panic must not unwind into the library's worker thread: it would abort.
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let bytes = if args.is_null() || len == 0 {
@@ -345,7 +344,7 @@ impl MyTimerCtx {
     pub fn set_fetch_host_clock_impl<F>(&self, f: F) -> bool
     where F: Fn(FetchHostClockCall, String) + Send + Sync + 'static,
     {
-        let raw = Box::into_raw(Box::new(FetchHostClockImplBox { ctx: self.ptr as usize, f: Box::new(f) })) as *mut c_void;
+        let raw = Box::into_raw(Box::new(FetchHostClockImplBox { f: Box::new(f) })) as *mut c_void;
         // The library owns the box now: it releases it once no invocation runs it.
         let rc = unsafe {
             ffi::my_timer_set_fetch_host_clock_impl(self.ptr, Some(fetch_host_clock_impl_trampoline), raw, Some(fetch_host_clock_impl_release))

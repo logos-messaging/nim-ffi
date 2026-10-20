@@ -301,9 +301,10 @@ proc generateFFIRs*(
   if reverse.len > 0:
     lines.add("")
     lines.add(
-      "/// Runs on a reverse worker thread and may block; answer via `<lib>_reverse_reply`."
+      "/// Runs on a reverse worker thread and may block; answer with `ctx`, the calling owner's token, via `<lib>_reverse_reply`."
     )
     lines.add("pub type FFIReverseImpl = unsafe extern \"C\" fn(")
+    lines.add("    ctx: *mut c_void,")
     lines.add("    call_id: u64,")
     lines.add("    args: *const u8,")
     lines.add("    args_len: usize,")
@@ -654,7 +655,6 @@ proc generateApiRs*(
     lines.add("}")
     lines.add("")
     lines.add("struct $1 {" % [boxStruct])
-    lines.add("    ctx: usize,")
     lines.add("    f: Box<dyn $1>," % [reverseImplBound(r)])
     lines.add("}")
     lines.add("")
@@ -668,11 +668,14 @@ proc generateApiRs*(
     lines.add("}")
     lines.add("")
     lines.add("unsafe extern \"C\" fn $1(" % [tramp])
-    lines.add("    call_id: u64, args: *const u8, len: usize, ud: *mut c_void,")
+    lines.add(
+      "    ctx: *mut c_void, call_id: u64, args: *const u8, len: usize, ud: *mut c_void,"
+    )
     lines.add(") {")
     lines.add("    if ud.is_null() { return; }")
     lines.add("    let b = &*(ud as *const $1);" % [boxStruct])
-    lines.add("    let call = $1 { ctx: b.ctx, id: call_id };" % [callStruct])
+    # The calling owner's token, not one captured at set time.
+    lines.add("    let call = $1 { ctx: ctx as usize, id: call_id };" % [callStruct])
     lines.add(
       "    // A panic must not unwind into the library's worker thread: it would abort."
     )
@@ -911,7 +914,7 @@ proc generateApiRs*(
     lines.add("    where F: $1 + 'static," % [reverseImplBound(r)])
     lines.add("    {")
     lines.add(
-      "        let raw = Box::into_raw(Box::new($1 { ctx: self.ptr as usize, f: Box::new(f) })) as *mut c_void;" %
+      "        let raw = Box::into_raw(Box::new($1 { f: Box::new(f) })) as *mut c_void;" %
         [boxStruct]
     )
     lines.add(
