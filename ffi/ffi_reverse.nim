@@ -89,6 +89,7 @@ type
     refs: Atomic[int]
     callId*: uint64
     generation*: uint
+    token*: pointer # the calling owner's context token, handed to the impl
     deadlineNs*: int64
     state*: Atomic[ReverseCallState]
     name*: cstring
@@ -119,10 +120,12 @@ type
 
   ReverseWakeFn* = proc(ud: pointer) {.nimcall, gcsafe, raises: [].}
   ReverseGenerationFn* = proc(ud: pointer): uint {.nimcall, gcsafe, raises: [].}
+  ReverseTokenFn* = proc(ud: pointer): pointer {.nimcall, gcsafe, raises: [].}
 
   ReverseContextHooks = object
     wake: ReverseWakeFn
     generation: ReverseGenerationFn
+    token: ReverseTokenFn
     ffiCtx: pointer
 
   ReverseMailbox = object ## FIFO of host replies: the first reply for a call id wins
@@ -175,8 +178,9 @@ func installContextHooks*(
     wake: ReverseWakeFn,
     gen: ReverseGenerationFn,
     ud: pointer,
+    token: ReverseTokenFn = nil,
 ) {.raises: [].} =
-  st.hooks = ReverseContextHooks(wake: wake, generation: gen, ffiCtx: ud)
+  st.hooks = ReverseContextHooks(wake: wake, generation: gen, token: token, ffiCtx: ud)
 
 proc freeReply*(r: ptr ReverseReply) {.raises: [].} =
   c_free(r)
@@ -461,7 +465,12 @@ proc mailboxLen*(st: var FFIReverseContext): int {.raises: [], gcsafe.} =
     return st.mailbox.count
 
 proc allocInvocation(
-    callId: uint64, generation: uint, deadlineNs: int64, name: string, args: seq[byte]
+    callId: uint64,
+    generation: uint,
+    token: pointer,
+    deadlineNs: int64,
+    name: string,
+    args: seq[byte],
 ): ptr ReverseInvocation {.raises: [].} =
   ## Nil when an allocation fails.
   let rec = cast[ptr ReverseInvocation](c_malloc(csize_t(sizeof(ReverseInvocation))))
@@ -471,6 +480,7 @@ proc allocInvocation(
   rec[].refs.store(2)
   rec[].callId = callId
   rec[].generation = generation
+  rec[].token = token
   rec[].deadlineNs = deadlineNs
   rec[].state.store(ReverseCallState.Pending)
   rec[].args = nil
@@ -564,7 +574,9 @@ proc runInvocation(
   defer:
     st.endReverseDispatch(entry)
   foreignThreadGc:
-    entry[].fn(rec[].callId, rec[].args, csize_t(rec[].argsLen), entry[].userData)
+    entry[].fn(
+      rec[].token, rec[].callId, rec[].args, csize_t(rec[].argsLen), entry[].userData
+    )
 
 proc reverseWorkerBody(arg: ReverseWorkerArg) {.thread.} =
   let st = arg.st
@@ -779,9 +791,14 @@ proc ffiReverseCall*(
       0'u
     else:
       st[].hooks.generation(st[].hooks.ffiCtx)
+  let token =
+    if st[].hooks.token.isNil():
+      nil
+    else:
+      st[].hooks.token(st[].hooks.ffiCtx)
   let callId = st[].allocCallId()
   let deadlineNs = nowNs() + int64(timeoutMs) * 1_000_000'i64
-  let rec = allocInvocation(callId, generation, deadlineNs, name, argsCbor)
+  let rec = allocInvocation(callId, generation, token, deadlineNs, name, argsCbor)
   if rec.isNil():
     return err("out of memory: could not queue reverse call " & name)
 

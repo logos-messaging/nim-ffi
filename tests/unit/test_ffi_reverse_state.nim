@@ -18,7 +18,11 @@ type EchoBox = object
   st: ptr FFIReverseContext
 
 proc echoImpl(
-    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
+    ctx: pointer,
+    callId: uint64,
+    args: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   ## Answers inline with the args echoed back, straight into the mailbox.
   let box = cast[ptr EchoBox](userData)
@@ -31,7 +35,11 @@ type GateBox = object
   release: bool
 
 proc gateImpl(
-    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
+    ctx: pointer,
+    callId: uint64,
+    args: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   ## Parks the worker until the test releases it: models a blocking host impl.
   let g = cast[ptr GateBox](userData)
@@ -53,6 +61,21 @@ proc open(g: var GateBox) =
   g.release = true
   broadcast(g.cond)
   release(g.lock)
+
+type TokenBox = object
+  st: ptr FFIReverseContext
+  seen: Atomic[pointer]
+
+proc tokenImpl(
+    ctx: pointer,
+    callId: uint64,
+    args: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
+) {.cdecl, gcsafe, raises: [].} =
+  let box = cast[ptr TokenBox](userData)
+  box[].seen.store(ctx)
+  discard box[].st[].pushReply(callId, RET_OK, nil, 0)
 
 suite "FFIReverseContext registry":
   test "set, has, replace and unregister":
@@ -404,3 +427,18 @@ suite "ffiReverseCall":
       check (waitFor blocker).isErr()
       for f in queued:
         check (waitFor f).isErr()
+
+  test "the impl receives the token of the owner that made the call":
+    withReverseHarness(st, 1):
+      var box = TokenBox(st: addr st)
+      proc ownerToken(ud: pointer): pointer {.nimcall, gcsafe, raises: [].} =
+        cast[pointer](0xC0FFEE)
+
+      st.installContextHooks(nil, nil, nil, ownerToken)
+      check st.registerImpl("token", tokenImpl, addr box).isOk()
+      let callFut = ffiReverseCall("token", @[], 2000)
+      while not callFut.finished():
+        drainReverseReplies()
+        waitFor sleepAsync(chronos.milliseconds(1))
+      check (waitFor callFut).isOk()
+      check box.seen.load() == cast[pointer](0xC0FFEE)
