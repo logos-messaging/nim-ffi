@@ -140,11 +140,29 @@ registerReqFFI(CallSelfDestroyRequest, lib: ptr TestRevLib):
 ## Host implementations (run on the event dispatch thread).
 
 proc echoImpl(
-    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
+    token: pointer,
+    callId: uint64,
+    args: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   ## Inline reply from within the invocation, on the event thread.
   let ctx = cast[ptr FFIContext[TestRevLib]](userData)
   discard submitReverseReply(ctx, callId, RET_OK, args, int(argsLen))
+
+var gSeenToken: Atomic[pointer]
+
+proc tokenEchoImpl(
+    ctx: pointer,
+    callId: uint64,
+    args: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
+) {.cdecl, gcsafe, raises: [].} =
+  ## Records the token it is handed, then echoes like `echoImpl`.
+  gSeenToken.store(ctx)
+  let owner = cast[ptr FFIContext[TestRevLib]](userData)
+  discard submitReverseReply(owner, callId, RET_OK, args, int(argsLen))
 
 type ParkBox = object
   lock: Lock
@@ -153,7 +171,11 @@ type ParkBox = object
   callId: uint64
 
 proc parkImpl(
-    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
+    ctx: pointer,
+    callId: uint64,
+    args: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   ## No reply here: hands the call id to the test thread, which answers later.
   let box = cast[ptr ParkBox](userData)
@@ -164,7 +186,11 @@ proc parkImpl(
   release(box[].lock)
 
 proc silentImpl(
-    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
+    ctx: pointer,
+    callId: uint64,
+    args: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   discard # never answers; the caller's deadline must fire
 
@@ -173,7 +199,11 @@ type SlowBox = object
   exited: Atomic[bool]
 
 proc slowImpl(
-    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
+    ctx: pointer,
+    callId: uint64,
+    args: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   let box = cast[ptr SlowBox](userData)
   box[].entered.store(true)
@@ -185,7 +215,11 @@ type WorkerProbe = object
   sawFlag: ptr Atomic[bool]
 
 proc probeImpl(
-    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
+    ctx: pointer,
+    callId: uint64,
+    args: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   ## Reports the thread marker the pool's idle reap reads.
   let p = cast[ptr WorkerProbe](userData)
@@ -205,7 +239,11 @@ type SleepyBox = object
   ms: int
 
 proc sleepyImpl(
-    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
+    ctx: pointer,
+    callId: uint64,
+    args: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   ## A blocking host impl: sleeps on its worker, then answers inline.
   let box = cast[ptr SleepyBox](userData)
@@ -219,7 +257,11 @@ type GateBox = object
   release: bool
 
 proc gateImpl(
-    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
+    ctx: pointer,
+    callId: uint64,
+    args: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   ## Parks the worker until the test releases it: a wedged plugin.
   let g = cast[ptr GateBox](userData)
@@ -252,6 +294,17 @@ suite "reverse call roundtrip":
       waitCallback(rsp)
       check rsp.retCode == RET_OK
       check "echoed" in callbackMsg(rsp)
+
+  test "the impl is handed the calling owner's token":
+    setupCallbackData(rsp)
+    withPool(ctx):
+      gSeenToken.store(nil)
+      check ctx[].reverse.registerImpl("echo", tokenEchoImpl, ctx).isOk()
+      check sendRequestToFFIThread(ctx, CallEchoRequest.ffiNewReq(captureCb, addr rsp))
+        .isOk()
+      waitCallback(rsp)
+      check rsp.retCode == RET_OK
+      check gSeenToken.load() == pointer(ctx.ffiToken())
 
   test "reply submitted later from a foreign thread completes the handler":
     setupCallbackData(rsp)
@@ -344,7 +397,11 @@ type SelfDestroyBox = object
   returned: Atomic[bool]
 
 proc selfDestroyImpl(
-    callId: uint64, args: ptr UncheckedArray[byte], argsLen: csize_t, userData: pointer
+    ctx: pointer,
+    callId: uint64,
+    args: ptr UncheckedArray[byte],
+    argsLen: csize_t,
+    userData: pointer,
 ) {.cdecl, gcsafe, raises: [].} =
   let p = cast[ptr SelfDestroyBox](userData)
   let started = getMonoTime()
