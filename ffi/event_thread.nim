@@ -23,9 +23,10 @@ proc dispatchToListeners[T](
     return
   foreignThreadGc:
     try:
-      notifyListeners(listeners, RET_OK, data, dataLen)
+      ctx[].eventRegistry.notifyListeners(eventName, listeners, RET_OK, data, dataLen)
     except Exception, CatchableError:
-      notifyListenersErr(
+      ctx[].eventRegistry.notifyListenersErr(
+        eventName,
         listeners,
         "Exception dispatching " & eventName & ": " & getCurrentExceptionMsg(),
       )
