@@ -177,7 +177,7 @@ proc parkIdleSlots[T](pool: var FFIContextPool[T]) =
 
 proc reapIfIdle[T](pool: var FFIContextPool[T]) =
   ## The exit policy: no context live, no thread of ours for the C runtime to finalize under.
-  if onFFIThread or onEventThread:
+  if not servedCtx.isNil():
     debug "skipping the idle reap: a destroy from inside the library's own " &
       "threads would join a thread to itself"
     return
@@ -196,6 +196,12 @@ proc recycleFFIContext*[T](
   # Recycling it would release the slot while `staticState` still points at it.
   if pool.isStaticCtx(ctx):
     return err("recycleFFIContext(pool): the {.ffiStatic.} context outlives every ctx")
+  # Its own threads would wait on themselves for `RecycleWaitTimeout`, then quarantine the slot.
+  if servedCtx == pointer(ctx):
+    return err(
+      "recycleFFIContext(pool): a callback cannot destroy its own context; " &
+        "destroy it from a host thread"
+    )
   ?ctx.requestRecycle()
 
   pool.reapIfIdle()

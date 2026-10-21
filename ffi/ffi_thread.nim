@@ -475,9 +475,11 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   when defined(ffiPollMode):
     ffiCurrentHostPolls = ffiHostPollsHook
   onFFIThread = true
+  servedCtx = ctx
 
   defer:
     onFFIThread = false
+    servedCtx = nil
     unregisterWaitedSignal(ctx.reqSignal)
     # Free handle refs on the thread that allocated them (refc heap is thread-local).
     ctx[].handles.releaseAll()

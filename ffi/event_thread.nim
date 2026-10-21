@@ -128,10 +128,10 @@ proc eventRun[T](ctx: ptr FFIContext[T]) {.async.} =
 proc eventThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ## Drains the event queue and runs the FFI-thread heartbeat check.
   registerCloseDispatcherHook()
-  onEventThread = true
+  servedCtx = ctx
 
   defer:
-    onEventThread = false
+    servedCtx = nil
     unregisterWaitedSignal(ctx.eventQueueSignal)
     let fireRes = ctx.eventThreadExitSignal.fireSync()
     if fireRes.isErr():
