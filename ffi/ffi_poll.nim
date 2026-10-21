@@ -4,7 +4,8 @@
 
 import std/[atomics, locks, monotimes, times]
 import chronos/timer
-import ./ffi_context, ./ffi_msg, ./ffi_wake, ./ret_codes
+import
+  ./ffi_context, ./ffi_msg, ./ffi_reverse, ./ffi_wake, ./ffi_thread_request, ./ret_codes
 
 const
   WatchSliceMs = 1000 ## A blocked poll still looks at the heartbeat this often.
@@ -113,6 +114,7 @@ proc releaseHeld(outb: var FFIOutbound) =
   ## Ends the host's use of the message it last polled.
   if outb.queueLive:
     releaseHeldEvent(outb.held)
+  outb.reverse.releaseHeld()
   if not outb.heldReply.isNil():
     outb.deleteRequest(outb.heldReply)
     outb.heldReply = nil
@@ -121,6 +123,8 @@ proc hasMessage[T](ctx: ptr FFIContext[T]): bool =
   let outb = addr ctx[].outbound
   # The count, not `headSeq() != 0`: an event nobody numbered has seqNum 0.
   if outb.queueLive and ctx[].eventQueue.hasEvents():
+    return true
+  if outb[].reverse.headSeq() != 0:
     return true
   return outb[].replyHeadSeq() != 0 or outb[].staleHeadSeq() != 0
 
@@ -178,6 +182,26 @@ proc takeEvent[T](msg: ptr ptr PollResult, ctx: ptr FFIContext[T]): bool =
   )
   return true
 
+proc takeReverseCall(msg: ptr ptr PollResult, outb: var FFIOutbound): bool =
+  ## The question the library is asking; the host answers it with `reverse_reply`.
+  let inv = outb.reverse.popForHost()
+  if inv.isNil():
+    return false
+  outb.reverse.held = inv
+  let leftMs = (inv[].deadline - getMonoTime()).inMilliseconds
+  fill(
+    msg,
+    outb,
+    MsgReverseCall,
+    seqNum = inv[].seqNum,
+    id = inv[].callId,
+    nameId = inv[].nameId,
+    durationMs = uint64(max(leftMs, 0)),
+    payload = inv[].args,
+    len = inv[].argsLen,
+  )
+  return true
+
 proc takeMessage[T](ctx: ptr FFIContext[T], msg: ptr ptr PollResult): bool =
   ## Hands out the oldest of what the context has ready — a queued reply, a
   ## pending stale request, or an event — so the host sees the order the library
@@ -194,8 +218,9 @@ proc takeMessage[T](ctx: ptr FFIContext[T], msg: ptr ptr PollResult): bool =
     eventSeq = ctx[].eventQueue.headSeq()
   let replySeq = outb[].replyHeadSeq()
   let staleSeq = outb[].staleHeadSeq()
+  let reverseSeq = outb[].reverse.headSeq()
 
-  let oldest = earliest(earliest(eventSeq, replySeq), staleSeq)
+  let oldest = earliest(earliest(earliest(eventSeq, replySeq), staleSeq), reverseSeq)
   if oldest == 0:
     # An event nobody numbered still has to come out, and it is the only
     # message a context can hold without a ticket.
@@ -204,6 +229,8 @@ proc takeMessage[T](ctx: ptr FFIContext[T], msg: ptr ptr PollResult): bool =
     return takeReply(msg, outb[])
   if oldest == staleSeq:
     return takeStaleWarn(msg, outb[])
+  if oldest == reverseSeq:
+    return takeReverseCall(msg, outb[])
   return takeEvent(msg, ctx)
 
 proc pollContext*[T](
