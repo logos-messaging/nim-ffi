@@ -551,16 +551,24 @@ proc generateCppHeader*(
       "        if (ffi_enc_.isErr()) return $1::err(ffi_enc_.error());" % [createRet]
     )
     lines.add("        const auto& ffi_req_bytes_ = ffi_enc_.value();")
+    # The ctor returns the context's token at once and settles it through the
+    # callback. A create that times out still owns that context: it is
+    # destroyed off this thread, since a destroy waits for the ctor to drain.
+    lines.add("        void* ffi_token_ = nullptr;")
     lines.add("        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {")
     lines.add(
-      "            (void)$1(ffi_req_bytes_.data(), ffi_req_bytes_.size(), cb, ud);" %
+      "            ffi_token_ = ::$1(ffi_req_bytes_.data(), ffi_req_bytes_.size(), cb, ud);" %
         [ctor.procName]
     )
     lines.add("            return 0;")
     lines.add("        }, timeout);")
+    lines.add("        if (ffi_raw_.isErr()) {")
     lines.add(
-      "        if (ffi_raw_.isErr()) return $1::err(ffi_raw_.error());" % [createRet]
+      "            if (ffi_token_) std::thread([ffi_token_] { (void)::$1_destroy(ffi_token_); }).detach();" %
+        [libName]
     )
+    lines.add("            return $1::err(ffi_raw_.error());" % [createRet])
+    lines.add("        }")
     lines.add("        auto ffi_addr_ = decodeCborFFI<std::string>(ffi_raw_.value());")
     lines.add(
       "        if (ffi_addr_.isErr()) return $1::err(ffi_addr_.error());" % [createRet]
@@ -659,7 +667,7 @@ proc generateCppHeader*(
     lines.add("        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {")
     let ctxArg = if isStatic: "" else: "ptr_, "
     lines.add(
-      "            return $1($2cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());" %
+      "            return ::$1($2cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());" %
         [m.procName, ctxArg]
     )
     lines.add("        }, $1);" % [if isStatic: "timeout" else: "timeout_"])

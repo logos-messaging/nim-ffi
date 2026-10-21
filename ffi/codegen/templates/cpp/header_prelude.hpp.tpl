@@ -26,6 +26,8 @@
 #include <cstring>
 #include <exception>
 #include <cassert>
+#include <limits>
+#include <thread>
 extern "C" {
 #include <tinycbor/cbor.h>
 }

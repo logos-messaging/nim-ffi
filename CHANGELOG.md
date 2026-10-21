@@ -89,6 +89,11 @@ All notable changes to this project are documented in this file.
   chronos' `release` in scope; its parameters are bound as the proc's own.
 - Fix: an `{.ffi.}` object with exported fields (`name*: string`) generated
   `name*` as the C/C++/Rust field name and CBOR key; it is now `name`.
+- Fix (C++ bindings): `uint32_t`, `uint16_t`, `uint8_t`, `int16_t`, `int8_t` and
+  `float` fields and params get CBOR codecs (they were ambiguous or missing);
+  the narrow decoders refuse out-of-range values. Raw calls are `::`-qualified,
+  so a method named like its export (`waku_relay_publish`) no longer hides it.
+  A `create()` that times out destroys the context the ctor still settles.
 - Each `{.ffi.}` proc's `##` doc comment reaches the generated C header as a
   `/** ... */` block above the declaration and its wrapper.
 - `genBindings()` fails compilation when a library declares an `{.ffiCtor.}` but

@@ -26,6 +26,8 @@
 #include <cstring>
 #include <exception>
 #include <cassert>
+#include <limits>
+#include <thread>
 extern "C" {
 #include <tinycbor/cbor.h>
 }
@@ -124,11 +126,32 @@ inline CborError encode_cbor(CborEncoder& e, int64_t v) {
 inline CborError encode_cbor(CborEncoder& e, int32_t v) {
     return cbor_encode_int(&e, static_cast<int64_t>(v));
 }
+inline CborError encode_cbor(CborEncoder& e, int16_t v) {
+    return cbor_encode_int(&e, static_cast<int64_t>(v));
+}
+inline CborError encode_cbor(CborEncoder& e, int8_t v) {
+    return cbor_encode_int(&e, static_cast<int64_t>(v));
+}
 inline CborError encode_cbor(CborEncoder& e, uint64_t v) {
     return cbor_encode_uint(&e, v);
 }
+// Every width the codegen emits needs its own overload: without one, a
+// uint32_t/uint16_t/uint8_t argument converts equally well to bool, int32_t,
+// int64_t and uint64_t, and the call is ambiguous.
+inline CborError encode_cbor(CborEncoder& e, uint32_t v) {
+    return cbor_encode_uint(&e, static_cast<uint64_t>(v));
+}
+inline CborError encode_cbor(CborEncoder& e, uint16_t v) {
+    return cbor_encode_uint(&e, static_cast<uint64_t>(v));
+}
+inline CborError encode_cbor(CborEncoder& e, uint8_t v) {
+    return cbor_encode_uint(&e, static_cast<uint64_t>(v));
+}
 inline CborError encode_cbor(CborEncoder& e, double v) {
     return cbor_encode_double(&e, v);
+}
+inline CborError encode_cbor(CborEncoder& e, float v) {
+    return cbor_encode_float(&e, v);
 }
 inline CborError encode_cbor(CborEncoder& e, const std::string& v) {
     return cbor_encode_text_string(&e, v.data(), v.size());
@@ -190,6 +213,36 @@ inline CborError decode_cbor(CborValue& it, uint64_t& out) {
     if (!cbor_value_is_unsigned_integer(&it)) return CborErrorImproperValue;
     return advance_if_ok(it, cbor_value_get_uint64(&it, &out));
 }
+
+// Narrow integers decode through the 64-bit readers and refuse a value that
+// does not fit, rather than truncating it.
+template<typename Narrow, typename Wide>
+inline CborError decode_narrow_cbor(CborValue& it, Narrow& out) {
+    Wide tmp = 0;
+    CborError err = decode_cbor(it, tmp);
+    if (err) return err;
+    if (tmp < static_cast<Wide>(std::numeric_limits<Narrow>::min()) ||
+        tmp > static_cast<Wide>(std::numeric_limits<Narrow>::max())) {
+        return CborErrorDataTooLarge;
+    }
+    out = static_cast<Narrow>(tmp);
+    return CborNoError;
+}
+inline CborError decode_cbor(CborValue& it, int16_t& out) {
+    return decode_narrow_cbor<int16_t, int64_t>(it, out);
+}
+inline CborError decode_cbor(CborValue& it, int8_t& out) {
+    return decode_narrow_cbor<int8_t, int64_t>(it, out);
+}
+inline CborError decode_cbor(CborValue& it, uint32_t& out) {
+    return decode_narrow_cbor<uint32_t, uint64_t>(it, out);
+}
+inline CborError decode_cbor(CborValue& it, uint16_t& out) {
+    return decode_narrow_cbor<uint16_t, uint64_t>(it, out);
+}
+inline CborError decode_cbor(CborValue& it, uint8_t& out) {
+    return decode_narrow_cbor<uint8_t, uint64_t>(it, out);
+}
 inline CborError decode_cbor(CborValue& it, double& out) {
     if (cbor_value_is_double(&it)) {
         return advance_if_ok(it, cbor_value_get_double(&it, &out));
@@ -202,6 +255,13 @@ inline CborError decode_cbor(CborValue& it, double& out) {
         return cbor_value_advance(&it);
     }
     return CborErrorImproperValue;
+}
+inline CborError decode_cbor(CborValue& it, float& out) {
+    double tmp = 0.0;
+    CborError err = decode_cbor(it, tmp);
+    if (err) return err;
+    out = static_cast<float>(tmp);
+    return CborNoError;
 }
 inline CborError decode_cbor(CborValue& it, std::string& out) {
     if (!cbor_value_is_text_string(&it)) return CborErrorImproperValue;
@@ -588,11 +648,15 @@ public:
         auto ffi_enc_ = encodeCborFFI(ffi_req_);
         if (ffi_enc_.isErr()) return Result<std::unique_ptr<EchoCtx>>::err(ffi_enc_.error());
         const auto& ffi_req_bytes_ = ffi_enc_.value();
+        void* ffi_token_ = nullptr;
         auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            (void)echo_create(ffi_req_bytes_.data(), ffi_req_bytes_.size(), cb, ud);
+            ffi_token_ = ::echo_create(ffi_req_bytes_.data(), ffi_req_bytes_.size(), cb, ud);
             return 0;
         }, timeout);
-        if (ffi_raw_.isErr()) return Result<std::unique_ptr<EchoCtx>>::err(ffi_raw_.error());
+        if (ffi_raw_.isErr()) {
+            if (ffi_token_) std::thread([ffi_token_] { (void)::echo_destroy(ffi_token_); }).detach();
+            return Result<std::unique_ptr<EchoCtx>>::err(ffi_raw_.error());
+        }
         auto ffi_addr_ = decodeCborFFI<std::string>(ffi_raw_.value());
         if (ffi_addr_.isErr()) return Result<std::unique_ptr<EchoCtx>>::err(ffi_addr_.error());
         const auto& addr_str = ffi_addr_.value();
@@ -639,7 +703,7 @@ public:
         if (ffi_enc_.isErr()) return Result<ShoutResponse>::err(ffi_enc_.error());
         const auto& ffi_req_bytes_ = ffi_enc_.value();
         auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return echo_shout(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+            return ::echo_shout(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
         }, timeout_);
         if (ffi_raw_.isErr()) return Result<ShoutResponse>::err(ffi_raw_.error());
         return decodeCborFFI<ShoutResponse>(ffi_raw_.value());
@@ -657,7 +721,7 @@ public:
         if (ffi_enc_.isErr()) return Result<std::string>::err(ffi_enc_.error());
         const auto& ffi_req_bytes_ = ffi_enc_.value();
         auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return echo_version(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+            return ::echo_version(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
         }, timeout_);
         if (ffi_raw_.isErr()) return Result<std::string>::err(ffi_raw_.error());
         return decodeCborFFI<std::string>(ffi_raw_.value());
@@ -674,7 +738,7 @@ public:
         if (ffi_enc_.isErr()) return Result<std::string>::err(ffi_enc_.error());
         const auto& ffi_req_bytes_ = ffi_enc_.value();
         auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return echo_lib_version(cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+            return ::echo_lib_version(cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
         }, timeout);
         if (ffi_raw_.isErr()) return Result<std::string>::err(ffi_raw_.error());
         return decodeCborFFI<std::string>(ffi_raw_.value());
@@ -690,7 +754,7 @@ public:
         if (ffi_enc_.isErr()) return Result<ShoutResponse>::err(ffi_enc_.error());
         const auto& ffi_req_bytes_ = ffi_enc_.value();
         auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return echo_shout_anon(cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+            return ::echo_shout_anon(cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
         }, timeout);
         if (ffi_raw_.isErr()) return Result<ShoutResponse>::err(ffi_raw_.error());
         return decodeCborFFI<ShoutResponse>(ffi_raw_.value());
