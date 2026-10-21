@@ -24,6 +24,16 @@ const
   ContextRuleOf5Tpl = staticRead("templates/cpp/context_rule_of_5.hpp.tpl")
   CMakeListsTpl = staticRead("templates/cpp/CMakeLists.txt.tpl")
   FindRepoRootTpl = staticRead("templates/find_repo_root.cmake.part")
+  ReverseCallTpl = staticRead("templates/cpp/reverse_call.hpp.tpl")
+  ReverseCallReplyTpl = staticRead("templates/cpp/reverse_call_reply.hpp.tpl")
+  ReverseCallReplyVoidTpl = staticRead("templates/cpp/reverse_call_reply_void.hpp.tpl")
+  ReverseBorrowedArgsTpl = staticRead("templates/cpp/reverse_borrowed_args.hpp.tpl")
+  ReverseSetImplTpl = staticRead("templates/cpp/reverse_set_impl.hpp.tpl")
+  ReverseEmitTpl = staticRead("templates/cpp/reverse_emit.hpp.tpl")
+  ReverseDecodeArgsTpl = staticRead("templates/cpp/reverse_decode_args.hpp.tpl")
+  ReverseTrampolineTpl = staticRead("templates/cpp/reverse_trampoline.hpp.tpl")
+  ReverseInvokeTpl = staticRead("templates/cpp/reverse_invoke.hpp.tpl")
+  ReverseInvokeNoArgsTpl = staticRead("templates/cpp/reverse_invoke_no_args.hpp.tpl")
 
 func cppScalar(s: ScalarKind): string =
   case s
@@ -225,12 +235,128 @@ proc emitEventTrampoline(lines: var seq[string], events: seq[FFIEventMeta]) =
   lines.add("    }")
   lines.add("")
 
+func reverseCallStruct(r: FFIReverseMeta): string =
+  ## Nested per-interface call token, e.g. `FetchHostClockCall`.
+  capitalizeFirstLetter(r.nimProcName) & "Call"
+
+func reverseBoxStruct(r: FFIReverseMeta): string =
+  capitalizeFirstLetter(r.nimProcName) & "ImplBox"
+
+func reverseArgsCpp(r: FFIReverseMeta): string =
+  ## "" when the interface takes no arguments.
+  if r.argsTypeName.len == 0:
+    ""
+  else:
+    nimTypeToCpp(r.argsTypeName)
+
+func reverseImplFnType(r: FFIReverseMeta): string =
+  ## The host-side callable: `(Call, const Args&)`, or `(Call)` with no args.
+  let argsCpp = reverseArgsCpp(r)
+  if argsCpp.len == 0:
+    "std::function<void($1)>" % [reverseCallStruct(r)]
+  else:
+    "std::function<void($1, const $2&)>" % [reverseCallStruct(r), argsCpp]
+
+func fillTpl(tpl: string, subs: varargs[(string, string)]): string =
+  ## A `.tpl` with its `{{NAME}}` placeholders filled, minus its final newline.
+  tpl.multiReplace(subs).strip(leading = false, chars = {'\n'})
+
+proc emitReverseApi(
+    lines: var seq[string],
+    ctxTypeName, libName: string,
+    reverse: seq[FFIReverseMeta],
+    reverseEvents: seq[FFIReverseEventMeta],
+) =
+  if reverse.len > 0:
+    lines.add(
+      "    // ── Reverse FFI: host-implemented interfaces ────────────"
+    )
+    for r in reverse:
+      let reply =
+        if r.replyTypeName.len > 0:
+          ReverseCallReplyTpl.fillTpl(
+            ("{{REPLY_TYPE}}", nimTypeToCpp(r.replyTypeName)), ("{{LIB}}", libName)
+          )
+        else:
+          ReverseCallReplyVoidTpl.fillTpl(("{{LIB}}", libName))
+      lines.add(
+        ReverseCallTpl.fillTpl(
+          ("{{WIRE}}", r.wireName),
+          ("{{CALL}}", reverseCallStruct(r)),
+          ("{{REPLY}}", reply),
+          ("{{LIB}}", libName),
+        )
+      )
+      lines.add("")
+    for r in reverse:
+      lines.add(renderMemberDocComment(r.doc))
+      if reverseArgsCpp(r).len > 0:
+        lines.add(ReverseBorrowedArgsTpl.fillTpl())
+      lines.add(
+        ReverseSetImplTpl.fillTpl(
+          ("{{PASCAL}}", capitalizeFirstLetter(r.nimProcName)),
+          ("{{FN_TYPE}}", reverseImplFnType(r)),
+          ("{{BOX}}", reverseBoxStruct(r)),
+          ("{{LIB}}", libName),
+          ("{{WIRE}}", r.wireName),
+          ("{{CTX}}", ctxTypeName),
+          ("{{NAME}}", r.nimProcName),
+        )
+      )
+      lines.add("")
+  if reverseEvents.len > 0:
+    lines.add("    // ── Reverse FFI: host-emitted events (fire-and-forget) ──")
+    for rev in reverseEvents:
+      var params: seq[string] = @[]
+      var names: seq[string] = @[]
+      for p in rev.params:
+        params.add("const $1& $2" % [nimTypeToCpp(p.typeName), p.name])
+        names.add(p.name)
+      lines.add(renderMemberDocComment(rev.doc))
+      lines.add(
+        ReverseEmitTpl.fillTpl(
+          ("{{PASCAL}}", capitalizeFirstLetter(rev.nimProcName)),
+          ("{{PARAMS}}", params.join(", ")),
+          ("{{PAYLOAD}}", cppBracedInit(rev.reqTypeName, names)),
+          ("{{LIB}}", libName),
+          ("{{WIRE}}", rev.wireName),
+        )
+      )
+      lines.add("")
+
+proc emitReverseMachinery(
+    lines: var seq[string], ctxTypeName: string, reverse: seq[FFIReverseMeta]
+) =
+  if reverse.len == 0:
+    return
+  lines.add(ReverseDecodeArgsTpl.fillTpl())
+  lines.add("")
+  for r in reverse:
+    let argsCpp = reverseArgsCpp(r)
+    let invoke =
+      if argsCpp.len == 0:
+        ReverseInvokeNoArgsTpl.fillTpl()
+      else:
+        ReverseInvokeTpl.fillTpl(("{{ARGS}}", argsCpp))
+    lines.add(
+      ReverseTrampolineTpl.fillTpl(
+        ("{{BOX}}", reverseBoxStruct(r)),
+        ("{{FN_TYPE}}", reverseImplFnType(r)),
+        ("{{NAME}}", r.nimProcName),
+        ("{{CALL}}", reverseCallStruct(r)),
+        ("{{INVOKE}}", invoke),
+      )
+    )
+    lines.add("")
+
 proc generateCppHeader*(
     procs: seq[FFIProcMeta],
     types: seq[FFITypeMeta],
     libName: string,
     events: seq[FFIEventMeta] = @[],
     consts: seq[FFIConstMeta] = @[],
+    reverse: seq[FFIReverseMeta] = @[],
+    reverseEvents: seq[FFIReverseEventMeta] = @[],
 ): string =
   var lines: seq[string] = @[]
 
@@ -352,6 +478,31 @@ proc generateCppHeader*(
   lines.add(
     "int $1_remove_event_listener(void* ctx, uint64_t listener_id);" % [libName]
   )
+  if reverse.len > 0 or reverseEvents.len > 0:
+    lines.add("")
+    lines.add("// Reverse FFI: host-implemented interfaces + host-emitted events")
+  if reverse.len > 0:
+    lines.add(
+      "typedef void (*FFIReverseImpl)(void* ctx, uint64_t call_id, const uint8_t* args, size_t args_len, void* user_data);"
+    )
+    lines.add("typedef void (*FFIReverseRelease)(void* user_data);")
+    lines.add("#ifndef NIMFFI_REVERSE_ACCEPTED")
+    lines.add(cReverseCodeDefines())
+    lines.add("#endif")
+    for r in reverse:
+      lines.add(
+        "int $1_set_$2_impl(void* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release);" %
+          [libName, r.wireName]
+      )
+    lines.add(
+      "int $1_reverse_reply(void* ctx, uint64_t call_id, int ret_code, const uint8_t* reply_cbor, size_t reply_len);" %
+        [libName]
+    )
+  for rev in reverseEvents:
+    lines.add(
+      "int $1_emit_$2(void* ctx, const uint8_t* payload_cbor, size_t payload_len);" %
+        [libName, rev.wireName]
+    )
   lines.add(renderBlockDocComment(ShutdownDoc))
   lines.add("int $1_shutdown(void);" % [libName])
   lines.add("} // extern \"C\"")
@@ -461,6 +612,7 @@ proc generateCppHeader*(
   )
 
   emitEventDispatcher(lines, ctxTypeName, libName, events)
+  emitReverseApi(lines, ctxTypeName, libName, reverse, reverseEvents)
 
   # A static has no ctx to inherit `timeout_` from, so it takes its own `timeout`.
   for m in classified.replyProcs():
@@ -550,6 +702,7 @@ proc generateCppHeader*(
   lines.add("private:")
   # Listener machinery must precede the `listeners_` member (its value type must be complete at declaration).
   emitEventTrampoline(lines, events)
+  emitReverseMachinery(lines, ctxTypeName, reverse)
   lines.add("    void* ptr_;")
   lines.add("    std::chrono::milliseconds timeout_;")
   if events.len > 0:
@@ -581,11 +734,13 @@ proc generateCppBindings*(
     nimSrcRelPath: string,
     events: seq[FFIEventMeta] = @[],
     consts: seq[FFIConstMeta] = @[],
+    reverse: seq[FFIReverseMeta] = @[],
+    reverseEvents: seq[FFIReverseEventMeta] = @[],
 ) =
   ensureOutputDir(outputDir)
   writeOutputFile(
     buildPath(outputDir, libName & ".hpp"),
-    generateCppHeader(procs, types, libName, events, consts),
+    generateCppHeader(procs, types, libName, events, consts, reverse, reverseEvents),
   )
   writeOutputFile(
     buildPath(outputDir, "CMakeLists.txt"),
