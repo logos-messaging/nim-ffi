@@ -157,9 +157,11 @@ proc registerFFITypeMeta(typeDef: NimNode) {.compileTime.} =
       for identDef in recList:
         if identDef.kind == nnkIdentDefs:
           let fieldType = identDef[^2]
+          # `basename`, not `$`: an exported field is a postfix node, and `$` keeps
+          # its `*`, which then lands in every generated binding's field name.
           for i in 0 ..< identDef.len - 2:
             rejectRawPtrType(
-              fieldType, "{.ffi.} type " & typeNameStr & "." & $identDef[i]
+              fieldType, "{.ffi.} type " & typeNameStr & "." & $identDef[i].basename
             )
           let fieldTypeName =
             if fieldType.kind == nnkIdent:
@@ -167,7 +169,9 @@ proc registerFFITypeMeta(typeDef: NimNode) {.compileTime.} =
             else:
               fieldType.repr
           for i in 0 ..< identDef.len - 2:
-            fieldMetas.add(FFIFieldMeta(name: $identDef[i], typeName: fieldTypeName))
+            fieldMetas.add(
+              FFIFieldMeta(name: $identDef[i].basename, typeName: fieldTypeName)
+            )
 
   ffiTypeRegistry.add(FFITypeMeta(name: typeNameStr, fields: fieldMetas))
 
@@ -2007,18 +2011,26 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
   let poolIdent = ident(currentLibType & "FFIPool")
   let ctxIdent = ident("ctx")
   let regResIdent = genSym(nskLet, "regRes")
+  # The params are spliced into the body as the same idents: a bare name in
+  # `quote` binds at this macro's definition site, so `release` would resolve
+  # to chronos' `release` overloads wherever the library imports chronos.
+  let tokenParam = ident("ctxToken")
+  let implParam = ident("impl")
+  let userDataParam = ident("userData")
+  let releaseParam = ident("release")
   let setBody = quote:
     when declared(initializeLibrary):
       initializeLibrary()
-    let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
+    let `ctxIdent` = `poolIdent`.resolveCtx(`tokenParam`)
     if `ctxIdent`.isNil():
       return REVERSE_INVALID_CTX
-    if impl.isNil():
+    if `implParam`.isNil():
       `ctxIdent`[].reverse.unregisterImpl(`wireNameLit`)
       return REVERSE_ACCEPTED
     # Refused: `userData` stays the caller's and `release` is never called for it.
-    let `regResIdent` =
-      `ctxIdent`[].reverse.registerImpl(`wireNameLit`, impl, userData, release)
+    let `regResIdent` = `ctxIdent`[].reverse.registerImpl(
+      `wireNameLit`, `implParam`, `userDataParam`, `releaseParam`
+    )
     if `regResIdent`.isErr():
       return `regResIdent`.error.toRetCode()
     return REVERSE_ACCEPTED
@@ -2028,10 +2040,10 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
       name = postfix(ident(setImplName), "*"),
       params = @[
         ident("cint"),
-        newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
-        newIdentDefs(ident("impl"), ident("FFIReverseImpl")),
-        newIdentDefs(ident("userData"), ident("pointer")),
-        newIdentDefs(ident("release"), ident("FFIReverseRelease")),
+        newIdentDefs(tokenParam, ident("FFICtxToken")),
+        newIdentDefs(implParam, ident("FFIReverseImpl")),
+        newIdentDefs(userDataParam, ident("pointer")),
+        newIdentDefs(releaseParam, ident("FFIReverseRelease")),
       ],
       body = setBody,
       pragmas = cdeclExportPragma(setImplName),

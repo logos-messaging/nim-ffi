@@ -34,6 +34,13 @@ proc onHostPing(seqNo: int) {.ffiReverseEvent.} =
   pingSeen.store(seqNo)
 
 static:
+  # Exported fields (`name*`) register under their bare names: the generated
+  # bindings use them as C field names and as CBOR map keys.
+  for t in ffiTypeRegistry:
+    if t.name == "RevConfig":
+      doAssert t.fields.len == 2
+      doAssert t.fields[0].name == "name"
+      doAssert t.fields[1].name == "attempt"
   doAssert ffiReverseRegistry.len == 3
   doAssert ffiReverseRegistry[0].wireName == "fetch_config"
   doAssert ffiReverseRegistry[0].argsTypeName == "FetchConfigArgs"

@@ -81,6 +81,10 @@ All notable changes to this project are documented in this file.
   and Rust bindings use it, and catch an exception or a panic in the
   implementation. Replies are first-wins, lengths are checked before use, and
   a reverse call fails at once once a recycle or shutdown has begun.
+- Fix: `<lib>_set_<wire>_impl` no longer fails to compile in a library that has
+  chronos' `release` in scope; its parameters are bound as the proc's own.
+- Fix: an `{.ffi.}` object with exported fields (`name*: string`) generated
+  `name*` as the C/C++/Rust field name and CBOR key; it is now `name`.
 - Each `{.ffi.}` proc's `##` doc comment reaches the generated C header as a
   `/** ... */` block above the declaration and its wrapper.
 - `genBindings()` fails compilation when a library declares an `{.ffiCtor.}` but
