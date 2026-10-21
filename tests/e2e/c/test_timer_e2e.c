@@ -10,6 +10,9 @@
 #include "my_timer.h"
 #include "waiter.h"
 #include <stdlib.h>
+#if !defined(_WIN32)
+#  include <pthread.h>
+#endif
 
 static int g_event_count = 0;
 static char g_event_message[256];
@@ -257,6 +260,69 @@ static void deferring_impl(void* ctx, uint64_t call_id, const uint8_t* args,
     atomic_store_explicit(&g_deferred_ready, 1, memory_order_release);
 }
 
+/* An async host: the impl copies what the reply needs, hands it to a thread of
+   its own and returns at once; that thread answers later with the token. */
+typedef struct {
+    void* ctx;
+    uint64_t call_id;
+    const char* precision; /* owned: decoded copy, freed by the replier */
+} DeferredCall;
+
+static void* deferred_replier(void* arg) {
+    DeferredCall* c = (DeferredCall*)arg;
+    sleep_ms(50); /* well after the impl returned */
+    HostClock clock = {42, strcmp(c->precision, "ms") == 0 ? "LATE" : "bad-args"};
+    int rc = my_timer_reverse_reply_fetch_host_clock(c->ctx, c->call_id, &clock);
+    assert(rc == NIMFFI_REVERSE_ACCEPTED);
+    (void)rc;
+    free((void*)c->precision);
+    free(c);
+    return NULL;
+}
+
+#if defined(_WIN32)
+static DWORD WINAPI deferred_replier_win(LPVOID arg) {
+    deferred_replier(arg);
+    return 0;
+}
+#endif
+
+static void async_impl(void* ctx, uint64_t call_id, const uint8_t* args, size_t len,
+                       void* ud) {
+    (void)ud;
+    DeferredCall* c = (DeferredCall*)calloc(1, sizeof(DeferredCall));
+    assert(c != NULL);
+    char* err = NULL;
+    if (my_timer_decode_fetch_host_clock_args(args, len, &c->precision, &err) != 0) {
+        my_timer_reverse_reply_err(ctx, call_id, err ? err : "args decode failed");
+        free(err);
+        free(c);
+        return;
+    }
+    c->ctx = ctx;
+    c->call_id = call_id;
+#if defined(_WIN32)
+    HANDLE t = CreateThread(NULL, 0, deferred_replier_win, c, 0, NULL);
+    assert(t != NULL);
+    CloseHandle(t);
+#else
+    pthread_t t;
+    assert(pthread_create(&t, NULL, deferred_replier, c) == 0);
+    pthread_detach(t);
+#endif
+}
+
+static void test_reverse_async_reply(MyTimerCtx* ctx) {
+    assert(my_timer_ctx_set_fetch_host_clock_impl(ctx, async_impl, NULL, NULL) == 0);
+    ReplyWaiter w;
+    memset(&w, 0, sizeof(w));
+    my_timer_ctx_host_clock(ctx, on_str, &w);
+    wait_done(&w.done);
+    assert(w.err_code == 0);
+    assert(strcmp(w.text_a, "LATE@42") == 0);
+    assert(my_timer_ctx_set_fetch_host_clock_impl(ctx, NULL, NULL, NULL) == 0);
+}
+
 static void test_reverse_missing_impl(MyTimerCtx* ctx) {
     ReplyWaiter w;
     memset(&w, 0, sizeof(w));
@@ -340,6 +406,7 @@ int main(void) {
     test_event(ctx);
     test_reverse_missing_impl(ctx);
     test_reverse_host_clock(ctx);
+    test_reverse_async_reply(ctx);
     test_reverse_event(ctx);
     assert(my_timer_ctx_destroy(ctx) == NIMFFI_RET_OK);
     test_reverse_reply_after_destroy();

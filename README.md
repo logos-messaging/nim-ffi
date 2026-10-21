@@ -404,8 +404,20 @@ ctx.emit_on_host_tick(7);            // reverse event, fire-and-forget
 | A host implementation calls `<lib>_shutdown` | The call returns; the worker that runs it leaks and is not joined. |
 | `{.ffiReverseEvent.}` emit | The return code reports the enqueue only. |
 
-A reverse call takes no `{.ffiHandle.}` parameter, and only an `{.ffi.}` handler
-on the FFI processing thread can await it.
+A reverse call takes no `{.ffiHandle.}` parameter, and only code on the FFI
+processing thread can await it: an `{.ffi.}` handler, or any async work running
+on that thread's event loop.
+
+To check an interface before its first call, ask which wires the host has not
+implemented yet. Both procs are for the FFI processing thread; off it, every
+wire counts as missing.
+
+```nim
+let missing = ffiReverseMissing(["fetch_host_clock", "host_note"])
+if missing.len > 0:
+  return err("host has not implemented " & missing.join(", "))
+doAssert ffiReverseImplemented("fetch_host_clock")
+```
 
 ## Placement of `genBindings()`
 

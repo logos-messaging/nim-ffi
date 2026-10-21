@@ -722,6 +722,24 @@ var ffiPendingReverse {.threadvar.}: Table[uint64, PendingReverse]
 proc ffiPendingReverseLen*(): int =
   return ffiPendingReverse.len
 
+proc ffiReverseImplemented*(wire: string): bool {.gcsafe, raises: [].} =
+  ## FFI thread only: whether the host registered an impl for `wire` on this
+  ## context. Off an FFI thread nothing can serve the call, so it is false.
+  let st = ffiCurrentReverseContext
+  if st.isNil():
+    return false
+  return st[].isRegistered(wire)
+
+proc ffiReverseMissing*(wires: openArray[string]): seq[string] {.gcsafe, raises: [].} =
+  ## FFI thread only: the wires of `wires` the host has not implemented, in
+  ## order; empty when the interface is fulfilled. Lets a library check an
+  ## interface up front instead of failing on its first call.
+  var missing: seq[string]
+  for wire in wires:
+    if not ffiReverseImplemented(wire):
+      missing.add(wire)
+  return missing
+
 proc drainReverseReplies*() {.gcsafe, raises: [].} =
   ## FFI thread only: completes parked futures; a reply with an unknown call id is dropped.
   let st = ffiCurrentReverseContext

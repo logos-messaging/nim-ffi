@@ -211,7 +211,37 @@ registerReqFFI(DrivePingRequest, h: ptr FFIContext[RevMacroLib]):
       return err(error)
     return ok("pinged")
 
+registerReqFFI(DriveMissingRequest, h: ptr FFIContext[RevMacroLib]):
+  proc(): Future[Result[string, string]] {.async.} =
+    return ok(ffiReverseMissing(["fetch_config", "host_note", "ping_host"]).join(","))
+
 suite "{.ffiReverse.} through the generated exports":
+  test "ffiReverseMissing lists the wires the host has not implemented":
+    check ffiReverseMissing(["fetch_config"]) == @["fetch_config"] # off an FFI thread
+    check not ffiReverseImplemented("fetch_config")
+    withLibCtx(ctx, token):
+      block:
+        setupCallbackData(rsp)
+        check sendRequestToFFIThread(
+          ctx, DriveMissingRequest.ffiNewReq(captureCb, addr rsp)
+        )
+          .isOk()
+        waitCallback(rsp)
+        check rsp.retCode == RET_OK
+        check "fetch_config,host_note,ping_host" in callbackMsg(rsp)
+
+      check revmacro_set_host_note_impl(token, ackNoteImpl, nil, nil) == REVERSE_ACCEPTED
+      block:
+        setupCallbackData(rsp)
+        check sendRequestToFFIThread(
+          ctx, DriveMissingRequest.ffiNewReq(captureCb, addr rsp)
+        )
+          .isOk()
+        waitCallback(rsp)
+        check rsp.retCode == RET_OK
+        check "fetch_config,ping_host" in callbackMsg(rsp)
+        check "host_note" notin callbackMsg(rsp)
+
   test "multi-param call: synthesized args object and typed reply roundtrip":
     setupCallbackData(rsp)
     withLibCtx(ctx, token):

@@ -40,8 +40,11 @@ add_subdirectory("${_echo_c_bindings_dir}" echo_c_bindings_build)
 
 enable_testing()
 
+find_package(Threads REQUIRED)
+
 add_executable(timer_e2e_c test_timer_e2e.c)
-target_link_libraries(timer_e2e_c PRIVATE my_timer_headers)
+# Threads: the async-reply check answers from a thread of its own.
+target_link_libraries(timer_e2e_c PRIVATE my_timer_headers Threads::Threads)
 add_dependencies(timer_e2e_c my_timer_nim_lib)
 
 add_executable(echo_e2e_c test_echo_e2e.c)
