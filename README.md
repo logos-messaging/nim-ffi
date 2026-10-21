@@ -346,7 +346,8 @@ invocation returns, on whichever thread that is. That makes replacing or clearin
 an implementation safe from any thread, including from inside the implementation
 itself. With a `NULL` release the host keeps ownership and the library never frees
 it, so keep `user_data` valid until the context is destroyed. If `set_impl` fails,
-the caller still owns `user_data`. The status codes are `NIMFFI_REVERSE_*` in C.
+the caller still owns `user_data`. The status codes are `NIMFFI_REVERSE_*` in C and C++ and
+`REVERSE_*` in Rust.
 
 The C header adds typed helpers: `<lib>_ctx_set_<wire>_impl`,
 `<lib>_decode_<wire>_args`, `<lib>_reverse_reply_<wire>`,
@@ -355,6 +356,36 @@ the `ctx` token the implementation is handed, so a reply deferred past the
 context's destroy fails with `NIMFFI_REVERSE_INVALID_CTX` instead of reading a
 freed `<Ctx>` wrapper. The `<lib>_ctx_reverse_reply_*` variants take the
 wrapper and are safe only while it is alive.
+The C++ and Rust bindings pass a `release`, so the library owns their
+closures, and turn a C++ exception or a Rust panic in the implementation into a
+failed call.
+
+The implementation gets a call token with `reply` and `fail`: a small copyable
+value holding the context token and the call id, nothing else. Copy it to any
+thread and answer once, before the call's deadline; a late or second reply is
+dropped, and a reply after the context is gone returns `false`. The arguments
+differ by language: C++ receives them by `const&`, borrowed until the
+implementation returns, so a deferred reply captures a copy. Rust closures own
+theirs and move them. C gets `args`, also valid only until it returns.
+
+```cpp
+ctx->setFetchHostClockImpl([](MyTimerCtx::FetchHostClockCall call, const std::string& precision) {
+    // `precision` is borrowed until this returns: capture a copy, never a reference.
+    std::thread([call, precision] { call.reply(HostClock{now_ms(precision), "CET"}); }).detach();
+});
+auto r = ctx->host_clock();          // Nim awaits the C++ impl
+ctx->emitOnHostTick(7);              // reverse event, fire-and-forget
+```
+
+```rust
+ctx.set_fetch_host_clock_impl(|call, precision: String| {
+    // `precision` is owned: move it into the thread.
+    std::thread::spawn(move || { call.reply(&HostClock { unix_ms: now_ms(&precision), zone: "CET".into() }); });
+});
+let r = ctx.host_clock()?;           // Nim awaits the Rust impl
+ctx.emit_on_host_tick(7);            // reverse event, fire-and-forget
+```
+
 | Situation | Behavior |
 | --- | --- |
 | No implementation registered | The call fails at once. |
@@ -365,6 +396,7 @@ wrapper and are safe only while it is alive.
 | Two replies for one call id | The first one completes the call; the second is dropped. |
 | A reply over `-d:ffiMaxRequestPayloadBytes` (when set), or `NULL` with a length | `NIMFFI_REVERSE_PAYLOAD_TOO_LARGE` or `NIMFFI_REVERSE_INVALID_ARGUMENT`; nothing is queued. |
 | Recycle or shutdown has begun | A new reverse call fails at once instead of parking. |
+| The C++ implementation throws, or the Rust one panics | The call fails with the message; the process keeps running. |
 | A worker inside one implementation past `ReverseWorkerStallMs` | `reverse_worker_blocked` fires, then `reverse_worker_recovered` when it returns. |
 | Recycle while an implementation runs | Waits `RecycleTimeout`, then quarantines the slot with `RecycleFailure.ReverseImplBlocked`. |
 | Destroy, park or `<lib>_shutdown` with a stuck worker | The stuck worker leaks with the slot, and so does its `user_data`: `release` never runs under it. |
