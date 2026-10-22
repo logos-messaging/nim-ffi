@@ -61,6 +61,8 @@ All notable changes to this project are documented in this file.
   returns 0 when they all stopped. A context the host still owned runs its
   `{.ffiDtor.}` on the way out and is then quarantined, so a later call on it
   fails instead of queueing to a thread that is gone.
+- Fix: an `{.ffi.}` object with exported fields (`name*: string`) generated
+  `name*` as the C/C++/Rust field name and CBOR key; it is now `name`.
 - Fix (C++ bindings): `uint32_t`, `uint16_t`, `uint8_t`, `int16_t`, `int8_t` and
   `float` fields and params get CBOR codecs (they were ambiguous or missing);
   the narrow decoders refuse out-of-range values. Raw calls are `::`-qualified,
