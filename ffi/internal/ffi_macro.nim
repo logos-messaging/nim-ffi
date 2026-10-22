@@ -157,9 +157,11 @@ proc registerFFITypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
       for identDef in recList:
         if identDef.kind == nnkIdentDefs:
           let fieldType = identDef[^2]
+          # `basename`, not `$`: an exported field is a postfix node, and `$` keeps
+          # its `*`, which then lands in every generated binding's field name.
           for i in 0 ..< identDef.len - 2:
             rejectRawPtrType(
-              fieldType, "{.ffi.} type " & typeNameStr & "." & $identDef[i]
+              fieldType, "{.ffi.} type " & typeNameStr & "." & $identDef[i].basename
             )
           let fieldTypeName =
             if fieldType.kind == nnkIdent:
@@ -167,7 +169,9 @@ proc registerFFITypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
             else:
               fieldType.repr
           for i in 0 ..< identDef.len - 2:
-            fieldMetas.add(FFIFieldMeta(name: $identDef[i], typeName: fieldTypeName))
+            fieldMetas.add(
+              FFIFieldMeta(name: $identDef[i].basename, typeName: fieldTypeName)
+            )
 
   ffiTypeRegistry.add(FFITypeMeta(name: typeNameStr, fields: fieldMetas))
   return typeDef
