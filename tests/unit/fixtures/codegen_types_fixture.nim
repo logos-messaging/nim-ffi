@@ -22,7 +22,9 @@ proc typeslib_create*(): Future[Result[TypesLib, string]] {.ffiCtor.} =
 proc typeslib_destroy*(lib: TypesLib) {.ffiDtor.} =
   discard
 
-proc typeslib_peer*(lib: TypesLib, id: string): Future[Result[PeerRecord, string]] {.ffi.} =
+proc typeslib_peer*(
+    lib: TypesLib, id: string
+): Future[Result[PeerRecord, string]] {.ffi.} =
   return ok(PeerRecord(peerId: id, addrs: @[], seqNo: 1))
 
 type Shard {.ffi.} = object
