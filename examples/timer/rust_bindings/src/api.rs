@@ -125,6 +125,33 @@ where
     }
 }
 
+thread_local! {
+    static DISPATCH_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static DEFERRED_LISTENERS: std::cell::RefCell<Vec<Box<dyn std::any::Any + Send>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+struct DispatchScope;
+
+impl DispatchScope {
+    fn enter() -> Self {
+        DISPATCH_DEPTH.with(|d| d.set(d.get() + 1));
+        DispatchScope
+    }
+}
+
+impl Drop for DispatchScope {
+    fn drop(&mut self) {
+        let depth = DISPATCH_DEPTH.with(|d| {
+            d.set(d.get() - 1);
+            d.get()
+        });
+        if depth == 0 {
+            drop(DEFERRED_LISTENERS.with(|l| std::mem::take(&mut *l.borrow_mut())));
+        }
+    }
+}
+
 struct OnEchoFiredHandler {
     f: Box<dyn Fn(&EchoEvent) + Send + Sync>,
 }
@@ -132,6 +159,7 @@ struct OnEchoFiredHandler {
 unsafe extern "C" fn on_echo_fired_trampoline(
     ret: c_int, msg: *const c_char, len: usize, ud: *mut c_void,
 ) {
+    let _scope = DispatchScope::enter();
     if ud.is_null() || ret != 0 || msg.is_null() || len == 0 {
         return;
     }
@@ -151,6 +179,7 @@ struct OnJobScheduledHandler {
 unsafe extern "C" fn on_job_scheduled_trampoline(
     ret: c_int, msg: *const c_char, len: usize, ud: *mut c_void,
 ) {
+    let _scope = DispatchScope::enter();
     if ud.is_null() || ret != 0 || msg.is_null() || len == 0 {
         return;
     }
@@ -187,9 +216,14 @@ unsafe impl Sync for MyTimerCtx {}
 
 impl Drop for MyTimerCtx {
     fn drop(&mut self) {
-        if !self.ptr.is_null() {
-            unsafe { ffi::my_timer_destroy(self.ptr); }
-            self.ptr = std::ptr::null_mut();
+        if self.ptr.is_null() {
+            return;
+        }
+        let rc = unsafe { ffi::my_timer_destroy(self.ptr) };
+        self.ptr = std::ptr::null_mut();
+        if rc != NIMFFI_RET_OK {
+            let boxes = self.listeners.get_mut().unwrap_or_else(|e| e.into_inner());
+            boxes.drain().for_each(|(_, owned)| { Box::leak(owned); });
         }
     }
 }
@@ -260,14 +294,20 @@ impl MyTimerCtx {
         self.add_listener_inner(b"on_job_scheduled\0".as_ptr() as *const c_char, on_job_scheduled_trampoline, raw, owned)
     }
 
-    /// Remove a previously-registered listener by handle. Returns true
-    /// if the listener existed and was removed; false otherwise.
+    /// Unregister a listener and release the box that holds the handler.
+    /// From inside a listener callback, the release waits until the outermost callback on that thread returns.
+    /// Returns true if the listener existed and was removed; false otherwise.
     pub fn remove_event_listener(&self, handle: ListenerHandle) -> bool {
         if handle.id == 0 { return false; }
         let rc = unsafe {
             ffi::my_timer_remove_event_listener(self.ptr, handle.id)
         };
-        self.listeners.lock().unwrap().remove(&handle.id);
+        let removed = self.listeners.lock().unwrap().remove(&handle.id);
+        if let Some(owned) = removed {
+            if DISPATCH_DEPTH.with(|d| d.get()) > 0 {
+                DEFERRED_LISTENERS.with(|l| l.borrow_mut().push(owned));
+            }
+        }
         rc == 0
     }
 

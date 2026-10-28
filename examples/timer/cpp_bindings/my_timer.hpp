@@ -957,7 +957,7 @@ public:
     // context.
     ~MyTimerCtx() {
         if (ptr_) {
-            my_timer_destroy(ptr_);
+            if (my_timer_destroy(ptr_) != NIMFFI_RET_OK) for (auto& entry : listeners_) (void)entry.second.release();
             ptr_ = nullptr;
         }
     }
@@ -977,6 +977,7 @@ public:
         const auto id = my_timer_add_event_listener(
             ptr_, "on_echo_fired", &MyTimerCtx::typedTrampoline<EchoEvent>, raw);
         if (id == 0) return ListenerHandle{0};
+        std::lock_guard<std::mutex> lock(listenersMu_);
         listeners_.emplace(id, std::move(owned));
         return ListenerHandle{id};
     }
@@ -989,15 +990,22 @@ public:
         const auto id = my_timer_add_event_listener(
             ptr_, "on_job_scheduled", &MyTimerCtx::typedTrampoline<OnJobScheduledPayload>, raw);
         if (id == 0) return ListenerHandle{0};
+        std::lock_guard<std::mutex> lock(listenersMu_);
         listeners_.emplace(id, std::move(owned));
         return ListenerHandle{id};
     }
 
     /// Unregister a listener and release the box that holds the handler.
+    /// From inside a listener callback, the release waits until the outermost callback on that thread returns.
     bool removeEventListener(ListenerHandle handle) {
         if (handle.id == 0) return false;
         const auto rc = my_timer_remove_event_listener(ptr_, handle.id);
-        listeners_.erase(handle.id);
+        auto node = [&] {
+            std::lock_guard<std::mutex> lock(listenersMu_);
+            return listeners_.extract(handle.id);
+        }();
+        if (!node.empty() && dispatchDepth() > 0)
+            deferredListeners().push_back(std::move(node.mapped()));
         return rc == 0;
     }
 
@@ -1098,8 +1106,29 @@ private:
         explicit TypedListener(std::function<void(const T&)> f) : fn(std::move(f)) {}
     };
 
+    static std::size_t& dispatchDepth() {
+        thread_local std::size_t depth = 0;
+        return depth;
+    }
+
+    // A box removed inside a dispatch waits here until the outermost callback on this thread returns.
+    static std::vector<std::unique_ptr<ListenerBase>>& deferredListeners() {
+        thread_local std::vector<std::unique_ptr<ListenerBase>> boxes;
+        return boxes;
+    }
+
+    struct DispatchScope {
+        DispatchScope() { ++dispatchDepth(); }
+        ~DispatchScope() {
+            if (--dispatchDepth() > 0) return;
+            std::vector<std::unique_ptr<ListenerBase>> doomed;
+            doomed.swap(deferredListeners());
+        }
+    };
+
     template <class T>
     static void typedTrampoline(int ret, const char* msg, std::size_t len, void* ud) {
+        DispatchScope scope;
         if (!ud || ret != 0 || !msg || len == 0) return;
         auto* listener = static_cast<TypedListener<T>*>(ud);
         if (!listener->fn) return;
@@ -1115,6 +1144,7 @@ private:
 
     void* ptr_;
     std::chrono::milliseconds timeout_;
+    std::mutex listenersMu_;
     std::unordered_map<std::uint64_t, std::unique_ptr<ListenerBase>> listeners_;
     explicit MyTimerCtx(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}
 };

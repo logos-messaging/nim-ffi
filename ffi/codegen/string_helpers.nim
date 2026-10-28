@@ -58,6 +58,10 @@ Returns 0 when every context stopped, 1 when one was left running."""
 const CtxRemoveListenerDoc* =
   "Unregister a listener and release the box that holds the handler."
 
+const DeferredRemoveListenerDoc* =
+  CtxRemoveListenerDoc & "\nFrom inside a listener callback, the release waits until " &
+  "the outermost callback on that thread returns."
+
 proc toLower*(s: string): string =
   ## Unicode-aware lowercase for an entire string.
   var buf = ""

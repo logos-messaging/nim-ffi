@@ -148,12 +148,12 @@ jobs:
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
   rust-bindings:
-    # The examples are the only consumers of api.rs; build.rs shells out to `nim c`, hence the nimble job.
+    # The examples and the ticker e2e crate are the consumers of api.rs; build.rs shells out to `nim c`, hence the nimble job.
     name: Run Rust examples
     needs: versions
     uses: ./.github/workflows/nimble-job.yml
     with:
-      run: nimble run_examples_rust -y
+      run: nimble run_examples_rust -y && nimble test_rust_e2e -y
       nim-versions:   ${{ needs.versions.outputs.nim-versions }}
       nimble-version: ${{ needs.versions.outputs.nimble }}
 
