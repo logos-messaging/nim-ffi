@@ -424,6 +424,15 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     return err("requestRecycle: the slot did not come free")
   ok()
 
+proc recycleAfterFailedCtor*[T](ctx: ptr FFIContext[T]) =
+  ## FFI thread only: hands the recycle to the FFI loop, where `requestRecycle` would wait on its own thread.
+  var expected = CtxLifecycle.Active
+  if not ctx.lifecycle.compareExchange(expected, CtxLifecycle.RecyclePending):
+    return
+  ctx.recycleAbandoned.store(false)
+  ctx.reqSignal.fireSync().isOkOr:
+    error "failed to wake the FFI loop for a failed ctor recycle", err = error
+
 const ThreadExitTimeoutMs* {.intdefine: "ffiThreadExitTimeoutMs".} = 1500
   ## Per-thread exit wait; past it stopAndJoinThreads leaks the ctx rather than hangs.
 const ThreadExitTimeout* = ThreadExitTimeoutMs.milliseconds

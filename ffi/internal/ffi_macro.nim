@@ -1301,11 +1301,22 @@ proc addCtorRequestToRegistry(reqTypeName, libTypeName: NimNode): NimNode =
     return ok(cborEncode(`resIdent`.value))
 
   var newBody = newStmtList()
+  let builtIdent = genSym(nskVar, "ctorBuilt")
+  when not defined(ffiPollMode):
+    # The callback host holds no token it can destroy with; a poll host does.
+    newBody.add quote do:
+      var `builtIdent` = false
+      defer:
+        if not `builtIdent`:
+          recycleAfterFailedCtor(cast[`ctxType`](reqHandler))
   newBody.add quote do:
     let `resIdent` = await `callExpr`
     if `resIdent`.isErr:
       return err(`resIdent`.error)
 
+  when not defined(ffiPollMode):
+    newBody.add quote do:
+      `builtIdent` = true
   newBody.add encodeRet
 
   let asyncProc = newProc(
@@ -1331,6 +1342,7 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
   ## C-exported constructor: creates an FFIContext and fills ctx.myLib async on the
   ## FFI thread. Takes Nim params (one CBOR blob), no ctx/callback/userData. Wrapper
   ## returns the ctx pointer sync (NULL on failure); callback fires with its address.
+  ## Callback mode: a failed body frees the slot after its reply; a destroy with the token then returns RET_ERR.
   requireBeforeGenBindings("`.ffiCtor.`")
   requireLibraryDeclared("`.ffiCtor.`")
   let prc = args[^1]
