@@ -157,6 +157,10 @@ fn main() {
         .arg("--noMain")
         .arg(format!("--nimMainPrefix:lib$2"))
         .arg(format!("-o:{}", out_lib.display()));
+    // Same knob as the CMake builds, e.g. `-d:useMalloc` so a sanitizer sees the library heap.
+    if let Ok(extra) = std::env::var("NIM_FFI_EXTRA_ARGS") {
+        cmd.args(extra.split_whitespace());
+    }
     cmd.arg(&nim_src).current_dir(&repo_root);
 
     let status = cmd.status().expect("failed to run nim compiler");
@@ -166,6 +170,7 @@ fn main() {
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", repo_root.display());
     println!("cargo:rustc-link-lib=$2");
     println!("cargo:rerun-if-changed={}", nim_src.display());
+    println!("cargo:rerun-if-env-changed=NIM_FFI_EXTRA_ARGS");
 }
 """ %
     [escapedSrc, libName]
@@ -326,6 +331,42 @@ proc generateTypesRs*(
     lines.add("")
 
   return lines.join("\n")
+
+proc emitDispatchScope(lines: var seq[string]) =
+  ## The outermost trampoline on a thread drops the boxes removed inside its dispatch.
+  lines.add("thread_local! {")
+  lines.add(
+    "    static DISPATCH_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };"
+  )
+  lines.add(
+    "    static DEFERRED_LISTENERS: std::cell::RefCell<Vec<Box<dyn std::any::Any + Send>>> ="
+  )
+  lines.add("        const { std::cell::RefCell::new(Vec::new()) };")
+  lines.add("}")
+  lines.add("")
+  lines.add("struct DispatchScope;")
+  lines.add("")
+  lines.add("impl DispatchScope {")
+  lines.add("    fn enter() -> Self {")
+  lines.add("        DISPATCH_DEPTH.with(|d| d.set(d.get() + 1));")
+  lines.add("        DispatchScope")
+  lines.add("    }")
+  lines.add("}")
+  lines.add("")
+  lines.add("impl Drop for DispatchScope {")
+  lines.add("    fn drop(&mut self) {")
+  lines.add("        let depth = DISPATCH_DEPTH.with(|d| {")
+  lines.add("            d.set(d.get() - 1);")
+  lines.add("            d.get()")
+  lines.add("        });")
+  lines.add("        if depth == 0 {")
+  lines.add(
+    "            drop(DEFERRED_LISTENERS.with(|l| std::mem::take(&mut *l.borrow_mut())));"
+  )
+  lines.add("        }")
+  lines.add("    }")
+  lines.add("}")
+  lines.add("")
 
 proc generateApiRs*(
     procs: seq[FFIProcMeta], libName: string, events: seq[FFIEventMeta] = @[]
@@ -494,6 +535,7 @@ proc generateApiRs*(
 
   # Per-listener handler boxes + extern "C" trampolines: the Box is kept alive in `listeners`, its raw pointer is the per-event `user_data`.
   if events.len > 0:
+    emitDispatchScope(lines)
     for ev in events:
       let handlerStruct = capitalizeFirstLetter(ev.nimProcName) & "Handler"
       let trampolineName = camelToSnakeCase(ev.nimProcName) & "_trampoline"
@@ -504,6 +546,7 @@ proc generateApiRs*(
       lines.add("unsafe extern \"C\" fn $1(" % [trampolineName])
       lines.add("    ret: c_int, msg: *const c_char, len: usize, ud: *mut c_void,")
       lines.add(") {")
+      lines.add("    let _scope = DispatchScope::enter();")
       lines.add("    if ud.is_null() || ret != 0 || msg.is_null() || len == 0 {")
       lines.add("        return;")
       lines.add("    }")
@@ -561,11 +604,22 @@ proc generateApiRs*(
   if dtorProcName.len > 0:
     lines.add("impl Drop for $1 {" % [ctxTypeName])
     lines.add("    fn drop(&mut self) {")
-    lines.add("        if !self.ptr.is_null() {")
-    lines.add("            unsafe { ffi::$1(self.ptr); }" % [dtorProcName])
-    lines.add("            self.ptr = std::ptr::null_mut();")
+    lines.add("        if self.ptr.is_null() {")
+    lines.add("            return;")
     lines.add("        }")
-    # `listeners` drops after this body; the dylib has joined its threads by then, so no callback is mid-flight against the raw pointers we handed it.
+    let rcBinding = if events.len > 0: "let rc = " else: ""
+    lines.add("        $1unsafe { ffi::$2(self.ptr) };" % [rcBinding, dtorProcName])
+    lines.add("        self.ptr = std::ptr::null_mut();")
+    if events.len > 0:
+      # A failed destroy leaves the event thread live, and it still holds each box as user_data.
+      lines.add("        if rc != NIMFFI_RET_OK {")
+      lines.add(
+        "            let boxes = self.listeners.get_mut().unwrap_or_else(|e| e.into_inner());"
+      )
+      lines.add(
+        "            boxes.drain().for_each(|(_, owned)| { Box::leak(owned); });"
+      )
+      lines.add("        }")
     lines.add("    }")
     lines.add("}")
     lines.add("")
@@ -700,9 +754,10 @@ proc generateApiRs*(
       lines.add("    }")
       lines.add("")
 
-    # Remove by handle; drops the Box after the C ABI confirms unregistration.
-    lines.add("    /// Remove a previously-registered listener by handle. Returns true")
-    lines.add("    /// if the listener existed and was removed; false otherwise.")
+    lines.add(renderMemberDocComment(DeferredRemoveListenerDoc))
+    lines.add(
+      "    /// Returns true if the listener existed and was removed; false otherwise."
+    )
     lines.add(
       "    pub fn remove_event_listener(&self, handle: ListenerHandle) -> bool {"
     )
@@ -712,7 +767,16 @@ proc generateApiRs*(
       "            ffi::$1_remove_event_listener(self.ptr, handle.id)" % [libName]
     )
     lines.add("        };")
-    lines.add("        self.listeners.lock().unwrap().remove(&handle.id);")
+    lines.add(
+      "        let removed = self.listeners.lock().unwrap().remove(&handle.id);"
+    )
+    lines.add("        if let Some(owned) = removed {")
+    lines.add("            if DISPATCH_DEPTH.with(|d| d.get()) > 0 {")
+    lines.add(
+      "                DEFERRED_LISTENERS.with(|l| l.borrow_mut().push(owned));"
+    )
+    lines.add("            }")
+    lines.add("        }")
     lines.add("        rc == 0")
     lines.add("    }")
     lines.add("")

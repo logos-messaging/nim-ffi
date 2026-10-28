@@ -25,6 +25,14 @@ const
   CMakeListsTpl = staticRead("templates/cpp/CMakeLists.txt.tpl")
   FindRepoRootTpl = staticRead("templates/find_repo_root.cmake.part")
 
+func destroyStmt(libName: string, hasListeners: bool): string =
+  if not hasListeners:
+    return libName & "_destroy(ptr_);"
+  # A failed destroy leaves the event thread live, and it still holds each box as user_data.
+  return
+    "if (" & libName & "_destroy(ptr_) != NIMFFI_RET_OK) " &
+    "for (auto& entry : listeners_) (void)entry.second.release();"
+
 func cppScalar(s: ScalarKind): string =
   case s
   of skBool: "bool"
@@ -171,17 +179,23 @@ proc emitEventDispatcher(
         [ev.wireName, ctxTypeName, ev.payloadTypeName]
     )
     lines.add("        if (id == 0) return ListenerHandle{0};")
+    lines.add("        std::lock_guard<std::mutex> lock(listenersMu_);")
     lines.add("        listeners_.emplace(id, std::move(owned));")
     lines.add("        return ListenerHandle{id};")
     lines.add("    }")
     lines.add("")
-  lines.add(renderMemberDocComment(CtxRemoveListenerDoc))
+  lines.add(renderMemberDocComment(DeferredRemoveListenerDoc))
   lines.add("    bool removeEventListener(ListenerHandle handle) {")
   lines.add("        if (handle.id == 0) return false;")
   lines.add(
     "        const auto rc = $1_remove_event_listener(ptr_, handle.id);" % [libName]
   )
-  lines.add("        listeners_.erase(handle.id);")
+  lines.add("        auto node = [&] {")
+  lines.add("            std::lock_guard<std::mutex> lock(listenersMu_);")
+  lines.add("            return listeners_.extract(handle.id);")
+  lines.add("        }();")
+  lines.add("        if (!node.empty() && dispatchDepth() > 0)")
+  lines.add("            deferredListeners().push_back(std::move(node.mapped()));")
   lines.add("        return rc == 0;")
   lines.add("    }")
   lines.add("")
@@ -203,10 +217,35 @@ proc emitEventTrampoline(lines: var seq[string], events: seq[FFIEventMeta]) =
   )
   lines.add("    };")
   lines.add("")
+  lines.add("    static std::size_t& dispatchDepth() {")
+  lines.add("        thread_local std::size_t depth = 0;")
+  lines.add("        return depth;")
+  lines.add("    }")
+  lines.add("")
+  lines.add(
+    "    // A box removed inside a dispatch waits here until the outermost callback on this thread returns."
+  )
+  lines.add(
+    "    static std::vector<std::unique_ptr<ListenerBase>>& deferredListeners() {"
+  )
+  lines.add("        thread_local std::vector<std::unique_ptr<ListenerBase>> boxes;")
+  lines.add("        return boxes;")
+  lines.add("    }")
+  lines.add("")
+  lines.add("    struct DispatchScope {")
+  lines.add("        DispatchScope() { ++dispatchDepth(); }")
+  lines.add("        ~DispatchScope() {")
+  lines.add("            if (--dispatchDepth() > 0) return;")
+  lines.add("            std::vector<std::unique_ptr<ListenerBase>> doomed;")
+  lines.add("            doomed.swap(deferredListeners());")
+  lines.add("        }")
+  lines.add("    };")
+  lines.add("")
   lines.add("    template <class T>")
   lines.add(
     "    static void typedTrampoline(int ret, const char* msg, std::size_t len, void* ud) {"
   )
+  lines.add("        DispatchScope scope;")
   lines.add("        if (!ud || ret != 0 || !msg || len == 0) return;")
   lines.add("        auto* listener = static_cast<TypedListener<T>*>(ud);")
   lines.add("        if (!listener->fn) return;")
@@ -457,7 +496,11 @@ proc generateCppHeader*(
     lines.add("")
 
   lines.add(
-    ContextRuleOf5Tpl.multiReplace(("{{CTX}}", ctxTypeName), ("{{LIB}}", libName))
+    ContextRuleOf5Tpl.multiReplace(
+      ("{{CTX}}", ctxTypeName),
+      ("{{LIB}}", libName),
+      ("{{DESTROY}}", destroyStmt(libName, events.len > 0)),
+    )
   )
 
   emitEventDispatcher(lines, ctxTypeName, libName, events)
@@ -553,6 +596,7 @@ proc generateCppHeader*(
   lines.add("    void* ptr_;")
   lines.add("    std::chrono::milliseconds timeout_;")
   if events.len > 0:
+    lines.add("    std::mutex listenersMu_;")
     lines.add(
       "    std::unordered_map<std::uint64_t, std::unique_ptr<ListenerBase>> listeners_;"
     )

@@ -4,7 +4,7 @@
 {.pragma: callback, cdecl, raises: [], gcsafe.}
 
 import system/ansi_c
-import std/[atomics, locks, sequtils, options, tables]
+import std/[atomics, locks, options]
 import chronicles
 import results
 import ./ffi_types, ./cbor_serial, ./ffi_msg
@@ -19,34 +19,72 @@ type
     callback*: FFICallBack
     userData*: pointer
 
+  RegisteredListener = object
+    nameId: uint64
+    listener: FFIEventListener
+
   FFIEventRegistry* = object
     lock*: Lock
     nextId*: uint64 # 0 is reserved as "invalid"; ids start at 1.
-    byEvent*: Table[string, seq[FFIEventListener]]
+    # c_malloc'd: host threads add and remove, and a GC block freed after its thread exits faults.
+    entries: ptr UncheckedArray[RegisteredListener]
+    len: int
+    cap: int
     dispatchDone*: Cond
     dispatching*: int # deliveries in flight, over every dispatching thread.
 
 var ffiInDispatch {.threadvar.}: int
   # Dispatch depth of this thread, so a listener never waits for its own delivery.
 
+var ffiDispatchRegistry {.threadvar.}: ptr FFIEventRegistry
+  # The registry this thread dispatches; a remove on another context's registry still waits.
+
 proc initEventRegistry*(reg: var FFIEventRegistry) =
   ## Run once on the owning thread before sharing (re-initLock is UB).
   reg.lock.initLock()
   reg.dispatchDone.initCond()
   reg.nextId = 0'u64
-  reg.byEvent = initTable[string, seq[FFIEventListener]]()
+  reg.entries = nil
+  reg.len = 0
+  reg.cap = 0
   reg.dispatching = 0
 
 proc deinitEventRegistry*(reg: var FFIEventRegistry) =
-  ## Mirror of `initEventRegistry`; resets GC fields so slot reuse sees no dtor.
+  ## Mirror of `initEventRegistry`.
   reg.dispatchDone.deinitCond()
   reg.lock.deinitLock()
-  reg.byEvent = default(Table[string, seq[FFIEventListener]])
+  if not reg.entries.isNil():
+    c_free(reg.entries)
+  reg.entries = nil
+  reg.len = 0
+  reg.cap = 0
   reg.nextId = 0'u64
+
+proc listenersOf(
+    reg: var FFIEventRegistry, eventName: string
+): seq[FFIEventListener] {.raises: [].} =
+  ## Call with `reg.lock` held.
+  let id = nameId(eventName)
+  var listeners: seq[FFIEventListener] = @[]
+  for i in 0 ..< reg.len:
+    if reg.entries[i].nameId == id:
+      listeners.add(reg.entries[i].listener)
+  return listeners
+
+proc grow(reg: var FFIEventRegistry): bool {.raises: [].} =
+  ## Call with `reg.lock` held; false when out of memory.
+  let newCap = max(8, reg.cap * 2)
+  let p = c_realloc(reg.entries, csize_t(newCap * sizeof(RegisteredListener)))
+  if p.isNil():
+    return false
+  reg.entries = cast[ptr UncheckedArray[RegisteredListener]](p)
+  reg.cap = newCap
+  return true
 
 proc awaitDispatch(reg: var FFIEventRegistry) {.raises: [].} =
   ## Call with `reg.lock` held.
-  while reg.dispatching > 0 and ffiInDispatch == 0:
+  let ownDelivery = ffiInDispatch > 0 and ffiDispatchRegistry == addr reg
+  while reg.dispatching > 0 and not ownDelivery:
     wait(reg.dispatchDone, reg.lock)
 
 proc beginDispatch*(
@@ -57,10 +95,10 @@ proc beginDispatch*(
   ## with `endDispatch`.
   var listeners: seq[FFIEventListener] = @[]
   withLock reg.lock:
-    for l in reg.byEvent.getOrDefault(eventName):
-      listeners.add(l)
+    listeners = reg.listenersOf(eventName)
     reg.dispatching.inc()
   ffiInDispatch.inc()
+  ffiDispatchRegistry = addr reg
   return listeners
 
 proc endDispatch*(reg: var FFIEventRegistry) {.raises: [].} =
@@ -73,7 +111,7 @@ proc clearListeners*(reg: var FFIEventRegistry) {.raises: [].} =
   ## Removes all listeners. The pool calls this when it recycles a context. The
   ## lock stays in place, because the event thread uses it across recycles.
   withLock reg.lock:
-    reg.byEvent.clear()
+    reg.len = 0
     reg.nextId = 0'u64
     reg.awaitDispatch()
 
@@ -83,18 +121,22 @@ proc addEventListener*(
     callback: FFICallBack,
     userData: pointer,
 ): uint64 {.raises: [].} =
-  ## Returns the listener id (>0), or 0 if `callback` is nil.
+  ## Returns the listener id (>0), or 0 if `callback` is nil or memory runs out.
   if callback.isNil():
     return 0
 
   var assigned: uint64 = 0
 
   withLock reg.lock:
+    if reg.len == reg.cap and not reg.grow():
+      return 0
     reg.nextId.inc()
     assigned = reg.nextId
-    let listener =
-      FFIEventListener(id: assigned, callback: callback, userData: userData)
-    reg.byEvent.mgetOrPut(eventName, @[]).add(listener)
+    reg.entries[reg.len] = RegisteredListener(
+      nameId: nameId(eventName),
+      listener: FFIEventListener(id: assigned, callback: callback, userData: userData),
+    )
+    reg.len.inc()
   assigned
 
 proc removeEventListener*(reg: var FFIEventRegistry, id: uint64): bool {.raises: [].} =
@@ -105,20 +147,16 @@ proc removeEventListener*(reg: var FFIEventRegistry, id: uint64): bool {.raises:
   var removed = false
 
   withLock reg.lock:
-    var
-      pruneKey = ""
-      prune = false
-    for key, listeners in reg.byEvent.mpairs:
-      let before = listeners.len
-      listeners.keepItIf(it.id != id)
-      if listeners.len < before:
+    for i in 0 ..< reg.len:
+      if reg.entries[i].listener.id == id:
+        moveMem(
+          addr reg.entries[i],
+          addr reg.entries[i + 1],
+          (reg.len - i - 1) * sizeof(RegisteredListener),
+        )
+        reg.len.dec()
         removed = true
-        if listeners.len == 0:
-          pruneKey = key
-          prune = true
         break
-    if prune:
-      reg.byEvent.del(pruneKey)
     if removed:
       reg.awaitDispatch()
   removed
@@ -126,18 +164,15 @@ proc removeEventListener*(reg: var FFIEventRegistry, id: uint64): bool {.raises:
 proc removeAllEventListeners*(reg: var FFIEventRegistry) {.raises: [].} =
   ## Does not reset the id counter.
   withLock reg.lock:
-    reg.byEvent.clear()
+    reg.len = 0
     reg.awaitDispatch()
 
 proc snapshotListeners*(
     reg: var FFIEventRegistry, eventName: string
 ): seq[FFIEventListener] {.raises: [].} =
   ## Lock held only across the copy so re-entrant add/remove can't deadlock.
-  var listeners: seq[FFIEventListener] = @[]
   withLock reg.lock:
-    for l in reg.byEvent.getOrDefault(eventName):
-      listeners.add(l)
-  listeners
+    return reg.listenersOf(eventName)
 
 const EventQueueCapacity* {.intdefine: "ffiEventQueueCapacity".} = 1024
   ## Sustained backlog here means a listener is wedged. Override `-d:ffiEventQueueCapacity=N`.
@@ -383,9 +418,11 @@ proc clearEventQueue*(q: var EventQueue) {.raises: [], gcsafe.} =
 proc isRegistered(
     reg: var FFIEventRegistry, eventName: string, id: uint64
 ): bool {.raises: [].} =
+  let nid = nameId(eventName)
   withLock reg.lock:
-    reg.byEvent.withValue(eventName, listeners):
-      return listeners[].anyIt(it.id == id)
+    for i in 0 ..< reg.len:
+      if reg.entries[i].listener.id == id:
+        return reg.entries[i].nameId == nid
   return false
 
 proc notifyListeners*(
