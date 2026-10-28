@@ -18,6 +18,12 @@ All notable changes to this project are documented in this file.
   by choice. The queue-depth and CBOR element limits are unchanged.
 
 ### Fixed
+- **A failed callback-mode ctor gives its pool slot back.** The ctor body
+  runs after `<lib>_create` returns the token, and the generated wrappers drop
+  that token. Each failed construction thus kept a slot, and after 32 failures
+  every create failed with "FFI context pool exhausted". The FFI thread now
+  recycles the context after the error reply. The token then stops resolving,
+  and a destroy with it returns `RET_ERR` and does nothing.
 - **A callback-mode ctor refuses a NULL callback.** `<lib>_create(req, len,
   NULL, NULL)` returned a token, and the FFI thread later called address 0.
   The ctor now returns NULL and claims no slot.
