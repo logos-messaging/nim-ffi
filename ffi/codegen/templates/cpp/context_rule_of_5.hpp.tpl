@@ -9,7 +9,7 @@
     // context.
     ~{{CTX}}() {
         if (ptr_) {
-            {{LIB}}_destroy(ptr_);
+            {{DESTROY}}
             ptr_ = nullptr;
         }
     }

@@ -36,6 +36,10 @@ fn main() {
         .arg("--noMain")
         .arg(format!("--nimMainPrefix:lib{{LIB}}"))
         .arg(format!("-o:{}", out_lib.display()));
+    // Same knob as the CMake builds, e.g. `-d:useMalloc` so a sanitizer sees the library heap.
+    if let Ok(extra) = std::env::var("NIM_FFI_EXTRA_ARGS") {
+        cmd.args(extra.split_whitespace());
+    }
     cmd.arg(&nim_src).current_dir(&repo_root);
 
     let status = cmd.status().expect("failed to run nim compiler");
@@ -47,6 +51,7 @@ fn main() {
     // Tests and examples then find the library without DYLD_/LD_LIBRARY_PATH.
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", repo_root.display());
     println!("cargo:rerun-if-changed={}", nim_src.display());
+    println!("cargo:rerun-if-env-changed=NIM_FFI_EXTRA_ARGS");
     // Inside the nim-ffi checkout, a runtime change must rebuild the library too.
     let ffi_dir = repo_root.join("ffi");
     if ffi_dir.is_dir() {

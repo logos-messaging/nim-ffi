@@ -5,6 +5,7 @@ struct {{EVENT}}Handler {
 unsafe extern "C" fn {{EVENT_SNAKE}}_trampoline(
     ret: c_int, msg: *const c_char, len: usize, ud: *mut c_void,
 ) {
+    let _scope = DispatchScope::enter();
     if ud.is_null() || ret != 0 || msg.is_null() || len == 0 {
         return;
     }
