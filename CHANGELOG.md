@@ -20,6 +20,18 @@ All notable changes to this project are documented in this file.
   by choice. The queue-depth and CBOR element limits are unchanged.
 
 ### Fixed
+- **A library builds with `--ic:on` on Nim 2.4** (#255). `--ic:on` compiles each
+  module in its own process, so a `{.compileTime.}` var did not cross modules: a
+  `.ffi.` proc did not see a `declareLibrary` in an imported module, and
+  `genBindings()` did not see an annotation in an imported module. The FFI state
+  now lives in `std/macrocache`. `genBindings()` reads the project path at its
+  call site, so the default output dir and the embedded source path follow the
+  compiled file. Under `--ic:on`, a binding build that calls `genBindings()`
+  outside the root module is now a compile error, because `--ic:on` drops
+  annotations of the sibling modules without one. A warm `--ic:on` cache skips
+  sem, so a rebuild with no source change does not regenerate the bindings:
+  delete the nimcache dir after you change the bindings dir, `-d:targetLang` or
+  `-d:ffiOutputDir`.
 - **A callback-mode ctor refuses a NULL callback.** `<lib>_create(req, len,
   NULL, NULL)` returned a token, and the FFI thread later called address 0.
   The ctor now returns NULL and claims no slot.

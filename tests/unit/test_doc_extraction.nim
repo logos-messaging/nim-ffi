@@ -45,13 +45,13 @@ proc doctest_plain*(p: Tocked) {.ffiEvent: "on_plain".}
 
 # The registries are compile-time only, so snapshot them into consts.
 proc docOf(procName: string): string {.compileTime.} =
-  for p in ffiProcRegistry:
+  for p in ffiProcRegistry():
     if p.procName == procName:
       return p.doc
   doAssert false, "no proc " & procName & " in ffiProcRegistry"
 
 proc eventDocOf(wireName: string): string {.compileTime.} =
-  for e in ffiEventRegistry:
+  for e in ffiEventRegistry():
     if e.wireName == wireName:
       return e.doc
   doAssert false, "no event " & wireName & " in ffiEventRegistry"
