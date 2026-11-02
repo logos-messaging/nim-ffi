@@ -53,6 +53,19 @@ TEST(TimerE2E, CreateAndDestroy) {
     SUCCEED();
 }
 
+TEST(TimerE2E, FailedCreatesGiveTheirSlotsBack) {
+    // More failures than the pool has slots: each failed create must free its slot.
+    constexpr int kFailedCreates = 40;
+    for (int i = 0; i < kFailedCreates; ++i) {
+        auto res = MyTimerCtx::create(TimerConfig{""});
+        ASSERT_TRUE(res.isErr());
+        EXPECT_NE(res.error().find("timer name must not be empty"), std::string::npos)
+            << res.error();
+    }
+    auto ctx = makeCtx("after-failed-creates");
+    EXPECT_EQ(mustOk(ctx->version()), TIMER_VERSION);
+}
+
 TEST(TimerE2E, VersionSync) {
     auto ctx = makeCtx("version-sync");
     const auto v = mustOk(ctx->version());

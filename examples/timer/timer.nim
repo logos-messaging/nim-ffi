@@ -53,6 +53,8 @@ proc onJobScheduled*(
 proc myTimerCreate*(config: TimerConfig): Future[Result[MyTimer, string]] {.ffiCtor.} =
   ## Creates the FFIContext + MyTimer; async via chronos.
   await sleepAsync(1.milliseconds) # proves chronos is live on the FFI thread
+  if config.name.len == 0:
+    return err("timer name must not be empty")
   return ok(MyTimer(name: config.name))
 
 proc myTimerEcho*(
