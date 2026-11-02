@@ -43,7 +43,7 @@ proc validateNimMainPrefix(libraryName: string) {.compileTime.} =
     )
 
 macro declareLibraryBase*(libraryName: static[string]): untyped =
-  currentLibName = libraryName
+  setCurrentLibName(libraryName)
 
   validateNimMainPrefix(libraryName)
 
@@ -130,8 +130,7 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
 
 macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
   ## Declares a library and emits its `FFIContext` listener ABI (add/remove).
-  currentLibType = $libType # so handle-receiver `.ffi.` procs can resolve the pool
-  libraryDeclared = true
+  setCurrentLibType($libType) # so handle-receiver `.ffi.` procs can resolve the pool
 
   var stmts = newStmtList()
 

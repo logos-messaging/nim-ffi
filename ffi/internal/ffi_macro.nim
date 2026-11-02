@@ -15,7 +15,7 @@ when defined(ffiGenBindings):
 
 proc requireLibraryDeclared(where: string) {.compileTime.} =
   ## Enforce that `declareLibrary(...)` ran before this annotation.
-  if not libraryDeclared:
+  if not libraryDeclared():
     error(
       where & ": declareLibrary(name, LibType) must be called before any FFI annotation"
     )
@@ -39,7 +39,7 @@ proc resolveEventWireName(
 proc requireBeforeGenBindings(where: string) {.compileTime.} =
   ## Enforce this annotation expands before `genBindings()`; anything registered
   ## afterwards never reaches the generator.
-  if genBindingsEmitted:
+  if genBindingsEmitted():
     error(
       where &
         " appears after genBindings(); genBindings() must be the LAST FFI call in the compilation root, after every {.ffi.}/{.ffiCtor.}/{.ffiDtor.}/{.ffiEvent.} annotation"
@@ -132,7 +132,7 @@ proc enumValueMetas(
   values
 
 proc registerFFIEnumInfo(typeDef: NimNode, typeNameStr: string) {.compileTime.} =
-  ffiTypeRegistry.add(
+  addFFIType(
     FFITypeMeta(name: typeNameStr, enumValues: enumValueMetas(typeDef[2], typeNameStr))
   )
 
@@ -169,7 +169,7 @@ proc registerFFITypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
           for i in 0 ..< identDef.len - 2:
             fieldMetas.add(FFIFieldMeta(name: $identDef[i], typeName: fieldTypeName))
 
-  ffiTypeRegistry.add(FFITypeMeta(name: typeNameStr, fields: fieldMetas))
+  addFFIType(FFITypeMeta(name: typeNameStr, fields: fieldMetas))
   return typeDef
 
 func extractDocComment(prc: NimNode): string {.compileTime.} =
@@ -715,7 +715,7 @@ macro ffiHandle*(args: varargs[untyped]): untyped =
   # Inherit the registry's storable base so handle refs share one static type.
   objTy[1] = nnkOfInherit.newTree(ident("FFIHandleRoot"))
 
-  ffiHandleTypeNames.add($typeName)
+  addFFIHandleTypeName($typeName)
 
   when defined(ffiDumpMacros):
     echo clean.repr
@@ -731,13 +731,13 @@ proc registerFFIConst(nameNode: NimNode): NimNode {.compileTime.} =
       ": only integer, float, bool and string consts can cross the FFI boundary"
   )
   # bindSym: the emitted code lands in the user's module, which doesn't import meta.
-  let registry = bindSym("ffiConstRegistry")
+  let registry = bindSym("addFFIConst")
   let metaType = bindSym("FFIConstMeta")
   quote:
     when not (`nameNode` is (SomeInteger | SomeFloat | bool | string)):
       {.error: `unsupported`.}
     static:
-      `registry`.add(
+      `registry`(
         `metaType`(name: `nameStr`, typeName: $typeof(`nameNode`), value: $(`nameNode`))
       )
 
@@ -784,7 +784,7 @@ proc buildFFIProc(prc: NimNode, isStatic: bool): NimNode {.compileTime.} =
     recvName = firstParam[0]
     recvType = firstParam[1]
     firstIsHandle = isHandleType(recvType)
-  if (firstIsHandle or isStatic) and currentLibType.len == 0:
+  if (firstIsHandle or isStatic) and currentLibType().len == 0:
     let why =
       if isStatic: " takes no library param" else: " has an {.ffiHandle.} receiver"
     error(
@@ -794,7 +794,7 @@ proc buildFFIProc(prc: NimNode, isStatic: bool): NimNode {.compileTime.} =
   # Neither carries a library type, so fall back to the declared one.
   let libTypeName =
     if firstIsHandle or isStatic:
-      ident(currentLibType)
+      ident(currentLibType())
     else:
       recvType
 
@@ -883,7 +883,7 @@ proc buildFFIProc(prc: NimNode, isStatic: bool): NimNode {.compileTime.} =
 
   let procMeta = FFIProcMeta(
     procName: cExportName,
-    libName: currentLibName,
+    libName: currentLibName(),
     kind: if isStatic: FFIKind.STATIC else: FFIKind.FFI,
     libTypeName: $libTypeName,
     extraParams: wireParamMetas,
@@ -1025,7 +1025,7 @@ proc buildFFIProc(prc: NimNode, isStatic: bool): NimNode {.compileTime.} =
 
     let ffiProc = buildCExportProc(exportedParams, ffiBody)
 
-    ffiProcRegistry.add(procMeta)
+    addFFIProc(procMeta)
 
     return newStmtList(helperProc, registerReq, ffiProc)
 
@@ -1535,10 +1535,10 @@ macro ffiCtor*(args: varargs[untyped]): untyped =
       ctorExtraParams.add(
         FFIParamMeta(name: paramNames[i], typeName: tn, isPtr: isPointer)
       )
-    ffiProcRegistry.add(
+    addFFIProc(
       FFIProcMeta(
         procName: cExportName,
-        libName: currentLibName,
+        libName: currentLibName(),
         kind: FFIKind.CTOR,
         libTypeName: $libTypeName,
         extraParams: ctorExtraParams,
@@ -1663,10 +1663,10 @@ proc buildFFIDtorProc(prc: NimNode): NimNode {.compileTime.} =
     ),
   )
 
-  ffiProcRegistry.add(
+  addFFIProc(
     FFIProcMeta(
       procName: cExportName,
-      libName: currentLibName,
+      libName: currentLibName(),
       kind: FFIKind.DTOR,
       libTypeName: $libTypeName,
       extraParams: @[],
@@ -1794,11 +1794,11 @@ proc buildFFIEventProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compileTi
   )
   resultStmts.add(generated)
 
-  ffiEventRegistry.add(
+  addFFIEvent(
     FFIEventMeta(
       wireName: wireName,
       nimProcName: $userProcName,
-      libName: currentLibName,
+      libName: currentLibName(),
       payloadTypeName: payloadTypeNameStr,
       doc: extractDocComment(prc),
     )
@@ -1824,24 +1824,24 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
   assertFFIPath(prc, fpEvent)
   return buildFFIEventProc(prc, args[0 ..^ 2])
 
-proc bindingsOutputDir(lang, explicit: string): string {.compileTime.} =
+proc bindingsOutputDir(lang, explicit, projectPath: string): string {.compileTime.} =
   ## Output dir for `lang`; defaults to `<lang>_bindings/` next to the compiled
   ## source. A relative -d:ffiOutputDir resolves against that same directory,
   ## because the compiler's working directory is not a stable base for it.
   if explicit.len == 0:
-    return buildPath(querySetting(SingleValueSetting.projectPath), lang & "_bindings")
+    return buildPath(projectPath, lang & "_bindings")
   if buildIsAbsolute(explicit):
     return explicit
-  return buildPath(querySetting(SingleValueSetting.projectPath), explicit)
+  return buildPath(projectPath, explicit)
 
-proc bindingsSrcPath(outDir, explicit: string): string {.compileTime.} =
+proc bindingsSrcPath(outDir, explicit, projectFull: string): string {.compileTime.} =
   ## Nim source path embedded in build files, relative to `outDir`; defaults to
   ## the compiled file, or an explicit -d:ffiSrcPath override. Derived for
   ## `buildOS`: the build files that carry it run on the build machine.
   if explicit.len > 0:
     explicit
   else:
-    buildRelativePath(querySetting(SingleValueSetting.projectFull), outDir)
+    buildRelativePath(projectFull, outDir)
 
 when defined(ffiGenBindings):
   proc emitBindingsFor(
@@ -1851,38 +1851,51 @@ when defined(ffiGenBindings):
     case lang
     of "rust":
       generateRustCrate(
-        genProcs, ffiTypeRegistry, libName, outDir, srcRel, ffiEventRegistry,
-        ffiConstRegistry,
+        genProcs,
+        ffiTypeRegistry(),
+        libName,
+        outDir,
+        srcRel,
+        ffiEventRegistry(),
+        ffiConstRegistry(),
       )
     of "cpp", "c++":
       generateCppBindings(
-        genProcs, ffiTypeRegistry, libName, outDir, srcRel, ffiEventRegistry,
-        ffiConstRegistry,
+        genProcs,
+        ffiTypeRegistry(),
+        libName,
+        outDir,
+        srcRel,
+        ffiEventRegistry(),
+        ffiConstRegistry(),
       )
     of "c":
       generateCBindings(
-        genProcs, ffiTypeRegistry, libName, outDir, srcRel, ffiEventRegistry,
-        ffiConstRegistry,
+        genProcs,
+        ffiTypeRegistry(),
+        libName,
+        outDir,
+        srcRel,
+        ffiEventRegistry(),
+        ffiConstRegistry(),
       )
     of "cddl":
-      generateCddlBindings(genProcs, ffiTypeRegistry, libName, outDir, srcRel)
+      generateCddlBindings(genProcs, ffiTypeRegistry(), libName, outDir, srcRel)
     else:
       error(
         "genBindings: unknown targetLang '" & lang &
           "'. Use 'rust', 'cpp', 'c', or 'cddl'."
       )
 
-macro genBindings*(
-    outputDir: static[string] = ffiOutputDir, nimSrcRelPath: static[string] = ffiSrcPath
+macro genBindingsAt*(
+    outputDir, nimSrcRelPath, projectPath, projectFull: static[string]
 ): untyped =
-  ## Emits binding files from the compile-time FFI registries. MUST be called AFTER
-  ## every {.ffi.}/{.ffiCtor.}/{.ffiDtor.} annotation, so place it at the compilation
-  ## root's bottom. -d:targetLang picks languages; emission needs -d:ffiGenBindings.
-  genBindingsEmitted = true
+  markGenBindingsEmitted()
 
   # A ctor allocates a context; without a dtor the caller has no way to release
   # the underlying Nim library object, so require the pair (issue #3).
-  let classified = classifyProcs(ffiProcRegistry)
+  let procs = ffiProcRegistry()
+  let classified = classifyProcs(procs)
   if classified.ctors.len > 0 and classified.dtor.isNone():
     error(
       "genBindings: library '" & classified.ctors[0].libName &
@@ -1900,14 +1913,34 @@ macro genBindings*(
           "`nim c --compileOnly`."
       )
     else:
-      let libName = deriveLibName(ffiProcRegistry)
+      let libName = deriveLibName(procs)
       for rawLang in targetLang.split(','):
         let lang = string_helpers.toLower(rawLang.strip())
         if lang.len == 0:
           continue
-        let outDir = bindingsOutputDir(lang, outputDir)
+        let outDir = bindingsOutputDir(lang, outputDir, projectPath)
         emitBindingsFor(
-          lang, ffiProcRegistry, libName, outDir, bindingsSrcPath(outDir, nimSrcRelPath)
+          lang,
+          procs,
+          libName,
+          outDir,
+          bindingsSrcPath(outDir, nimSrcRelPath, projectFull),
         )
 
   newStmtList()
+
+# A template: under `--ic:on` a query inside the macro reads the project of ffi_macro.nim.
+template genBindings*(outputDir = ffiOutputDir, nimSrcRelPath = ffiSrcPath) =
+  ## Emits binding files from the compile-time FFI registries. MUST be called AFTER
+  ## every {.ffi.}/{.ffiCtor.}/{.ffiDtor.} annotation, so place it at the compilation
+  ## root's bottom. -d:targetLang picks languages; emission needs -d:ffiGenBindings.
+
+  # Under `--ic:on` a sibling module of a non-root call cannot see the call, so its annotations vanish.
+  when defined(ffiGenBindings) and not isMainModule:
+    {.error: "genBindings() must be called from the compilation root".}
+  genBindingsAt(
+    outputDir,
+    nimSrcRelPath,
+    querySetting(SingleValueSetting.projectPath),
+    querySetting(SingleValueSetting.projectFull),
+  )

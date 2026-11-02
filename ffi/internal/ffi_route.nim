@@ -55,7 +55,8 @@ proc isLibReceiver(t: NimNode): bool {.compileTime.} =
   ## The receiver is the type that `declareLibrary` recorded, or a handle type.
   if t.kind != nnkIdent:
     return false
-  return ($t == currentLibType and currentLibType.len > 0) or isFFIHandleTypeName($t)
+  return
+    ($t == currentLibType() and currentLibType().len > 0) or isFFIHandleTypeName($t)
 
 proc routeFFIProc*(prc: NimNode): FFIPath {.compileTime.} =
   ## Reads the receiver and the return type, then names the path.

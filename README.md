@@ -311,7 +311,9 @@ library keeps its annotations in imported sub-modules and calls `genBindings()`
 once at the bottom of the top-level root file.
 
 An annotation that expands *after* `genBindings()` is now a **compile error**
-(previously it was silently dropped from the bindings).
+(previously it was silently dropped from the bindings). A binding build
+(`-d:ffiGenBindings`) that calls `genBindings()` outside the root module is also
+a compile error.
 
 ### Request payload size (host responsibility)
 
