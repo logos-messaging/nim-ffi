@@ -238,7 +238,7 @@ static void host_clock_impl(void* ctx, uint64_t call_id, const uint8_t* args,
     free((void*)precision);
     HostClock clock = {1700000123456LL, "UTC"};
     int rc = my_timer_reverse_reply_fetch_host_clock(ctx, call_id, &clock);
-    assert(rc == NIMFFI_REVERSE_ACCEPTED);
+    assert(rc == NIMFFI_RET_OK);
     (void)rc;
 }
 
@@ -326,7 +326,7 @@ static void test_reverse_reply_after_destroy(void) {
     assert(w.err_code != 0);
     HostClock clock = {1, "late"};
     assert(my_timer_reverse_reply_fetch_host_clock(g_deferred_ctx, g_deferred_call, &clock) ==
-           NIMFFI_REVERSE_INVALID_CTX);
+           NIMFFI_RET_INVALID_CTX);
 }
 
 int main(void) {

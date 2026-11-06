@@ -333,7 +333,8 @@ worker. The host answers, now or later and from any thread, through
 first `set_impl`; `-d:ffiReverseWorkers` sets the count (default 1), so by
 default a blocked implementation holds every other reverse call of that context
 until it returns or their deadlines fire. At most `-d:ffiReverseQueueDepth`
-calls (default 1024) wait for a worker; one more fails at once.
+calls (default 1024) wait for a worker; one more fails at once, and
+`reverse_call_timeout` fires with `reason: "queue_full"`.
 
 ```c
 typedef void (*FFIReverseImpl)(void* ctx, uint64_t call_id, const uint8_t* args,
@@ -352,26 +353,26 @@ invocation returns, on whichever thread that is. That makes replacing or clearin
 an implementation safe from any thread, including from inside the implementation
 itself. With a `NULL` release the host keeps ownership and the library never frees
 it, so keep `user_data` valid until the context is destroyed. If `set_impl` fails,
-the caller still owns `user_data`. The status codes are `NIMFFI_REVERSE_*` in C.
+the caller still owns `user_data`. The status codes are the shared `NIMFFI_RET_*`.
 
 The C header adds typed helpers: `<lib>_ctx_set_<wire>_impl`,
 `<lib>_decode_<wire>_args`, `<lib>_reverse_reply_<wire>`,
 `<lib>_reverse_reply_err` and `<lib>_ctx_emit_<wire>`. The reply helpers take
 the `ctx` token the implementation is handed, so a reply deferred past the
-context's destroy fails with `NIMFFI_REVERSE_INVALID_CTX` instead of reading a
+context's destroy fails with `NIMFFI_RET_INVALID_CTX` instead of reading a
 freed `<Ctx>` wrapper. The `<lib>_ctx_reverse_reply_*` variants take the
 wrapper and are safe only while it is alive.
 | Situation | Behavior |
 | --- | --- |
 | No implementation registered | The call fails at once. |
-| No reply before the deadline | The call fails after `ReverseCallTimeoutMs` (10 s) or the `timeout = ms` of the proc. |
+| No reply before the deadline | The call fails after `ReverseCallTimeoutMs` (10 s) or the `timeout = ms` of the proc, and `reverse_call_timeout` fires with `reason: "timeout"`. |
 | Deadline or `cancelSoon()` while the call is queued | The worker skips the call, and the implementation never runs. |
 | Deadline or cancel while the implementation runs | The call fails at once, and the late reply is dropped by call id. |
 | `set_impl` while invocations run | Returns at once. With a `release`, the last running invocation releases the old `user_data`; with `NULL`, the host must keep it valid until the context is destroyed. |
 | Two replies for one call id | The first one completes the call; the second is dropped. |
-| A reply over `-d:ffiMaxRequestPayloadBytes` (when set), or `NULL` with a length | `NIMFFI_REVERSE_PAYLOAD_TOO_LARGE` or `NIMFFI_REVERSE_INVALID_ARGUMENT`; nothing is queued. |
+| A reply over `-d:ffiMaxRequestPayloadBytes` (when set), or `NULL` with a length | `NIMFFI_RET_TOO_LARGE` or `NIMFFI_RET_INVALID_ARGUMENT`; nothing is queued. |
 | Recycle or shutdown has begun | A new reverse call fails at once instead of parking. |
-| A worker inside one implementation past `ReverseWorkerStallMs` | `reverse_worker_blocked` fires, then `reverse_worker_recovered` when it returns. |
+| A worker inside one implementation past `ReverseCallTimeoutMs` | `reverse_worker_blocked` fires with the proc and the time spent in it, then `reverse_worker_recovered` when it returns. |
 | Recycle while an implementation runs | Waits `RecycleTimeout`, then quarantines the slot with `RecycleFailure.ReverseImplBlocked`. |
 | Destroy, park or `<lib>_shutdown` with a stuck worker | The stuck worker leaks with the slot, and so does its `user_data`: `release` never runs under it. |
 | A host implementation destroys its own context | `<lib>_destroy` fails at once with `RET_ERR`, and the context stays usable: destroy it from another thread. |

@@ -367,7 +367,7 @@ suite "F5: reverse_reply boundary checks":
     check revreg_reverse_reply(ctx.ffiToken(), 1'u64, RET_OK, nil, 16) != RET_OK
 
 suite "F7: generated C contract":
-  test "the header names the REVERSE_* status codes, including workers-failed":
+  test "the header names the status codes, including workers-failed":
     let reverse = @[
       FFIReverseMeta(
         wireName: "fetch_config",
@@ -378,7 +378,7 @@ suite "F7: generated C contract":
       )
     ]
     let header = generateCLibHeader(@[], @[], "timer", @[], @[], reverse, @[])
-    check "REVERSE_WORKERS_FAILED" in header
+    check "NIMFFI_RET_OK, _INVALID_CTX, _WORKERS_FAILED" in header
 
   test "the timer example's {.ffiReverse.} doc comment reaches the C header":
     const headerPath =

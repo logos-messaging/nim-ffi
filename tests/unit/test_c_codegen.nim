@@ -421,11 +421,9 @@ suite "generateCLibHeader: reverse FFI":
     check "int timer_emit_on_host_ping(void* ctx, const uint8_t* payload_cbor, size_t payload_len);" in
       header
 
-  test "the reverse status codes are named from ffi/ret_codes.nim":
-    check "#define NIMFFI_REVERSE_ACCEPTED 0" in header
-    check "#define NIMFFI_REVERSE_WORKERS_FAILED 5" in header
-    check "#define NIMFFI_REVERSE_INVALID_ARGUMENT " & $REVERSE_INVALID_ARGUMENT in
-      header
+  test "the reverse docs name the shared NIMFFI_RET_* codes":
+    check "NIMFFI_REVERSE_" notin header
+    check "Returns NIMFFI_RET_OK, _INVALID_CTX, _WORKERS_FAILED" in header
 
   test "the header states the args lifetime and the user_data ownership rules":
     check "args is valid only until" in header

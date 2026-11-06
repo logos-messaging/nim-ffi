@@ -1047,7 +1047,7 @@ proc generateCLibHeader*(
     lines.add("")
     lines.add("/* Reverse FFI: host-implemented interfaces + host-emitted events */")
   if reverse.len > 0:
-    lines.add(ReverseDeclsTpl.fillTpl(("{{REVERSE_CODES}}", cReverseCodeDefines())))
+    lines.add(ReverseDeclsTpl.strip(leading = false))
     for r in reverse:
       lines.add(renderBlockDocComment(r.doc))
       lines.add(
