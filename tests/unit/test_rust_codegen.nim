@@ -134,8 +134,9 @@ suite "reverse FFI: the Rust wrapper hands the impl box to the library":
     check "std::panic::catch_unwind" in api
     check "host impl panicked" in api
 
-  test "the status codes and the release type are emitted":
-    check "pub const REVERSE_INVALID_ARGUMENT: c_int = 6;" in api
+  test "the reverse helpers check the shared codes; the release type is emitted":
+    check "REVERSE_" notin api
+    check "== NIMFFI_RET_OK }" in api
     check "release: Option<FFIReverseRelease>" in ffiRs
     check "pub type FFIReverseRelease" in ffiRs
     check "start_reverse_workers" notin ffiRs
