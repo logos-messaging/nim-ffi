@@ -174,17 +174,6 @@ unsafe extern "C" fn on_job_scheduled_trampoline(
 #[derive(Debug, Clone, Copy)]
 pub struct ListenerHandle { pub id: u64 }
 
-/// Status of `set_*_impl` and a reverse reply, emitted from ffi/ret_codes.nim.
-pub const REVERSE_ACCEPTED: c_int = 0;
-pub const REVERSE_INVALID_CTX: c_int = 1;
-pub const REVERSE_NOT_ACTIVE: c_int = 2;
-pub const REVERSE_PAYLOAD_TOO_LARGE: c_int = 3;
-pub const REVERSE_MAILBOX_FULL: c_int = 4;
-pub const REVERSE_WORKERS_FAILED: c_int = 5;
-pub const REVERSE_INVALID_ARGUMENT: c_int = 6;
-pub const REVERSE_OUT_OF_MEMORY: c_int = 7;
-pub const REVERSE_REGISTRY_FULL: c_int = 8;
-
 /// Answer token for one `fetch_host_clock` call: a `Copy` {context token, call id} pair.
 /// Move it anywhere and reply once, from any thread, before the call's deadline;
 /// a late or second reply is dropped, and a reply after the context is gone
@@ -195,12 +184,12 @@ pub struct FetchHostClockCall { ctx: usize, id: u64 }
 impl FetchHostClockCall {
     pub fn reply(&self, r: &HostClock) -> bool {
         match encode_cbor(r) {
-            Ok(b) => unsafe { ffi::my_timer_reverse_reply(self.ctx as *mut c_void, self.id, 0, b.as_ptr(), b.len()) == 0 },
+            Ok(b) => unsafe { ffi::my_timer_reverse_reply(self.ctx as *mut c_void, self.id, 0, b.as_ptr(), b.len()) == NIMFFI_RET_OK },
             Err(e) => self.fail(&e),
         }
     }
     pub fn fail(&self, msg: &str) -> bool {
-        unsafe { ffi::my_timer_reverse_reply(self.ctx as *mut c_void, self.id, 1, msg.as_ptr(), msg.len()) == 0 }
+        unsafe { ffi::my_timer_reverse_reply(self.ctx as *mut c_void, self.id, 1, msg.as_ptr(), msg.len()) == NIMFFI_RET_OK }
     }
 }
 
@@ -354,7 +343,7 @@ impl MyTimerCtx {
         let rc = unsafe {
             ffi::my_timer_set_fetch_host_clock_impl(self.ptr, Some(fetch_host_clock_impl_trampoline), raw, Some(fetch_host_clock_impl_release))
         };
-        if rc != 0 {
+        if rc != NIMFFI_RET_OK {
             drop(unsafe { Box::from_raw(raw as *mut FetchHostClockImplBox) }); // refused: still ours
             return false;
         }
@@ -362,14 +351,14 @@ impl MyTimerCtx {
     }
 
     pub fn clear_fetch_host_clock_impl(&self) -> bool {
-        unsafe { ffi::my_timer_set_fetch_host_clock_impl(self.ptr, None, std::ptr::null_mut(), None) == 0 }
+        unsafe { ffi::my_timer_set_fetch_host_clock_impl(self.ptr, None, std::ptr::null_mut(), None) == NIMFFI_RET_OK }
     }
 
     /// Records the tick number that the host emits.
     pub fn emit_on_host_tick(&self, tick_no: i64) -> bool {
         let payload = OnHostTickReq { tick_no };
         match encode_cbor(&payload) {
-            Ok(b) => unsafe { ffi::my_timer_emit_on_host_tick(self.ptr, b.as_ptr(), b.len()) == 0 },
+            Ok(b) => unsafe { ffi::my_timer_emit_on_host_tick(self.ptr, b.as_ptr(), b.len()) == NIMFFI_RET_OK },
             Err(_) => false,
         }
     }

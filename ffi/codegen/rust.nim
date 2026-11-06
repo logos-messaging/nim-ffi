@@ -600,13 +600,6 @@ proc generateApiRs*(
     lines.add("pub struct ListenerHandle { pub id: u64 }")
     lines.add("")
 
-  if reverse.len > 0:
-    lines.add(
-      "/// Status of `set_*_impl` and a reverse reply, emitted from ffi/ret_codes.nim."
-    )
-    lines.add(rustReverseCodeConsts())
-    lines.add("")
-
   # The token holds the ctx as usize, so that a host thread can answer later.
   for r in reverse:
     let callStruct = reverseCallStruct(r)
@@ -633,7 +626,7 @@ proc generateApiRs*(
       lines.add("    pub fn reply(&self, r: &$1) -> bool {" % [replyRust])
       lines.add("        match encode_cbor(r) {")
       lines.add(
-        "            Ok(b) => unsafe { ffi::$1_reverse_reply(self.ctx as *mut c_void, self.id, 0, b.as_ptr(), b.len()) == 0 }," %
+        "            Ok(b) => unsafe { ffi::$1_reverse_reply(self.ctx as *mut c_void, self.id, 0, b.as_ptr(), b.len()) == NIMFFI_RET_OK }," %
           [libName]
       )
       lines.add("            Err(e) => self.fail(&e),")
@@ -642,13 +635,13 @@ proc generateApiRs*(
     else:
       lines.add("    pub fn reply(&self) -> bool {")
       lines.add(
-        "        unsafe { ffi::$1_reverse_reply(self.ctx as *mut c_void, self.id, 0, std::ptr::null(), 0) == 0 }" %
+        "        unsafe { ffi::$1_reverse_reply(self.ctx as *mut c_void, self.id, 0, std::ptr::null(), 0) == NIMFFI_RET_OK }" %
           [libName]
       )
       lines.add("    }")
     lines.add("    pub fn fail(&self, msg: &str) -> bool {")
     lines.add(
-      "        unsafe { ffi::$1_reverse_reply(self.ctx as *mut c_void, self.id, 1, msg.as_ptr(), msg.len()) == 0 }" %
+      "        unsafe { ffi::$1_reverse_reply(self.ctx as *mut c_void, self.id, 1, msg.as_ptr(), msg.len()) == NIMFFI_RET_OK }" %
         [libName]
     )
     lines.add("    }")
@@ -925,7 +918,7 @@ proc generateApiRs*(
         [libName, r.wireName, tramp, snake]
     )
     lines.add("        };")
-    lines.add("        if rc != 0 {")
+    lines.add("        if rc != NIMFFI_RET_OK {")
     lines.add(
       "            drop(unsafe { Box::from_raw(raw as *mut $1) }); // refused: still ours" %
         [boxStruct]
@@ -937,7 +930,7 @@ proc generateApiRs*(
     lines.add("")
     lines.add("    pub fn clear_$1_impl(&self) -> bool {" % [snake])
     lines.add(
-      "        unsafe { ffi::$1_set_$2_impl(self.ptr, None, std::ptr::null_mut(), None) == 0 }" %
+      "        unsafe { ffi::$1_set_$2_impl(self.ptr, None, std::ptr::null_mut(), None) == NIMFFI_RET_OK }" %
         [libName, r.wireName]
     )
     lines.add("    }")
@@ -968,7 +961,7 @@ proc generateApiRs*(
     lines.add("        let payload = $1;" % [reqLit])
     lines.add("        match encode_cbor(&payload) {")
     lines.add(
-      "            Ok(b) => unsafe { ffi::$1_emit_$2(self.ptr, b.as_ptr(), b.len()) == 0 }," %
+      "            Ok(b) => unsafe { ffi::$1_emit_$2(self.ptr, b.as_ptr(), b.len()) == NIMFFI_RET_OK }," %
         [libName, rev.wireName]
     )
     lines.add("            Err(_) => false,")
