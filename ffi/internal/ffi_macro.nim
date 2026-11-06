@@ -20,21 +20,46 @@ proc requireLibraryDeclared(where: string) {.compileTime.} =
       where & ": declareLibrary(name, LibType) must be called before any FFI annotation"
     )
 
-proc resolveEventWireName(
-    leading: seq[NimNode], userProcName: NimNode
+const AbiGoneHint = ". The `abi = ...` wire selector is gone; CBOR is the only wire."
+
+proc resolveWireName(
+    leading: seq[NimNode], userProcName: NimNode, where: string
 ): tuple[wireName: string, consumed: int] {.compileTime.} =
   ## A leading string literal is the explicit wire name; else derive from the proc.
   if leading.len > 0 and leading[0].kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit} and
       ($leading[0]).len > 0:
+    let name = $leading[0]
     # Without this, a leftover `{.ffiEvent: "abi = cbor".}` names an event `abi = cbor`.
-    if '=' in $leading[0]:
-      error(
-        "`.ffiEvent.` wire name must not contain '=', got: " & ($leading[0]).repr &
-          ". The `abi = ...` wire selector is gone; CBOR is the only wire."
-      )
-    ($leading[0], 1)
+    if '=' in name:
+      error(where & " wire name must not contain '=', got: " & name.repr & AbiGoneHint)
+    # It becomes part of C symbols such as `<lib>_set_<wire>_impl`.
+    if not name.validIdentifier():
+      error(where & " wire name must be a C identifier, got: " & name.repr)
+    (name, 1)
   else:
     (camelToSnakeCase($userProcName), 0)
+
+proc takeOption(
+    specs: var seq[NimNode], key: string, where: string
+): Option[NimNode] {.compileTime.} =
+  ## Removes `key = <expr>` from `specs` and returns `<expr>`; a repeat is an error.
+  var found = none(NimNode)
+  var rest: seq[NimNode] = @[]
+  for arg in specs:
+    if arg.kind == nnkExprEqExpr and arg[0].kind == nnkIdent and arg[0].eqIdent(key):
+      if found.isSome():
+        error(where & ": `" & key & "` given twice")
+      found = some(arg[1])
+    else:
+      rest.add(arg)
+  specs = rest
+  return found
+
+proc intLitValue(node: NimNode, where, key: string): int {.compileTime.} =
+  ## Literal only: the value is also recorded in the meta registry for the bindings.
+  if node.kind != nnkIntLit:
+    error(where & ": `" & key & "` must be an integer literal, got: " & node.repr)
+  return int(node.intVal)
 
 proc requireBeforeGenBindings(where: string) {.compileTime.} =
   ## Enforce this annotation expands before `genBindings()`; anything registered
@@ -51,16 +76,13 @@ func overrideLooksLikeAbi(spec: string): bool =
 
 proc rejectPragmaArgs(specs: seq[NimNode], where: string) {.compileTime.} =
   ## Every annotation takes the node alone; an event's wire name is handled by
-  ## `resolveEventWireName` before this runs.
+  ## `resolveWireName` before this runs.
   if specs.len == 0:
     return
 
   let hint =
     if specs[0].kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit} and
-        overrideLooksLikeAbi($specs[0]):
-      ". The `abi = ...` wire selector is gone; CBOR is the only wire."
-    else:
-      ""
+        overrideLooksLikeAbi($specs[0]): AbiGoneHint else: ""
   error(where & " takes no pragma argument, got: " & specs[0].repr & hint)
 
 proc isPtr(typ: NimNode): bool =
@@ -136,8 +158,8 @@ proc registerFFIEnumInfo(typeDef: NimNode, typeNameStr: string) {.compileTime.} 
     FFITypeMeta(name: typeNameStr, enumValues: enumValueMetas(typeDef[2], typeNameStr))
   )
 
-proc registerFFITypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
-  ## Registers the type in ffiTypeRegistry and returns the clean typeDef.
+proc registerFFITypeMeta(typeDef: NimNode) {.compileTime.} =
+  ## Registers the type in ffiTypeRegistry.
   let typeName =
     if typeDef[0].kind == nnkPostfix:
       typeDef[0][1]
@@ -147,7 +169,7 @@ proc registerFFITypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
 
   if typeDef[2].kind == nnkEnumTy:
     registerFFIEnumInfo(typeDef, typeNameStr)
-    return typeDef
+    return
 
   var fieldMetas: seq[FFIFieldMeta] = @[]
   let objTy = typeDef[2]
@@ -170,6 +192,10 @@ proc registerFFITypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
             fieldMetas.add(FFIFieldMeta(name: $identDef[i], typeName: fieldTypeName))
 
   ffiTypeRegistry.add(FFITypeMeta(name: typeNameStr, fields: fieldMetas))
+
+proc registerFFITypeInfo(typeDef: NimNode): NimNode {.compileTime.} =
+  ## Registers the type in ffiTypeRegistry and returns the clean typeDef.
+  registerFFITypeMeta(typeDef)
   return typeDef
 
 func extractDocComment(prc: NimNode): string {.compileTime.} =
@@ -1713,7 +1739,7 @@ proc buildFFIEventProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compileTi
   if procName.kind == nnkPostfix:
     userProcName = procName[1]
 
-  let (wireName, consumed) = resolveEventWireName(leading, userProcName)
+  let (wireName, consumed) = resolveWireName(leading, userProcName, "`.ffiEvent.`")
   rejectPragmaArgs(leading[consumed ..^ 1], "`.ffiEvent.`")
 
   let formalParams = prc[3]
@@ -1823,6 +1849,260 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
     error("ffiEvent must be applied to a proc declaration")
   assertFFIPath(prc, fpEvent)
   return buildFFIEventProc(prc, args[0 ..^ 2])
+
+proc skipDocstring(body: NimNode): seq[NimNode] {.compileTime.} =
+  ## The statements of `body`, without its `##` doc comments.
+  if body.kind == nnkEmpty:
+    return @[]
+  if body.kind != nnkStmtList:
+    return @[body]
+  var stmts: seq[NimNode] = @[]
+  for child in body:
+    if child.kind != nnkCommentStmt:
+      stmts.add(child)
+  return stmts
+
+type ReversePragmaArgs = object
+  wireName: string
+  timeoutNode: NimNode
+  timeoutMs: int
+
+proc cdeclExportPragma(name: string): NimNode {.compileTime.} =
+  return newTree(
+    nnkPragma,
+    ident("dynlib"),
+    newTree(nnkExprColonExpr, ident("exportc"), newStrLitNode(name)),
+    ident("cdecl"),
+    newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
+  )
+
+proc resolveReversePragmaArgs(
+    leading: seq[NimNode], userProcName: NimNode
+): ReversePragmaArgs {.compileTime.} =
+  ## Parses the optional wire-name literal and `timeout = <ms>`.
+  const where = "`.ffiReverse.`"
+  let (wireName, consumed) = resolveWireName(leading, userProcName, where)
+  var rest = leading[consumed ..^ 1]
+  let timeoutOpt = rest.takeOption("timeout", where)
+  if rest.len > 0:
+    error(
+      where & ": unsupported argument " & rest[0].repr &
+        "; expected an optional wire-name string literal and/or `timeout = <ms>`"
+    )
+  if timeoutOpt.isNone():
+    return ReversePragmaArgs(
+      wireName: wireName, timeoutNode: ident("ReverseCallTimeoutMs"), timeoutMs: 0
+    )
+  let timeoutMs = intLitValue(timeoutOpt.get(), where, "timeout")
+  # 0 would fail every call at once: the deadline is the whole wait.
+  if timeoutMs <= 0:
+    error(where & ": `timeout` must be a positive number of ms, got: " & $timeoutMs)
+  return ReversePragmaArgs(
+    wireName: wireName, timeoutNode: timeoutOpt.get(), timeoutMs: timeoutMs
+  )
+
+proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compileTime.} =
+  ## Emits the async caller stub and the `<lib>_set_<wire>_impl` export.
+  let procName = prc[0]
+  var userProcName = procName
+  if procName.kind == nnkPostfix:
+    userProcName = procName[1]
+
+  let pragmaArgs = resolveReversePragmaArgs(leading, userProcName)
+  let wireName = pragmaArgs.wireName
+  let timeoutNode = pragmaArgs.timeoutNode
+
+  if prc.body.skipDocstring().len > 0:
+    error(
+      "`.ffiReverse.` proc " & $userProcName &
+        " must have no body: the host registers the implementation at runtime via " &
+        currentLibName & "_set_" & wireName & "_impl"
+    )
+
+  let formalParams = prc[3]
+  let ret = formalParams[0]
+  var replyType: NimNode = nil
+  if ret.kind == nnkBracketExpr and ret.len == 2 and ret[0].kind == nnkIdent and
+      $ret[0] == "Future" and ret[1].kind == nnkBracketExpr and ret[1].len == 3 and
+      $ret[1][0] == "Result" and ret[1][2].kind == nnkIdent and $ret[1][2] == "string":
+    replyType = ret[1][1]
+  else:
+    error(
+      "`.ffiReverse.` proc " & $userProcName &
+        " must return Future[Result[T, string]] (T may be void)"
+    )
+
+  # Flatten the parameter list (a grouped `a, b: T` expands to one entry each).
+  var paramNames: seq[NimNode] = @[]
+  var paramTypes: seq[NimNode] = @[]
+  for i in 1 ..< formalParams.len:
+    let p = formalParams[i]
+    for j in 0 ..< p.len - 2:
+      rejectRawPtrType(
+        p[^2], "`.ffiReverse.` proc " & $userProcName & " parameter " & $p[j]
+      )
+      if isHandleType(p[^2]):
+        error(
+          "`.ffiReverse.` proc " & $userProcName & " parameter " & $p[j] &
+            ": an {.ffiHandle.} type cannot cross to the host in a reverse call"
+        )
+      paramNames.add(p[j])
+      paramTypes.add(p[^2])
+
+  let resultStmts = newStmtList()
+  let wireNameLit = newStrLitNode(wireName)
+  # The registry slot of this proc: its index among the library's reverse procs.
+  var implId = 0
+  for r in ffiReverseRegistry:
+    if r.libName == currentLibName:
+      implId.inc()
+  let implIdLit = newLit(implId)
+
+  var paramMetas: seq[FFIParamMeta] = @[]
+  for i in 0 ..< paramNames.len:
+    paramMetas.add(
+      FFIParamMeta(name: $paramNames[i], typeName: nimTypeNameRepr(paramTypes[i]))
+    )
+
+  var argsTypeName = ""
+  var encodeExpr: NimNode
+  if paramNames.len == 0:
+    # An empty CBOR map: the args stay valid CBOR with nothing to decode.
+    encodeExpr = quote:
+      @[0xa0'u8]
+  elif paramNames.len == 1:
+    argsTypeName = nimTypeNameRepr(paramTypes[0])
+    let p0 = paramNames[0]
+    if paramTypes[0].kind == nnkIdent and $paramTypes[0] == "cstring":
+      encodeExpr = quote:
+        cborEncode($`p0`)
+    else:
+      encodeExpr = quote:
+        cborEncode(`p0`)
+  else:
+    let argsType = ident(snakeToPascalCase(wireName) & "Args")
+    argsTypeName = $argsType
+    var paramNameStrs: seq[string] = @[]
+    for n in paramNames:
+      paramNameStrs.add($n)
+    let typeSection = buildReqTypeFromFields(argsType, paramNameStrs, paramTypes)
+    registerFFITypeMeta(typeSection[0])
+    resultStmts.add(typeSection)
+    let envelope = nnkObjConstr.newTree(argsType)
+    for i in 0 ..< paramNames.len:
+      # `cstring` rides as `string` in the envelope (per storageType).
+      let value =
+        if paramTypes[i].kind == nnkIdent and $paramTypes[i] == "cstring":
+          newCall(ident("$"), paramNames[i])
+        else:
+          paramNames[i]
+      envelope.add(nnkExprColonExpr.newTree(paramNames[i], value))
+    encodeExpr = quote:
+      cborEncode(`envelope`)
+
+  let rawResIdent = genSym(nskLet, "rawRes")
+  let stubBody = newStmtList()
+  stubBody.add quote do:
+    let `rawResIdent` =
+      await ffiReverseCall(`implIdLit`, `wireNameLit`, `encodeExpr`, `timeoutNode`)
+    if `rawResIdent`.isErr():
+      return err("reverse call failed: " & `rawResIdent`.error)
+  if replyType.kind == nnkIdent and $replyType == "void":
+    stubBody.add quote do:
+      return ok()
+  else:
+    let decodedIdent = genSym(nskLet, "decodedReply")
+    stubBody.add quote do:
+      let `decodedIdent` = cborDecode(`rawResIdent`.value, `replyType`).valueOr:
+        return err("reverse reply decode failed for: " & `wireNameLit` & ": " & $error)
+      return ok(`decodedIdent`)
+
+  var stubPragmas = nnkPragma.newTree()
+  if prc.len >= 5 and prc[4].kind == nnkPragma:
+    for p in prc[4]:
+      stubPragmas.add(p)
+  stubPragmas.add(ident("async"))
+
+  var newParams = newSeq[NimNode]()
+  for i in 0 ..< formalParams.len:
+    newParams.add(formalParams[i])
+
+  resultStmts.add(
+    newProc(
+      name = procName,
+      params = newParams,
+      body = stubBody,
+      procType = prc.kind,
+      pragmas = stubPragmas,
+    )
+  )
+
+  let setImplName = currentLibName & "_set_" & wireName & "_impl"
+  let poolIdent = ident(currentLibType & "FFIPool")
+  let ctxIdent = ident("ctx")
+  let regResIdent = genSym(nskLet, "regRes")
+  let setBody = quote:
+    when declared(initializeLibrary):
+      initializeLibrary()
+    let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
+    if `ctxIdent`.isNil():
+      return RET_INVALID_CTX
+    if impl.isNil():
+      `ctxIdent`[].reverse.unregisterImpl(`implIdLit`)
+      return RET_OK
+    # Refused: `userData` stays the caller's and `release` is never called for it.
+    let `regResIdent` =
+      `ctxIdent`[].reverse.registerImpl(`implIdLit`, impl, userData, release)
+    if `regResIdent`.isErr():
+      return `regResIdent`.error.toRetCode()
+    return RET_OK
+
+  resultStmts.add(
+    newProc(
+      name = postfix(ident(setImplName), "*"),
+      params = @[
+        ident("cint"),
+        newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
+        newIdentDefs(ident("impl"), ident("FFIReverseImpl")),
+        newIdentDefs(ident("userData"), ident("pointer")),
+        newIdentDefs(ident("release"), ident("FFIReverseRelease")),
+      ],
+      body = setBody,
+      pragmas = cdeclExportPragma(setImplName),
+    )
+  )
+
+  ffiReverseRegistry.add(
+    FFIReverseMeta(
+      wireName: wireName,
+      nimProcName: $userProcName,
+      libName: currentLibName,
+      params: paramMetas,
+      argsTypeName: argsTypeName,
+      replyTypeName:
+        if replyType.kind == nnkIdent and $replyType == "void":
+          ""
+        else:
+          nimTypeNameRepr(replyType),
+      timeoutMs: pragmaArgs.timeoutMs,
+      doc: extractDocComment(prc),
+    )
+  )
+
+  when defined(ffiDumpMacros):
+    echo resultStmts.repr
+  return resultStmts
+
+macro ffiReverse*(args: varargs[untyped]): untyped =
+  ## Declares a bodyless proc that the host implements at runtime.
+  requireBeforeGenBindings("`.ffiReverse.`")
+  requireLibraryDeclared("`.ffiReverse.`")
+  if args.len < 1:
+    error("ffiReverse must be applied to a proc declaration")
+  let prc = args[^1]
+  if prc.kind notin {nnkProcDef, nnkFuncDef}:
+    error("ffiReverse must be applied to a proc declaration")
+  return buildFFIReverseProc(prc, args[0 ..^ 2])
 
 proc bindingsOutputDir(lang, explicit: string): string {.compileTime.} =
   ## Output dir for `lang`; defaults to `<lang>_bindings/` next to the compiled
