@@ -88,7 +88,7 @@ else()
         DISCOVERY_TIMEOUT 120)
 endif()
 
-# PR #154 review regressions (the wrapper-level reverse FFI cases).
+# Reverse FFI review regressions (the wrapper-level cases).
 add_executable(reverse_regressions_e2e test_reverse_regressions_e2e.cpp)
 target_link_libraries(reverse_regressions_e2e PRIVATE my_timer_headers GTest::gtest_main)
 add_dependencies(reverse_regressions_e2e my_timer_nim_lib)

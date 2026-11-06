@@ -1,7 +1,5 @@
-    // Answer token for one `{{WIRE}}` call: a trivially copyable {context token,
-    // call id} pair. Copy it anywhere and reply once, from any thread, before the
-    // call's deadline; a late or second reply is dropped, and a reply after the
-    // context is gone returns false.
+    // Answer token for one `{{WIRE}}` call (copyable). Reply once, from any thread;
+    // a late or second reply is dropped, and one after destroy returns false.
     struct {{CALL}} {
         void* ctx = nullptr;
         std::uint64_t id = 0;

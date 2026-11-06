@@ -1,5 +1,5 @@
-// Regressions for the PR #154 review findings at the C++ wrapper layer. Each test
-// failed before its fix; the comments say how.
+// Regressions for reverse FFI review findings (raised on #154) at the C++ wrapper
+// layer. Each test failed before its fix; the comments say how.
 //
 // "Freed" is observed without touching freed memory: every impl captures a
 // shared_ptr token, the test keeps only a weak_ptr to it, and the impl copies
