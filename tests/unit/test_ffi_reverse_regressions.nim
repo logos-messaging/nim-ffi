@@ -19,6 +19,15 @@ declareLibrary("revreg", RevRegLib)
 
 const ChildEnv = "REVREG_CHILD"
 
+const # registry ids of the impls the tests register by hand
+  GateId = 0
+  VictimId = 1
+  UnregId = 2
+  BarId = 3
+  FooId = 4
+  LateId = 5
+  TwiceId = 6
+
 if getEnv(ChildEnv) == "reply_len_overflow":
   let ctx = RevRegLibFFIPool.createFFIContext().valueOr:
     quit(2)
@@ -26,7 +35,7 @@ if getEnv(ChildEnv) == "reply_len_overflow":
   let rc =
     revreg_reverse_reply(ctx.ffiToken(), 1'u64, RET_OK, addr b[0], csize_t(high(uint)))
   echo "rc=", rc
-  quit(if rc == REVERSE_ACCEPTED: 3 else: 0)
+  quit(if rc == RET_OK: 3 else: 0)
 
 proc runChild(mode: string): tuple[output: string, exitCode: int] =
   var env = newStringTable()
@@ -118,7 +127,7 @@ proc unregImpl(
 ) {.cdecl, gcsafe, raises: [].} =
   ## Unregisters "victim" from inside a dispatch, then reports what set_impl left.
   let b = cast[ptr UnregBox](userData)
-  b[].st[].unregisterImpl("victim")
+  b[].st[].unregisterImpl(VictimId)
   b[].victimInsideAtReturn.store(if b[].gate[].stillInside(): 1 else: 0)
   {.cast(gcsafe).}:
     b[].releasedAtReturn.store(victimReleased.load())
@@ -155,11 +164,11 @@ proc concurrentStopProbe(): int =
   initGate(raceGate)
   if not raceSt.startReverseWorkers(2):
     return 2
-  if raceSt.registerImpl("gate", gateImpl, addr raceGate).isErr():
+  if raceSt.registerImpl(GateId, gateImpl, addr raceGate).isErr():
     return 4
   ffiCurrentReverseContext = addr raceSt
-  let a = ffiReverseCall("gate", @[], 60_000)
-  let b = ffiReverseCall("gate", @[], 60_000)
+  let a = ffiReverseCall(GateId, "gate", @[], 60_000)
+  let b = ffiReverseCall(GateId, "gate", @[], 60_000)
   raceGate.waitEntered(2)
 
   var t1, t2: Thread[int]
@@ -204,12 +213,12 @@ suite "F1: set_impl and in-flight invocations":
       box.victimInsideAtReturn.store(-1)
       box.releasedAtReturn.store(-1)
       victimReleased.store(0)
-      check st.registerImpl("victim", gateImpl, addr g, countVictimRelease).isOk()
-      check st.registerImpl("unreg", unregImpl, addr box).isOk()
+      check st.registerImpl(VictimId, gateImpl, addr g, countVictimRelease).isOk()
+      check st.registerImpl(UnregId, unregImpl, addr box).isOk()
 
-      let victimFut = ffiReverseCall("victim", @[], 5000)
+      let victimFut = ffiReverseCall(VictimId, "victim", @[], 5000)
       g.waitEntered(1)
-      let unregFut = ffiReverseCall("unreg", @[], 5000)
+      let unregFut = ffiReverseCall(UnregId, "unreg", @[], 5000)
       for _ in 0 ..< 2000:
         if box.done.load():
           break
@@ -234,14 +243,14 @@ suite "F1: set_impl and in-flight invocations":
     withReverseHarness(st, 1):
       var g: GateBox
       initGate(g)
-      check st.registerImpl("bar", gateImpl, addr g).isOk()
-      let barFut = ffiReverseCall("bar", @[], 5000)
+      check st.registerImpl(BarId, gateImpl, addr g).isOk()
+      let barFut = ffiReverseCall(BarId, "bar", @[], 5000)
       g.waitEntered(1)
 
       var opener: Thread[ptr GateBox]
       createThread(opener, openLater, addr g)
       let t0 = getMonoTime()
-      check st.registerImpl("foo", nopImpl, nil).isOk()
+      check st.registerImpl(FooId, nopImpl, nil).isOk()
       let elapsedMs = (getMonoTime() - t0).inMilliseconds
       joinThread(opener)
 
@@ -271,7 +280,7 @@ registerReqFFI(LateReverseRequest, lib: ptr RevRegLib):
   proc(): Future[Result[string, string]] {.async.} =
     # Outlasts the recycle's failPendingReverse, then parks past RecycleTimeout.
     await sleepAsync(chronos.milliseconds(200))
-    let r = await ffiReverseCall("late", @[], RecycleTimeoutMs * 2)
+    let r = await ffiReverseCall(LateId, "late", @[], RecycleTimeoutMs * 2)
     if r.isErr():
       return err(r.error)
     return ok("unexpected success")
@@ -283,7 +292,7 @@ suite "F2: recycle vs a reverse call started mid-drain":
     let ctx = RevRegLibFFIPool.createFFIContext().valueOr:
       check false
       return
-    check ctx[].reverse.registerImpl("late", nopImpl, nil).isOk() # never answers
+    check ctx[].reverse.registerImpl(LateId, nopImpl, nil).isOk() # never answers
     check sendRequestToFFIThread(ctx, LateReverseRequest.ffiNewReq(lateCb, nil)).isOk()
     os.sleep(50) # the handler is inside its sleepAsync
 
@@ -314,12 +323,12 @@ suite "F4: worker stop":
     initReverseContext(stopSt)
     initGate(stopGate)
     check stopSt.startReverseWorkers(2)
-    check stopSt.registerImpl("gate", gateImpl, addr stopGate).isOk()
+    check stopSt.registerImpl(GateId, gateImpl, addr stopGate).isOk()
     ffiCurrentReverseContext = addr stopSt
     defer:
       ffiCurrentReverseContext = nil
-    let a = ffiReverseCall("gate", @[], 60_000)
-    let b = ffiReverseCall("gate", @[], 60_000)
+    let a = ffiReverseCall(GateId, "gate", @[], 60_000)
+    let b = ffiReverseCall(GateId, "gate", @[], 60_000)
     stopGate.waitEntered(2)
 
     let t0 = getMonoTime()
@@ -355,15 +364,14 @@ suite "F5: reverse_reply boundary checks":
       return
     defer:
       discard RevRegLibFFIPool.destroyFFIContext(ctx)
-    check revreg_reverse_reply(ctx.ffiToken(), 1'u64, RET_OK, nil, 16) !=
-      REVERSE_ACCEPTED
+    check revreg_reverse_reply(ctx.ffiToken(), 1'u64, RET_OK, nil, 16) != RET_OK
 
 suite "N1: duplicate replies (new, from validation)":
   test "the first reply submitted for a call id wins":
     withReverseHarness(st, 1):
       var box = TwiceBox(st: addr st)
-      check st.registerImpl("twice", replyTwiceImpl, addr box).isOk()
-      let fut = ffiReverseCall("twice", @[], 2000)
+      check st.registerImpl(TwiceId, replyTwiceImpl, addr box).isOk()
+      let fut = ffiReverseCall(TwiceId, "twice", @[], 2000)
       pumpUntil(fut, 2000)
       let res = waitFor fut
       check res.isOk()

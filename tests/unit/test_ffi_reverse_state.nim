@@ -27,6 +27,10 @@ const
   Idle = 0
   Running = 1
   Absent = 7
+  SelfId = 4
+  SlowArgsId = 5
+  CountId = 6
+  ParkedId = 8
 
 type EchoBox = object
   st: ptr FFIReverseContext
@@ -214,7 +218,7 @@ proc selfReplaceImpl(
 ) {.cdecl, gcsafe, raises: [].} =
   ## Replaces its own entry, then reads whether its userData was already released.
   let b = cast[ptr ReleaseBox](userData)
-  doAssert b[].st[].registerImpl("self", nopImpl, nil).isOk()
+  doAssert b[].st[].registerImpl(SelfId, nopImpl, nil).isOk()
   b[].releasedInside.store(b[].released.load())
   discard b[].st[].pushReply(callId, RET_OK, nil, 0)
   b[].done.store(true)
@@ -328,8 +332,8 @@ suite "impl ownership (release callback)":
       check deinitReverseContext(st).isOk()
     var box = ReleaseBox(st: addr st)
     box.releasedInside.store(-1)
-    check st.registerImpl("self", selfReplaceImpl, addr box, countRelease).isOk()
-    let callFut = ffiReverseCall("self", @[], 2000)
+    check st.registerImpl(SelfId, selfReplaceImpl, addr box, countRelease).isOk()
+    let callFut = ffiReverseCall(SelfId, "self", @[], 2000)
     while not callFut.finished():
       drainReverseReplies()
       waitFor sleepAsync(chronos.milliseconds(1))
@@ -456,11 +460,11 @@ suite "worker pool lifecycle":
     initReverseContext(claimSt)
     initGate(claimGate)
     check claimSt.startReverseWorkers(1)
-    check claimSt.registerImpl("gate", gateImpl, addr claimGate).isOk()
+    check claimSt.registerImpl(GateId, gateImpl, addr claimGate).isOk()
     ffiCurrentReverseContext = addr claimSt
     defer:
       ffiCurrentReverseContext = nil
-    let blocker = ffiReverseCall("gate", @[], 60_000)
+    let blocker = ffiReverseCall(GateId, "gate", @[], 60_000)
     claimGate.waitEntered(1)
 
     var stopper: Thread[void]
@@ -486,12 +490,12 @@ suite "worker pool lifecycle":
     g.cond.initCond()
     # Exactly one worker, or `registerImpl` starts the default count.
     check st.startReverseWorkers(1)
-    check st.registerImpl("gate", gateImpl, addr g).isOk()
+    check st.registerImpl(GateId, gateImpl, addr g).isOk()
     ffiCurrentReverseContext = addr st
     defer:
       ffiCurrentReverseContext = nil
 
-    let callFut = ffiReverseCall("gate", @[], 60_000)
+    let callFut = ffiReverseCall(GateId, "gate", @[], 60_000)
     g.waitEntered(1)
     let stop = stopReverseWorkers(st)
     check stop.stopped == 0
@@ -597,9 +601,9 @@ suite "ffiReverseCall":
   test "args stay readable for the whole impl, even after the caller timed out":
     withReverseHarness(st, 1):
       var box: ArgsAfterTimeoutBox
-      check st.registerImpl("slow_args", argsAfterTimeoutImpl, addr box).isOk()
+      check st.registerImpl(SlowArgsId, argsAfterTimeoutImpl, addr box).isOk()
       let args = @[byte 7, 8, 9]
-      let res = waitFor ffiReverseCall("slow_args", args, 30)
+      let res = waitFor ffiReverseCall(SlowArgsId, "slow_args", args, 30)
       check res.isErr()
       check "timed out" in res.error
       check ffiPendingReverseLen() == 0 # the FFI side dropped its reference
@@ -616,13 +620,13 @@ suite "ffiReverseCall":
       g.lock.initLock()
       g.cond.initCond()
       var counted: CountBox
-      check st.registerImpl("gate", gateImpl, addr g).isOk()
-      check st.registerImpl("count", countImpl, addr counted).isOk()
+      check st.registerImpl(GateId, gateImpl, addr g).isOk()
+      check st.registerImpl(CountId, countImpl, addr counted).isOk()
 
-      let blocker = ffiReverseCall("gate", @[], 60_000)
+      let blocker = ffiReverseCall(GateId, "gate", @[], 60_000)
       g.waitEntered(1)
-      let a = ffiReverseCall("count", @[], 30)
-      let b = ffiReverseCall("count", @[], 30)
+      let a = ffiReverseCall(CountId, "count", @[], 30)
+      let b = ffiReverseCall(CountId, "count", @[], 30)
       check st.queueLen() == 2
       check (waitFor a).isErr()
       check (waitFor b).isErr()
@@ -643,12 +647,12 @@ suite "ffiReverseCall":
       g.lock.initLock()
       g.cond.initCond()
       var counted: CountBox
-      check st.registerImpl("gate", gateImpl, addr g).isOk()
-      check st.registerImpl("count", countImpl, addr counted).isOk()
+      check st.registerImpl(GateId, gateImpl, addr g).isOk()
+      check st.registerImpl(CountId, countImpl, addr counted).isOk()
 
-      let blocker = ffiReverseCall("gate", @[], 60_000)
+      let blocker = ffiReverseCall(GateId, "gate", @[], 60_000)
       g.waitEntered(1)
-      let victim = ffiReverseCall("count", @[], 60_000)
+      let victim = ffiReverseCall(CountId, "count", @[], 60_000)
       check st.queueLen() == 1
       waitFor victim.cancelAndWait()
       check victim.cancelled()
@@ -743,9 +747,9 @@ suite "ffiReverseCall":
       var g: GateBox
       g.lock.initLock()
       g.cond.initCond()
-      check st.registerImpl("gate", gateImpl, addr g).isOk()
-      let a = ffiReverseCall("gate", @[], 60_000)
-      let b = ffiReverseCall("gate", @[], 60_000)
+      check st.registerImpl(GateId, gateImpl, addr g).isOk()
+      let a = ffiReverseCall(GateId, "gate", @[], 60_000)
+      let b = ffiReverseCall(GateId, "gate", @[], 60_000)
       g.waitEntered(2) # both impls are inside at the same time
       check st.inFlight() == 2
       g.open()
@@ -754,14 +758,12 @@ suite "ffiReverseCall":
       check (waitFor b).isErr()
 
   test "scanReverseWorkers reports a stalled worker once and its recovery":
-
-  test "a stalled worker reports the proc it is stuck in":
     withReverseHarness(st, 1):
       var g: GateBox
       g.lock.initLock()
       g.cond.initCond()
-      check st.registerImpl("gate", gateImpl, addr g).isOk()
-      let blocker = ffiReverseCall("gate", @[], 60_000)
+      check st.registerImpl(GateId, gateImpl, addr g).isOk()
+      let blocker = ffiReverseCall(GateId, "gate", @[], 60_000)
       g.waitEntered(1)
       os.sleep(5)
       var hits = st.scanReverseWorkers(1_000_000'i64) # 1 ms stall threshold
@@ -781,17 +783,11 @@ suite "ffiReverseCall":
       failPendingReverse("done")
       check (waitFor blocker).isErr()
 
-  test "failPendingReverse fails every parked call and cancels queued ones":
-    withReverseHarness(st, 0):
-      check st.registerImpl("parked", nopImpl, nil).isOk()
-      let callFut = ffiReverseCall("parked", @[], 5000)
-      check ffiPendingReverseLen() == 1
-      failPendingReverse("context is recycling")
-      check ffiPendingReverseLen() == 0
-      let res = waitFor callFut
-      check res.isErr()
-      check "recycling" in res.error
-
+  test "a stalled worker reports the proc it is stuck in":
+    withReverseHarness(st, 1):
+      var g: GateBox
+      g.lock.initLock()
+      g.cond.initCond()
       check st.registerImpl(GateId, gateImpl, addr g).isOk()
       let callFut = ffiReverseCall(GateId, "gate", @[], 60_000)
       g.waitEntered(1)
@@ -804,3 +800,14 @@ suite "ffiReverseCall":
       g.open()
       failPendingReverse("done")
       check (waitFor callFut).isErr()
+
+  test "failPendingReverse fails every parked call and cancels queued ones":
+    withReverseHarness(st, 0):
+      check st.registerImpl(ParkedId, nopImpl, nil).isOk()
+      let callFut = ffiReverseCall(ParkedId, "parked", @[], 5000)
+      check ffiPendingReverseLen() == 1
+      failPendingReverse("context is recycling")
+      check ffiPendingReverseLen() == 0
+      let res = waitFor callFut
+      check res.isErr()
+      check "recycling" in res.error
