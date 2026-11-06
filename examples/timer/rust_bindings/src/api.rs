@@ -56,6 +56,14 @@ const NIMFFI_RET_BUSY: c_int = 7;
 const NIMFFI_RET_QUEUE_FULL: c_int = 8;
 #[allow(dead_code)]
 const NIMFFI_RET_TOO_LARGE: c_int = 9;
+#[allow(dead_code)]
+const NIMFFI_RET_NOT_ACTIVE: c_int = 10;
+#[allow(dead_code)]
+const NIMFFI_RET_WORKERS_FAILED: c_int = 11;
+#[allow(dead_code)]
+const NIMFFI_RET_INVALID_ARGUMENT: c_int = 12;
+#[allow(dead_code)]
+const NIMFFI_RET_OUT_OF_MEMORY: c_int = 13;
 
 unsafe extern "C" fn on_result(
     ret: c_int,

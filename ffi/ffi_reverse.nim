@@ -6,35 +6,24 @@ import results
 import ./ffi_types
 
 const ReverseMailboxDepth* {.intdefine: "ffiReverseMailboxDepth".} = 1024
-  ## Replies parked between two FFI-thread drains; a full mailbox rejects the reply,
-  ## so the caller's future then times out. Override `-d:ffiReverseMailboxDepth=<n>`.
+  ## Replies parked between two FFI-thread drains; past it a reply is refused.
 
 const ReverseCallTimeoutMs* {.intdefine: "ffiReverseCallTimeoutMs".} = 10000
-  ## Default deadline of one `{.ffiReverse.}` call; `timeout = N` overrides it per proc.
-  ## Override the default with `-d:ffiReverseCallTimeoutMs=<ms>`.
+  ## Default deadline of a `{.ffiReverse.}` call; `timeout = <ms>` overrides it per proc.
 
 const ReverseWorkersDefault* {.intdefine: "ffiReverseWorkers".} = 1
-  ## Workers a context starts on the first `registerImpl`; this many impls run at once.
-  ## Override `-d:ffiReverseWorkers=<n>`.
+  ## Reverse workers per context, started by the first `registerImpl`.
 
-const ReverseMaxImpls* {.intdefine: "ffiReverseMaxImpls".} = 64
-  ## Registry slots per context: at least the `{.ffiReverse.}` procs of the library.
-  ## Override `-d:ffiReverseMaxImpls=<n>`.
-
-const ReverseWorkerStallMs* {.intdefine: "ffiReverseWorkerStallMs".} =
-  ReverseCallTimeoutMs
+const ReverseWorkerStallMs* = ReverseCallTimeoutMs
   ## A worker inside one impl for longer emits `reverse_worker_blocked`.
-  ## Override `-d:ffiReverseWorkerStallMs=<ms>`.
 
 const ReverseWorkerJoinTimeoutMs* {.intdefine: "ffiReverseWorkerJoinTimeoutMs".} = 1500
-  ## Per-worker join wait at stop; past it the worker is leaked, not waited on.
-  ## Override `-d:ffiReverseWorkerJoinTimeoutMs=<ms>`.
+  ## Join wait per worker at stop; a worker still running then is leaked.
 
 static:
   doAssert ReverseWorkersDefault >= 1, "-d:ffiReverseWorkers must be at least 1"
   doAssert ReverseMailboxDepth >= 1, "-d:ffiReverseMailboxDepth must be at least 1"
   doAssert ReverseCallTimeoutMs > 0, "-d:ffiReverseCallTimeoutMs must be positive"
-  doAssert ReverseMaxImpls >= 1, "-d:ffiReverseMaxImpls must be at least 1"
 
 proc ffiNoopCallback*(
     callerRet: cint, msg: ptr cchar, len: csize_t, userData: pointer
@@ -48,24 +37,18 @@ type FFIReverseImpl* = proc(
   argsLen: csize_t,
   userData: pointer,
 ) {.cdecl, gcsafe, raises: [].}
-  ## Runs on a reverse worker and may block; answers through `<lib>_reverse_reply`.
-  ## `ctx` is the token of the owner that made the call: reply with it, from any thread.
+  ## Runs on a reverse worker, may block; reply with `ctx` via `<lib>_reverse_reply`.
 
 type FFIReverseRelease* = proc(userData: pointer) {.cdecl, gcsafe, raises: [].}
-  ## Frees an impl's `userData`. Runs on whichever thread drops the last
-  ## reference: a reverse worker, a `registerImpl` caller or the FFI thread.
+  ## Frees an impl's `userData`, on whichever thread drops the last reference.
 
 type
   ReverseImplEntry* = object
-    ## c_malloc'd: one reference for the registry slot, one per running dispatch.
+    ## c_malloc'd; refs: one for the registry, one per running dispatch.
     refs: Atomic[int]
     fn*: FFIReverseImpl
     userData*: pointer
     release: FFIReverseRelease
-
-  ReverseImplSlot = object
-    name: cstring # c_malloc'd; nil for a free slot
-    entry: ptr ReverseImplEntry
 
   ReverseReply* = object
     callId*: uint64
@@ -88,7 +71,8 @@ type
 
   FFIReverseContext* = object
     lock*: Lock
-    impls: array[ReverseMaxImpls, ReverseImplSlot] # no GC memory: any thread may free
+    impls: ptr UncheckedArray[ptr ReverseImplEntry] # c_malloc'd, indexed by impl id
+    implCap: int
     dispatching*: int # invocations in flight on the workers
     nextCallId*: Atomic[uint64]
     mailbox: ReverseMailbox
@@ -124,16 +108,8 @@ proc freeAllReplies*(st: var FFIReverseContext) {.raises: [], gcsafe.} =
     freeReply(node)
     node = next
 
-proc dupName(name: string): cstring {.raises: [].} =
-  ## A c_malloc'd copy, so any thread may free it; nil when the allocation fails.
-  let buf = c_malloc(csize_t(name.len + 1))
-  if buf.isNil():
-    return nil
-  copyMem(buf, cstring(name), name.len + 1) # a Nim string keeps its terminating NUL
-  return cast[cstring](buf)
-
 proc free(e: ptr ReverseImplEntry) {.raises: [], gcsafe.} =
-  ## Hands `userData` back through the host's `release`, then frees the entry itself.
+  ## Calls the host's `release`, then frees the entry.
   if not e[].release.isNil():
     e[].release(e[].userData)
   c_free(e)
@@ -146,41 +122,45 @@ proc decRef(e: ptr ReverseImplEntry) {.raises: [], gcsafe.} =
   if e[].refs.fetchSub(1) == 1:
     free(e)
 
-proc free(slot: ReverseImplSlot) {.raises: [], gcsafe.} =
-  ## Call once the slot is unlinked and the lock is dropped.
-  if not slot.name.isNil():
-    c_free(slot.name)
-  decRef(slot.entry)
+func entryAt(st: FFIReverseContext, id: int): ptr ReverseImplEntry {.raises: [].} =
+  ## Call with `st.lock` held; nil when `id` has no impl.
+  if id < 0 or id >= st.implCap:
+    return nil
+  return st.impls[id]
 
-func findSlotByName(st: FFIReverseContext, name: cstring): int {.raises: [].} =
-  ## Call with `st.lock` held; -1 when `name` has no impl.
-  for i in 0 ..< ReverseMaxImpls:
-    if not st.impls[i].name.isNil() and c_strcmp(st.impls[i].name, name) == 0:
-      return i
-  return -1
-
-func findEmptySlot(st: FFIReverseContext): int {.raises: [].} =
-  ## Call with `st.lock` held; -1 when the registry is full.
-  for i in 0 ..< ReverseMaxImpls:
-    if st.impls[i].name.isNil():
-      return i
-  return -1
+proc reserve(st: var FFIReverseContext, id: int): bool {.raises: [].} =
+  ## Call with `st.lock` held: grows the registry to hold `id`; false when out of memory.
+  if id < st.implCap:
+    return true
+  let cap = max(id + 1, 2 * st.implCap)
+  let grown = cast[ptr UncheckedArray[ptr ReverseImplEntry]](c_realloc(
+    st.impls, csize_t(cap * sizeof(pointer))
+  ))
+  if grown.isNil():
+    return false
+  zeroMem(addr grown[st.implCap], (cap - st.implCap) * sizeof(pointer))
+  st.impls = grown
+  st.implCap = cap
+  return true
 
 proc clearImpls*(st: var FFIReverseContext): int {.raises: [], gcsafe.} =
-  ## Unregisters every impl without waiting; returns the invocations still running.
-  ## A running invocation keeps its entry, and releases it when it returns.
-  var old: typeof(st.impls)
+  ## Unregisters every impl without waiting; returns the invocations still running,
+  ## which keep their entry until they return.
+  var old: ptr UncheckedArray[ptr ReverseImplEntry]
+  var oldCap = 0
   var running = 0
   withLock st.lock:
     swap(old, st.impls)
+    swap(oldCap, st.implCap)
     running = st.dispatching
-  for slot in old:
-    free(slot)
+  for i in 0 ..< oldCap:
+    decRef(old[i])
+  if not old.isNil():
+    c_free(old)
   return running
 
 proc deinitReverseContext*(st: var FFIReverseContext): Result[void, string] =
-  ## Err while a running impl may still take the lock: it then stays alive, and a
-  ## later call may free it.
+  ## Err, keeping the lock alive, while a running impl may still take it.
   st.freeAllReplies()
   let running = st.clearImpls()
   if running > 0:
@@ -191,30 +171,26 @@ proc deinitReverseContext*(st: var FFIReverseContext): Result[void, string] =
 
 type ReverseError* {.pure.} = enum
   OutOfMemory
-  RegistryFull
 
 func toRetCode*(e: ReverseError): cint =
-  ## The REVERSE_* status the C exports return for `e`.
+  ## The `RET_*` status a C export returns for `e`.
   case e
-  of ReverseError.OutOfMemory: REVERSE_OUT_OF_MEMORY
-  of ReverseError.RegistryFull: REVERSE_REGISTRY_FULL
+  of ReverseError.OutOfMemory: RET_OUT_OF_MEMORY
 
 proc registerImpl*(
     st: var FFIReverseContext,
-    name: string,
+    id: int,
     fn: FFIReverseImpl,
     userData: pointer,
     release: FFIReverseRelease = nil,
 ): Result[void, ReverseError] {.raises: [], gcsafe.} =
-  ## Registers `fn` (not nil) for `name`, replacing any impl it had. Never waits.
+  ## Sets the impl of `{.ffiReverse.}` proc `id`, replacing any. Never waits.
   ##
-  ## With a `release`, Nim owns `userData`: the last invocation still running the
-  ## replaced entry calls its `release`. With a nil `release` the host keeps
-  ## ownership and Nim never frees `userData`: keep it valid while an invocation
-  ## may still run it, i.e. until the context is destroyed.
-  ##
-  ## On an error the caller still owns `userData`, and `release` is never called for it.
+  ## With a `release`, Nim owns `userData` and releases it after the replaced impl's
+  ## last running call. With nil, the host keeps `userData` valid until the context
+  ## is destroyed. On an error the caller keeps `userData`; `release` never runs.
   doAssert not fn.isNil(), "registerImpl needs an impl; use unregisterImpl"
+  doAssert id >= 0, "registerImpl: negative impl id"
   let fresh = cast[ptr ReverseImplEntry](c_malloc(csize_t(sizeof(ReverseImplEntry))))
   if fresh.isNil():
     return err(ReverseError.OutOfMemory)
@@ -225,51 +201,40 @@ proc registerImpl*(
 
   var old: ptr ReverseImplEntry = nil
   withLock st.lock:
-    var idx = st.findSlotByName(cstring(name))
-    if idx < 0:
-      idx = st.findEmptySlot()
-      if idx < 0:
-        c_free(fresh) # never published, so its release must not run
-        return err(ReverseError.RegistryFull)
-      st.impls[idx].name = dupName(name)
-      if st.impls[idx].name.isNil():
-        c_free(fresh)
-        return err(ReverseError.OutOfMemory)
-    old = st.impls[idx].entry
-    st.impls[idx].entry = fresh
+    if not st.reserve(id):
+      c_free(fresh) # never published, so its release must not run
+      return err(ReverseError.OutOfMemory)
+    old = st.impls[id]
+    st.impls[id] = fresh
   decRef(old)
   return ok()
 
-proc unregisterImpl*(st: var FFIReverseContext, name: string) {.raises: [], gcsafe.} =
-  ## Removes the impl of `name`, if any. Never waits: an invocation still running
-  ## it keeps its entry and releases it when it returns.
-  var old: ReverseImplSlot
+proc unregisterImpl*(st: var FFIReverseContext, id: int) {.raises: [], gcsafe.} =
+  ## Removes the impl of `id`, if any. Never waits: a running call keeps its entry.
+  var old: ptr ReverseImplEntry = nil
   withLock st.lock:
-    let idx = st.findSlotByName(cstring(name))
-    if idx >= 0:
-      swap(old, st.impls[idx])
-  free(old)
+    old = st.entryAt(id)
+    if not old.isNil():
+      st.impls[id] = nil
+  decRef(old)
 
-proc isRegistered*(
-    st: var FFIReverseContext, name: string
-): bool {.raises: [], gcsafe.} =
+proc isRegistered*(st: var FFIReverseContext, id: int): bool {.raises: [], gcsafe.} =
   withLock st.lock:
-    return st.findSlotByName(cstring(name)) >= 0
+    return not st.entryAt(id).isNil()
 
 proc inFlight*(st: var FFIReverseContext): int {.raises: [], gcsafe.} =
   withLock st.lock:
     return st.dispatching
 
 proc beginReverseDispatch*(
-    st: var FFIReverseContext, name: cstring
+    st: var FFIReverseContext, id: int
 ): ptr ReverseImplEntry {.raises: [], gcsafe.} =
-  ## Nil when `name` has no impl; pair every other result with `endReverseDispatch`.
+  ## Nil when `id` has no impl; pair every other result with `endReverseDispatch`.
   withLock st.lock:
-    let idx = st.findSlotByName(name)
-    if idx < 0:
+    let entry = st.entryAt(id)
+    if entry.isNil():
       return nil
 
-    let entry = st.impls[idx].entry
     discard entry[].refs.fetchAdd(1)
     st.dispatching.inc()
     return entry
@@ -277,7 +242,7 @@ proc beginReverseDispatch*(
 proc endReverseDispatch*(
     st: var FFIReverseContext, entry: ptr ReverseImplEntry
 ) {.raises: [], gcsafe.} =
-  # Release first: the dispatch counts as in flight until the host's `release` has run.
+  # Release first: the call stays in flight until the host's `release` returns.
   decRef(entry)
   withLock st.lock:
     st.dispatching.dec()
@@ -298,7 +263,7 @@ proc pushReply*(
   let node =
     cast[ptr ReverseReply](c_malloc(csize_t(sizeof(ReverseReply) + payloadLen)))
   if node.isNil():
-    return REVERSE_OUT_OF_MEMORY
+    return RET_OUT_OF_MEMORY
 
   node[].callId = callId
   node[].retCode = retCode
@@ -314,7 +279,7 @@ proc pushReply*(
   withLock st.lock:
     if st.mailbox.count >= ReverseMailboxDepth:
       freeReply(node)
-      return REVERSE_MAILBOX_FULL
+      return RET_QUEUE_FULL
     wasEmpty = st.mailbox.head.isNil()
     if wasEmpty:
       st.mailbox.head = node
@@ -325,7 +290,7 @@ proc pushReply*(
 
   if wasEmpty and not st.hooks.wake.isNil():
     st.hooks.wake(st.hooks.ffiCtx)
-  return REVERSE_ACCEPTED
+  return RET_OK
 
 proc mailboxLen*(st: var FFIReverseContext): int {.raises: [], gcsafe.} =
   withLock st.lock:
