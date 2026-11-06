@@ -19,6 +19,10 @@ const RET_BUSY*: cint = 7 ## `<lib>_poll`: another thread is polling this contex
 const RET_QUEUE_FULL*: cint = 8
   ## A request was refused: the request queue is full, or too many are unanswered.
 const RET_TOO_LARGE*: cint = 9 ## A request was refused: its payload is over the cap.
+const RET_NOT_ACTIVE*: cint = 10 ## The context is being recycled or shut down.
+const RET_WORKERS_FAILED*: cint = 11 ## No reverse worker could be started.
+const RET_INVALID_ARGUMENT*: cint = 12 ## A NULL buffer with a non-zero length.
+const RET_OUT_OF_MEMORY*: cint = 13 ## An allocation failed; nothing was queued.
 
 const RetCodes* = [
   RetCode(name: "OK", value: RET_OK),
@@ -31,6 +35,10 @@ const RetCodes* = [
   RetCode(name: "BUSY", value: RET_BUSY),
   RetCode(name: "QUEUE_FULL", value: RET_QUEUE_FULL),
   RetCode(name: "TOO_LARGE", value: RET_TOO_LARGE),
+  RetCode(name: "NOT_ACTIVE", value: RET_NOT_ACTIVE),
+  RetCode(name: "WORKERS_FAILED", value: RET_WORKERS_FAILED),
+  RetCode(name: "INVALID_ARGUMENT", value: RET_INVALID_ARGUMENT),
+  RetCode(name: "OUT_OF_MEMORY", value: RET_OUT_OF_MEMORY),
 ]
 
 func cRetCodeDefines*(): string =
