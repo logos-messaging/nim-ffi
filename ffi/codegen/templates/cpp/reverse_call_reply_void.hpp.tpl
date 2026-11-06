@@ -1,3 +1,3 @@
         bool reply() const {
-            return {{LIB}}_reverse_reply(ctx, id, 0, nullptr, 0) == 0;
+            return {{LIB}}_reverse_reply(ctx, id, 0, nullptr, 0) == NIMFFI_RET_OK;
         }
