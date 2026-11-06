@@ -2212,19 +2212,19 @@ proc buildFFIReverseEventProc(
       initializeLibrary()
     let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
     if `ctxIdent`.isNil():
-      return RET_ERR
+      return RET_INVALID_CTX
     # Checked on the csize_t, before the int conversion can raise a RangeDefect.
     if payloadLen > csize_t(high(int)) or
         (MaxRequestPayloadBytes > 0 and payloadLen > csize_t(MaxRequestPayloadBytes)):
-      return RET_ERR
+      return RET_TOO_LARGE
     if payloadCbor.isNil() and payloadLen > 0:
-      return RET_ERR
+      return RET_INVALID_ARGUMENT
     let `ctxGenIdent` = ctxToken.tokenGeneration()
     let `reqPtrIdent` = FFIThreadRequest.initFromPtr(
       ffiNoopCallback, nil, cstring(`reqNameLit`), payloadCbor, int(payloadLen)
     )
     if `reqPtrIdent`.isNil():
-      return RET_ERR
+      return RET_OUT_OF_MEMORY
     let `sendResIdent` =
       try:
         ffi_context.sendRequestToFFIThread(`ctxIdent`, `reqPtrIdent`, `ctxGenIdent`)

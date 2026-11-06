@@ -361,12 +361,13 @@ suite "{.ffiReverseEvent.} through the generated emit export":
       var b = [byte 0]
       check revmacro_emit_on_host_ping(
         token, addr b[0], csize_t(MaxRequestPayloadBytes + 1)
-      ) == RET_ERR
-      check revmacro_emit_on_host_ping(token, addr b[0], csize_t(high(uint))) == RET_ERR
-      check revmacro_emit_on_host_ping(token, nil, 4) == RET_ERR
+      ) == RET_TOO_LARGE
+      check revmacro_emit_on_host_ping(token, addr b[0], csize_t(high(uint))) ==
+        RET_TOO_LARGE
+      check revmacro_emit_on_host_ping(token, nil, 4) == RET_INVALID_ARGUMENT
 
   test "emit with a stale token is rejected":
     let payload = cborEncode(OnHostPingReq(seqNo: 1))
     check revmacro_emit_on_host_ping(
       FFICtxToken(nil), cast[ptr byte](unsafeAddr payload[0]), csize_t(payload.len)
-    ) == RET_ERR
+    ) == RET_INVALID_CTX
