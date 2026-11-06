@@ -57,6 +57,8 @@ type
   ReverseWorkerBlockedEvent* = object
     worker*: int
     callId*: uint64
+    procName*: string ## the reverse proc the worker is stuck in
+    elapsedMs*: int64 ## time spent in it so far
 
   ReverseWorkerRecoveredEvent* = object
     worker*: int
@@ -71,7 +73,9 @@ proc checkReverseWorkers[T](ctx: ptr FFIContext[T]) =
       emitLivenessEvent(
         ctx,
         ReverseWorkerBlockedEventName,
-        ReverseWorkerBlockedEvent(worker: t.idx, callId: t.callId),
+        ReverseWorkerBlockedEvent(
+          worker: t.idx, callId: t.callId, procName: t.procName, elapsedMs: t.elapsedMs
+        ),
       )
     else:
       emitLivenessEvent(

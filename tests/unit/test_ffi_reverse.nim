@@ -68,11 +68,23 @@ template withPool(ctxIdent: untyped, body: untyped) =
     discard gPool.destroyFFIContext(ctxIdent)
   body
 
-## Handlers: each drives one scenario; the reverse name and deadline are fixed.
+## Reverse impl ids, as the `{.ffiReverse.}` macro would assign them.
+const
+  EchoId = 0
+  ParkedId = 1
+  NobodyId = 2
+  SilentId = 3
+  AbandonedId = 4
+  SleepyId = 5
+  ProbeId = 6
+  GateId = 7
+  SelfDestroyId = 8
+
+## Handlers: each drives one scenario; the reverse impl and deadline are fixed.
 
 registerReqFFI(CallEchoRequest, lib: ptr TestRevLib):
   proc(): Future[Result[string, string]] {.async.} =
-    let r = await ffiReverseCall("echo", @[byte 1, 2, 3], 2000)
+    let r = await ffiReverseCall(EchoId, "echo", @[byte 1, 2, 3], 2000)
     if r.isErr():
       return err(r.error)
     if r.value != @[byte 1, 2, 3]:
@@ -81,7 +93,7 @@ registerReqFFI(CallEchoRequest, lib: ptr TestRevLib):
 
 registerReqFFI(CallParkedRequest, lib: ptr TestRevLib):
   proc(): Future[Result[string, string]] {.async.} =
-    let r = await ffiReverseCall("parked", @[byte 42], 5000)
+    let r = await ffiReverseCall(ParkedId, "parked", @[byte 42], 5000)
     if r.isErr():
       return err(r.error)
     if r.value != @[byte 9]:
@@ -90,49 +102,49 @@ registerReqFFI(CallParkedRequest, lib: ptr TestRevLib):
 
 registerReqFFI(CallMissingRequest, lib: ptr TestRevLib):
   proc(): Future[Result[string, string]] {.async.} =
-    let r = await ffiReverseCall("nobody", @[], 500)
+    let r = await ffiReverseCall(NobodyId, "nobody", @[], 500)
     if r.isErr():
       return err(r.error)
     return ok("unexpected success")
 
 registerReqFFI(CallSilentRequest, lib: ptr TestRevLib):
   proc(): Future[Result[string, string]] {.async.} =
-    let r = await ffiReverseCall("silent", @[], 200)
+    let r = await ffiReverseCall(SilentId, "silent", @[], 200)
     if r.isErr():
       return err(r.error)
     return ok("unexpected success")
 
 registerReqFFI(CallAbandonedRequest, lib: ptr TestRevLib):
   proc(): Future[Result[string, string]] {.async.} =
-    let r = await ffiReverseCall("abandoned", @[], 30000)
+    let r = await ffiReverseCall(AbandonedId, "abandoned", @[], 30000)
     if r.isErr():
       return err(r.error)
     return ok("unexpected success")
 
 registerReqFFI(CallSleepyRequest, lib: ptr TestRevLib):
   proc(): Future[Result[string, string]] {.async.} =
-    let r = await ffiReverseCall("sleepy", @[], 5000)
+    let r = await ffiReverseCall(SleepyId, "sleepy", @[], 5000)
     if r.isErr():
       return err(r.error)
     return ok("slept")
 
 registerReqFFI(CallProbeRequest, lib: ptr TestRevLib):
   proc(): Future[Result[string, string]] {.async.} =
-    let r = await ffiReverseCall("probe", @[], 5000)
+    let r = await ffiReverseCall(ProbeId, "probe", @[], 5000)
     if r.isErr():
       return err(r.error)
     return ok("probed")
 
 registerReqFFI(CallGateRequest, lib: ptr TestRevLib):
   proc(): Future[Result[string, string]] {.async.} =
-    let r = await ffiReverseCall("gate", @[], 30000)
+    let r = await ffiReverseCall(GateId, "gate", @[], 30000)
     if r.isErr():
       return err(r.error)
     return ok("unexpected success")
 
 registerReqFFI(CallSelfDestroyRequest, lib: ptr TestRevLib):
   proc(): Future[Result[string, string]] {.async.} =
-    let r = await ffiReverseCall("self_destroy", @[], 10_000)
+    let r = await ffiReverseCall(SelfDestroyId, "self_destroy", @[], 10_000)
     if r.isErr():
       return err(r.error)
     return ok("still alive")
@@ -288,7 +300,7 @@ suite "reverse call roundtrip":
   test "impl replying inline on the event thread completes the handler":
     setupCallbackData(rsp)
     withPool(ctx):
-      check ctx[].reverse.registerImpl("echo", echoImpl, ctx).isOk()
+      check ctx[].reverse.registerImpl(EchoId, echoImpl, ctx).isOk()
       check sendRequestToFFIThread(ctx, CallEchoRequest.ffiNewReq(captureCb, addr rsp))
         .isOk()
       waitCallback(rsp)
@@ -299,7 +311,7 @@ suite "reverse call roundtrip":
     setupCallbackData(rsp)
     withPool(ctx):
       gSeenToken.store(nil)
-      check ctx[].reverse.registerImpl("echo", tokenEchoImpl, ctx).isOk()
+      check ctx[].reverse.registerImpl(EchoId, tokenEchoImpl, ctx).isOk()
       check sendRequestToFFIThread(ctx, CallEchoRequest.ffiNewReq(captureCb, addr rsp))
         .isOk()
       waitCallback(rsp)
@@ -316,7 +328,7 @@ suite "reverse call roundtrip":
         box.cond.deinitCond()
         box.lock.deinitLock()
 
-      check ctx[].reverse.registerImpl("parked", parkImpl, addr box).isOk()
+      check ctx[].reverse.registerImpl(ParkedId, parkImpl, addr box).isOk()
       check sendRequestToFFIThread(
         ctx, CallParkedRequest.ffiNewReq(captureCb, addr rsp)
       )
@@ -326,8 +338,7 @@ suite "reverse call roundtrip":
       os.sleep(20) # the handler is genuinely parked when the reply lands
       var payload = [byte 9]
       # This thread is neither the FFI nor the event thread: the any-thread path.
-      check submitReverseReply(ctx, callId, RET_OK, addr payload[0], 1) ==
-        REVERSE_ACCEPTED
+      check submitReverseReply(ctx, callId, RET_OK, addr payload[0], 1) == RET_OK
 
       waitCallback(rsp)
       check rsp.retCode == RET_OK
@@ -348,7 +359,7 @@ suite "reverse call failure modes":
   test "an impl that never answers trips the call deadline":
     setupCallbackData(rsp)
     withPool(ctx):
-      check ctx[].reverse.registerImpl("silent", silentImpl, nil).isOk()
+      check ctx[].reverse.registerImpl(SilentId, silentImpl, nil).isOk()
       check sendRequestToFFIThread(
         ctx, CallSilentRequest.ffiNewReq(captureCb, addr rsp)
       )
@@ -357,6 +368,30 @@ suite "reverse call failure modes":
       check rsp.retCode == RET_ERR
       check "timed out" in callbackMsg(rsp)
 
+  test "a timed-out call emits reverse_call_timeout":
+    setupCallbackData(rsp)
+    setupCallbackData(ev)
+    withPool(ctx):
+      check addEventListener(
+        ctx[].eventRegistry, ReverseCallTimeoutEventName, captureCb, addr ev
+      ) > 0
+      check ctx[].reverse.registerImpl(SilentId, silentImpl, nil).isOk()
+      check sendRequestToFFIThread(
+        ctx, CallSilentRequest.ffiNewReq(captureCb, addr rsp)
+      )
+        .isOk()
+      waitCallback(rsp)
+      waitCallback(ev)
+      check ev.retCode == RET_OK
+      let decoded = cborDecode(
+        ev.msg.toOpenArray(0, ev.msgLen - 1), EventEnvelope[ReverseCallTimeout]
+      )
+      check decoded.isOk()
+      let e = decoded.get().payload
+      check e.procName == "silent"
+      check e.reason == "timeout"
+      check e.timeoutMs == 200
+
 suite "registration semantics":
   test "unregistering returns at once; the in-flight invocation still finishes":
     setupCallbackData(rsp)
@@ -364,7 +399,7 @@ suite "registration semantics":
       var box: SlowBox
       box.entered.store(false)
       box.exited.store(false)
-      check ctx[].reverse.registerImpl("silent", slowImpl, addr box).isOk()
+      check ctx[].reverse.registerImpl(SilentId, slowImpl, addr box).isOk()
       check sendRequestToFFIThread(
         ctx, CallSilentRequest.ffiNewReq(captureCb, addr rsp)
       )
@@ -378,8 +413,8 @@ suite "registration semantics":
       check not box.exited.load()
 
       # Never waits: the running invocation keeps its entry until it returns.
-      ctx[].reverse.unregisterImpl("silent")
-      check not ctx[].reverse.isRegistered("silent")
+      ctx[].reverse.unregisterImpl(SilentId)
+      check not ctx[].reverse.isRegistered(SilentId)
       for _ in 0 ..< 500:
         if box.exited.load():
           break
@@ -419,7 +454,7 @@ suite "teardown with a reverse call in flight":
       check false
       return
     var box = SelfDestroyBox(ctx: ctx)
-    check ctx[].reverse.registerImpl("self_destroy", selfDestroyImpl, addr box).isOk()
+    check ctx[].reverse.registerImpl(SelfDestroyId, selfDestroyImpl, addr box).isOk()
 
     check sendRequestToFFIThread(
       ctx, CallSelfDestroyRequest.ffiNewReq(captureCb, addr rsp)
@@ -451,7 +486,7 @@ suite "teardown with a reverse call in flight":
       box.cond.deinitCond()
       box.lock.deinitLock()
 
-    check ctx[].reverse.registerImpl("abandoned", parkImpl, addr box).isOk()
+    check ctx[].reverse.registerImpl(AbandonedId, parkImpl, addr box).isOk()
     check sendRequestToFFIThread(
       ctx, CallAbandonedRequest.ffiNewReq(captureCb, addr rsp)
     )
@@ -475,7 +510,7 @@ suite "teardown with a reverse call in flight":
     g.lock.initLock()
     g.cond.initCond()
 
-    check ctx[].reverse.registerImpl("gate", gateImpl, addr g).isOk()
+    check ctx[].reverse.registerImpl(GateId, gateImpl, addr g).isOk()
     check sendRequestToFFIThread(ctx, CallGateRequest.ffiNewReq(captureCb, addr rsp))
       .isOk()
     g.waitEntered(1)
@@ -501,7 +536,7 @@ suite "teardown with a reverse call in flight":
     g.lock.initLock()
     g.cond.initCond()
 
-    check ctx[].reverse.registerImpl("gate", gateImpl, addr g).isOk()
+    check ctx[].reverse.registerImpl(GateId, gateImpl, addr g).isOk()
     check sendRequestToFFIThread(ctx, CallGateRequest.ffiNewReq(captureCb, addr rsp))
       .isOk()
     g.waitEntered(1)
@@ -524,7 +559,7 @@ suite "reverse calls run concurrently":
     withPool(ctx):
       var box = SleepyBox(ctx: ctx, ms: 150)
       check ctx[].reverse.startReverseWorkers(2)
-      check ctx[].reverse.registerImpl("sleepy", sleepyImpl, addr box).isOk()
+      check ctx[].reverse.registerImpl(SleepyId, sleepyImpl, addr box).isOk()
       let t0 = getMonoTime()
       check sendRequestToFFIThread(
         ctx, CallSleepyRequest.ffiNewReq(captureCb, addr rspA)

@@ -160,6 +160,23 @@ proc reverseTokenHook[T](ud: pointer): pointer {.nimcall, gcsafe, raises: [].} =
   ## FFI thread: the token of the owner the thread now serves, handed to a reverse impl.
   return pointer(cast[ptr FFIContext[T]](ud).token)
 
+const ReverseCallTimeoutEventName* = "reverse_call_timeout"
+
+proc reverseTimeoutHook[T](
+    ud: pointer, ev: ReverseCallTimeout
+) {.nimcall, gcsafe, raises: [].} =
+  ## FFI thread: logs the unanswered call and queues `reverse_call_timeout` for the listeners.
+  warn "reverse call unanswered",
+    procName = ev.procName,
+    callId = ev.callId,
+    reason = ev.reason,
+    elapsedMs = ev.elapsedMs,
+    timeoutMs = ev.timeoutMs
+  try:
+    dispatchFFIEventCbor(ReverseCallTimeoutEventName, ev)
+  except CatchableError as e:
+    error "reverse_call_timeout encode failed", err = e.msg
+
 proc unregisterWaitedSignal(signal: ThreadSignalPtr) =
   ## `wait` leaves the signal's fd registered in this thread's dispatcher, and
   ## `closeThreadDispatcher` refuses to close a dispatcher that still has one.
@@ -293,7 +310,11 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
     initEventRegistry(ctx[].eventRegistry)
   initReverseContext(ctx[].reverse)
   ctx[].reverse.installContextHooks(
-    reverseWakeHook[T], reverseGenerationHook[T], ctx, reverseTokenHook[T]
+    reverseWakeHook[T],
+    reverseGenerationHook[T],
+    ctx,
+    reverseTokenHook[T],
+    reverseTimeoutHook[T],
   )
   initHandleRegistry(ctx[].handles)
 
@@ -451,13 +472,13 @@ proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
 proc submitReverseReply*[T](
     ctx: ptr FFIContext[T], callId: uint64, retCode: cint, data: pointer, dataLen: int
 ): cint =
-  ## Any host thread. Returns a REVERSE_* status.
+  ## Any host thread. Returns a `RET_*` status.
   if ctx.lifecycle.load() != CtxLifecycle.Active:
-    return REVERSE_NOT_ACTIVE
+    return RET_NOT_ACTIVE
   if MaxRequestPayloadBytes > 0 and dataLen > MaxRequestPayloadBytes:
-    return REVERSE_PAYLOAD_TOO_LARGE
+    return RET_TOO_LARGE
   if data.isNil() and dataLen > 0:
-    return REVERSE_INVALID_ARGUMENT
+    return RET_INVALID_ARGUMENT
 
   return ctx[].reverse.pushReply(callId, retCode, data, dataLen)
 
