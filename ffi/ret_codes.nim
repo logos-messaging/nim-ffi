@@ -19,6 +19,10 @@ const RET_BUSY*: cint = 7 ## `<lib>_poll`: another thread is polling this contex
 const RET_QUEUE_FULL*: cint = 8
   ## A request was refused: the request queue is full, or too many are unanswered.
 const RET_TOO_LARGE*: cint = 9 ## A request was refused: its payload is over the cap.
+const RET_NOT_ACTIVE*: cint = 10 ## The context is being recycled or shut down.
+const RET_WORKERS_FAILED*: cint = 11 ## No reverse worker could be started.
+const RET_INVALID_ARGUMENT*: cint = 12 ## A NULL buffer with a non-zero length.
+const RET_OUT_OF_MEMORY*: cint = 13 ## An allocation failed; nothing was queued.
 
 const RetCodes* = [
   RetCode(name: "OK", value: RET_OK),
@@ -31,6 +35,10 @@ const RetCodes* = [
   RetCode(name: "BUSY", value: RET_BUSY),
   RetCode(name: "QUEUE_FULL", value: RET_QUEUE_FULL),
   RetCode(name: "TOO_LARGE", value: RET_TOO_LARGE),
+  RetCode(name: "NOT_ACTIVE", value: RET_NOT_ACTIVE),
+  RetCode(name: "WORKERS_FAILED", value: RET_WORKERS_FAILED),
+  RetCode(name: "INVALID_ARGUMENT", value: RET_INVALID_ARGUMENT),
+  RetCode(name: "OUT_OF_MEMORY", value: RET_OUT_OF_MEMORY),
 ]
 
 func cRetCodeDefines*(): string =
@@ -51,14 +59,3 @@ func rustRetCodeConsts*(): string =
     lines.add("const NIMFFI_RET_" & code.name & ": c_int = " & $code.value & ";")
 
   return lines
-
-const
-  REVERSE_ACCEPTED*: cint = 0
-  REVERSE_INVALID_CTX*: cint = 1
-  REVERSE_NOT_ACTIVE*: cint = 2
-  REVERSE_PAYLOAD_TOO_LARGE*: cint = 3
-  REVERSE_MAILBOX_FULL*: cint = 4
-  REVERSE_WORKERS_FAILED*: cint = 5
-  REVERSE_INVALID_ARGUMENT*: cint = 6
-  REVERSE_OUT_OF_MEMORY*: cint = 7
-  REVERSE_REGISTRY_FULL*: cint = 8

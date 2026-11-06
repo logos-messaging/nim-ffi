@@ -37,6 +37,10 @@ typedef void (*FFICallback)(int ret, const char* msg, size_t len, void* user_dat
 #define NIMFFI_RET_BUSY 7
 #define NIMFFI_RET_QUEUE_FULL 8
 #define NIMFFI_RET_TOO_LARGE 9
+#define NIMFFI_RET_NOT_ACTIVE 10
+#define NIMFFI_RET_WORKERS_FAILED 11
+#define NIMFFI_RET_INVALID_ARGUMENT 12
+#define NIMFFI_RET_OUT_OF_MEMORY 13
 
 /* ── leaf encoders ─────────────────────────────────────────────────────── */
 static inline CborError nimffi_enc_bool(CborEncoder* e, const bool* v) {
