@@ -2113,19 +2113,16 @@ proc buildFFIReverseEventProc(
   if procName.kind == nnkPostfix:
     userProcName = procName[1]
 
-  let (wireName, abiSpecStart) = resolveEventWireName(leading, userProcName)
-  if leading.len > abiSpecStart:
-    error(
-      "`.ffiReverseEvent.`: unsupported argument " & leading[abiSpecStart].repr &
-        "; only an optional wire-name string literal is accepted"
-    )
+  let (wireName, consumed) =
+    resolveWireName(leading, userProcName, "`.ffiReverseEvent.`")
+  rejectPragmaArgs(leading[consumed ..^ 1], "`.ffiReverseEvent.`")
 
   let formalParams = prc[3]
   if formalParams[0].kind != nnkEmpty:
     error(
       "`.ffiReverseEvent.` proc " & $userProcName & " must not declare a return type"
     )
-  if not hasRealBody(prc):
+  if prc.body.skipDocstring().len == 0:
     error(
       "`.ffiReverseEvent.` proc " & $userProcName &
         " needs a body: it is the handler the host-emitted event runs on the " &
