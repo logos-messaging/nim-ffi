@@ -309,11 +309,11 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
       initializeLibrary()
     let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
     if `ctxIdent`.isNil():
-      return REVERSE_INVALID_CTX
+      return RET_INVALID_CTX
     # Checked on the csize_t, before the int conversion can raise a RangeDefect.
     if replyLen > csize_t(high(int)) or
         (MaxRequestPayloadBytes > 0 and replyLen > csize_t(MaxRequestPayloadBytes)):
-      return REVERSE_PAYLOAD_TOO_LARGE
+      return RET_TOO_LARGE
     return submitReverseReply(`ctxIdent`, callId, retCode, replyCbor, int(replyLen))
 
   stmts.add(

@@ -20,21 +20,46 @@ proc requireLibraryDeclared(where: string) {.compileTime.} =
       where & ": declareLibrary(name, LibType) must be called before any FFI annotation"
     )
 
-proc resolveEventWireName(
-    leading: seq[NimNode], userProcName: NimNode
+const AbiGoneHint = ". The `abi = ...` wire selector is gone; CBOR is the only wire."
+
+proc resolveWireName(
+    leading: seq[NimNode], userProcName: NimNode, where: string
 ): tuple[wireName: string, consumed: int] {.compileTime.} =
   ## A leading string literal is the explicit wire name; else derive from the proc.
   if leading.len > 0 and leading[0].kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit} and
       ($leading[0]).len > 0:
+    let name = $leading[0]
     # Without this, a leftover `{.ffiEvent: "abi = cbor".}` names an event `abi = cbor`.
-    if '=' in $leading[0]:
-      error(
-        "`.ffiEvent.` wire name must not contain '=', got: " & ($leading[0]).repr &
-          ". The `abi = ...` wire selector is gone; CBOR is the only wire."
-      )
-    ($leading[0], 1)
+    if '=' in name:
+      error(where & " wire name must not contain '=', got: " & name.repr & AbiGoneHint)
+    # It becomes part of C symbols such as `<lib>_set_<wire>_impl`.
+    if not name.validIdentifier():
+      error(where & " wire name must be a C identifier, got: " & name.repr)
+    (name, 1)
   else:
     (camelToSnakeCase($userProcName), 0)
+
+proc takeOption(
+    specs: var seq[NimNode], key: string, where: string
+): Option[NimNode] {.compileTime.} =
+  ## Removes `key = <expr>` from `specs` and returns `<expr>`; a repeat is an error.
+  var found = none(NimNode)
+  var rest: seq[NimNode] = @[]
+  for arg in specs:
+    if arg.kind == nnkExprEqExpr and arg[0].kind == nnkIdent and arg[0].eqIdent(key):
+      if found.isSome():
+        error(where & ": `" & key & "` given twice")
+      found = some(arg[1])
+    else:
+      rest.add(arg)
+  specs = rest
+  return found
+
+proc intLitValue(node: NimNode, where, key: string): int {.compileTime.} =
+  ## Literal only: the value is also recorded in the meta registry for the bindings.
+  if node.kind != nnkIntLit:
+    error(where & ": `" & key & "` must be an integer literal, got: " & node.repr)
+  return int(node.intVal)
 
 proc requireBeforeGenBindings(where: string) {.compileTime.} =
   ## Enforce this annotation expands before `genBindings()`; anything registered
@@ -51,16 +76,13 @@ func overrideLooksLikeAbi(spec: string): bool =
 
 proc rejectPragmaArgs(specs: seq[NimNode], where: string) {.compileTime.} =
   ## Every annotation takes the node alone; an event's wire name is handled by
-  ## `resolveEventWireName` before this runs.
+  ## `resolveWireName` before this runs.
   if specs.len == 0:
     return
 
   let hint =
     if specs[0].kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit} and
-        overrideLooksLikeAbi($specs[0]):
-      ". The `abi = ...` wire selector is gone; CBOR is the only wire."
-    else:
-      ""
+        overrideLooksLikeAbi($specs[0]): AbiGoneHint else: ""
   error(where & " takes no pragma argument, got: " & specs[0].repr & hint)
 
 proc isPtr(typ: NimNode): bool =
@@ -1721,7 +1743,7 @@ proc buildFFIEventProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compileTi
   if procName.kind == nnkPostfix:
     userProcName = procName[1]
 
-  let (wireName, consumed) = resolveEventWireName(leading, userProcName)
+  let (wireName, consumed) = resolveWireName(leading, userProcName, "`.ffiEvent.`")
   rejectPragmaArgs(leading[consumed ..^ 1], "`.ffiEvent.`")
 
   let formalParams = prc[3]
@@ -1832,16 +1854,17 @@ macro ffiEvent*(args: varargs[untyped]): untyped =
   assertFFIPath(prc, fpEvent)
   return buildFFIEventProc(prc, args[0 ..^ 2])
 
-proc hasRealBody(prc: NimNode): bool {.compileTime.} =
-  ## A leading `##` doc comment alone does not count as a body.
-  if prc.body.kind == nnkEmpty:
-    return false
-  if prc.body.kind == nnkStmtList:
-    for child in prc.body:
-      if child.kind != nnkCommentStmt:
-        return true
-    return false
-  return true
+proc skipDocstring(body: NimNode): seq[NimNode] {.compileTime.} =
+  ## The statements of `body`, without its `##` doc comments.
+  if body.kind == nnkEmpty:
+    return @[]
+  if body.kind != nnkStmtList:
+    return @[body]
+  var stmts: seq[NimNode] = @[]
+  for child in body:
+    if child.kind != nnkCommentStmt:
+      stmts.add(child)
+  return stmts
 
 type ReversePragmaArgs = object
   wireName: string
@@ -1861,23 +1884,25 @@ proc resolveReversePragmaArgs(
     leading: seq[NimNode], userProcName: NimNode
 ): ReversePragmaArgs {.compileTime.} =
   ## Parses the optional wire-name literal and `timeout = <ms>`.
-  var wireName = camelToSnakeCase($userProcName)
-  var timeoutNode: NimNode = ident("ReverseCallTimeoutMs")
-  var timeoutMs = 0
-  for i, arg in leading:
-    if i == 0 and arg.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
-      wireName = $arg
-    elif arg.kind == nnkExprEqExpr and arg[0].kind == nnkIdent and $arg[0] == "timeout" and
-        arg[1].kind == nnkIntLit:
-      timeoutNode = arg[1]
-      timeoutMs = int(arg[1].intVal)
-    else:
-      error(
-        "`.ffiReverse.`: unsupported argument " & arg.repr &
-          "; expected an optional wire-name string literal and/or `timeout = <ms>`"
-      )
+  const where = "`.ffiReverse.`"
+  let (wireName, consumed) = resolveWireName(leading, userProcName, where)
+  var rest = leading[consumed ..^ 1]
+  let timeoutOpt = rest.takeOption("timeout", where)
+  if rest.len > 0:
+    error(
+      where & ": unsupported argument " & rest[0].repr &
+        "; expected an optional wire-name string literal and/or `timeout = <ms>`"
+    )
+  if timeoutOpt.isNone():
+    return ReversePragmaArgs(
+      wireName: wireName, timeoutNode: ident("ReverseCallTimeoutMs"), timeoutMs: 0
+    )
+  let timeoutMs = intLitValue(timeoutOpt.get(), where, "timeout")
+  # 0 would fail every call at once: the deadline is the whole wait.
+  if timeoutMs <= 0:
+    error(where & ": `timeout` must be a positive number of ms, got: " & $timeoutMs)
   return ReversePragmaArgs(
-    wireName: wireName, timeoutNode: timeoutNode, timeoutMs: timeoutMs
+    wireName: wireName, timeoutNode: timeoutOpt.get(), timeoutMs: timeoutMs
   )
 
 proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compileTime.} =
@@ -1891,7 +1916,7 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
   let wireName = pragmaArgs.wireName
   let timeoutNode = pragmaArgs.timeoutNode
 
-  if hasRealBody(prc):
+  if prc.body.skipDocstring().len > 0:
     error(
       "`.ffiReverse.` proc " & $userProcName &
         " must have no body: the host registers the implementation at runtime via " &
@@ -1930,6 +1955,12 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
 
   let resultStmts = newStmtList()
   let wireNameLit = newStrLitNode(wireName)
+  # The registry slot of this proc: its index among the library's reverse procs.
+  var implId = 0
+  for r in ffiReverseRegistry:
+    if r.libName == currentLibName:
+      implId.inc()
+  let implIdLit = newLit(implId)
 
   var paramMetas: seq[FFIParamMeta] = @[]
   for i in 0 ..< paramNames.len:
@@ -1976,9 +2007,10 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
   let rawResIdent = genSym(nskLet, "rawRes")
   let stubBody = newStmtList()
   stubBody.add quote do:
-    let `rawResIdent` = await ffiReverseCall(`wireNameLit`, `encodeExpr`, `timeoutNode`)
+    let `rawResIdent` =
+      await ffiReverseCall(`implIdLit`, `wireNameLit`, `encodeExpr`, `timeoutNode`)
     if `rawResIdent`.isErr():
-      return err(`rawResIdent`.error)
+      return err("reverse call failed: " & `rawResIdent`.error)
   if replyType.kind == nnkIdent and $replyType == "void":
     stubBody.add quote do:
       return ok()
@@ -1986,7 +2018,7 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
     let decodedIdent = genSym(nskLet, "decodedReply")
     stubBody.add quote do:
       let `decodedIdent` = cborDecode(`rawResIdent`.value, `replyType`).valueOr:
-        return err("reverse reply decode failed for " & `wireNameLit` & ": " & $error)
+        return err("reverse reply decode failed for: " & `wireNameLit` & ": " & $error)
       return ok(`decodedIdent`)
 
   var stubPragmas = nnkPragma.newTree()
@@ -2018,16 +2050,16 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
       initializeLibrary()
     let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
     if `ctxIdent`.isNil():
-      return REVERSE_INVALID_CTX
+      return RET_INVALID_CTX
     if impl.isNil():
-      `ctxIdent`[].reverse.unregisterImpl(`wireNameLit`)
-      return REVERSE_ACCEPTED
+      `ctxIdent`[].reverse.unregisterImpl(`implIdLit`)
+      return RET_OK
     # Refused: `userData` stays the caller's and `release` is never called for it.
     let `regResIdent` =
-      `ctxIdent`[].reverse.registerImpl(`wireNameLit`, impl, userData, release)
+      `ctxIdent`[].reverse.registerImpl(`implIdLit`, impl, userData, release)
     if `regResIdent`.isErr():
       return `regResIdent`.error.toRetCode()
-    return REVERSE_ACCEPTED
+    return RET_OK
 
   resultStmts.add(
     newProc(
@@ -2043,16 +2075,6 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
       pragmas = cdeclExportPragma(setImplName),
     )
   )
-
-  var libReverseCount = 1
-  for r in ffiReverseRegistry:
-    if r.libName == currentLibName:
-      libReverseCount.inc()
-  let countLit = newLit(libReverseCount)
-  resultStmts.add quote do:
-    static:
-      doAssert `countLit` <= ReverseMaxImpls,
-        "more {.ffiReverse.} procs than registry slots; raise -d:ffiReverseMaxImpls"
 
   ffiReverseRegistry.add(
     FFIReverseMeta(
