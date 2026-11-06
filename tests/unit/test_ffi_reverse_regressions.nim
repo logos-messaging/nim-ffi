@@ -366,6 +366,26 @@ suite "F5: reverse_reply boundary checks":
       discard RevRegLibFFIPool.destroyFFIContext(ctx)
     check revreg_reverse_reply(ctx.ffiToken(), 1'u64, RET_OK, nil, 16) != RET_OK
 
+suite "F7: generated C contract":
+  test "the header names the status codes, including workers-failed":
+    let reverse = @[
+      FFIReverseMeta(
+        wireName: "fetch_config",
+        nimProcName: "fetchConfig",
+        libName: "timer",
+        argsTypeName: "string",
+        replyTypeName: "",
+      )
+    ]
+    let header = generateCLibHeader(@[], @[], "timer", @[], @[], reverse, @[])
+    check "NIMFFI_RET_OK, _INVALID_CTX, _WORKERS_FAILED" in header
+
+  test "the timer example's {.ffiReverse.} doc comment reaches the C header":
+    const headerPath =
+      currentSourcePath().parentDir() / ".." / ".." / "examples" / "timer" / "c_bindings" /
+      "my_timer.h"
+    check "Asks the host for its wall clock" in readFile(headerPath)
+
 suite "N1: duplicate replies (new, from validation)":
   test "the first reply submitted for a call id wins":
     withReverseHarness(st, 1):
