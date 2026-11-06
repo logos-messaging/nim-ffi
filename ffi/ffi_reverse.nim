@@ -1,7 +1,7 @@
 ## Reverse FFI runtime: host impls, the per-context worker pool and the reply mailbox.
 
 import system/ansi_c
-import std/[atomics, locks, monotimes, os, tables]
+import std/[atomics, locks, monotimes, os, strutils, tables]
 import chronos, results
 import ./ffi_types
 
@@ -10,7 +10,6 @@ const ReverseMailboxDepth* {.intdefine: "ffiReverseMailboxDepth".} = 1024
 
 const ReverseQueueDepth* {.intdefine: "ffiReverseQueueDepth".} = 1024
   ## Calls waiting for a free reverse worker; a call past it fails at once.
-  ## Override `-d:ffiReverseQueueDepth=<n>`.
 
 const ReverseCallTimeoutMs* {.intdefine: "ffiReverseCallTimeoutMs".} = 10000
   ## Default deadline of a `{.ffiReverse.}` call; `timeout = <ms>` overrides it per proc.
@@ -75,7 +74,8 @@ type
     token*: pointer # the calling owner's context token, handed to the impl
     deadlineNs*: int64
     state*: Atomic[ReverseCallState]
-    name*: cstring
+    implId*: int
+    name*: cstring # the macro's wire-name literal: static, never freed
     args*: ptr UncheckedArray[byte]
     argsLen*: int
     next*: ptr ReverseInvocation
@@ -90,6 +90,7 @@ type
     exited: Atomic[bool]
     busySinceNs*: Atomic[int64] # 0 when idle
     currentCall*: Atomic[uint64]
+    currentName*: Atomic[pointer] # static cstring of the running call, nil when idle
     stalled*: bool # event thread only
 
   ReverseStopResult* = object
@@ -99,16 +100,29 @@ type
   ReverseWorkerTransition* = object
     idx*: int
     callId*: uint64
+    procName*: string
+    elapsedMs*: int64
     blocked*: bool
+
+  ReverseCallTimeout* = object
+    ## A reverse call that failed unanswered: `reason` is "timeout" or "queue_full".
+    callId*: uint64
+    procName*: string
+    elapsedMs*: int64
+    timeoutMs*: int64
+    reason*: string
 
   ReverseWakeFn* = proc(ud: pointer) {.nimcall, gcsafe, raises: [].}
   ReverseGenerationFn* = proc(ud: pointer): uint {.nimcall, gcsafe, raises: [].}
   ReverseTokenFn* = proc(ud: pointer): pointer {.nimcall, gcsafe, raises: [].}
+  ReverseTimeoutFn* =
+    proc(ud: pointer, ev: ReverseCallTimeout) {.nimcall, gcsafe, raises: [].}
 
   ReverseContextHooks = object
     wake: ReverseWakeFn
     generation: ReverseGenerationFn
     token: ReverseTokenFn
+    timeout: ReverseTimeoutFn
     ffiCtx: pointer
 
   ReverseMailbox = object ## FIFO of host replies: the first reply for a call id wins
@@ -136,16 +150,18 @@ type
     closing*: Atomic[bool] # recycle or shutdown began: new reverse calls fail fast
     workers: ptr UncheckedArray[FFIReverseWorker] # c_malloc'd, nil until started
     workerCount*: int
-    leakedWorkers*: int # never joined: the worker array and the locks stay alive
+    leakedWorkers*: int
+      ## Never decremented: a leaked worker may still run, so the worker array and the
+      ## locks stay alive for the life of the slot, and no new pool starts.
     stopFn*: ReverseStopFn # nil until startReverseWorkers
 
 var onReverseWorker* {.threadvar.}: bool
 var myWorkerIdx {.threadvar.}: int # 1-based; 0 off a worker
 var myReverseState {.threadvar.}: ptr FFIReverseContext # nil off a worker
 
-proc onOwnReverseWorker*(st: var FFIReverseContext): bool {.raises: [], gcsafe.} =
-  ## True on a worker of `st`: tearing its context down from here waits on this very impl.
-  return onReverseWorker and myReverseState == addr st
+proc ownsReverseWorker*(st: var FFIReverseContext): bool {.raises: [], gcsafe.} =
+  ## True on a reverse worker of `st`: a teardown of its context from here waits on itself.
+  return onReverseWorker and myReverseState == addr(st)
 
 proc nowNs(): int64 =
   return getMonoTime().ticks
@@ -163,8 +179,11 @@ func installContextHooks*(
     gen: ReverseGenerationFn,
     ud: pointer,
     token: ReverseTokenFn = nil,
+    timeout: ReverseTimeoutFn = nil,
 ) {.raises: [].} =
-  st.hooks = ReverseContextHooks(wake: wake, generation: gen, token: token, ffiCtx: ud)
+  st.hooks = ReverseContextHooks(
+    wake: wake, generation: gen, token: token, timeout: timeout, ffiCtx: ud
+  )
 
 proc freeReply*(r: ptr ReverseReply) {.raises: [].} =
   c_free(r)
@@ -173,8 +192,6 @@ proc free(r: ptr ReverseInvocation) {.raises: [].} =
   if r.isNil():
     return
 
-  if not r[].name.isNil():
-    c_free(cast[pointer](r[].name))
   if not r[].args.isNil():
     c_free(r[].args)
   c_free(r)
@@ -220,14 +237,6 @@ proc queueLen*(st: var FFIReverseContext): int {.raises: [], gcsafe.} =
 proc workersStarted*(st: var FFIReverseContext): bool {.raises: [], gcsafe.} =
   withLock st.qLock:
     return st.workerCount > 0
-
-proc dupName(name: string): cstring {.raises: [].} =
-  ## A c_malloc'd copy, so any thread may free it; nil when the allocation fails.
-  let buf = c_malloc(csize_t(name.len + 1))
-  if buf.isNil():
-    return nil
-  copyMem(buf, cstring(name), name.len + 1) # a Nim string keeps its terminating NUL
-  return cast[cstring](buf)
 
 proc free(e: ptr ReverseImplEntry) {.raises: [], gcsafe.} =
   ## Calls the host's `release`, then frees the entry.
@@ -445,7 +454,8 @@ proc allocInvocation(
     generation: uint,
     token: pointer,
     deadlineNs: int64,
-    name: string,
+    implId: int,
+    name: cstring,
     args: seq[byte],
 ): ptr ReverseInvocation {.raises: [].} =
   ## Nil when an allocation fails.
@@ -462,11 +472,8 @@ proc allocInvocation(
   rec[].args = nil
   rec[].argsLen = 0
   rec[].next = nil
-
-  rec[].name = dupName(name)
-  if rec[].name.isNil():
-    c_free(rec)
-    return nil
+  rec[].implId = implId
+  rec[].name = name
 
   if args.len > 0:
     let buf = cast[ptr UncheckedArray[byte]](c_malloc(csize_t(args.len)))
@@ -481,9 +488,9 @@ proc allocInvocation(
 proc pushInvocation(
     st: var FFIReverseContext, rec: ptr ReverseInvocation
 ): bool {.raises: [].} =
-  ## False when `ReverseQueueDepth` calls already wait; the record is then not queued.
+  ## False, not queuing `rec`, when the pool is stopping or `ReverseQueueDepth` calls wait.
   withLock st.qLock:
-    if st.qCount >= ReverseQueueDepth:
+    if st.stopping.load() or st.qCount >= ReverseQueueDepth:
       return false
     if st.qTail.isNil():
       st.qHead = rec
@@ -534,11 +541,13 @@ proc runInvocation(
     return
 
   me[].currentCall.store(rec[].callId)
+  me[].currentName.store(cast[pointer](rec[].name))
   me[].busySinceNs.store(nowNs())
-  let entry = st.beginReverseDispatch(rec[].name)
+  let entry = st.beginReverseDispatch(rec[].implId)
   # One defer, idle first: once `inFlight()` reads 0, the worker already reads idle.
   defer:
     me[].busySinceNs.store(0'i64)
+    me[].currentName.store(nil)
     me[].currentCall.store(0'u64)
     if not entry.isNil():
       st.endReverseDispatch(entry)
@@ -598,7 +607,7 @@ proc stopReverseWorkers*(
   let deadline = nowNs() + int64(max(timeoutMs, 0)) * 1_000_000'i64
   for i in 0 ..< count:
     let w = addr workers[i]
-    if st.onOwnReverseWorker() and myWorkerIdx == i + 1:
+    if st.ownsReverseWorker() and myWorkerIdx == i + 1:
       # A host impl called a teardown export on this worker: a self-join would hang.
       leaked.inc()
       continue
@@ -636,6 +645,7 @@ proc startReverseWorkers*(
       st.workers[i].exited.store(false)
       st.workers[i].busySinceNs.store(0'i64)
       st.workers[i].currentCall.store(0'u64)
+      st.workers[i].currentName.store(nil)
       st.workers[i].stalled = false
 
     var started = 0
@@ -662,29 +672,48 @@ proc scanReverseWorkers*(
     st: var FFIReverseContext, stallNs: int64
 ): seq[ReverseWorkerTransition] {.raises: [], gcsafe.} =
   ## Event thread only: reports once each worker that just stalled or just recovered.
-  var count = 0
-  var workers: ptr UncheckedArray[FFIReverseWorker]
-  withLock st.qLock:
-    count = st.workerCount
-    workers = st.workers
-  if count == 0 or workers.isNil():
-    return @[]
-
+  ## Holds `qLock` throughout: a stop claims the pool under it, so the worker array
+  ## cannot be freed during the scan.
   var transitions: seq[ReverseWorkerTransition] = @[]
-  let now = nowNs()
-  for i in 0 ..< count:
-    let w = addr workers[i]
-    let busy = w[].busySinceNs.load()
-    if busy > 0 and now - busy > stallNs:
-      if not w[].stalled:
-        w[].stalled = true
-        transitions.add(
-          ReverseWorkerTransition(idx: i, callId: w[].currentCall.load(), blocked: true)
-        )
-    elif w[].stalled and busy == 0:
-      w[].stalled = false
-      transitions.add(ReverseWorkerTransition(idx: i, blocked: false))
+  withLock st.qLock:
+    if st.workers.isNil():
+      return transitions
+    let now = nowNs()
+    for i in 0 ..< st.workerCount:
+      let w = addr st.workers[i]
+      let busy = w[].busySinceNs.load()
+      if busy > 0 and now - busy > stallNs:
+        if not w[].stalled:
+          w[].stalled = true
+          transitions.add(
+            ReverseWorkerTransition(
+              idx: i,
+              callId: w[].currentCall.load(),
+              procName: $cast[cstring](w[].currentName.load()),
+              elapsedMs: (now - busy) div 1_000_000,
+              blocked: true,
+            )
+          )
+      elif w[].stalled and busy == 0:
+        w[].stalled = false
+        transitions.add(ReverseWorkerTransition(idx: i, blocked: false))
   return transitions
+
+proc busySummary(st: var FFIReverseContext): string {.raises: [].} =
+  ## Which procs hold the workers, and for how long: the root cause of a full queue.
+  let now = nowNs()
+  var parts: seq[string] = @[]
+  withLock st.qLock:
+    for i in 0 ..< st.workerCount:
+      let busy = st.workers[i].busySinceNs.load()
+      if busy > 0:
+        parts.add(
+          "worker " & $i & " in " & $cast[cstring](st.workers[i].currentName.load()) &
+            " for " & $((now - busy) div 1_000_000) & " ms"
+        )
+  if parts.len == 0:
+    return "no worker busy"
+  return parts.join(", ")
 
 var ffiCurrentReverseContext* {.threadvar.}: ptr FFIReverseContext
 
@@ -748,20 +777,42 @@ proc abandonCall(callId: uint64) =
     decRef(p.rec)
   ffiPendingReverse.del(callId)
 
+proc reportTimeout(
+    st: var FFIReverseContext,
+    callId: uint64,
+    name: cstring,
+    elapsedMs, timeoutMs: int64,
+    reason: string,
+) {.raises: [].} =
+  ## FFI thread: hands a call that failed unanswered to the context, which logs it and
+  ## emits `reverse_call_timeout`. No logging here: chronicles slows worker start-up.
+  if not st.hooks.timeout.isNil():
+    st.hooks.timeout(
+      st.hooks.ffiCtx,
+      ReverseCallTimeout(
+        callId: callId,
+        procName: $name,
+        elapsedMs: elapsedMs,
+        timeoutMs: timeoutMs,
+        reason: reason,
+      ),
+    )
+
 proc ffiReverseCall*(
-    name: string, argsCbor: seq[byte], timeoutMs: int
+    implId: int, name: cstring, argsCbor: seq[byte], timeoutMs: int
 ): Future[Result[seq[byte], string]] {.async.} =
-  ## FFI thread only: queues the call for the workers and awaits the reply under `timeoutMs`.
+  ## FFI thread only: queues call `implId` for the workers and awaits the reply under
+  ## `timeoutMs`. `name` must be a string literal (the macro's wire name).
   let st = ffiCurrentReverseContext
   if st.isNil():
-    return err("reverse call " & name & " outside an FFI processing thread")
+    return err("reverse call " & $name & " outside an FFI processing thread")
   if st[].closing.load():
     # Set before the teardown fails the parked calls, so nothing parks behind it.
-    return err("reverse call " & name & " abandoned: the FFI context is closing")
-  if not st[].isRegistered(name):
-    return err("no host implementation registered for " & name)
+    return err("reverse call " & $name & " abandoned: the FFI context is closing")
+  if not st[].isRegistered(implId):
+    return err("no host implementation registered for " & $name)
   if not st[].startReverseWorkers():
-    return err("reverse workers could not be started for " & name)
+    return err("reverse workers could not be started for " & $name)
 
   let generation =
     if st[].hooks.generation.isNil():
@@ -775,13 +826,22 @@ proc ffiReverseCall*(
       st[].hooks.token(st[].hooks.ffiCtx)
   let callId = st[].allocCallId()
   let deadlineNs = nowNs() + int64(timeoutMs) * 1_000_000'i64
-  let rec = allocInvocation(callId, generation, token, deadlineNs, name, argsCbor)
+  let rec =
+    allocInvocation(callId, generation, token, deadlineNs, implId, name, argsCbor)
   if rec.isNil():
-    return err("out of memory: could not queue reverse call " & name)
+    return err("out of memory: could not queue reverse call " & $name)
 
   if not st[].pushInvocation(rec):
     free(rec) # neither the queue nor a pending entry holds it
-    return err("reverse call queue full (" & $ReverseQueueDepth & " waiting): " & name)
+    if st[].stopping.load():
+      return
+        err("reverse call " & $name & " abandoned: the reverse workers are stopping")
+    let busy = st[].busySummary()
+    st[].reportTimeout(callId, name, 0, timeoutMs, "queue_full")
+    return err(
+      "reverse call queue full (" & $ReverseQueueDepth & " waiting): " & $name & "; " &
+        busy
+    )
   # No await since the push, so no reply for `callId` is drained before this.
   let fut = newFuture[Result[seq[byte], string]]("ffiReverseCall")
   ffiPendingReverse[callId] = PendingReverse(fut: fut, rec: rec)
@@ -794,6 +854,7 @@ proc ffiReverseCall*(
     raise e
   if not completed:
     abandonCall(callId)
-    return err("reverse call " & name & " timed out after " & $timeoutMs & " ms")
+    st[].reportTimeout(callId, name, timeoutMs, timeoutMs, "timeout")
+    return err("reverse call " & $name & " timed out after " & $timeoutMs & " ms")
 
   return await fut

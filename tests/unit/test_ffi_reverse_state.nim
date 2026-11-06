@@ -16,6 +16,11 @@ proc nopImpl(
 
 # Impl ids, as the {.ffiReverse.} macro would assign them.
 const
+  EchoId = 0
+  GateId = 1
+  TokenId = 2
+  StopOtherId = 3
+  NobodyId = 9
   Fetch = 0
   X = 0
   Idle = 0
@@ -365,6 +370,14 @@ suite "worker pool lifecycle":
       check stop.leaked == 0
       check deinitReverseContext(st).isOk()
 
+var timeouts: seq[ReverseCallTimeout] # the FFI thread here is the test's own thread
+
+proc recordTimeout(
+    ud: pointer, ev: ReverseCallTimeout
+) {.nimcall, gcsafe, raises: [].} =
+  {.cast(gcsafe).}:
+    timeouts.add(ev)
+
 template withReverseHarness(stIdent: untyped, workers: int, body: untyped) =
   var stIdent: FFIReverseContext
   initReverseContext(stIdent)
@@ -379,9 +392,9 @@ template withReverseHarness(stIdent: untyped, workers: int, body: untyped) =
 suite "ffiReverseCall":
   test "fails fast once the context is closing, without queueing":
     withReverseHarness(st, 0):
-      check st.registerImpl("echo", nopImpl, nil).isOk()
+      check st.registerImpl(EchoId, nopImpl, nil).isOk()
       st.closing.store(true)
-      let res = waitFor ffiReverseCall("echo", @[], 1000)
+      let res = waitFor ffiReverseCall(EchoId, "echo", @[], 1000)
       check res.isErr()
       check "closing" in res.error
       check st.queueLen() == 0
@@ -389,7 +402,7 @@ suite "ffiReverseCall":
 
   test "fails fast when no implementation is registered":
     withReverseHarness(st, 0):
-      let res = waitFor ffiReverseCall("nobody", @[], 1000)
+      let res = waitFor ffiReverseCall(NobodyId, "nobody", @[], 1000)
       check res.isErr()
       check "no host implementation" in res.error
       check st.queueLen() == 0
@@ -398,11 +411,11 @@ suite "ffiReverseCall":
   test "roundtrip: worker runs the impl, reply completes the future":
     withReverseHarness(st, 1):
       var box = EchoBox(st: addr st)
-      check st.registerImpl("echo", echoImpl, addr box).isOk()
+      check st.registerImpl(EchoId, echoImpl, addr box).isOk()
       let args = @[byte 1, 2, 3]
       var res = Result[seq[byte], string].err("not yet")
       # Poll the drain the way the FFI loop does.
-      let callFut = ffiReverseCall("echo", args, 2000)
+      let callFut = ffiReverseCall(EchoId, "echo", args, 2000)
       while not callFut.finished():
         drainReverseReplies()
         waitFor sleepAsync(chronos.milliseconds(1))
@@ -415,8 +428,8 @@ suite "ffiReverseCall":
   test "workers not started yet are started by the first call":
     withReverseHarness(st, 0):
       var box = EchoBox(st: addr st)
-      check st.registerImpl("echo", echoImpl, addr box).isOk()
-      let callFut = ffiReverseCall("echo", @[byte 9], 2000)
+      check st.registerImpl(EchoId, echoImpl, addr box).isOk()
+      let callFut = ffiReverseCall(EchoId, "echo", @[byte 9], 2000)
       check st.workersStarted()
       while not callFut.finished():
         drainReverseReplies()
@@ -428,17 +441,23 @@ suite "ffiReverseCall":
       var g: GateBox
       g.lock.initLock()
       g.cond.initCond()
-      check st.registerImpl("gate", gateImpl, addr g).isOk()
-      let callFut = ffiReverseCall("gate", @[], 50)
+      timeouts.setLen(0)
+      st.installContextHooks(nil, nil, nil, nil, recordTimeout)
+      check st.registerImpl(GateId, gateImpl, addr g).isOk()
+      let callFut = ffiReverseCall(GateId, "gate", @[], 50)
       g.waitEntered(1) # the impl is Running when the deadline fires
       let res = waitFor callFut
       check res.isErr()
       check "timed out" in res.error
       check ffiPendingReverseLen() == 0
+      require timeouts.len == 1 # the app hears about it, not only the caller
+      check timeouts[0].reason == "timeout"
+      check timeouts[0].procName == "gate"
+      check timeouts[0].timeoutMs == 50
       g.open()
       os.sleep(20)
       # A reply for the abandoned call parks fine and the next drain drops it.
-      check st.pushReply(1'u64, RET_OK, nil, 0) == REVERSE_ACCEPTED
+      check st.pushReply(1'u64, RET_OK, nil, 0) == RET_OK
       drainReverseReplies()
       check st.mailboxLen() == 0
 
@@ -447,16 +466,22 @@ suite "ffiReverseCall":
       var g: GateBox
       g.lock.initLock()
       g.cond.initCond()
-      check st.registerImpl("gate", gateImpl, addr g).isOk()
-      let blocker = ffiReverseCall("gate", @[], 60_000)
+      timeouts.setLen(0)
+      st.installContextHooks(nil, nil, nil, nil, recordTimeout)
+      check st.registerImpl(GateId, gateImpl, addr g).isOk()
+      let blocker = ffiReverseCall(GateId, "gate", @[], 60_000)
       g.waitEntered(1) # the only worker is busy: every further call waits in the queue
       var queued = newSeq[typeof(blocker)]()
       for _ in 0 ..< ReverseQueueDepth:
-        queued.add(ffiReverseCall("gate", @[], 60_000))
+        queued.add(ffiReverseCall(GateId, "gate", @[], 60_000))
       check st.queueLen() == ReverseQueueDepth
-      let overflow = waitFor ffiReverseCall("gate", @[], 60_000)
+      let overflow = waitFor ffiReverseCall(GateId, "gate", @[], 60_000)
       check overflow.isErr()
       check "queue full" in overflow.error
+      check "worker 0 in gate for" in overflow.error
+        # the root cause, not only the symptom
+      require timeouts.len == 1
+      check timeouts[0].reason == "queue_full"
       check ffiPendingReverseLen() == ReverseQueueDepth + 1 # the overflow never parked
       g.open()
       failPendingReverse("done")
@@ -471,8 +496,8 @@ suite "ffiReverseCall":
         cast[pointer](0xC0FFEE)
 
       st.installContextHooks(nil, nil, nil, ownerToken)
-      check st.registerImpl("token", tokenImpl, addr box).isOk()
-      let callFut = ffiReverseCall("token", @[], 2000)
+      check st.registerImpl(TokenId, tokenImpl, addr box).isOk()
+      let callFut = ffiReverseCall(TokenId, "token", @[], 2000)
       while not callFut.finished():
         drainReverseReplies()
         waitFor sleepAsync(chronos.milliseconds(1))
@@ -486,8 +511,8 @@ suite "ffiReverseCall":
     check b.startReverseWorkers(1)
     withReverseHarness(st, 1):
       var box = StopOtherBox(st: addr st, other: addr b)
-      check st.registerImpl("stop_other", stopOtherImpl, addr box).isOk()
-      let callFut = ffiReverseCall("stop_other", @[], 5000)
+      check st.registerImpl(StopOtherId, stopOtherImpl, addr box).isOk()
+      let callFut = ffiReverseCall(StopOtherId, "stop_other", @[], 5000)
       while not callFut.finished():
         drainReverseReplies()
         waitFor sleepAsync(chronos.milliseconds(1))
@@ -500,9 +525,9 @@ suite "ffiReverseCall":
   test "a worker reads idle by the time inFlight drops to 0":
     withReverseHarness(st, 1):
       var box = EchoBox(st: addr st)
-      check st.registerImpl("echo", echoImpl, addr box).isOk()
+      check st.registerImpl(EchoId, echoImpl, addr box).isOk()
       for _ in 0 ..< 200:
-        let callFut = ffiReverseCall("echo", @[byte 1], 2000)
+        let callFut = ffiReverseCall(EchoId, "echo", @[byte 1], 2000)
         while not callFut.finished():
           drainReverseReplies()
           waitFor sleepAsync(chronos.milliseconds(0))
@@ -511,3 +536,21 @@ suite "ffiReverseCall":
           sleep(0)
         # A stall threshold of 0 flags any worker still marked busy.
         check st.scanReverseWorkers(0).len == 0
+
+  test "a stalled worker reports the proc it is stuck in":
+    withReverseHarness(st, 1):
+      var g: GateBox
+      g.lock.initLock()
+      g.cond.initCond()
+      check st.registerImpl(GateId, gateImpl, addr g).isOk()
+      let callFut = ffiReverseCall(GateId, "gate", @[], 60_000)
+      g.waitEntered(1)
+      os.sleep(5)
+      let stalled = st.scanReverseWorkers(0)
+      require stalled.len == 1
+      check stalled[0].blocked
+      check stalled[0].procName == "gate"
+      check stalled[0].elapsedMs >= 1
+      g.open()
+      failPendingReverse("done")
+      check (waitFor callFut).isErr()
