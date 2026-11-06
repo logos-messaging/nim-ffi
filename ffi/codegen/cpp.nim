@@ -486,9 +486,6 @@ proc generateCppHeader*(
       "typedef void (*FFIReverseImpl)(void* ctx, uint64_t call_id, const uint8_t* args, size_t args_len, void* user_data);"
     )
     lines.add("typedef void (*FFIReverseRelease)(void* user_data);")
-    lines.add("#ifndef NIMFFI_REVERSE_ACCEPTED")
-    lines.add(cReverseCodeDefines())
-    lines.add("#endif")
     for r in reverse:
       lines.add(
         "int $1_set_$2_impl(void* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release);" %

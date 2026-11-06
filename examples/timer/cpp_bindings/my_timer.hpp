@@ -922,17 +922,6 @@ int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
 // Reverse FFI: host-implemented interfaces + host-emitted events
 typedef void (*FFIReverseImpl)(void* ctx, uint64_t call_id, const uint8_t* args, size_t args_len, void* user_data);
 typedef void (*FFIReverseRelease)(void* user_data);
-#ifndef NIMFFI_REVERSE_ACCEPTED
-#define NIMFFI_REVERSE_ACCEPTED 0
-#define NIMFFI_REVERSE_INVALID_CTX 1
-#define NIMFFI_REVERSE_NOT_ACTIVE 2
-#define NIMFFI_REVERSE_PAYLOAD_TOO_LARGE 3
-#define NIMFFI_REVERSE_MAILBOX_FULL 4
-#define NIMFFI_REVERSE_WORKERS_FAILED 5
-#define NIMFFI_REVERSE_INVALID_ARGUMENT 6
-#define NIMFFI_REVERSE_OUT_OF_MEMORY 7
-#define NIMFFI_REVERSE_REGISTRY_FULL 8
-#endif
 int my_timer_set_fetch_host_clock_impl(void* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release);
 int my_timer_reverse_reply(void* ctx, uint64_t call_id, int ret_code, const uint8_t* reply_cbor, size_t reply_len);
 int my_timer_emit_on_host_tick(void* ctx, const uint8_t* payload_cbor, size_t payload_len);
@@ -1114,14 +1103,14 @@ public:
             auto enc = encodeCborFFI(r);
             if (enc.isErr()) return fail(enc.error());
             const auto& b = enc.value();
-            return my_timer_reverse_reply(ctx, id, 0, b.data(), b.size()) == 0;
+            return my_timer_reverse_reply(ctx, id, 0, b.data(), b.size()) == NIMFFI_RET_OK;
         }
         bool fail(const std::string& msg) const {
-            return my_timer_reverse_reply(ctx, id, 1, reinterpret_cast<const std::uint8_t*>(msg.data()), msg.size()) == 0;
+            return my_timer_reverse_reply(ctx, id, 1, reinterpret_cast<const std::uint8_t*>(msg.data()), msg.size()) == NIMFFI_RET_OK;
         }
         // Allocation-free, for reporting from a catch block.
         bool failRaw(const char* msg) const noexcept {
-            return my_timer_reverse_reply(ctx, id, 1, reinterpret_cast<const std::uint8_t*>(msg), msg ? std::strlen(msg) : 0) == 0;
+            return my_timer_reverse_reply(ctx, id, 1, reinterpret_cast<const std::uint8_t*>(msg), msg ? std::strlen(msg) : 0) == NIMFFI_RET_OK;
         }
     };
 
@@ -1131,7 +1120,7 @@ public:
     bool setFetchHostClockImpl(std::function<void(FetchHostClockCall, const std::string&)> fn) {
         auto* raw = new FetchHostClockImplBox{std::move(fn)};
         // The library owns the box now: it deletes it once no invocation runs it.
-        if (my_timer_set_fetch_host_clock_impl(ptr_, &MyTimerCtx::fetchHostClockImplTrampoline, raw, &MyTimerCtx::fetchHostClockImplRelease) != 0) {
+        if (my_timer_set_fetch_host_clock_impl(ptr_, &MyTimerCtx::fetchHostClockImplTrampoline, raw, &MyTimerCtx::fetchHostClockImplRelease) != NIMFFI_RET_OK) {
             delete raw; // refused: still ours
             return false;
         }
@@ -1139,7 +1128,7 @@ public:
     }
 
     bool clearFetchHostClockImpl() {
-        return my_timer_set_fetch_host_clock_impl(ptr_, nullptr, nullptr, nullptr) == 0;
+        return my_timer_set_fetch_host_clock_impl(ptr_, nullptr, nullptr, nullptr) == NIMFFI_RET_OK;
     }
 
     // ── Reverse FFI: host-emitted events (fire-and-forget) ──
@@ -1149,7 +1138,7 @@ public:
         auto enc = encodeCborFFI(payload_);
         if (enc.isErr()) return false;
         const auto& b = enc.value();
-        return my_timer_emit_on_host_tick(ptr_, b.data(), b.size()) == 0;
+        return my_timer_emit_on_host_tick(ptr_, b.data(), b.size()) == NIMFFI_RET_OK;
     }
 
     /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
