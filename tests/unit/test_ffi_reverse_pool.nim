@@ -26,9 +26,13 @@ proc probeImpl(
   p[].sawWorkerFlag.store(onReverseWorker)
   discard submitReverseReply(p[].ctx, callId, RET_OK, nil, 0)
 
+const
+  ProbeId = 0
+  SuicideId = 1
+
 registerReqFFI(ProbeRequest, lib: ptr FFIContext[RevPoolLib]):
   proc(): Future[Result[string, string]] {.async.} =
-    let r = await ffiReverseCall("probe", @[], 5000)
+    let r = await ffiReverseCall(ProbeId, "probe", @[], 5000)
     if r.isErr():
       return err(r.error)
     return ok("probed")
@@ -70,7 +74,7 @@ suite "reverse workers follow the slot's threads":
       check false
       return
     var probe = ProbeBox(ctx: ctx)
-    check ctx[].reverse.registerImpl("probe", probeImpl, addr probe).isOk()
+    check ctx[].reverse.registerImpl(ProbeId, probeImpl, addr probe).isOk()
     check ctx[].reverse.workersStarted()
 
     check gPool.recycleFFIContext(ctx).isOk()
@@ -85,7 +89,7 @@ suite "reverse workers follow the slot's threads":
     # A parked slot comes back with no workers until an impl is registered.
     check not ctx[].reverse.workersStarted()
     var probe = ProbeBox(ctx: ctx)
-    check ctx[].reverse.registerImpl("probe", probeImpl, addr probe).isOk()
+    check ctx[].reverse.registerImpl(ProbeId, probeImpl, addr probe).isOk()
     check ctx[].reverse.workersStarted()
 
     check sendRequestToFFIThread(ctx, ProbeRequest.ffiNewReq(waiterCb, addr w)).isOk()
@@ -115,7 +119,7 @@ proc suicideImpl(
 
 registerReqFFI(SuicideRequest, lib: ptr FFIContext[RevPoolLib]):
   proc(): Future[Result[string, string]] {.async.} =
-    let r = await ffiReverseCall("suicide", @[], 5000)
+    let r = await ffiReverseCall(SuicideId, "suicide", @[], 5000)
     if r.isErr():
       return err(r.error)
     return ok("survived")
@@ -130,7 +134,7 @@ suite "a teardown reached from inside a host impl":
       check false
       return
     var box = SuicideBox(ctx: ctx)
-    check ctx[].reverse.registerImpl("suicide", suicideImpl, addr box).isOk()
+    check ctx[].reverse.registerImpl(SuicideId, suicideImpl, addr box).isOk()
 
     check sendRequestToFFIThread(ctx, SuicideRequest.ffiNewReq(waiterCb, addr w)).isOk()
     w.await()
