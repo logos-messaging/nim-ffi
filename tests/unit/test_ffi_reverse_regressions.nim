@@ -1,5 +1,5 @@
-## Regressions for the PR #154 review findings (F1-F7, N1). Each test failed
-## before its fix; the comments say how.
+## Regressions for reverse FFI review findings (F1-F7, N1, raised on #154). Each
+## test failed before its fix; the comments say how.
 
 import std/[atomics, locks, monotimes, os, osproc, strtabs, strutils, times]
 import unittest2
