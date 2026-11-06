@@ -1001,39 +1001,32 @@ int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
 /* Reverse FFI: host-implemented interfaces + host-emitted events */
 #ifndef NIM_FFI_REVERSE_IMPL_DEFINED
 #define NIM_FFI_REVERSE_IMPL_DEFINED
-/* Runs on a reverse worker thread and may block. ctx is the token of the
-   context that made the call: answer with it, now or later and from any
-   thread, via <lib>_reverse_reply or <lib>_reverse_reply_<wire>; it stays
-   safe to use after the context is destroyed (the reply then fails with
-   NIMFFI_RET_INVALID_CTX). args is valid only until the impl returns: copy what a
-   deferred reply needs. */
+/* Runs on a reverse worker thread; may block. Reply with ctx via
+   <lib>_reverse_reply*, from any thread, now or later (after the context is
+   destroyed: NIMFFI_RET_INVALID_CTX). args lives only until the impl returns. */
 typedef void (*FFIReverseImpl)(void* ctx, uint64_t call_id, const uint8_t* args, size_t args_len, void* user_data);
-/* Frees an impl's user_data once no invocation uses it. It runs on whichever
-   thread drops the last reference (a reverse worker, the set_impl caller or
-   the library's own thread at teardown), so it must be thread-safe. */
+/* Frees user_data after its last invocation; runs on any thread, so it must be
+   thread-safe. */
 typedef void (*FFIReverseRelease)(void* user_data);
 #endif
-/* Destroying a context from inside one of its own impls fails at once with
-   RET_ERR: that destroy would wait for the very impl that calls it. */
-/* <lib>_set_<wire>_impl registers impl (NULL unregisters). With a release the
-   library owns user_data, and release(user_data) runs once the replaced impl's
-   last running invocation returns. With a NULL release the host keeps ownership
-   and the library never frees it: keep it valid until the context is destroyed.
-   The call never waits. Returns NIMFFI_RET_OK, _INVALID_CTX, _WORKERS_FAILED
-   or _OUT_OF_MEMORY; on an error the caller still owns user_data and
-   release is never called. */
+/* Destroying a context from one of its own impls returns RET_ERR (it would
+   deadlock). */
+/* <lib>_set_<wire>_impl registers impl (NULL unregisters); never blocks. With a
+   release the library owns user_data and frees it after the replaced impl's last
+   call; with NULL the host keeps it valid until the context is destroyed. On
+   error the caller keeps user_data.
+   Returns NIMFFI_RET_OK, _INVALID_CTX, _WORKERS_FAILED or _OUT_OF_MEMORY. */
 /** Asks the host for its wall clock; fails when no host implementation answers. */
 int my_timer_set_fetch_host_clock_impl(void* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release);
-/* Answers a reverse call from ANY thread. ret_code 0 = ok (reply_cbor is
-   the CBOR reply), non-zero = error (reply_cbor is a UTF-8 message).
-   The first reply for a call_id wins; a later one, or one for a call that
-   already timed out, is dropped. Returns NIMFFI_RET_OK, _INVALID_CTX,
-   _NOT_ACTIVE, _TOO_LARGE, _QUEUE_FULL, _OUT_OF_MEMORY or _INVALID_ARGUMENT
-   (NULL reply_cbor with a non-zero reply_len). */
+/* Answers a reverse call; callable from any thread. ret_code 0: reply_cbor is
+   the CBOR reply; non-zero: a UTF-8 error message. First reply per call_id
+   wins; later or expired ones are dropped. Returns NIMFFI_RET_OK or
+   _INVALID_CTX, _NOT_ACTIVE, _TOO_LARGE, _QUEUE_FULL, _OUT_OF_MEMORY,
+   _INVALID_ARGUMENT (NULL reply_cbor with a non-zero reply_len). */
 int my_timer_reverse_reply(void* ctx, uint64_t call_id, int ret_code, const uint8_t* reply_cbor, size_t reply_len);
-/* <lib>_emit_<wire> queues a host event for the library's own thread and
-   returns NIMFFI_RET_OK once queued; NIMFFI_RET_ERR for a bad ctx, a payload
-   over the request limit, or NULL payload_cbor with a length. */
+/* <lib>_emit_<wire> queues a host event for the library's thread. Returns
+   NIMFFI_RET_OK once queued, or _INVALID_CTX, _TOO_LARGE, _INVALID_ARGUMENT,
+   _OUT_OF_MEMORY or _ERR (the send failed). */
 /** Records the tick number that the host emits. */
 int my_timer_emit_on_host_tick(void* ctx, const uint8_t* payload_cbor, size_t payload_len);
 /**

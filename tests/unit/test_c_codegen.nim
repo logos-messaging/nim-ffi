@@ -426,10 +426,10 @@ suite "generateCLibHeader: reverse FFI":
     check "Returns NIMFFI_RET_OK, _INVALID_CTX, _WORKERS_FAILED" in header
 
   test "the header states the args lifetime and the user_data ownership rules":
-    check "args is valid only until" in header
-    check "release(user_data) runs" in header
-    check "release is never called" in header
-    check "The first reply for a call_id wins" in header
+    check "args lives only until the impl returns" in header
+    check "the library owns user_data" in header
+    check "error the caller keeps user_data" in header
+    check "First reply per call_id" in header
 
   test "the release typedef is declared and no worker start export remains":
     check "typedef void (*FFIReverseRelease)(void* user_data);" in header
