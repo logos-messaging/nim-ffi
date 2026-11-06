@@ -363,13 +363,9 @@ The C++ and Rust bindings pass a `release`, so the library owns their
 closures, and turn a C++ exception or a Rust panic in the implementation into a
 failed call.
 
-The implementation gets a call token with `reply` and `fail`: a small copyable
-value holding the context token and the call id, nothing else. Copy it to any
-thread and answer once, before the call's deadline; a late or second reply is
-dropped, and a reply after the context is gone returns `false`. The arguments
-differ by language: C++ receives them by `const&`, borrowed until the
-implementation returns, so a deferred reply captures a copy. Rust closures own
-theirs and move them. C gets `args`, also valid only until it returns.
+The implementation gets a copyable call token with `reply` and `fail`. C++
+receives the arguments by `const&`, borrowed until the implementation returns,
+so a deferred reply captures a copy; Rust closures own theirs and move them.
 
 ```cpp
 ctx->setFetchHostClockImpl([](MyTimerCtx::FetchHostClockCall call, const std::string& precision) {

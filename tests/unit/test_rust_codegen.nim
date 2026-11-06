@@ -127,7 +127,7 @@ suite "reverse FFI: the Rust wrapper hands the impl box to the library":
     check "_impl: std::sync::Mutex" notin api
 
   test "the docs say the token is Copy and the closure owns its arguments":
-    check "a `Copy` {context token, call id} pair" in api
+    check "call (`Copy`)" in api
     check "owns its arguments" in api
 
   test "the trampoline catches a panic instead of unwinding into the library":

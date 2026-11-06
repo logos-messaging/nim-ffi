@@ -1,5 +1,5 @@
-//! Regressions for the PR #154 review findings at the Rust wrapper layer. Each test
-//! failed before its fix; the comments say how.
+//! Regressions for reverse FFI review findings (raised on #154) at the Rust wrapper
+//! layer. Each test failed before its fix; the comments say how.
 //!
 //! "Dropped" is observed without touching freed memory: every closure captures an
 //! `Arc` token, the test keeps only a `Weak` to it, and the closure clones its probe

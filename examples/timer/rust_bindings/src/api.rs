@@ -174,10 +174,8 @@ unsafe extern "C" fn on_job_scheduled_trampoline(
 #[derive(Debug, Clone, Copy)]
 pub struct ListenerHandle { pub id: u64 }
 
-/// Answer token for one `fetch_host_clock` call: a `Copy` {context token, call id} pair.
-/// Move it anywhere and reply once, from any thread, before the call's deadline;
-/// a late or second reply is dropped, and a reply after the context is gone
-/// returns false.
+/// Answer token for one `fetch_host_clock` call (`Copy`). Reply once, from any thread;
+/// a late or second reply is dropped, and one after destroy returns false.
 #[derive(Debug, Clone, Copy)]
 pub struct FetchHostClockCall { ctx: usize, id: u64 }
 

@@ -607,16 +607,12 @@ proc generateApiRs*(
     let tramp = reverseSnake(r) & "_impl_trampoline"
     let argsRust = reverseArgsRust(r)
     lines.add(
-      "/// Answer token for one `$1` call: a `Copy` {context token, call id} pair." %
+      "/// Answer token for one `$1` call (`Copy`). Reply once, from any thread;" %
         [r.wireName]
     )
     lines.add(
-      "/// Move it anywhere and reply once, from any thread, before the call's deadline;"
+      "/// a late or second reply is dropped, and one after destroy returns false."
     )
-    lines.add(
-      "/// a late or second reply is dropped, and a reply after the context is gone"
-    )
-    lines.add("/// returns false.")
     lines.add("#[derive(Debug, Clone, Copy)]")
     lines.add("pub struct $1 { ctx: usize, id: u64 }" % [callStruct])
     lines.add("")

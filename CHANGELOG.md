@@ -79,7 +79,8 @@ All notable changes to this project are documented in this file.
   where `ctx` is the token of the context that made the call; the C reply
   helpers take it, so a reply deferred past a destroy fails cleanly. At most
   `-d:ffiReverseQueueDepth` calls (default 1024) wait for one. A worker stuck past
-  `ReverseWorkerStallMs` emits `reverse_worker_blocked`, and a recycle that
+  `ReverseWorkerStallMs` emits `reverse_worker_blocked`; an unanswered or
+  queue-full call emits `reverse_call_timeout`. A recycle that
   outlasts a running implementation quarantines the slot with
   `RecycleFailure.ReverseImplBlocked`.
 - `<lib>_set_<wire>_impl` takes a `release` callback: the library owns
