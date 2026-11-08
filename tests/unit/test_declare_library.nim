@@ -1,6 +1,6 @@
 ## Asserts the contracts that hold at macro time: an {.ffiCtor.} with no
 ## {.ffiDtor.} fails the build, and so do a leftover `"abi = ..."` argument and
-## a bad {.ffiReverse.} timeout or wire name.
+## a bad {.ffiReverse.} timeout or wire name, or a duplicate wire name.
 ## Each fixture compiles in a child `nim check`, so its failure is an assertion.
 
 import std/strutils
@@ -36,3 +36,8 @@ suite "{.ffiReverse.} pragma arguments are checked at macro time":
     let (output, code) = checkFixture("reverse_wire_name_fixture")
     check code != 0
     check output.contains("wire name must be a C identifier")
+
+  test "two reverse procs with one wire name fail the build":
+    let (output, code) = checkFixture("reverse_duplicate_wire_fixture")
+    check code != 0
+    check output.contains("wire name 'ask' is already used by askHost")

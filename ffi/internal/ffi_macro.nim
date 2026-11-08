@@ -1959,6 +1959,12 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
   var implId = 0
   for r in ffiReverseRegistry:
     if r.libName == currentLibName:
+      if r.wireName == wireName:
+        error(
+          "`.ffiReverse.` proc " & $userProcName & ": wire name '" & wireName &
+            "' is already used by " & r.nimProcName & "; each needs its own " &
+            currentLibName & "_set_<wire>_impl"
+        )
       implId.inc()
   let implIdLit = newLit(implId)
 
