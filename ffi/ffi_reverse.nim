@@ -738,6 +738,25 @@ var ffiPendingReverse {.threadvar.}: Table[uint64, PendingReverse]
 proc ffiPendingReverseLen*(): int =
   return ffiPendingReverse.len
 
+proc ffiReverseImplementedId*(implId: int): bool {.gcsafe, raises: [].} =
+  ## FFI thread only: whether the host registered an impl for `implId` on this
+  ## context. Off an FFI thread nothing can serve the call, so it is false.
+  ## Code names wires, not ids: see `ffiReverseImplemented` / `ffiReverseMissing`.
+  let st = ffiCurrentReverseContext
+  if st.isNil():
+    return false
+  return st[].isRegistered(implId)
+
+proc ffiReverseMissingIds*(
+    wires: openArray[tuple[wire: string, implId: int]]
+): seq[string] {.gcsafe, raises: [].} =
+  ## The wires of `wires` whose impl is not registered, in order.
+  var missing: seq[string]
+  for w in wires:
+    if not ffiReverseImplementedId(w.implId):
+      missing.add(w.wire)
+  return missing
+
 proc drainReverseReplies*() {.gcsafe, raises: [].} =
   ## FFI thread only: completes parked futures; a reply with an unknown call id is dropped.
   let st = ffiCurrentReverseContext

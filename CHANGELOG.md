@@ -93,6 +93,10 @@ All notable changes to this project are documented in this file.
   and Rust bindings use it, and catch an exception or a panic in the
   implementation. Replies are first-wins, lengths are checked before use, and
   a reverse call fails at once once a recycle or shutdown has begun.
+- `ffiReverseImplemented(wire)` and `ffiReverseMissing(wires)` tell code on the
+  FFI processing thread which host implementations are registered, so a library
+  can reject an unfulfilled interface up front (at start, say) instead of on its
+  first call. Wire names resolve to impl ids at compile time.
 - Fix: `<lib>_set_<wire>_impl` compiles when its `{.ffiReverse.}` proc is in
   another module than `declareLibrary`; `release` resolved to chronos'
   `AsyncLock` / `AsyncSemaphore` overloads instead of the export's parameter.

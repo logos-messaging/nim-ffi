@@ -2123,6 +2123,41 @@ macro ffiReverse*(args: varargs[untyped]): untyped =
     error("ffiReverse must be applied to a proc declaration")
   return buildFFIReverseProc(prc, args[0 ..^ 2])
 
+proc reverseImplId(wire: string): int {.compileTime.} =
+  ## The impl id `buildFFIReverseProc` gave the library's `{.ffiReverse.}` proc
+  ## with this wire name: its index among the library's reverse procs.
+  var implId = 0
+  for r in ffiReverseRegistry:
+    if r.libName == currentLibName:
+      if r.wireName == wire:
+        return implId
+      implId.inc()
+  error(
+    "no `.ffiReverse.` proc of " & currentLibName & " has the wire name '" & wire &
+      "' (declare the proc before checking it)"
+  )
+
+macro ffiReverseImplemented*(wire: static string): untyped =
+  ## FFI thread only: whether the host registered an impl for `wire` on this
+  ## context; false off an FFI thread. An unknown wire is a compile error.
+  return newCall(ident("ffiReverseImplementedId"), newLit(reverseImplId(wire)))
+
+macro ffiReverseMissing*(wires: static openArray[string]): untyped =
+  ## FFI thread only: the wires of `wires` the host has not implemented, in
+  ## order; empty when the interface is fulfilled. Lets a library reject an
+  ## unfulfilled interface up front (at start, say) instead of on its first
+  ## call. Every wire counts as missing off an FFI thread; an unknown wire is a
+  ## compile error.
+  var pairs = nnkBracket.newTree()
+  for w in wires:
+    pairs.add(
+      nnkTupleConstr.newTree(
+        nnkExprColonExpr.newTree(ident("wire"), newLit(w)),
+        nnkExprColonExpr.newTree(ident("implId"), newLit(reverseImplId(w))),
+      )
+    )
+  return newCall(ident("ffiReverseMissingIds"), pairs)
+
 proc buildFFIReverseEventProc(
     prc: NimNode, leading: seq[NimNode]
 ): NimNode {.compileTime.} =
