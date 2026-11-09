@@ -2,6 +2,7 @@
 ## {.ffiDtor.} fails the build, and so do a leftover `"abi = ..."` argument and
 ## a bad {.ffiReverse.} timeout or wire name, or a duplicate wire name.
 ## Each fixture compiles in a child `nim check`, so its failure is an assertion.
+## One acceptance fixture must compile: a reverse proc split from its library.
 
 import std/strutils
 import unittest2
@@ -41,3 +42,8 @@ suite "{.ffiReverse.} pragma arguments are checked at macro time":
     let (output, code) = checkFixture("reverse_duplicate_wire_fixture")
     check code != 0
     check output.contains("wire name 'ask' is already used by askHost")
+
+  test "a reverse proc in another module than declareLibrary compiles":
+    let (output, code) = checkFixture("reverse_split_module_fixture")
+    check code == 0
+    check not output.contains("ambiguous identifier: 'release'")

@@ -2051,18 +2051,27 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
   let poolIdent = ident(currentLibType & "FFIPool")
   let ctxIdent = ident("ctx")
   let regResIdent = genSym(nskLet, "regRes")
+  # The params are spliced into the body as the same idents. A bare name in
+  # `quote` is bound to what this module sees, and it imports chronos: `release`
+  # became chronos' AsyncLock/AsyncSemaphore overloads, and with the proc in
+  # another module than declareLibrary it no longer resolved to the param.
+  let tokenParam = ident("ctxToken")
+  let implParam = ident("impl")
+  let userDataParam = ident("userData")
+  let releaseParam = ident("release")
   let setBody = quote:
     when declared(initializeLibrary):
       initializeLibrary()
-    let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
+    let `ctxIdent` = `poolIdent`.resolveCtx(`tokenParam`)
     if `ctxIdent`.isNil():
       return RET_INVALID_CTX
-    if impl.isNil():
+    if `implParam`.isNil():
       `ctxIdent`[].reverse.unregisterImpl(`implIdLit`)
       return RET_OK
     # Refused: `userData` stays the caller's and `release` is never called for it.
-    let `regResIdent` =
-      `ctxIdent`[].reverse.registerImpl(`implIdLit`, impl, userData, release)
+    let `regResIdent` = `ctxIdent`[].reverse.registerImpl(
+      `implIdLit`, `implParam`, `userDataParam`, `releaseParam`
+    )
     if `regResIdent`.isErr():
       return `regResIdent`.error.toRetCode()
     return RET_OK
@@ -2072,10 +2081,10 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
       name = postfix(ident(setImplName), "*"),
       params = @[
         ident("cint"),
-        newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
-        newIdentDefs(ident("impl"), ident("FFIReverseImpl")),
-        newIdentDefs(ident("userData"), ident("pointer")),
-        newIdentDefs(ident("release"), ident("FFIReverseRelease")),
+        newIdentDefs(tokenParam, ident("FFICtxToken")),
+        newIdentDefs(implParam, ident("FFIReverseImpl")),
+        newIdentDefs(userDataParam, ident("pointer")),
+        newIdentDefs(releaseParam, ident("FFIReverseRelease")),
       ],
       body = setBody,
       pragmas = cdeclExportPragma(setImplName),
