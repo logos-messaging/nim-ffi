@@ -337,6 +337,8 @@ suite "reverse call roundtrip":
       let callId = waitParked(box)
       os.sleep(20) # the handler is genuinely parked when the reply lands
       var payload = [byte 9]
+      check submitReverseReply(ctx, callId, RET_OK, addr payload[0], -1) ==
+        RET_INVALID_ARGUMENT
       # This thread is neither the FFI nor the event thread: the any-thread path.
       check submitReverseReply(ctx, callId, RET_OK, addr payload[0], 1) == RET_OK
 
