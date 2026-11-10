@@ -162,7 +162,7 @@ proc concurrentStopProbe(): int =
   ## Two stops race over two wedged workers that are then released together.
   initReverseContext(raceSt)
   initGate(raceGate)
-  if not raceSt.startReverseWorkers(2):
+  if raceSt.startReverseWorkers(2).isErr():
     return 2
   if raceSt.registerImpl(GateId, gateImpl, addr raceGate).isErr():
     return 4
@@ -192,7 +192,7 @@ template withReverseHarness(stIdent: untyped, workers: int, body: untyped) =
   initReverseContext(stIdent)
   ffiCurrentReverseContext = addr stIdent
   if workers > 0:
-    check stIdent.startReverseWorkers(workers)
+    check stIdent.startReverseWorkers(workers).isOk()
   defer:
     ffiCurrentReverseContext = nil
     check deinitReverseContext(stIdent).isOk()
@@ -322,7 +322,7 @@ suite "F4: worker stop":
   ):
     initReverseContext(stopSt)
     initGate(stopGate)
-    check stopSt.startReverseWorkers(2)
+    check stopSt.startReverseWorkers(2).isOk()
     check stopSt.registerImpl(GateId, gateImpl, addr stopGate).isOk()
     ffiCurrentReverseContext = addr stopSt
     defer:

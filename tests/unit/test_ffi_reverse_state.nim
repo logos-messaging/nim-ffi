@@ -459,7 +459,7 @@ suite "worker pool lifecycle":
   test "a start while a stop is joining the pool is refused":
     initReverseContext(claimSt)
     initGate(claimGate)
-    check claimSt.startReverseWorkers(1)
+    check claimSt.startReverseWorkers(1).isOk()
     check claimSt.registerImpl(GateId, gateImpl, addr claimGate).isOk()
     ffiCurrentReverseContext = addr claimSt
     defer:
@@ -470,11 +470,13 @@ suite "worker pool lifecycle":
     var stopper: Thread[void]
     createThread(stopper, stopClaimSt)
     os.sleep(50) # the stop has claimed the pool and waits on the stuck worker
-    check not claimSt.startReverseWorkers(1)
+    let refused = claimSt.startReverseWorkers(1)
+    check refused.isErr() and refused.error == ReverseStartFailure.Stopping
     claimGate.open()
     joinThread(stopper)
     check claimStopped.load() == 1
-    check claimSt.startReverseWorkers(1) # the stop finished: a fresh pool may start
+    check claimSt.startReverseWorkers(1).isOk()
+      # the stop finished: a fresh pool may start
     failPendingReverse("done")
     discard waitFor blocker
     check deinitReverseContext(claimSt).isOk()
@@ -489,7 +491,7 @@ suite "worker pool lifecycle":
     g.lock.initLock()
     g.cond.initCond()
     # Exactly one worker, or `registerImpl` starts the default count.
-    check st.startReverseWorkers(1)
+    check st.startReverseWorkers(1).isOk()
     check st.registerImpl(GateId, gateImpl, addr g).isOk()
     ffiCurrentReverseContext = addr st
     defer:
