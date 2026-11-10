@@ -572,7 +572,7 @@ suite "reverse calls run concurrently":
     setupCallbackData(rspB)
     withPool(ctx):
       var box = SleepyBox(ctx: ctx, ms: 150)
-      check ctx[].reverse.startReverseWorkers(2)
+      check ctx[].reverse.startReverseWorkers(2).isOk()
       check ctx[].reverse.registerImpl(SleepyId, sleepyImpl, addr box).isOk()
       let t0 = getMonoTime()
       check sendRequestToFFIThread(
