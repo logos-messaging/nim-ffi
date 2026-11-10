@@ -45,6 +45,18 @@ suite "FFIReverseContext registry":
     check not st.isRegistered(Fetch)
     check st.beginReverseDispatch(Fetch).isNil()
 
+  test "a nil impl or a negative id is an invalid argument":
+    var st: FFIReverseContext
+    initReverseContext(st)
+    defer:
+      check deinitReverseContext(st).isOk()
+
+    let noImpl = st.registerImpl(Fetch, nil, nil)
+    check noImpl.isErr() and noImpl.error == ReverseError.InvalidArgument
+    let badId = st.registerImpl(-1, nopImpl, nil)
+    check badId.isErr() and badId.error == ReverseError.InvalidArgument
+    check not st.isRegistered(Fetch)
+
   test "call ids start at 1 and are monotonic":
     var st: FFIReverseContext
     initReverseContext(st)

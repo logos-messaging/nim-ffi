@@ -171,11 +171,13 @@ proc deinitReverseContext*(st: var FFIReverseContext): Result[void, string] =
 
 type ReverseError* {.pure.} = enum
   OutOfMemory
+  InvalidArgument
 
 func toRetCode*(e: ReverseError): cint =
   ## The `RET_*` status a C export returns for `e`.
   case e
   of ReverseError.OutOfMemory: RET_OUT_OF_MEMORY
+  of ReverseError.InvalidArgument: RET_INVALID_ARGUMENT
 
 proc registerImpl*(
     st: var FFIReverseContext,
@@ -189,8 +191,8 @@ proc registerImpl*(
   ## With a `release`, Nim owns `userData` and releases it after the replaced impl's
   ## last running call. With nil, the host keeps `userData` valid until the context
   ## is destroyed. On an error the caller keeps `userData`; `release` never runs.
-  doAssert not fn.isNil(), "registerImpl needs an impl; use unregisterImpl"
-  doAssert id >= 0, "registerImpl: negative impl id"
+  if fn.isNil() or id < 0: # a nil impl unregisters: use unregisterImpl
+    return err(ReverseError.InvalidArgument)
   let fresh = cast[ptr ReverseImplEntry](c_malloc(csize_t(sizeof(ReverseImplEntry))))
   if fresh.isNil():
     return err(ReverseError.OutOfMemory)
