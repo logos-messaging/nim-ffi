@@ -17,6 +17,8 @@ proc runLeakChild*(filter: string): tuple[output: string, exitCode: int] =
   env[LeakChildEnv] = "1"
   let supp = getTempDir() / ("nim_ffi_reverse_leak_" & $getCurrentProcessId() & ".supp")
   writeFile(supp, readFile(baseSupp) & "\n" & leakSupp & "\n")
+  defer:
+    removeFile(supp)
   var opts: seq[string] = @[]
   for part in env.getOrDefault("TSAN_OPTIONS").split(':'):
     if part.len > 0 and not part.startsWith("suppressions="):
