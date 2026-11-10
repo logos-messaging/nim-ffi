@@ -347,16 +347,16 @@ suite "worker pool lifecycle":
       check deinitReverseContext(st).isOk()
 
     check not st.workersStarted()
-    check st.startReverseWorkers(3)
+    check st.startReverseWorkers(3).isOk()
     check st.workersStarted()
     check st.workerCount == 3
-    check st.startReverseWorkers(7) # already running: keeps its size
+    check st.startReverseWorkers(7).isOk() # already running: keeps its size
     check st.workerCount == 3
     let stop = stopReverseWorkers(st)
     check stop.stopped == 3
     check stop.leaked == 0
     check not st.workersStarted()
-    check st.startReverseWorkers(1)
+    check st.startReverseWorkers(1).isOk()
     check st.workerCount == 1
 
   test "a stop right after the start does not strand a worker that has not run yet":
@@ -364,7 +364,7 @@ suite "worker pool lifecycle":
     for _ in 0 ..< 200:
       var st: FFIReverseContext
       initReverseContext(st)
-      check st.startReverseWorkers(2)
+      check st.startReverseWorkers(2).isOk()
       let stop = stopReverseWorkers(st)
       check stop.stopped == 2
       check stop.leaked == 0
@@ -383,7 +383,7 @@ template withReverseHarness(stIdent: untyped, workers: int, body: untyped) =
   initReverseContext(stIdent)
   ffiCurrentReverseContext = addr stIdent
   if workers > 0:
-    check stIdent.startReverseWorkers(workers)
+    check stIdent.startReverseWorkers(workers).isOk()
   defer:
     ffiCurrentReverseContext = nil
     check deinitReverseContext(stIdent).isOk()
@@ -508,7 +508,7 @@ suite "ffiReverseCall":
     # Worker 1 of A must not mistake B's worker 0 for itself.
     var b: FFIReverseContext
     initReverseContext(b)
-    check b.startReverseWorkers(1)
+    check b.startReverseWorkers(1).isOk()
     withReverseHarness(st, 1):
       var box = StopOtherBox(st: addr st, other: addr b)
       check st.registerImpl(StopOtherId, stopOtherImpl, addr box).isOk()

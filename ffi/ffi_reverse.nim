@@ -312,9 +312,16 @@ proc deinitReverseContext*(st: var FFIReverseContext): Result[void, string] =
   st.lock.deinitLock()
   return ok()
 
+type ReverseStartFailure* {.pure.} = enum
+  ## Why no reverse worker runs. No GC memory: `registerImpl` runs on host threads.
+  WorkersLeaked = "workers leaked by an earlier stop are still out"
+  Stopping = "a stop of the pool is in progress"
+  OutOfMemory = "the worker array could not be allocated"
+  ThreadsFailed = "no worker thread could be created"
+
 proc startReverseWorkers*(
   st: var FFIReverseContext, n: int = 0
-): bool {.raises: [], gcsafe.}
+): Result[void, ReverseStartFailure] {.raises: [], gcsafe.}
 
 type ReverseError* {.pure.} = enum
   OutOfMemory
@@ -342,7 +349,7 @@ proc registerImpl*(
   ## is destroyed. On an error the caller keeps `userData`; `release` never runs.
   if fn.isNil() or id < 0: # a nil impl unregisters: use unregisterImpl
     return err(ReverseError.InvalidArgument)
-  if not st.startReverseWorkers():
+  if st.startReverseWorkers().isErr():
     return err(ReverseError.WorkersFailed)
   let fresh = cast[ptr ReverseImplEntry](c_malloc(csize_t(sizeof(ReverseImplEntry))))
   if fresh.isNil():
@@ -628,18 +635,22 @@ proc stopReverseWorkers*(
 
 proc startReverseWorkers*(
     st: var FFIReverseContext, n: int = 0
-): bool {.raises: [], gcsafe.} =
+): Result[void, ReverseStartFailure] {.raises: [], gcsafe.} =
   ## Idempotent: a running pool keeps its size. `n <= 0` starts `ReverseWorkersDefault`.
   let count = if n <= 0: ReverseWorkersDefault else: n
   withLock st.qLock:
-    if st.workerCount > 0 or st.leakedWorkers > 0 or st.stopClaimed:
-      return st.workerCount > 0
+    if st.workerCount > 0:
+      return ok()
+    if st.leakedWorkers > 0:
+      return err(ReverseStartFailure.WorkersLeaked)
+    if st.stopClaimed:
+      return err(ReverseStartFailure.Stopping)
 
     st.stopping.store(false)
     let bytes = csize_t(count * sizeof(FFIReverseWorker))
     st.workers = cast[ptr UncheckedArray[FFIReverseWorker]](c_malloc(bytes))
     if st.workers.isNil():
-      return false
+      return err(ReverseStartFailure.OutOfMemory)
     zeroMem(st.workers, int(bytes))
     for i in 0 ..< count:
       st.workers[i].exited.store(false)
@@ -662,11 +673,11 @@ proc startReverseWorkers*(
     if started == 0:
       c_free(st.workers)
       st.workers = nil
-      return false
+      return err(ReverseStartFailure.ThreadsFailed)
 
     st.workerCount = started
     st.stopFn = stopReverseWorkers
-  return true
+  return ok()
 
 proc scanReverseWorkers*(
     st: var FFIReverseContext, stallNs: int64
@@ -811,8 +822,10 @@ proc ffiReverseCall*(
     return err("reverse call " & $name & " abandoned: the FFI context is closing")
   if not st[].isRegistered(implId):
     return err("no host implementation registered for " & $name)
-  if not st[].startReverseWorkers():
-    return err("reverse workers could not be started for " & $name)
+  let started = st[].startReverseWorkers()
+  if started.isErr():
+    return
+      err("reverse workers could not be started for " & $name & ": " & $started.error)
 
   let generation =
     if st[].hooks.generation.isNil():
