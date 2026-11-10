@@ -816,16 +816,16 @@ proc ffiReverseCall*(
   ## `timeoutMs`. `name` must be a string literal (the macro's wire name).
   let st = ffiCurrentReverseContext
   if st.isNil():
-    return err("reverse call " & $name & " outside an FFI processing thread")
+    return err("reverse call outside an FFI processing thread: " & $name)
   if st[].closing.load():
     # Set before the teardown fails the parked calls, so nothing parks behind it.
-    return err("reverse call " & $name & " abandoned: the FFI context is closing")
+    return err("reverse call abandoned, the FFI context is closing: " & $name)
   if not st[].isRegistered(implId):
-    return err("no host implementation registered for " & $name)
+    return err("no host implementation registered for: " & $name)
   let started = st[].startReverseWorkers()
   if started.isErr():
     return
-      err("reverse workers could not be started for " & $name & ": " & $started.error)
+      err("reverse workers could not be started for: " & $name & ": " & $started.error)
 
   let generation =
     if st[].hooks.generation.isNil():
@@ -842,14 +842,14 @@ proc ffiReverseCall*(
   let rec =
     allocInvocation(callId, generation, token, deadlineNs, implId, name, argsCbor)
   if rec.isNil():
-    return err("out of memory: could not queue reverse call " & $name)
+    return err("out of memory, could not queue reverse call: " & $name)
 
   if not st[].pushInvocation(rec):
     free(rec) # neither the queue nor a pending entry holds it
     if st[].stopping.load():
-      return
-        err("reverse call " & $name & " abandoned: the reverse workers are stopping")
+      return err("reverse call abandoned, the reverse workers are stopping: " & $name)
     let busy = st[].busySummary()
+    # Refused before queuing, so there is no wait to report: elapsedMs is 0.
     st[].reportTimeout(callId, name, 0, timeoutMs, "queue_full")
     return err(
       "reverse call queue full (" & $ReverseQueueDepth & " waiting): " & $name & "; " &
@@ -868,6 +868,6 @@ proc ffiReverseCall*(
   if not completed:
     abandonCall(callId)
     st[].reportTimeout(callId, name, timeoutMs, timeoutMs, "timeout")
-    return err("reverse call " & $name & " timed out after " & $timeoutMs & " ms")
+    return err("reverse call timed out after " & $timeoutMs & " ms: " & $name)
 
   return await fut
