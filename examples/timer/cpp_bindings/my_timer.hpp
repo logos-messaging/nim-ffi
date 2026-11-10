@@ -1224,7 +1224,7 @@ public:
         if (ffi_enc_.isErr()) return Result<std::string>::err(ffi_enc_.error());
         const auto& ffi_req_bytes_ = ffi_enc_.value();
         auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return my_timer_host_clock(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+            return ::my_timer_host_clock(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
         }, timeout_);
         if (ffi_raw_.isErr()) return Result<std::string>::err(ffi_raw_.error());
         return decodeCborFFI<std::string>(ffi_raw_.value());
@@ -1242,7 +1242,7 @@ public:
         if (ffi_enc_.isErr()) return Result<int64_t>::err(ffi_enc_.error());
         const auto& ffi_req_bytes_ = ffi_enc_.value();
         auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return my_timer_last_host_tick(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+            return ::my_timer_last_host_tick(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
         }, timeout_);
         if (ffi_raw_.isErr()) return Result<int64_t>::err(ffi_raw_.error());
         return decodeCborFFI<int64_t>(ffi_raw_.value());
