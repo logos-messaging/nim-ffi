@@ -1,7 +1,7 @@
 ## Compile-time metadata types for FFI binding generation, populated by the
 ## {.ffiCtor.}/{.ffi.} macros and consumed by codegen.
 
-import std/options
+import std/[json, macrocache, macros, options]
 
 type
   FFIParamMeta* = object
@@ -60,26 +60,86 @@ type
     payloadTypeName*: string
     doc*: string
 
-var ffiProcRegistry* {.compileTime.}: seq[FFIProcMeta]
-var ffiTypeRegistry* {.compileTime.}: seq[FFITypeMeta]
-var ffiEventRegistry* {.compileTime.}: seq[FFIEventMeta]
-var ffiConstRegistry* {.compileTime.}: seq[FFIConstMeta]
-var currentLibName* {.compileTime.}: string
+# macrocache, not `{.compileTime.}` vars: `--ic:on` compiles each module in its own process.
+const
+  procCache = CacheSeq"ffi.procs"
+  typeCache = CacheSeq"ffi.types"
+  eventCache = CacheSeq"ffi.events"
+  constCache = CacheSeq"ffi.consts"
+  handleTypeCache = CacheSeq"ffi.handleTypes"
+  libNameCache = CacheSeq"ffi.libName"
+  libTypeCache = CacheSeq"ffi.libType"
+  genBindingsCache = CacheCounter"ffi.genBindings"
 
-# Set by `declareLibrary`; the FFI annotations require it.
-var libraryDeclared* {.compileTime.}: bool = false
+proc cacheAdd[T](cache: CacheSeq, item: T) {.compileTime.} =
+  cache.add(newLit($(%item)))
 
-# Set by `genBindings()`. Annotations expanded after it register too late to be emitted, so the macros check this and fail loudly instead of dropping silently.
-var genBindingsEmitted* {.compileTime.}: bool = false
+proc addFFIProc*(meta: FFIProcMeta) {.compileTime.} =
+  procCache.cacheAdd(meta)
 
-# Lib type name (set by declareLibrary) so handle-receiver procs resolve the pool.
-var currentLibType* {.compileTime.}: string
+proc addFFIType*(meta: FFITypeMeta) {.compileTime.} =
+  typeCache.cacheAdd(meta)
 
-# Names of types marked `{.ffiHandle.}` (wire form uint64).
-var ffiHandleTypeNames* {.compileTime.}: seq[string]
+proc addFFIEvent*(meta: FFIEventMeta) {.compileTime.} =
+  eventCache.cacheAdd(meta)
+
+proc addFFIConst*(meta: FFIConstMeta) {.compileTime.} =
+  constCache.cacheAdd(meta)
+
+proc setCurrentLibName*(name: string) {.compileTime.} =
+  libNameCache.add(newLit(name))
+
+proc setCurrentLibType*(name: string) {.compileTime.} =
+  libTypeCache.add(newLit(name))
+
+proc addFFIHandleTypeName*(name: string) {.compileTime.} =
+  handleTypeCache.add(newLit(name))
 
 proc isFFIHandleTypeName*(name: string): bool {.compileTime.} =
-  name in ffiHandleTypeNames
+  for node in handleTypeCache:
+    if node.strVal == name:
+      return true
+  return false
+
+# Templates: a proc call with constant args folds when the macro compiles, before any annotation runs.
+template cacheLoad(cache: CacheSeq, T: typedesc): untyped =
+  var loaded: seq[T]
+  for node in macrocache.items(cache):
+    loaded.add(parseJson(node.strVal).to(T))
+  loaded
+
+template cacheLast(cache: CacheSeq): string =
+  if cache.len == 0:
+    ""
+  else:
+    cache[cache.len - 1].strVal
+
+template ffiProcRegistry*(): seq[FFIProcMeta] =
+  procCache.cacheLoad(FFIProcMeta)
+
+template ffiTypeRegistry*(): seq[FFITypeMeta] =
+  typeCache.cacheLoad(FFITypeMeta)
+
+template ffiEventRegistry*(): seq[FFIEventMeta] =
+  eventCache.cacheLoad(FFIEventMeta)
+
+template ffiConstRegistry*(): seq[FFIConstMeta] =
+  constCache.cacheLoad(FFIConstMeta)
+
+template currentLibName*(): string =
+  libNameCache.cacheLast()
+
+template currentLibType*(): string =
+  libTypeCache.cacheLast()
+
+template libraryDeclared*(): bool =
+  libTypeCache.len > 0
+
+template markGenBindingsEmitted*() =
+  genBindingsCache.inc()
+
+template genBindingsEmitted*(): bool =
+  genBindingsCache.value > 0
 
 func isEnum*(t: FFITypeMeta): bool =
   return t.enumValues.len > 0

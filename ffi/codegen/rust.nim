@@ -43,10 +43,10 @@ proc nimTypeToRust*(typeName: string): string =
   ## Maps Nim type names to Rust type names, including generics.
   renderNative(rustMap, parseFFIType(typeName))
 
-proc deriveLibName*(procs: seq[FFIProcMeta]): string =
+proc deriveLibName*(procs: seq[FFIProcMeta]): string {.compileTime.} =
   ## Common prefix before the first `_` in proc names, e.g. "timer_create" → "timer".
-  if currentLibName.len > 0:
-    return currentLibName
+  if currentLibName().len > 0:
+    return currentLibName()
   if procs.len == 0:
     return "unknown"
   let first = procs[0].procName
