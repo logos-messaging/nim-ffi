@@ -266,6 +266,7 @@ type GateBox = object
   lock: Lock
   cond: Cond
   entered: int
+  exited: int
   release: bool
 
 proc gateImpl(
@@ -282,7 +283,9 @@ proc gateImpl(
   broadcast(g[].cond)
   while not g[].release:
     wait(g[].cond, g[].lock)
-  release(g[].lock)
+  g[].exited.inc()
+  broadcast(g[].cond)
+  release(g[].lock) # the impl's last touch of `g`
 
 proc waitEntered(g: var GateBox, n: int) =
   acquire(g.lock)
@@ -294,6 +297,14 @@ proc open(g: var GateBox) =
   acquire(g.lock)
   g.release = true
   broadcast(g.cond)
+  release(g.lock)
+
+proc openAndWaitExited(g: var GateBox) =
+  ## Lets every parked impl return, and waits until each has left `g`.
+  g.open()
+  acquire(g.lock)
+  while g.exited < g.entered:
+    wait(g.cond, g.lock)
   release(g.lock)
 
 suite "reverse call roundtrip":
@@ -335,7 +346,10 @@ suite "reverse call roundtrip":
         .isOk()
 
       let callId = waitParked(box)
-      os.sleep(20) # the handler is genuinely parked when the reply lands
+      # Gives the FFI thread time to suspend in `await`, so the reply lands while
+      # the handler is parked. Nothing observable marks that point; an earlier
+      # reply is still correct, it only takes the mailbox-drain path instead.
+      os.sleep(20)
       var payload = [byte 9]
       check submitReverseReply(ctx, callId, RET_OK, addr payload[0], -1) ==
         RET_INVALID_ARGUMENT
@@ -523,8 +537,7 @@ suite "teardown with a reverse call in flight":
     check ctx[].reverse.leakedWorkers == 1
     waitCallback(rsp) # the parked handler was failed at shutdown
     check rsp.retCode == RET_ERR
-    g.open() # let the leaked worker finish so the process can exit
-    os.sleep(20)
+    g.openAndWaitExited() # the leaked worker leaves the impl before `g` goes away
 
   leakingTest(
     "teardown with a reverse call in flight",
@@ -550,8 +563,7 @@ suite "teardown with a reverse call in flight":
     check ctx.recycleFailure.load() == RecycleFailure.ReverseImplBlocked
     waitCallback(rsp)
     check rsp.retCode == RET_ERR
-    g.open()
-    os.sleep(20)
+    g.openAndWaitExited()
 
 suite "reverse calls run concurrently":
   test "two blocking impls awaited by two requests overlap on two workers":
