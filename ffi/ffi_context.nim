@@ -160,7 +160,11 @@ proc reverseTokenHook[T](ud: pointer): pointer {.nimcall, gcsafe, raises: [].} =
   ## FFI thread: the token of the owner the thread now serves, handed to a reverse impl.
   return pointer(cast[ptr FFIContext[T]](ud).token)
 
-const ReverseCallTimeoutEventName* = "reverse_call_timeout"
+const
+  # The reverse FFI events, in one place; event_thread.nim (included below) emits the worker ones.
+  ReverseCallTimeoutEventName* = "reverse_call_timeout"
+  ReverseWorkerBlockedEventName* = "reverse_worker_blocked"
+  ReverseWorkerRecoveredEventName* = "reverse_worker_recovered"
 
 proc reverseTimeoutHook[T](
     ud: pointer, ev: ReverseCallTimeout

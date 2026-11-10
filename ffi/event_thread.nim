@@ -63,10 +63,6 @@ type
   ReverseWorkerRecoveredEvent* = object
     worker*: int
 
-const
-  ReverseWorkerBlockedEventName* = "reverse_worker_blocked"
-  ReverseWorkerRecoveredEventName* = "reverse_worker_recovered"
-
 proc checkReverseWorkers[T](ctx: ptr FFIContext[T]) =
   for t in ctx[].reverse.scanReverseWorkers(int64(ReverseWorkerStallMs) * 1_000_000'i64):
     if t.blocked:
