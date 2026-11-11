@@ -7,6 +7,7 @@ import chronicles, chronos, chronos/threadsync, results
 import
   ./ffi_types,
   ./ffi_events,
+  ./ffi_reverse,
   ./ffi_handles,
   ./ffi_last_error,
   ./ffi_reply_target,
@@ -15,7 +16,8 @@ import
   ./ffi_request_queue,
   ./cbor_serial
 
-export ffi_events, ffi_handles, ffi_last_error, ffi_outbound, ffi_reply_target
+export
+  ffi_events, ffi_reverse, ffi_handles, ffi_last_error, ffi_outbound, ffi_reply_target
 export ffi_request_queue.RequestQueueDepth
 
 type FFICtxToken* = distinct pointer
