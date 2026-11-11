@@ -123,6 +123,12 @@ proc destroyFFIContext*[T](
   # Destroying it would release the slot while `staticState` still points at it.
   if pool.isStaticCtx(ctx):
     return err("destroyFFIContext(pool): the {.ffiStatic.} context outlives every ctx")
+  # Its own threads (FFI, event or reverse worker) would wait on themselves, then leak the slot.
+  if servedCtx == pointer(ctx) or ctx[].reverse.ownsReverseWorker():
+    return err(
+      "destroyFFIContext(pool): a callback cannot destroy its own context; " &
+        "destroy it from a host thread"
+    )
   ctx.stopAndJoinThreads().isOkOr:
     error "context threads did not exit; the pool slot and its resources leak " &
       "(a free under live threads is unsafe)", reason = error
@@ -177,7 +183,7 @@ proc parkIdleSlots[T](pool: var FFIContextPool[T]) =
 
 proc reapIfIdle[T](pool: var FFIContextPool[T]) =
   ## The exit policy: no context live, no thread of ours for the C runtime to finalize under.
-  if not servedCtx.isNil():
+  if not servedCtx.isNil() or onReverseWorker:
     debug "skipping the idle reap: a destroy from inside the library's own " &
       "threads would join a thread to itself"
     return
@@ -196,8 +202,9 @@ proc recycleFFIContext*[T](
   # Recycling it would release the slot while `staticState` still points at it.
   if pool.isStaticCtx(ctx):
     return err("recycleFFIContext(pool): the {.ffiStatic.} context outlives every ctx")
-  # Its own threads would wait on themselves for `RecycleWaitTimeout`, then quarantine the slot.
-  if servedCtx == pointer(ctx):
+  # Its own threads (FFI, event or reverse worker) would wait on themselves for
+  # `RecycleWaitTimeout`, then quarantine the slot.
+  if servedCtx == pointer(ctx) or ctx[].reverse.ownsReverseWorker():
     return err(
       "recycleFFIContext(pool): a callback cannot destroy its own context; " &
         "destroy it from a host thread"
