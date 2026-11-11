@@ -72,3 +72,13 @@ func rustRetCodeConsts*(): string =
     lines.add("const NIMFFI_RET_" & code.name & ": c_int = " & $code.value & ";")
 
   return lines
+
+func rustRetNameFn*(): string =
+  ## `ret_name(rc)`: the `NIMFFI_RET_*` name of a code, for error text.
+  var lines = "fn ret_name(rc: c_int) -> &'static str {\n    match rc {\n"
+  for code in RetCodes:
+    lines.add(
+      "        NIMFFI_RET_" & code.name & " => \"NIMFFI_RET_" & code.name & "\",\n"
+    )
+  lines.add("        _ => \"NIMFFI_RET_UNKNOWN\",\n    }\n}")
+  return lines

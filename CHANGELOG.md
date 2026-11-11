@@ -68,6 +68,31 @@ All notable changes to this project are documented in this file.
   the narrow decoders refuse out-of-range values. Raw calls are `::`-qualified,
   so a method named like its export (`waku_relay_publish`) no longer hides it.
   A `create()` that times out destroys the context the ctor still settles.
+- Experimental reverse FFI (#153). `{.ffiReverse.}` declares a bodyless proc
+  that the host implements at runtime through `<lib>_set_<wire>_impl` and
+  answers through `<lib>_reverse_reply`, under a per-call deadline.
+  `{.ffiReverseEvent.}` declares a handler that runs when the host calls
+  `<lib>_emit_<wire>`. The C, C++ and Rust bindings get typed helpers: the C
+  ones that encode return `NIMFFI_RET_ERR` with the reason in a `char** err`,
+  and the C++ and Rust ones return `Result<void>` / `Result<(), String>` whose
+  error names the operation, the wire name and the encode error or
+  `NIMFFI_RET_*` code.
+- Host implementations run on per-context reverse worker threads
+  (`-d:ffiReverseWorkers`, default 1), never on the FFI thread, and may block.
+  An implementation is called with `(ctx, call_id, args, args_len, user_data)`,
+  where `ctx` is the token of the context that made the call; the C reply
+  helpers take it, so a reply deferred past a destroy fails cleanly. At most
+  `-d:ffiReverseQueueDepth` calls (default 1024) wait for one. A worker stuck past
+  `ReverseWorkerStallMs` emits `reverse_worker_blocked`; an unanswered or
+  queue-full call emits `reverse_call_timeout`. A recycle that
+  outlasts a running implementation quarantines the slot with
+  `RecycleFailure.ReverseImplBlocked`.
+- `<lib>_set_<wire>_impl` takes a `release` callback: the library owns
+  `user_data` and releases it after the last running invocation, so replacing
+  an implementation from any thread, or from inside itself, is safe. The C++
+  and Rust bindings use it, and catch an exception or a panic in the
+  implementation. Replies are first-wins, lengths are checked before use, and
+  a reverse call fails at once once a recycle or shutdown has begun.
 - Each `{.ffi.}` proc's `##` doc comment reaches the generated C header as a
   `/** ... */` block above the declaration and its wrapper.
 - `genBindings()` fails compilation when a library declares an `{.ffiCtor.}` but

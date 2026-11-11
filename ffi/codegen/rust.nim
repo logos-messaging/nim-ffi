@@ -165,7 +165,14 @@ fn main() {
     println!("cargo:rustc-link-search={}", repo_root.display());
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", repo_root.display());
     println!("cargo:rustc-link-lib=$2");
+    // Tests and examples then find the library without DYLD_/LD_LIBRARY_PATH.
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", repo_root.display());
     println!("cargo:rerun-if-changed={}", nim_src.display());
+    // Inside the nim-ffi checkout, a runtime change must rebuild the library too.
+    let ffi_dir = repo_root.join("ffi");
+    if ffi_dir.is_dir() {
+        println!("cargo:rerun-if-changed={}", ffi_dir.display());
+    }
 }
 """ %
     [escapedSrc, libName]
@@ -178,7 +185,35 @@ pub use types::*;
 pub use api::*;
 """
 
-proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
+func reverseCallStruct(r: FFIReverseMeta): string =
+  capitalizeFirstLetter(r.nimProcName) & "Call"
+
+func reverseBoxStruct(r: FFIReverseMeta): string =
+  capitalizeFirstLetter(r.nimProcName) & "ImplBox"
+
+func reverseSnake(r: FFIReverseMeta): string =
+  camelToSnakeCase(r.nimProcName)
+
+func reverseArgsRust(r: FFIReverseMeta): string =
+  ## "" when the interface takes no arguments.
+  if r.argsTypeName.len == 0:
+    ""
+  else:
+    nimTypeToRust(r.argsTypeName)
+
+func reverseImplBound(r: FFIReverseMeta): string =
+  ## The `Fn` trait of the host callable: `Fn(Call, Args)`, or `Fn(Call)` with no args.
+  let argsRust = reverseArgsRust(r)
+  if argsRust.len == 0:
+    "Fn($1) + Send + Sync" % [reverseCallStruct(r)]
+  else:
+    "Fn($1, $2) + Send + Sync" % [reverseCallStruct(r), argsRust]
+
+proc generateFFIRs*(
+    procs: seq[FFIProcMeta],
+    reverse: seq[FFIReverseMeta] = @[],
+    reverseEvents: seq[FFIReverseEventMeta] = @[],
+): string =
   ## Generates ffi.rs with extern "C" declarations; each proc takes one CBOR
   ## buffer (ptr+len) as its request payload.
   var lines: seq[string] = @[]
@@ -244,7 +279,44 @@ proc generateFFIRs*(procs: seq[FFIProcMeta]): string =
   lines.add(renderMemberDocComment(ShutdownDoc))
   lines.add("    pub fn $1_shutdown() -> c_int;" % [linkLibName])
 
+  # Reverse FFI: host-implemented interfaces + host-emitted events.
+  if reverse.len > 0:
+    for r in reverse:
+      lines.add(
+        "    pub fn $1_set_$2_impl(ctx: *mut c_void, imp: Option<FFIReverseImpl>, user_data: *mut c_void, release: Option<FFIReverseRelease>) -> c_int;" %
+          [linkLibName, r.wireName]
+      )
+    lines.add(
+      "    pub fn $1_reverse_reply(ctx: *mut c_void, call_id: u64, ret_code: c_int, reply_cbor: *const u8, reply_len: usize) -> c_int;" %
+        [linkLibName]
+    )
+  for rev in reverseEvents:
+    lines.add(
+      "    pub fn $1_emit_$2(ctx: *mut c_void, payload_cbor: *const u8, payload_len: usize) -> c_int;" %
+        [linkLibName, rev.wireName]
+    )
+
   lines.add("}")
+
+  if reverse.len > 0:
+    lines.add("")
+    lines.add(
+      "/// Runs on a reverse worker thread and may block; answer with `ctx`, the calling owner's token, via `<lib>_reverse_reply`."
+    )
+    lines.add("pub type FFIReverseImpl = unsafe extern \"C\" fn(")
+    lines.add("    ctx: *mut c_void,")
+    lines.add("    call_id: u64,")
+    lines.add("    args: *const u8,")
+    lines.add("    args_len: usize,")
+    lines.add("    user_data: *mut c_void,")
+    lines.add(");")
+    lines.add(
+      "/// Frees an impl's `user_data` once no invocation uses it; runs on any thread."
+    )
+    lines.add(
+      "pub type FFIReverseRelease = unsafe extern \"C\" fn(user_data: *mut c_void);"
+    )
+
   return lines.join("\n") & "\n"
 
 func rustConstType(typeName: string): string =
@@ -328,7 +400,11 @@ proc generateTypesRs*(
   return lines.join("\n")
 
 proc generateApiRs*(
-    procs: seq[FFIProcMeta], libName: string, events: seq[FFIEventMeta] = @[]
+    procs: seq[FFIProcMeta],
+    libName: string,
+    events: seq[FFIEventMeta] = @[],
+    reverse: seq[FFIReverseMeta] = @[],
+    reverseEvents: seq[FFIReverseEventMeta] = @[],
 ): string =
   ## Generates api.rs with a blocking and a tokio-async high-level API.
   ## Requests/responses are CBOR (ciborium); errors are raw UTF-8 strings.
@@ -399,6 +475,9 @@ proc generateApiRs*(
   lines.add("// nim-ffi result-callback status codes, emitted from ffi/ret_codes.nim.")
   lines.add(rustRetCodeConsts())
   lines.add("")
+  if reverse.len > 0 or reverseEvents.len > 0:
+    lines.add(rustRetNameFn())
+    lines.add("")
   lines.add("unsafe extern \"C\" fn on_result(")
   lines.add("    ret: c_int,")
   lines.add("    msg: *const c_char,")
@@ -524,6 +603,123 @@ proc generateApiRs*(
     lines.add("pub struct ListenerHandle { pub id: u64 }")
     lines.add("")
 
+  # The token holds the ctx as usize, so that a host thread can answer later.
+  for r in reverse:
+    let callStruct = reverseCallStruct(r)
+    let boxStruct = reverseBoxStruct(r)
+    let tramp = reverseSnake(r) & "_impl_trampoline"
+    let argsRust = reverseArgsRust(r)
+    lines.add(
+      "/// Answer token for one `$1` call (`Copy`). Reply once, from any thread;" %
+        [r.wireName]
+    )
+    lines.add(
+      "/// a late or second reply is dropped, and one after destroy returns an error."
+    )
+    lines.add("#[derive(Debug, Clone, Copy)]")
+    lines.add("pub struct $1 { ctx: usize, id: u64 }" % [callStruct])
+    lines.add("")
+    lines.add("impl $1 {" % [callStruct])
+    if r.replyTypeName.len > 0:
+      let replyRust = nimTypeToRust(r.replyTypeName)
+      lines.add(
+        "    /// A reply that does not encode still answers the call, with the reason"
+      )
+      lines.add("    /// as the error, so the library does not wait out its timeout.")
+      lines.add("    pub fn reply(&self, r: &$1) -> Result<(), String> {" % [replyRust])
+      lines.add("        let b = match encode_cbor(r) {")
+      lines.add("            Ok(b) => b,")
+      lines.add("            Err(e) => {")
+      lines.add("                let _ = self.fail(&e);")
+      lines.add(
+        "                return Err(format!(\"reply $1: {e}\"));" % [r.wireName]
+      )
+      lines.add("            }")
+      lines.add("        };")
+      lines.add(
+        "        let rc = unsafe { ffi::$1_reverse_reply(self.ctx as *mut c_void, self.id, 0, b.as_ptr(), b.len()) };" %
+          [libName]
+      )
+      lines.add(
+        "        if rc == NIMFFI_RET_OK { Ok(()) } else { Err(format!(\"reply $1: {}\", ret_name(rc))) }" %
+          [r.wireName]
+      )
+      lines.add("    }")
+    else:
+      lines.add("    pub fn reply(&self) -> Result<(), String> {")
+      lines.add(
+        "        let rc = unsafe { ffi::$1_reverse_reply(self.ctx as *mut c_void, self.id, 0, std::ptr::null(), 0) };" %
+          [libName]
+      )
+      lines.add(
+        "        if rc == NIMFFI_RET_OK { Ok(()) } else { Err(format!(\"reply $1: {}\", ret_name(rc))) }" %
+          [r.wireName]
+      )
+      lines.add("    }")
+    lines.add("    pub fn fail(&self, msg: &str) -> Result<(), String> {")
+    lines.add(
+      "        let rc = unsafe { ffi::$1_reverse_reply(self.ctx as *mut c_void, self.id, 1, msg.as_ptr(), msg.len()) };" %
+        [libName]
+    )
+    lines.add(
+      "        if rc == NIMFFI_RET_OK { Ok(()) } else { Err(format!(\"fail $1: {}\", ret_name(rc))) }" %
+        [r.wireName]
+    )
+    lines.add("    }")
+    lines.add("}")
+    lines.add("")
+    lines.add("struct $1 {" % [boxStruct])
+    lines.add("    f: Box<dyn $1>," % [reverseImplBound(r)])
+    lines.add("}")
+    lines.add("")
+    lines.add("/// The library calls it once no invocation runs the box any more.")
+    lines.add(
+      "unsafe extern \"C\" fn $1_impl_release(ud: *mut c_void) {" % [reverseSnake(r)]
+    )
+    lines.add(
+      "    if !ud.is_null() { drop(Box::from_raw(ud as *mut $1)); }" % [boxStruct]
+    )
+    lines.add("}")
+    lines.add("")
+    lines.add("unsafe extern \"C\" fn $1(" % [tramp])
+    lines.add(
+      "    ctx: *mut c_void, call_id: u64, args: *const u8, len: usize, ud: *mut c_void,"
+    )
+    lines.add(") {")
+    lines.add("    if ud.is_null() { return; }")
+    lines.add("    let b = &*(ud as *const $1);" % [boxStruct])
+    # The calling owner's token, not one captured at set time.
+    lines.add("    let call = $1 { ctx: ctx as usize, id: call_id };" % [callStruct])
+    lines.add(
+      "    // A panic must not unwind into the library's worker thread: it would abort."
+    )
+    lines.add("    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {")
+    if argsRust.len == 0:
+      lines.add("        let _ = (args, len);")
+      lines.add("        (b.f)(call);")
+    else:
+      lines.add("        let bytes = if args.is_null() || len == 0 {")
+      lines.add("            &[][..]")
+      lines.add("        } else {")
+      lines.add("            slice::from_raw_parts(args, len)")
+      lines.add("        };")
+      lines.add("        match decode_cbor::<$1>(bytes) {" % [argsRust])
+      lines.add("            Ok(a) => (b.f)(call, a),")
+      lines.add("            Err(e) => {")
+      lines.add(
+        "                let _ = call.fail(&format!(\"reverse args decode failed: {e}\"));"
+      )
+      lines.add("            }")
+      lines.add("        }")
+    lines.add("    }));")
+    lines.add("    if r.is_err() {")
+    lines.add(
+      "        let _ = call.fail(\"host impl panicked\"); // dropped if it already replied"
+    )
+    lines.add("    }")
+    lines.add("}")
+    lines.add("")
+
   lines.add("/// High-level context for `$1`." % [libTypeName])
   lines.add("pub struct $1 {" % [ctxTypeName])
   lines.add("    ptr: *mut c_void,")
@@ -572,6 +768,16 @@ proc generateApiRs*(
 
   lines.add("impl $1 {" % [ctxTypeName])
 
+  var selfExtras: seq[string] = @[]
+  if events.len > 0:
+    selfExtras.add("listeners: std::sync::Mutex::new(std::collections::HashMap::new())")
+  let selfInit =
+    if selfExtras.len > 0:
+      "        Ok(Self { ptr: addr as *mut c_void, timeout, " & selfExtras.join(", ") &
+        " })"
+    else:
+      "        Ok(Self { ptr: addr as *mut c_void, timeout })"
+
   for ctor in ctors:
     let reqName = reqStructName(ctor)
     var paramsList: seq[string] = @[]
@@ -615,12 +821,7 @@ proc generateApiRs*(
     lines.add(
       "        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;"
     )
-    if events.len > 0:
-      lines.add(
-        "        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })"
-      )
-    else:
-      lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout })")
+    lines.add(selfInit)
     lines.add("    }")
     lines.add("")
 
@@ -642,12 +843,7 @@ proc generateApiRs*(
     lines.add(
       "        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;"
     )
-    if events.len > 0:
-      lines.add(
-        "        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })"
-      )
-    else:
-      lines.add("        Ok(Self { ptr: addr as *mut c_void, timeout })")
+    lines.add(selfInit)
     lines.add("    }")
     lines.add("")
 
@@ -714,6 +910,94 @@ proc generateApiRs*(
     lines.add("        };")
     lines.add("        self.listeners.lock().unwrap().remove(&handle.id);")
     lines.add("        rc == 0")
+    lines.add("    }")
+    lines.add("")
+
+  for r in reverse:
+    let snake = reverseSnake(r)
+    let boxStruct = reverseBoxStruct(r)
+    let tramp = snake & "_impl_trampoline"
+    lines.add(renderMemberDocComment(r.doc))
+    if reverseArgsRust(r).len > 0:
+      lines.add(
+        "    /// The closure runs on a reverse worker and owns its arguments, so a deferred"
+      )
+      lines.add("    /// reply can move them to another thread.")
+    lines.add("    pub fn set_$1_impl<F>(&self, f: F) -> Result<(), String>" % [snake])
+    lines.add("    where F: $1 + 'static," % [reverseImplBound(r)])
+    lines.add("    {")
+    lines.add(
+      "        let raw = Box::into_raw(Box::new($1 { f: Box::new(f) })) as *mut c_void;" %
+        [boxStruct]
+    )
+    lines.add(
+      "        // The library owns the box now: it releases it once no invocation runs it."
+    )
+    lines.add("        let rc = unsafe {")
+    lines.add(
+      "            ffi::$1_set_$2_impl(self.ptr, Some($3), raw, Some($4_impl_release))" %
+        [libName, r.wireName, tramp, snake]
+    )
+    lines.add("        };")
+    lines.add("        if rc != NIMFFI_RET_OK {")
+    lines.add(
+      "            drop(unsafe { Box::from_raw(raw as *mut $1) }); // refused: still ours" %
+        [boxStruct]
+    )
+    lines.add(
+      "            return Err(format!(\"set $1 impl: {}\", ret_name(rc)));" %
+        [r.wireName]
+    )
+    lines.add("        }")
+    lines.add("        Ok(())")
+    lines.add("    }")
+    lines.add("")
+    lines.add("    pub fn clear_$1_impl(&self) -> Result<(), String> {" % [snake])
+    lines.add(
+      "        let rc = unsafe { ffi::$1_set_$2_impl(self.ptr, None, std::ptr::null_mut(), None) };" %
+        [libName, r.wireName]
+    )
+    lines.add(
+      "        if rc == NIMFFI_RET_OK { Ok(()) } else { Err(format!(\"clear $1 impl: {}\", ret_name(rc))) }" %
+        [r.wireName]
+    )
+    lines.add("    }")
+    lines.add("")
+  for rev in reverseEvents:
+    var params: seq[string] = @[]
+    var inits: seq[string] = @[]
+    for p in rev.params:
+      let snakeName = camelToSnakeCase(p.name)
+      params.add("$1: $2" % [snakeName, nimTypeToRust(p.typeName)])
+      inits.add(snakeName)
+    let paramsStr =
+      if params.len > 0:
+        "&self, " & params.join(", ")
+      else:
+        "&self"
+    let reqLit =
+      if inits.len > 0:
+        rev.reqTypeName & " { " & inits.join(", ") & " }"
+      else:
+        rev.reqTypeName & " {}"
+    lines.add(renderMemberDocComment(rev.doc))
+    lines.add(
+      "    pub fn emit_$1($2) -> Result<(), String> {" %
+        [camelToSnakeCase(rev.nimProcName), paramsStr]
+    )
+    lines.add("        let payload = $1;" % [reqLit])
+    lines.add(
+      "        let b = encode_cbor(&payload).map_err(|e| format!(\"emit $1: {e}\"))?;" %
+        [rev.wireName]
+    )
+    lines.add(
+      "        let rc = unsafe { ffi::$1_emit_$2(self.ptr, b.as_ptr(), b.len()) };" %
+        [libName, rev.wireName]
+    )
+    lines.add(
+      "        if rc == NIMFFI_RET_OK { Ok(()) } else { Err(format!(\"emit $1: {}\", ret_name(rc))) }" %
+        [rev.wireName]
+    )
     lines.add("    }")
     lines.add("")
 
@@ -817,6 +1101,8 @@ proc generateRustCrate*(
     nimSrcRelPath: string,
     events: seq[FFIEventMeta] = @[],
     consts: seq[FFIConstMeta] = @[],
+    reverse: seq[FFIReverseMeta] = @[],
+    reverseEvents: seq[FFIReverseEventMeta] = @[],
 ) =
   ## Generates a complete Rust crate in outputDir.
   ensureOutputDir(outputDir)
@@ -831,6 +1117,11 @@ proc generateRustCrate*(
     buildPath(outputDir, "build.rs"), generateBuildRs(libName, nimSrcRelPath)
   )
   writeOutputFile(buildPath(srcDir, "lib.rs"), generateLibRs())
-  writeOutputFile(buildPath(srcDir, "ffi.rs"), generateFFIRs(procs))
+  writeOutputFile(
+    buildPath(srcDir, "ffi.rs"), generateFFIRs(procs, reverse, reverseEvents)
+  )
   writeOutputFile(buildPath(srcDir, "types.rs"), generateTypesRs(types, procs, consts))
-  writeOutputFile(buildPath(srcDir, "api.rs"), generateApiRs(procs, libName, events))
+  writeOutputFile(
+    buildPath(srcDir, "api.rs"),
+    generateApiRs(procs, libName, events, reverse, reverseEvents),
+  )

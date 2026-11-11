@@ -65,6 +65,26 @@ const NIMFFI_RET_INVALID_ARGUMENT: c_int = 12;
 #[allow(dead_code)]
 const NIMFFI_RET_OUT_OF_MEMORY: c_int = 13;
 
+fn ret_name(rc: c_int) -> &'static str {
+    match rc {
+        NIMFFI_RET_OK => "NIMFFI_RET_OK",
+        NIMFFI_RET_ERR => "NIMFFI_RET_ERR",
+        NIMFFI_RET_MISSING_CALLBACK => "NIMFFI_RET_MISSING_CALLBACK",
+        NIMFFI_RET_STALE_WARN => "NIMFFI_RET_STALE_WARN",
+        NIMFFI_RET_TIMEOUT => "NIMFFI_RET_TIMEOUT",
+        NIMFFI_RET_CLOSED => "NIMFFI_RET_CLOSED",
+        NIMFFI_RET_INVALID_CTX => "NIMFFI_RET_INVALID_CTX",
+        NIMFFI_RET_BUSY => "NIMFFI_RET_BUSY",
+        NIMFFI_RET_QUEUE_FULL => "NIMFFI_RET_QUEUE_FULL",
+        NIMFFI_RET_TOO_LARGE => "NIMFFI_RET_TOO_LARGE",
+        NIMFFI_RET_NOT_ACTIVE => "NIMFFI_RET_NOT_ACTIVE",
+        NIMFFI_RET_WORKERS_FAILED => "NIMFFI_RET_WORKERS_FAILED",
+        NIMFFI_RET_INVALID_ARGUMENT => "NIMFFI_RET_INVALID_ARGUMENT",
+        NIMFFI_RET_OUT_OF_MEMORY => "NIMFFI_RET_OUT_OF_MEMORY",
+        _ => "NIMFFI_RET_UNKNOWN",
+    }
+}
+
 unsafe extern "C" fn on_result(
     ret: c_int,
     msg: *const c_char,
@@ -174,6 +194,65 @@ unsafe extern "C" fn on_job_scheduled_trampoline(
 #[derive(Debug, Clone, Copy)]
 pub struct ListenerHandle { pub id: u64 }
 
+/// Answer token for one `fetch_host_clock` call (`Copy`). Reply once, from any thread;
+/// a late or second reply is dropped, and one after destroy returns an error.
+#[derive(Debug, Clone, Copy)]
+pub struct FetchHostClockCall { ctx: usize, id: u64 }
+
+impl FetchHostClockCall {
+    /// A reply that does not encode still answers the call, with the reason
+    /// as the error, so the library does not wait out its timeout.
+    pub fn reply(&self, r: &HostClock) -> Result<(), String> {
+        let b = match encode_cbor(r) {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = self.fail(&e);
+                return Err(format!("reply fetch_host_clock: {e}"));
+            }
+        };
+        let rc = unsafe { ffi::my_timer_reverse_reply(self.ctx as *mut c_void, self.id, 0, b.as_ptr(), b.len()) };
+        if rc == NIMFFI_RET_OK { Ok(()) } else { Err(format!("reply fetch_host_clock: {}", ret_name(rc))) }
+    }
+    pub fn fail(&self, msg: &str) -> Result<(), String> {
+        let rc = unsafe { ffi::my_timer_reverse_reply(self.ctx as *mut c_void, self.id, 1, msg.as_ptr(), msg.len()) };
+        if rc == NIMFFI_RET_OK { Ok(()) } else { Err(format!("fail fetch_host_clock: {}", ret_name(rc))) }
+    }
+}
+
+struct FetchHostClockImplBox {
+    f: Box<dyn Fn(FetchHostClockCall, String) + Send + Sync>,
+}
+
+/// The library calls it once no invocation runs the box any more.
+unsafe extern "C" fn fetch_host_clock_impl_release(ud: *mut c_void) {
+    if !ud.is_null() { drop(Box::from_raw(ud as *mut FetchHostClockImplBox)); }
+}
+
+unsafe extern "C" fn fetch_host_clock_impl_trampoline(
+    ctx: *mut c_void, call_id: u64, args: *const u8, len: usize, ud: *mut c_void,
+) {
+    if ud.is_null() { return; }
+    let b = &*(ud as *const FetchHostClockImplBox);
+    let call = FetchHostClockCall { ctx: ctx as usize, id: call_id };
+    // A panic must not unwind into the library's worker thread: it would abort.
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let bytes = if args.is_null() || len == 0 {
+            &[][..]
+        } else {
+            slice::from_raw_parts(args, len)
+        };
+        match decode_cbor::<String>(bytes) {
+            Ok(a) => (b.f)(call, a),
+            Err(e) => {
+                let _ = call.fail(&format!("reverse args decode failed: {e}"));
+            }
+        }
+    }));
+    if r.is_err() {
+        let _ = call.fail("host impl panicked"); // dropped if it already replied
+    }
+}
+
 /// High-level context for `MyTimer`.
 pub struct MyTimerCtx {
     ptr: *mut c_void,
@@ -277,6 +356,37 @@ impl MyTimerCtx {
         };
         self.listeners.lock().unwrap().remove(&handle.id);
         rc == 0
+    }
+
+    /// Asks the host for its wall clock; fails when no host implementation answers.
+    /// The closure runs on a reverse worker and owns its arguments, so a deferred
+    /// reply can move them to another thread.
+    pub fn set_fetch_host_clock_impl<F>(&self, f: F) -> Result<(), String>
+    where F: Fn(FetchHostClockCall, String) + Send + Sync + 'static,
+    {
+        let raw = Box::into_raw(Box::new(FetchHostClockImplBox { f: Box::new(f) })) as *mut c_void;
+        // The library owns the box now: it releases it once no invocation runs it.
+        let rc = unsafe {
+            ffi::my_timer_set_fetch_host_clock_impl(self.ptr, Some(fetch_host_clock_impl_trampoline), raw, Some(fetch_host_clock_impl_release))
+        };
+        if rc != NIMFFI_RET_OK {
+            drop(unsafe { Box::from_raw(raw as *mut FetchHostClockImplBox) }); // refused: still ours
+            return Err(format!("set fetch_host_clock impl: {}", ret_name(rc)));
+        }
+        Ok(())
+    }
+
+    pub fn clear_fetch_host_clock_impl(&self) -> Result<(), String> {
+        let rc = unsafe { ffi::my_timer_set_fetch_host_clock_impl(self.ptr, None, std::ptr::null_mut(), None) };
+        if rc == NIMFFI_RET_OK { Ok(()) } else { Err(format!("clear fetch_host_clock impl: {}", ret_name(rc))) }
+    }
+
+    /// Records the tick number that the host emits.
+    pub fn emit_on_host_tick(&self, tick_no: i64) -> Result<(), String> {
+        let payload = OnHostTickReq { tick_no };
+        let b = encode_cbor(&payload).map_err(|e| format!("emit on_host_tick: {e}"))?;
+        let rc = unsafe { ffi::my_timer_emit_on_host_tick(self.ptr, b.as_ptr(), b.len()) };
+        if rc == NIMFFI_RET_OK { Ok(()) } else { Err(format!("emit on_host_tick: {}", ret_name(rc))) }
     }
 
     /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
