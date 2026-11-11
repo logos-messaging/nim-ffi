@@ -52,6 +52,28 @@ extern "C" {
 #define NIMFFI_RET_OUT_OF_MEMORY 13
 #endif
 
+#ifndef NIMFFI_RET_NAME_DEFINED
+#define NIMFFI_RET_NAME_DEFINED
+inline const char* nimffiRetName(int rc) noexcept {
+    switch (rc) {
+        case NIMFFI_RET_OK: return "NIMFFI_RET_OK";
+        case NIMFFI_RET_ERR: return "NIMFFI_RET_ERR";
+        case NIMFFI_RET_MISSING_CALLBACK: return "NIMFFI_RET_MISSING_CALLBACK";
+        case NIMFFI_RET_STALE_WARN: return "NIMFFI_RET_STALE_WARN";
+        case NIMFFI_RET_TIMEOUT: return "NIMFFI_RET_TIMEOUT";
+        case NIMFFI_RET_CLOSED: return "NIMFFI_RET_CLOSED";
+        case NIMFFI_RET_INVALID_CTX: return "NIMFFI_RET_INVALID_CTX";
+        case NIMFFI_RET_BUSY: return "NIMFFI_RET_BUSY";
+        case NIMFFI_RET_QUEUE_FULL: return "NIMFFI_RET_QUEUE_FULL";
+        case NIMFFI_RET_TOO_LARGE: return "NIMFFI_RET_TOO_LARGE";
+        case NIMFFI_RET_NOT_ACTIVE: return "NIMFFI_RET_NOT_ACTIVE";
+        case NIMFFI_RET_WORKERS_FAILED: return "NIMFFI_RET_WORKERS_FAILED";
+        case NIMFFI_RET_INVALID_ARGUMENT: return "NIMFFI_RET_INVALID_ARGUMENT";
+        case NIMFFI_RET_OUT_OF_MEMORY: return "NIMFFI_RET_OUT_OF_MEMORY";
+        default: return "NIMFFI_RET_UNKNOWN";
+    }
+}
+#endif
 #include <unordered_map>
 // ============================================================
 // Result<T> — exception-free error channel
@@ -1157,18 +1179,27 @@ public:
 
     // ── Reverse FFI: host-implemented interfaces ────────────
     // Answer token for one `fetch_host_clock` call (copyable). Reply once, from any thread;
-    // a late or second reply is dropped, and one after destroy returns false.
+    // a late or second reply is dropped, and one after destroy returns an error.
     struct FetchHostClockCall {
         void* ctx = nullptr;
         std::uint64_t id = 0;
-        bool reply(const HostClock& r) const {
+        // A reply that does not encode still answers the call, with the reason
+        // as the error, so the library does not wait out its timeout.
+        Result<void> reply(const HostClock& r) const {
             auto enc = encodeCborFFI(r);
-            if (enc.isErr()) return fail(enc.error());
+            if (enc.isErr()) {
+                (void)failRaw(enc.error().c_str());
+                return Result<void>::err("reply fetch_host_clock: " + enc.error());
+            }
             const auto& b = enc.value();
-            return my_timer_reverse_reply(ctx, id, 0, b.data(), b.size()) == NIMFFI_RET_OK;
+            const int rc = my_timer_reverse_reply(ctx, id, 0, b.data(), b.size());
+            if (rc != NIMFFI_RET_OK) return Result<void>::err(std::string("reply fetch_host_clock: ") + nimffiRetName(rc));
+            return Result<void>::ok();
         }
-        bool fail(const std::string& msg) const {
-            return my_timer_reverse_reply(ctx, id, 1, reinterpret_cast<const std::uint8_t*>(msg.data()), msg.size()) == NIMFFI_RET_OK;
+        Result<void> fail(const std::string& msg) const {
+            const int rc = my_timer_reverse_reply(ctx, id, 1, reinterpret_cast<const std::uint8_t*>(msg.data()), msg.size());
+            if (rc != NIMFFI_RET_OK) return Result<void>::err(std::string("fail fetch_host_clock: ") + nimffiRetName(rc));
+            return Result<void>::ok();
         }
         // Allocation-free, for reporting from a catch block.
         bool failRaw(const char* msg) const noexcept {
@@ -1179,28 +1210,33 @@ public:
     /// Asks the host for its wall clock; fails when no host implementation answers.
     // `fn` runs on a reverse worker. Its arguments are borrowed: valid only until
     // `fn` returns, so a deferred reply must copy what it needs.
-    bool setFetchHostClockImpl(std::function<void(FetchHostClockCall, const std::string&)> fn) {
+    Result<void> setFetchHostClockImpl(std::function<void(FetchHostClockCall, const std::string&)> fn) {
         auto* raw = new FetchHostClockImplBox{std::move(fn)};
         // The library owns the box now: it deletes it once no invocation runs it.
-        if (my_timer_set_fetch_host_clock_impl(ptr_, &MyTimerCtx::fetchHostClockImplTrampoline, raw, &MyTimerCtx::fetchHostClockImplRelease) != NIMFFI_RET_OK) {
+        const int rc = my_timer_set_fetch_host_clock_impl(ptr_, &MyTimerCtx::fetchHostClockImplTrampoline, raw, &MyTimerCtx::fetchHostClockImplRelease);
+        if (rc != NIMFFI_RET_OK) {
             delete raw; // refused: still ours
-            return false;
+            return Result<void>::err(std::string("set fetch_host_clock impl: ") + nimffiRetName(rc));
         }
-        return true;
+        return Result<void>::ok();
     }
 
-    bool clearFetchHostClockImpl() {
-        return my_timer_set_fetch_host_clock_impl(ptr_, nullptr, nullptr, nullptr) == NIMFFI_RET_OK;
+    Result<void> clearFetchHostClockImpl() {
+        const int rc = my_timer_set_fetch_host_clock_impl(ptr_, nullptr, nullptr, nullptr);
+        if (rc != NIMFFI_RET_OK) return Result<void>::err(std::string("clear fetch_host_clock impl: ") + nimffiRetName(rc));
+        return Result<void>::ok();
     }
 
     // ── Reverse FFI: host-emitted events (fire-and-forget) ──
     /// Records the tick number that the host emits.
-    bool emitOnHostTick(const int64_t& tickNo) const {
+    Result<void> emitOnHostTick(const int64_t& tickNo) const {
         const auto payload_ = OnHostTickReq{tickNo};
         auto enc = encodeCborFFI(payload_);
-        if (enc.isErr()) return false;
+        if (enc.isErr()) return Result<void>::err("emit on_host_tick: " + enc.error());
         const auto& b = enc.value();
-        return my_timer_emit_on_host_tick(ptr_, b.data(), b.size()) == NIMFFI_RET_OK;
+        const int rc = my_timer_emit_on_host_tick(ptr_, b.data(), b.size());
+        if (rc != NIMFFI_RET_OK) return Result<void>::err(std::string("emit on_host_tick: ") + nimffiRetName(rc));
+        return Result<void>::ok();
     }
 
     /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.

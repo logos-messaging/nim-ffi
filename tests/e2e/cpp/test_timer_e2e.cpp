@@ -478,7 +478,7 @@ TEST(ReverseFFI, InlineTypedReplyRoundTrips) {
     ASSERT_TRUE(ctx->setFetchHostClockImpl(
         [](MyTimerCtx::FetchHostClockCall call, const std::string& precision) {
             EXPECT_EQ(precision, "ms");
-            EXPECT_TRUE(call.reply(HostClock{1700000123456, "UTC"}));
+            { auto rr = call.reply(HostClock{1700000123456, "UTC"}); EXPECT_TRUE(rr) << rr.error(); }
         }));
     auto r = ctx->host_clock();
     ASSERT_FALSE(r.isErr()) << r.error();
@@ -492,7 +492,7 @@ TEST(ReverseFFI, DeferredReplyFromAHostThread) {
         [](MyTimerCtx::FetchHostClockCall call, const std::string&) {
             std::thread([call] {
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
-                EXPECT_TRUE(call.reply(HostClock{42, "CET"}));
+                { auto rr = call.reply(HostClock{42, "CET"}); EXPECT_TRUE(rr) << rr.error(); }
             }).detach();
         }));
     auto r = ctx->host_clock();
@@ -507,7 +507,7 @@ TEST(ReverseFFI, DeferredReplyUsesACopyOfTheBorrowedArgs) {
             // `precision` dies when this returns; the thread keeps its own copy.
             std::thread([call, precision] {
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
-                EXPECT_TRUE(call.reply(HostClock{7, precision}));
+                { auto rr = call.reply(HostClock{7, precision}); EXPECT_TRUE(rr) << rr.error(); }
             }).detach();
         }));
     auto r = ctx->host_clock();
@@ -515,26 +515,30 @@ TEST(ReverseFFI, DeferredReplyUsesACopyOfTheBorrowedArgs) {
     EXPECT_EQ(r.value(), "ms@7");
 }
 
-TEST(ReverseFFI, ACallTokenOutlivingItsContextRepliesFalse) {
+TEST(ReverseFFI, ACallTokenOutlivingItsContextRepliesAnError) {
     auto ctx = makeCtx("rev-stale-token");
     auto kept = std::make_shared<std::optional<MyTimerCtx::FetchHostClockCall>>();
     ASSERT_TRUE(ctx->setFetchHostClockImpl(
         [kept](MyTimerCtx::FetchHostClockCall call, const std::string&) {
             *kept = call; // a plain copy: {context token, call id}
-            EXPECT_TRUE(call.reply(HostClock{1, "UTC"}));
+            { auto rr = call.reply(HostClock{1, "UTC"}); EXPECT_TRUE(rr) << rr.error(); }
         }));
     ASSERT_FALSE(ctx->host_clock().isErr());
     ASSERT_TRUE(kept->has_value());
     ctx.reset(); // the token now names a slot with no owner, or a new one
-    EXPECT_FALSE((*kept)->reply(HostClock{2, "UTC"}));
-    EXPECT_FALSE((*kept)->fail("too late"));
+    auto late = (*kept)->reply(HostClock{2, "UTC"});
+    ASSERT_TRUE(late.isErr());
+    EXPECT_EQ(late.error(), "reply fetch_host_clock: NIMFFI_RET_INVALID_CTX");
+    auto lateFail = (*kept)->fail("too late");
+    ASSERT_TRUE(lateFail.isErr());
+    EXPECT_EQ(lateFail.error(), "fail fetch_host_clock: NIMFFI_RET_INVALID_CTX");
 }
 
 TEST(ReverseFFI, FailPropagatesTheHostMessage) {
     auto ctx = makeCtx("rev-fail");
     ASSERT_TRUE(ctx->setFetchHostClockImpl(
         [](MyTimerCtx::FetchHostClockCall call, const std::string&) {
-            EXPECT_TRUE(call.fail("host has no clock today"));
+            { auto rr = call.fail("host has no clock today"); EXPECT_TRUE(rr) << rr.error(); }
         }));
     auto r = ctx->host_clock();
     ASSERT_TRUE(r.isErr());
@@ -545,7 +549,7 @@ TEST(ReverseFFI, ClearImplRestoresFailFast) {
     auto ctx = makeCtx("rev-clear");
     ASSERT_TRUE(ctx->setFetchHostClockImpl(
         [](MyTimerCtx::FetchHostClockCall call, const std::string&) {
-            EXPECT_TRUE(call.reply(HostClock{1, "UTC"}));
+            { auto rr = call.reply(HostClock{1, "UTC"}); EXPECT_TRUE(rr) << rr.error(); }
         }));
     ASSERT_FALSE(ctx->host_clock().isErr());
     ASSERT_TRUE(ctx->clearFetchHostClockImpl());
@@ -560,7 +564,7 @@ TEST(ReverseFFI, BlockingImplsQueueOnTheSingleWorker) {
     ASSERT_TRUE(ctx->setFetchHostClockImpl(
         [](MyTimerCtx::FetchHostClockCall call, const std::string&) {
             std::this_thread::sleep_for(std::chrono::milliseconds(150));
-            EXPECT_TRUE(call.reply(HostClock{1, "UTC"}));
+            { auto rr = call.reply(HostClock{1, "UTC"}); EXPECT_TRUE(rr) << rr.error(); }
         }));
     const auto t0 = std::chrono::steady_clock::now();
     auto a = ctx->host_clockAsync();

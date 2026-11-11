@@ -1,13 +1,16 @@
-    bool set{{PASCAL}}Impl({{FN_TYPE}} fn) {
+    Result<void> set{{PASCAL}}Impl({{FN_TYPE}} fn) {
         auto* raw = new {{BOX}}{std::move(fn)};
         // The library owns the box now: it deletes it once no invocation runs it.
-        if ({{LIB}}_set_{{WIRE}}_impl(ptr_, &{{CTX}}::{{NAME}}ImplTrampoline, raw, &{{CTX}}::{{NAME}}ImplRelease) != NIMFFI_RET_OK) {
+        const int rc = {{LIB}}_set_{{WIRE}}_impl(ptr_, &{{CTX}}::{{NAME}}ImplTrampoline, raw, &{{CTX}}::{{NAME}}ImplRelease);
+        if (rc != NIMFFI_RET_OK) {
             delete raw; // refused: still ours
-            return false;
+            return Result<void>::err(std::string("set {{WIRE}} impl: ") + nimffiRetName(rc));
         }
-        return true;
+        return Result<void>::ok();
     }
 
-    bool clear{{PASCAL}}Impl() {
-        return {{LIB}}_set_{{WIRE}}_impl(ptr_, nullptr, nullptr, nullptr) == NIMFFI_RET_OK;
+    Result<void> clear{{PASCAL}}Impl() {
+        const int rc = {{LIB}}_set_{{WIRE}}_impl(ptr_, nullptr, nullptr, nullptr);
+        if (rc != NIMFFI_RET_OK) return Result<void>::err(std::string("clear {{WIRE}} impl: ") + nimffiRetName(rc));
+        return Result<void>::ok();
     }

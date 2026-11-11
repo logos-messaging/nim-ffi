@@ -275,10 +275,14 @@ proc emitReverseApi(
       let reply =
         if r.replyTypeName.len > 0:
           ReverseCallReplyTpl.fillTpl(
-            ("{{REPLY_TYPE}}", nimTypeToCpp(r.replyTypeName)), ("{{LIB}}", libName)
+            ("{{REPLY_TYPE}}", nimTypeToCpp(r.replyTypeName)),
+            ("{{LIB}}", libName),
+            ("{{WIRE}}", r.wireName),
           )
         else:
-          ReverseCallReplyVoidTpl.fillTpl(("{{LIB}}", libName))
+          ReverseCallReplyVoidTpl.fillTpl(
+            ("{{LIB}}", libName), ("{{WIRE}}", r.wireName)
+          )
       lines.add(
         ReverseCallTpl.fillTpl(
           ("{{WIRE}}", r.wireName),
@@ -361,6 +365,8 @@ proc generateCppHeader*(
   var lines: seq[string] = @[]
 
   lines.add(HeaderPreludeTpl.replace("{{RET_CODES}}", cRetCodeDefines()))
+  if reverse.len > 0 or reverseEvents.len > 0:
+    lines.add(cppRetNameFn())
   if events.len > 0:
     lines.add("#include <unordered_map>")
 
