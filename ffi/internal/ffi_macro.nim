@@ -2206,7 +2206,6 @@ proc buildFFIReverseEventProc(
   let ctxGenIdent = ident("ctxGen")
   let reqNameLit = newLit($reqType)
   let reqPtrIdent = genSym(nskLet, "reqPtr")
-  let sendResIdent = genSym(nskLet, "sendRes")
   let emitBody = quote:
     when declared(initializeLibrary):
       initializeLibrary()
@@ -2225,12 +2224,14 @@ proc buildFFIReverseEventProc(
     )
     if `reqPtrIdent`.isNil():
       return RET_OUT_OF_MEMORY
-    let `sendResIdent` =
-      try:
-        ffi_context.sendRequestToFFIThread(`ctxIdent`, `reqPtrIdent`, `ctxGenIdent`)
-      except Exception as e:
-        Result[void, string].err("sendRequestToFFIThread exception: " & e.msg)
-    if `sendResIdent`.isErr():
+    # A refusal has already set lastError (`sendRequestToFFIThread`).
+    try:
+      if ffi_context
+          .sendRequestToFFIThread(`ctxIdent`, `reqPtrIdent`, `ctxGenIdent`)
+          .isErr():
+        return RET_ERR
+    except Exception as e:
+      setLastError(e.msg)
       return RET_ERR
     return RET_OK
 
