@@ -367,6 +367,14 @@ The implementation gets a copyable call token with `reply` and `fail`. C++
 receives the arguments by `const&`, borrowed until the implementation returns,
 so a deferred reply captures a copy; Rust closures own theirs and move them.
 
+`reply`, `fail`, `set<X>Impl` / `set_<x>_impl`, `clear…` and `emit…` return
+`Result<void>` in C++ and `Result<(), String>` in Rust. The error reads
+`"<op> <wire>: <reason>"`, where the reason is the encoder's message or the
+`NIMFFI_RET_*` name of the refusal, for example
+`"reply fetch_host_clock: NIMFFI_RET_INVALID_CTX"` for a reply after destroy.
+A reply that does not encode still answers the call, with the reason as the
+error. The C++ token's `failRaw` stays a `noexcept` `bool`, for a catch block.
+
 ```cpp
 ctx->setFetchHostClockImpl([](MyTimerCtx::FetchHostClockCall call, const std::string& precision) {
     // `precision` is borrowed until this returns: capture a copy, never a reference.

@@ -74,7 +74,7 @@ impl Probe {
 }
 
 fn noop_impl(call: FetchHostClockCall, _: String) {
-    call.reply(&HostClock { unix_ms: 0, zone: "UTC".into() });
+    let _ = call.reply(&HostClock { unix_ms: 0, zone: "UTC".into() });
 }
 
 /// Re-runs one test of this binary in a child with `CHILD_ENV=mode`.
@@ -93,14 +93,14 @@ fn self_replacement_keeps_the_running_closure_alive() {
     let token = Arc::new(());
     let probe = Probe::new(&ctx, &token);
     let (cap_token, cap_probe) = (token.clone(), probe.clone());
-    assert!(ctx.set_fetch_host_clock_impl(move |call, _| {
+    ctx.set_fetch_host_clock_impl(move |call, _| {
         let _keep = &cap_token;
         let p = cap_probe.clone(); // the capture itself may be dropped below
-        p.ctx().set_fetch_host_clock_impl(noop_impl);
+        let _ = p.ctx().set_fetch_host_clock_impl(noop_impl);
         p.record_capture();
-        call.reply(&HostClock { unix_ms: 1, zone: "UTC".into() });
+        let _ = call.reply(&HostClock { unix_ms: 1, zone: "UTC".into() });
         p.done.store(true, Ordering::SeqCst);
-    }));
+    }).expect("set_fetch_host_clock_impl");
     drop(token); // only the box holds it now
 
     ctx.host_clock().expect("host_clock");
@@ -117,14 +117,14 @@ fn drop_with_a_stuck_impl_keeps_its_closure_alive() {
     let token = Arc::new(());
     let probe = Probe::new(&ctx, &token);
     let (cap_token, cap_probe) = (token.clone(), probe.clone());
-    assert!(ctx.set_fetch_host_clock_impl(move |call, _| {
+    ctx.set_fetch_host_clock_impl(move |call, _| {
         let _keep = &cap_token;
         let p = cap_probe.clone();
-        call.reply(&HostClock { unix_ms: 1, zone: "UTC".into() }); // answer, then stay stuck
+        let _ = call.reply(&HostClock { unix_ms: 1, zone: "UTC".into() }); // answer, then stay stuck
         p.latch.enter_and_wait();
         p.record_capture();
         p.done.store(true, Ordering::SeqCst);
-    }));
+    }).expect("set_fetch_host_clock_impl");
     drop(token);
 
     ctx.host_clock().expect("host_clock");
@@ -147,7 +147,7 @@ fn drop_with_a_stuck_impl_keeps_its_closure_alive() {
 fn panicking_impl_fails_the_call_instead_of_aborting() {
     if std::env::var(CHILD_ENV).as_deref() == Ok("panic") {
         let ctx = make_ctx("find-panic");
-        ctx.set_fetch_host_clock_impl(|_, _| panic!("boom"));
+        let _ = ctx.set_fetch_host_clock_impl(|_, _| panic!("boom"));
         let r = ctx.host_clock();
         std::process::exit(if r.is_err() { 0 } else { 1 });
     }
@@ -179,9 +179,9 @@ fn concurrent_sets_leave_nim_and_the_wrapper_agreeing() {
                             let token = Arc::new(());
                             let id = (t * 50 + i) as i64;
                             live.lock().unwrap().push((id, Arc::downgrade(&token)));
-                            ctx.set_fetch_host_clock_impl(move |call, _| {
+                            let _ = ctx.set_fetch_host_clock_impl(move |call, _| {
                                 let _keep = &token;
-                                call.reply(&HostClock { unix_ms: id, zone: "UTC".into() });
+                                let _ = call.reply(&HostClock { unix_ms: id, zone: "UTC".into() });
                             });
                         }
                     });

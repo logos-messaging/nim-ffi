@@ -475,6 +475,9 @@ proc generateApiRs*(
   lines.add("// nim-ffi result-callback status codes, emitted from ffi/ret_codes.nim.")
   lines.add(rustRetCodeConsts())
   lines.add("")
+  if reverse.len > 0 or reverseEvents.len > 0:
+    lines.add(rustRetNameFn())
+    lines.add("")
   lines.add("unsafe extern \"C\" fn on_result(")
   lines.add("    ret: c_int,")
   lines.add("    msg: *const c_char,")
@@ -611,7 +614,7 @@ proc generateApiRs*(
         [r.wireName]
     )
     lines.add(
-      "/// a late or second reply is dropped, and one after destroy returns false."
+      "/// a late or second reply is dropped, and one after destroy returns an error."
     )
     lines.add("#[derive(Debug, Clone, Copy)]")
     lines.add("pub struct $1 { ctx: usize, id: u64 }" % [callStruct])
@@ -619,26 +622,48 @@ proc generateApiRs*(
     lines.add("impl $1 {" % [callStruct])
     if r.replyTypeName.len > 0:
       let replyRust = nimTypeToRust(r.replyTypeName)
-      lines.add("    pub fn reply(&self, r: &$1) -> bool {" % [replyRust])
-      lines.add("        match encode_cbor(r) {")
       lines.add(
-        "            Ok(b) => unsafe { ffi::$1_reverse_reply(self.ctx as *mut c_void, self.id, 0, b.as_ptr(), b.len()) == NIMFFI_RET_OK }," %
+        "    /// A reply that does not encode still answers the call, with the reason"
+      )
+      lines.add("    /// as the error, so the library does not wait out its timeout.")
+      lines.add("    pub fn reply(&self, r: &$1) -> Result<(), String> {" % [replyRust])
+      lines.add("        let b = match encode_cbor(r) {")
+      lines.add("            Ok(b) => b,")
+      lines.add("            Err(e) => {")
+      lines.add("                let _ = self.fail(&e);")
+      lines.add(
+        "                return Err(format!(\"reply $1: {e}\"));" % [r.wireName]
+      )
+      lines.add("            }")
+      lines.add("        };")
+      lines.add(
+        "        let rc = unsafe { ffi::$1_reverse_reply(self.ctx as *mut c_void, self.id, 0, b.as_ptr(), b.len()) };" %
           [libName]
       )
-      lines.add("            Err(e) => self.fail(&e),")
-      lines.add("        }")
+      lines.add(
+        "        if rc == NIMFFI_RET_OK { Ok(()) } else { Err(format!(\"reply $1: {}\", ret_name(rc))) }" %
+          [r.wireName]
+      )
       lines.add("    }")
     else:
-      lines.add("    pub fn reply(&self) -> bool {")
+      lines.add("    pub fn reply(&self) -> Result<(), String> {")
       lines.add(
-        "        unsafe { ffi::$1_reverse_reply(self.ctx as *mut c_void, self.id, 0, std::ptr::null(), 0) == NIMFFI_RET_OK }" %
+        "        let rc = unsafe { ffi::$1_reverse_reply(self.ctx as *mut c_void, self.id, 0, std::ptr::null(), 0) };" %
           [libName]
       )
+      lines.add(
+        "        if rc == NIMFFI_RET_OK { Ok(()) } else { Err(format!(\"reply $1: {}\", ret_name(rc))) }" %
+          [r.wireName]
+      )
       lines.add("    }")
-    lines.add("    pub fn fail(&self, msg: &str) -> bool {")
+    lines.add("    pub fn fail(&self, msg: &str) -> Result<(), String> {")
     lines.add(
-      "        unsafe { ffi::$1_reverse_reply(self.ctx as *mut c_void, self.id, 1, msg.as_ptr(), msg.len()) == NIMFFI_RET_OK }" %
+      "        let rc = unsafe { ffi::$1_reverse_reply(self.ctx as *mut c_void, self.id, 1, msg.as_ptr(), msg.len()) };" %
         [libName]
+    )
+    lines.add(
+      "        if rc == NIMFFI_RET_OK { Ok(()) } else { Err(format!(\"fail $1: {}\", ret_name(rc))) }" %
+        [r.wireName]
     )
     lines.add("    }")
     lines.add("}")
@@ -898,7 +923,7 @@ proc generateApiRs*(
         "    /// The closure runs on a reverse worker and owns its arguments, so a deferred"
       )
       lines.add("    /// reply can move them to another thread.")
-    lines.add("    pub fn set_$1_impl<F>(&self, f: F) -> bool" % [snake])
+    lines.add("    pub fn set_$1_impl<F>(&self, f: F) -> Result<(), String>" % [snake])
     lines.add("    where F: $1 + 'static," % [reverseImplBound(r)])
     lines.add("    {")
     lines.add(
@@ -919,15 +944,22 @@ proc generateApiRs*(
       "            drop(unsafe { Box::from_raw(raw as *mut $1) }); // refused: still ours" %
         [boxStruct]
     )
-    lines.add("            return false;")
+    lines.add(
+      "            return Err(format!(\"set $1 impl: {}\", ret_name(rc)));" %
+        [r.wireName]
+    )
     lines.add("        }")
-    lines.add("        true")
+    lines.add("        Ok(())")
     lines.add("    }")
     lines.add("")
-    lines.add("    pub fn clear_$1_impl(&self) -> bool {" % [snake])
+    lines.add("    pub fn clear_$1_impl(&self) -> Result<(), String> {" % [snake])
     lines.add(
-      "        unsafe { ffi::$1_set_$2_impl(self.ptr, None, std::ptr::null_mut(), None) == NIMFFI_RET_OK }" %
+      "        let rc = unsafe { ffi::$1_set_$2_impl(self.ptr, None, std::ptr::null_mut(), None) };" %
         [libName, r.wireName]
+    )
+    lines.add(
+      "        if rc == NIMFFI_RET_OK { Ok(()) } else { Err(format!(\"clear $1 impl: {}\", ret_name(rc))) }" %
+        [r.wireName]
     )
     lines.add("    }")
     lines.add("")
@@ -950,18 +982,22 @@ proc generateApiRs*(
         rev.reqTypeName & " {}"
     lines.add(renderMemberDocComment(rev.doc))
     lines.add(
-      "    pub fn emit_$1($2) -> bool {" % [
-        camelToSnakeCase(rev.nimProcName), paramsStr
-      ]
+      "    pub fn emit_$1($2) -> Result<(), String> {" %
+        [camelToSnakeCase(rev.nimProcName), paramsStr]
     )
     lines.add("        let payload = $1;" % [reqLit])
-    lines.add("        match encode_cbor(&payload) {")
     lines.add(
-      "            Ok(b) => unsafe { ffi::$1_emit_$2(self.ptr, b.as_ptr(), b.len()) == NIMFFI_RET_OK }," %
+      "        let b = encode_cbor(&payload).map_err(|e| format!(\"emit $1: {e}\"))?;" %
+        [rev.wireName]
+    )
+    lines.add(
+      "        let rc = unsafe { ffi::$1_emit_$2(self.ptr, b.as_ptr(), b.len()) };" %
         [libName, rev.wireName]
     )
-    lines.add("            Err(_) => false,")
-    lines.add("        }")
+    lines.add(
+      "        if rc == NIMFFI_RET_OK { Ok(()) } else { Err(format!(\"emit $1: {}\", ret_name(rc))) }" %
+        [rev.wireName]
+    )
     lines.add("    }")
     lines.add("")
 

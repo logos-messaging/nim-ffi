@@ -105,22 +105,22 @@ fn main() {
     println!("[6] host_clock before set_impl -> {unfulfilled:?}");
 
     // The call token is Copy + Send: this impl replies later from a host thread.
-    assert!(ctx.set_fetch_host_clock_impl(|call, precision: String| {
+    ctx.set_fetch_host_clock_impl(|call, precision: String| {
         assert_eq!(precision, "ms");
         std::thread::spawn(move || {
-            assert!(call.reply(&HostClock { unix_ms: 1_700_000_123_456, zone: "UTC".into() }));
+            call.reply(&HostClock { unix_ms: 1_700_000_123_456, zone: "UTC".into() }).expect("reply");
         });
-    }));
+    }).expect("set_fetch_host_clock_impl");
     let clock = ctx.host_clock().expect("my_timer_host_clock failed");
     println!("[6b] host_clock via Rust impl (deferred reply): {clock}");
     assert_eq!(clock, "UTC@1700000123456");
 
     // Unregister: the next call fails fast again.
-    assert!(ctx.clear_fetch_host_clock_impl());
+    ctx.clear_fetch_host_clock_impl().expect("clear_fetch_host_clock_impl");
     assert!(ctx.host_clock().is_err());
 
     // ── 7. Reverse event: host-emitted, handled by the Nim body ───────────
-    assert!(ctx.emit_on_host_tick(21));
+    ctx.emit_on_host_tick(21).expect("emit_on_host_tick");
     let mut seen = -1;
     for _ in 0..100 {
         seen = ctx.last_host_tick().expect("my_timer_last_host_tick failed");

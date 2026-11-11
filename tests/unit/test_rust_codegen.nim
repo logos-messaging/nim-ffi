@@ -136,7 +136,9 @@ suite "reverse FFI: the Rust wrapper hands the impl box to the library":
 
   test "the reverse helpers check the shared codes; the release type is emitted":
     check "REVERSE_" notin api
-    check "== NIMFFI_RET_OK }" in api
+    check "if rc == NIMFFI_RET_OK { Ok(()) }" in api
+    check "fn ret_name(rc: c_int) -> &'static str" in api
+    check "-> Result<(), String>" in api
     check "release: Option<FFIReverseRelease>" in ffiRs
     check "pub type FFIReverseRelease" in ffiRs
     check "start_reverse_workers" notin ffiRs

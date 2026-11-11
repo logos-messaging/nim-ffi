@@ -72,7 +72,11 @@ All notable changes to this project are documented in this file.
   that the host implements at runtime through `<lib>_set_<wire>_impl` and
   answers through `<lib>_reverse_reply`, under a per-call deadline.
   `{.ffiReverseEvent.}` declares a handler that runs when the host calls
-  `<lib>_emit_<wire>`. The C, C++ and Rust bindings get typed helpers.
+  `<lib>_emit_<wire>`. The C, C++ and Rust bindings get typed helpers: the C
+  ones that encode return `NIMFFI_RET_ERR` with the reason in a `char** err`,
+  and the C++ and Rust ones return `Result<void>` / `Result<(), String>` whose
+  error names the operation, the wire name and the encode error or
+  `NIMFFI_RET_*` code.
 - Host implementations run on per-context reverse worker threads
   (`-d:ffiReverseWorkers`, default 1), never on the FFI thread, and may block.
   An implementation is called with `(ctx, call_id, args, args_len, user_data)`,
