@@ -50,6 +50,19 @@ func cRetCodeDefines*(): string =
 
   return lines
 
+func cppRetNameFn*(): string =
+  ## `nimffiRetName(rc)`: the `NIMFFI_RET_*` name of a code, for error text.
+  var lines =
+    "#ifndef NIMFFI_RET_NAME_DEFINED\n#define NIMFFI_RET_NAME_DEFINED\n" &
+    "inline const char* nimffiRetName(int rc) noexcept {\n    switch (rc) {\n"
+  for code in RetCodes:
+    lines.add(
+      "        case NIMFFI_RET_" & code.name & ": return \"NIMFFI_RET_" & code.name &
+        "\";\n"
+    )
+  lines.add("        default: return \"NIMFFI_RET_UNKNOWN\";\n    }\n}\n#endif")
+  return lines
+
 func rustRetCodeConsts*(): string =
   var lines = ""
   for code in RetCodes:
