@@ -60,10 +60,30 @@ type
     payloadTypeName*: string
     doc*: string
 
+  FFIReverseMeta* = object ## Host-implemented interface from `{.ffiReverse.}`.
+    wireName*: string ## the registry key and the `<lib>_set_<wire>_impl` suffix
+    nimProcName*: string ## the Nim stub the library awaits
+    libName*: string ## prefix of the generated exports
+    params*: seq[FFIParamMeta] ## the call's arguments, in declaration order
+    argsTypeName*: string ## synthesized args object, single param type, or ""
+    replyTypeName*: string ## "" when the proc returns Future[Result[void, string]]
+    timeoutMs*: int ## 0 = library default (ReverseCallTimeoutMs)
+    doc*: string ## the proc's doc comment, copied into the bindings
+
+  FFIReverseEventMeta* = object ## Host-emitted event from `{.ffiReverseEvent.}`.
+    wireName*: string ## the `<lib>_emit_<wire>` suffix
+    nimProcName*: string ## the Nim handler that runs on the FFI thread
+    libName*: string ## prefix of the generated exports
+    reqTypeName*: string ## the Req object whose CBOR shape the host encodes
+    params*: seq[FFIParamMeta] ## the event's fields, in declaration order
+    doc*: string ## the proc's doc comment, copied into the bindings
+
 var ffiProcRegistry* {.compileTime.}: seq[FFIProcMeta]
 var ffiTypeRegistry* {.compileTime.}: seq[FFITypeMeta]
 var ffiEventRegistry* {.compileTime.}: seq[FFIEventMeta]
 var ffiConstRegistry* {.compileTime.}: seq[FFIConstMeta]
+var ffiReverseRegistry* {.compileTime.}: seq[FFIReverseMeta]
+var ffiReverseEventRegistry* {.compileTime.}: seq[FFIReverseEventMeta]
 var currentLibName* {.compileTime.}: string
 
 # Set by `declareLibrary`; the FFI annotations require it.
