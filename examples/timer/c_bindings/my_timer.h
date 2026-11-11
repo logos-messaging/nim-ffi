@@ -1026,7 +1026,8 @@ int my_timer_set_fetch_host_clock_impl(void* ctx, FFIReverseImpl impl, void* use
 int my_timer_reverse_reply(void* ctx, uint64_t call_id, int ret_code, const uint8_t* reply_cbor, size_t reply_len);
 /* <lib>_emit_<wire> queues a host event for the library's thread. Returns
    NIMFFI_RET_OK once queued, or _INVALID_CTX, _TOO_LARGE, _INVALID_ARGUMENT,
-   _OUT_OF_MEMORY or _ERR (the send failed). */
+   _OUT_OF_MEMORY or _ERR (the send failed). <lib>_ctx_emit_<wire> also
+   returns _ERR when the payload does not encode, with the reason in *err. */
 /** Records the tick number that the host emits. */
 int my_timer_emit_on_host_tick(void* ctx, const uint8_t* payload_cbor, size_t payload_len);
 /**
@@ -1275,31 +1276,37 @@ static inline int my_timer_decode_fetch_host_clock_args(const uint8_t* args_cbor
     memset(out, 0, sizeof(*out));
     return nimffi_decode_from_buf(my_timer_decv_Str, args_cbor, args_len, out, err);
 }
-static inline int my_timer_reverse_reply_fetch_host_clock(void* ctx, uint64_t call_id, const HostClock* reply) {
+/* Encodes reply and answers call_id. An encode failure answers the call with
+   the reason as an error, so the library does not wait out its timeout, and
+   returns NIMFFI_RET_ERR; when err is not NULL, *err is set to the reason
+   (the caller frees it). */
+static inline int my_timer_reverse_reply_fetch_host_clock(void* ctx, uint64_t call_id, const HostClock* reply, char** err) {
     uint8_t* buf = NULL;
     size_t len = 0;
-    char* err = NULL;
-    if (nimffi_encode_to_buf(my_timer_encv_HostClock, reply, &buf, &len, &err) != 0) {
-        free(err);
-        return -1;
+    char* why = NULL;
+    if (nimffi_encode_to_buf(my_timer_encv_HostClock, reply, &buf, &len, &why) != 0) {
+        const char* msg = why ? why : "reply encode failed";
+        (void)my_timer_reverse_reply(ctx, call_id, 1, (const uint8_t*)msg, strlen(msg));
+        if (err) *err = why; else free(why);
+        return NIMFFI_RET_ERR;
     }
     int rc = my_timer_reverse_reply(ctx, call_id, 0, buf, len);
     free(buf);
     return rc;
 }
 /* Only while ctx is alive: a deferred reply uses the impl's ctx token. */
-static inline int my_timer_ctx_reverse_reply_fetch_host_clock(const MyTimerCtx* ctx, uint64_t call_id, const HostClock* reply) {
-    return my_timer_reverse_reply_fetch_host_clock(ctx->ptr, call_id, reply);
+static inline int my_timer_ctx_reverse_reply_fetch_host_clock(const MyTimerCtx* ctx, uint64_t call_id, const HostClock* reply, char** err) {
+    return my_timer_reverse_reply_fetch_host_clock(ctx->ptr, call_id, reply, err);
 }
 
 /** Records the tick number that the host emits. */
-static inline int my_timer_ctx_emit_on_host_tick(const MyTimerCtx* ctx, const OnHostTickReq* payload) {
+/* Encodes payload and emits it. An encode failure returns NIMFFI_RET_ERR and,
+   when err is not NULL, sets *err to the reason (the caller frees it). */
+static inline int my_timer_ctx_emit_on_host_tick(const MyTimerCtx* ctx, const OnHostTickReq* payload, char** err) {
     uint8_t* buf = NULL;
     size_t len = 0;
-    char* err = NULL;
-    if (nimffi_encode_to_buf(my_timer_encv_OnHostTickReq, payload, &buf, &len, &err) != 0) {
-        free(err);
-        return -1;
+    if (nimffi_encode_to_buf(my_timer_encv_OnHostTickReq, payload, &buf, &len, err) != 0) {
+        return NIMFFI_RET_ERR;
     }
     int rc = my_timer_emit_on_host_tick(ctx->ptr, buf, len);
     free(buf);

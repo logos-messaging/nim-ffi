@@ -440,19 +440,20 @@ suite "generateCLibHeader: reverse FFI":
       header
     check "static inline int timer_decode_fetch_config_args(const uint8_t* args_cbor, size_t args_len, FetchConfigArgs* out, char** err)" in
       header
-    check "static inline int timer_ctx_reverse_reply_fetch_config(const TimerCtx* ctx, uint64_t call_id, const RevConfig* reply)" in
+    check "static inline int timer_ctx_reverse_reply_fetch_config(const TimerCtx* ctx, uint64_t call_id, const RevConfig* reply, char** err)" in
       header
     check "static inline int timer_ctx_reverse_reply_err(const TimerCtx* ctx, uint64_t call_id, const char* msg)" in
       header
 
   test "reply helpers take the impl's ctx token; the ctx-wrapper ones delegate":
-    check "static inline int timer_reverse_reply_fetch_config(void* ctx, uint64_t call_id, const RevConfig* reply)" in
+    check "static inline int timer_reverse_reply_fetch_config(void* ctx, uint64_t call_id, const RevConfig* reply, char** err)" in
       header
     check "static inline int timer_reverse_reply_err(void* ctx, uint64_t call_id, const char* msg)" in
       header
     check "static inline int timer_reverse_reply_host_note(void* ctx, uint64_t call_id)" in
       header
-    check "return timer_reverse_reply_fetch_config(ctx->ptr, call_id, reply);" in header
+    check "return timer_reverse_reply_fetch_config(ctx->ptr, call_id, reply, err);" in
+      header
 
   test "a void reply gets the payload-less reply helper":
     check "static inline int timer_ctx_reverse_reply_host_note(const TimerCtx* ctx, uint64_t call_id)" in
@@ -464,7 +465,7 @@ suite "generateCLibHeader: reverse FFI":
     check "invocation; free `*out` with free(). */" in header
 
   test "reverse events get the typed emit helper":
-    check "static inline int timer_ctx_emit_on_host_ping(const TimerCtx* ctx, const OnHostPingReq* payload)" in
+    check "static inline int timer_ctx_emit_on_host_ping(const TimerCtx* ctx, const OnHostPingReq* payload, char** err)" in
       header
 
   test "buffer adapters cover the reverse-direction types":

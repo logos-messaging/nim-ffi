@@ -354,7 +354,11 @@ The C header adds typed helpers: `<lib>_ctx_set_<wire>_impl`,
 the `ctx` token the implementation is handed, so a reply deferred past the
 context's destroy fails with `NIMFFI_RET_INVALID_CTX` instead of reading a
 freed `<Ctx>` wrapper. The `<lib>_ctx_reverse_reply_*` variants take the
-wrapper and are safe only while it is alive.
+wrapper and are safe only while it is alive. The helpers that encode, the
+typed reply and `<lib>_ctx_emit_<wire>`, take a trailing `char** err`: when the
+value does not encode they return `NIMFFI_RET_ERR` and, unless `err` is `NULL`,
+set `*err` to the reason, which the caller frees. A reply that does not encode
+still answers the call, with that reason as the error.
 
 | Situation | Behavior |
 | --- | --- |

@@ -9,6 +9,7 @@
  * data or error strings, which is the whole point. */
 #include "my_timer.h"
 #include "waiter.h"
+#include <stdio.h>
 #include <stdlib.h>
 
 static int g_event_count = 0;
@@ -237,9 +238,11 @@ static void host_clock_impl(void* ctx, uint64_t call_id, const uint8_t* args,
     assert(precision && strcmp(precision, "ms") == 0);
     free((void*)precision);
     HostClock clock = {1700000123456LL, "UTC"};
-    int rc = my_timer_reverse_reply_fetch_host_clock(ctx, call_id, &clock);
+    char* reply_err = NULL;
+    int rc = my_timer_reverse_reply_fetch_host_clock(ctx, call_id, &clock, &reply_err);
+    if (rc != NIMFFI_RET_OK) fprintf(stderr, "reply fetch_host_clock: %d %s\n", rc, reply_err ? reply_err : "");
+    free(reply_err);
     assert(rc == NIMFFI_RET_OK);
-    (void)rc;
 }
 
 /* Keeps the call to answer it later, the way a deferred host does. */
@@ -294,7 +297,7 @@ static void on_last_tick(int ec, const int64_t* reply, const char* em, void* ud)
 
 static void test_reverse_event(MyTimerCtx* ctx) {
     OnHostTickReq tick = {42};
-    assert(my_timer_ctx_emit_on_host_tick(ctx, &tick) == 0);
+    assert(my_timer_ctx_emit_on_host_tick(ctx, &tick, NULL) == NIMFFI_RET_OK);
 
     /* Fire-and-forget: poll the effect of the handler. */
     long long seen = 0;
@@ -325,7 +328,7 @@ static void test_reverse_reply_after_destroy(void) {
     wait_done(&w.done); /* the destroy failed the parked call */
     assert(w.err_code != 0);
     HostClock clock = {1, "late"};
-    assert(my_timer_reverse_reply_fetch_host_clock(g_deferred_ctx, g_deferred_call, &clock) ==
+    assert(my_timer_reverse_reply_fetch_host_clock(g_deferred_ctx, g_deferred_call, &clock, NULL) ==
            NIMFFI_RET_INVALID_CTX);
 }
 
