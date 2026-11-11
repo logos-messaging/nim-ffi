@@ -88,6 +88,13 @@ typedef struct {
     JobPriority priority;
 } ScheduleResult;
 typedef struct {
+    int64_t unixMs;
+    const char* zone;
+} HostClock;
+typedef struct {
+    int64_t tickNo;
+} OnHostTickReq;
+typedef struct {
     TimerConfig config;
 } MyTimerCreateCtorReq;
 typedef struct {
@@ -107,6 +114,12 @@ typedef struct {
     RetryPolicy retry;
     ScheduleConfig schedule;
 } MyTimerScheduleReq;
+typedef struct {
+    char _nimffi_empty; /* C forbids empty structs */
+} MyTimerHostClockReq;
+typedef struct {
+    char _nimffi_empty; /* C forbids empty structs */
+} MyTimerLastHostTickReq;
 
 static inline CborError my_timer_enc_TimerConfig(
         CborEncoder* e, const TimerConfig* v) {
@@ -709,6 +722,65 @@ static inline void my_timer_free_ScheduleResult(ScheduleResult* v) {
     if (!v) return;
     do { free((void*)v->jobId); v->jobId = NULL; } while (0);
 }
+static inline CborError my_timer_enc_HostClock(
+        CborEncoder* e, const HostClock* v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(e, &m, 2);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "unixMs");
+    if (err) return err;
+    err = nimffi_enc_i64(&m, &v->unixMs);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "zone");
+    if (err) return err;
+    err = nimffi_enc_str(&m, &v->zone);
+    if (err) return err;
+    return cbor_encoder_close_container(e, &m);
+}
+static inline CborError my_timer_dec_HostClock(
+        CborValue* it, HostClock* out) {
+    if (!cbor_value_is_map(it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(it, "unixMs", &field);
+    if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = nimffi_dec_i64(&field, &out->unixMs);
+    if (err) return err;
+    err = cbor_value_map_find_value(it, "zone", &field);
+    if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = nimffi_dec_str(&field, &out->zone);
+    if (err) return err;
+    return cbor_value_advance(it);
+}
+static inline void my_timer_free_HostClock(HostClock* v) {
+    if (!v) return;
+    do { free((void*)v->zone); v->zone = NULL; } while (0);
+}
+static inline CborError my_timer_enc_OnHostTickReq(
+        CborEncoder* e, const OnHostTickReq* v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(e, &m, 1);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "tickNo");
+    if (err) return err;
+    err = nimffi_enc_i64(&m, &v->tickNo);
+    if (err) return err;
+    return cbor_encoder_close_container(e, &m);
+}
+static inline CborError my_timer_dec_OnHostTickReq(
+        CborValue* it, OnHostTickReq* out) {
+    if (!cbor_value_is_map(it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(it, "tickNo", &field);
+    if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = nimffi_dec_i64(&field, &out->tickNo);
+    if (err) return err;
+    return cbor_value_advance(it);
+}
 static inline CborError my_timer_enc_MyTimerCreateCtorReq(
         CborEncoder* e, const MyTimerCreateCtorReq* v) {
     CborEncoder m;
@@ -864,6 +936,34 @@ static inline void my_timer_free_MyTimerScheduleReq(MyTimerScheduleReq* v) {
     my_timer_free_JobSpec(&v->job);
     my_timer_free_RetryPolicy(&v->retry);
 }
+static inline CborError my_timer_enc_MyTimerHostClockReq(
+        CborEncoder* e, const MyTimerHostClockReq* v) {
+    (void)v;
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(e, &m, 0);
+    if (err) return err;
+    return cbor_encoder_close_container(e, &m);
+}
+static inline CborError my_timer_dec_MyTimerHostClockReq(
+        CborValue* it, MyTimerHostClockReq* out) {
+    if (!cbor_value_is_map(it)) return CborErrorImproperValue;
+    (void)out;
+    return cbor_value_advance(it);
+}
+static inline CborError my_timer_enc_MyTimerLastHostTickReq(
+        CborEncoder* e, const MyTimerLastHostTickReq* v) {
+    (void)v;
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(e, &m, 0);
+    if (err) return err;
+    return cbor_encoder_close_container(e, &m);
+}
+static inline CborError my_timer_dec_MyTimerLastHostTickReq(
+        CborValue* it, MyTimerLastHostTickReq* out) {
+    if (!cbor_value_is_map(it)) return CborErrorImproperValue;
+    (void)out;
+    return cbor_value_advance(it);
+}
 
 /* ============================================================ */
 /* C ABI declarations (symbols exported by the Nim dylib)       */
@@ -882,6 +982,10 @@ int my_timer_lib_version(FFICallback callback, void* user_data, const uint8_t* r
 int my_timer_complex(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 /** Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope. */
 int my_timer_schedule(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+/** Calls the host-implemented `fetch_host_clock` interface and formats it. */
+int my_timer_host_clock(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
+/** Reads the last tick number the `on_host_tick` reverse event recorded. */
+int my_timer_last_host_tick(void* ctx, FFICallback callback, void* user_data, const uint8_t* req_cbor, size_t req_cbor_len);
 /** Tears down the FFI context; blocks until FFI + watchdog threads join. */
 int my_timer_destroy(void* ctx);
 uint64_t my_timer_add_event_listener(void* ctx, const char* event_name, FFICallback callback, void* user_data);
@@ -893,6 +997,39 @@ uint64_t my_timer_add_event_listener(void* ctx, const char* event_name, FFICallb
  * flight then skips the listener that you removed.
  */
 int my_timer_remove_event_listener(void* ctx, uint64_t listener_id);
+
+/* Reverse FFI: host-implemented interfaces + host-emitted events */
+#ifndef NIM_FFI_REVERSE_IMPL_DEFINED
+#define NIM_FFI_REVERSE_IMPL_DEFINED
+/* Runs on a reverse worker thread; may block. Reply with ctx via
+   <lib>_reverse_reply*, from any thread, now or later (after the context is
+   destroyed: NIMFFI_RET_INVALID_CTX). args lives only until the impl returns. */
+typedef void (*FFIReverseImpl)(void* ctx, uint64_t call_id, const uint8_t* args, size_t args_len, void* user_data);
+/* Frees user_data after its last invocation; runs on any thread, so it must be
+   thread-safe. */
+typedef void (*FFIReverseRelease)(void* user_data);
+#endif
+/* Destroying a context from one of its own impls returns RET_ERR (it would
+   deadlock). */
+/* <lib>_set_<wire>_impl registers impl (NULL unregisters); never blocks. With a
+   release the library owns user_data and frees it after the replaced impl's last
+   call; with NULL the host keeps it valid until the context is destroyed. On
+   error the caller keeps user_data.
+   Returns NIMFFI_RET_OK, _INVALID_CTX, _WORKERS_FAILED or _OUT_OF_MEMORY. */
+/** Asks the host for its wall clock; fails when no host implementation answers. */
+int my_timer_set_fetch_host_clock_impl(void* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release);
+/* Answers a reverse call; callable from any thread. ret_code 0: reply_cbor is
+   the CBOR reply; non-zero: a UTF-8 error message. First reply per call_id
+   wins; later or expired ones are dropped. Returns NIMFFI_RET_OK or
+   _INVALID_CTX, _NOT_ACTIVE, _TOO_LARGE, _QUEUE_FULL, _OUT_OF_MEMORY,
+   _INVALID_ARGUMENT (NULL reply_cbor with a non-zero reply_len). */
+int my_timer_reverse_reply(void* ctx, uint64_t call_id, int ret_code, const uint8_t* reply_cbor, size_t reply_len);
+/* <lib>_emit_<wire> queues a host event for the library's thread. Returns
+   NIMFFI_RET_OK once queued, or _INVALID_CTX, _TOO_LARGE, _INVALID_ARGUMENT,
+   _OUT_OF_MEMORY or _ERR (the send failed). <lib>_ctx_emit_<wire> also
+   returns _ERR when the payload does not encode, with the reason in *err. */
+/** Records the tick number that the host emits. */
+int my_timer_emit_on_host_tick(void* ctx, const uint8_t* payload_cbor, size_t payload_len);
 /**
  * Stop every context the library still holds and join their threads.
  * Call it before the process exits when a context is still alive, or when a
@@ -912,10 +1049,15 @@ static inline CborError my_timer_encv_MyTimerVersionReq(CborEncoder* e, const vo
 static inline CborError my_timer_encv_MyTimerLibVersionReq(CborEncoder* e, const void* v) { return my_timer_enc_MyTimerLibVersionReq(e, (const MyTimerLibVersionReq*)v); }
 static inline CborError my_timer_encv_MyTimerComplexReq(CborEncoder* e, const void* v) { return my_timer_enc_MyTimerComplexReq(e, (const MyTimerComplexReq*)v); }
 static inline CborError my_timer_encv_MyTimerScheduleReq(CborEncoder* e, const void* v) { return my_timer_enc_MyTimerScheduleReq(e, (const MyTimerScheduleReq*)v); }
+static inline CborError my_timer_encv_MyTimerHostClockReq(CborEncoder* e, const void* v) { return my_timer_enc_MyTimerHostClockReq(e, (const MyTimerHostClockReq*)v); }
+static inline CborError my_timer_encv_MyTimerLastHostTickReq(CborEncoder* e, const void* v) { return my_timer_enc_MyTimerLastHostTickReq(e, (const MyTimerLastHostTickReq*)v); }
+static inline CborError my_timer_encv_HostClock(CborEncoder* e, const void* v) { return my_timer_enc_HostClock(e, (const HostClock*)v); }
+static inline CborError my_timer_encv_OnHostTickReq(CborEncoder* e, const void* v) { return my_timer_enc_OnHostTickReq(e, (const OnHostTickReq*)v); }
 static inline CborError my_timer_decv_EchoResponse(CborValue* it, void* v) { return my_timer_dec_EchoResponse(it, (EchoResponse*)v); }
 static inline CborError my_timer_decv_Str(CborValue* it, void* v) { return nimffi_dec_str(it, (const char**)v); }
 static inline CborError my_timer_decv_ComplexResponse(CborValue* it, void* v) { return my_timer_dec_ComplexResponse(it, (ComplexResponse*)v); }
 static inline CborError my_timer_decv_ScheduleResult(CborValue* it, void* v) { return my_timer_dec_ScheduleResult(it, (ScheduleResult*)v); }
+static inline CborError my_timer_decv_I64(CborValue* it, void* v) { return nimffi_dec_i64(it, (int64_t*)v); }
 
 /* Event listener machinery */
 typedef void (*MyTimerOnEchoFiredFn)(const EchoEvent* evt, void* user_data);
@@ -1114,6 +1256,61 @@ static inline bool my_timer_ctx_remove_event_listener(MyTimerCtx* ctx, uint64_t 
         }
     }
     return rc == 0;
+}
+
+/* Reverse FFI helpers (typed sugar over the raw exports above) */
+static inline int my_timer_reverse_reply_err(void* ctx, uint64_t call_id, const char* msg) {
+    return my_timer_reverse_reply(ctx, call_id, 1, (const uint8_t*)msg, msg ? strlen(msg) : 0);
+}
+/* Only while ctx is alive: a deferred reply uses the impl's ctx token. */
+static inline int my_timer_ctx_reverse_reply_err(const MyTimerCtx* ctx, uint64_t call_id, const char* msg) {
+    return my_timer_reverse_reply_err(ctx->ptr, call_id, msg);
+}
+
+/** Asks the host for its wall clock; fails when no host implementation answers. */
+static inline int my_timer_ctx_set_fetch_host_clock_impl(const MyTimerCtx* ctx, FFIReverseImpl impl, void* user_data, FFIReverseRelease release) {
+    return my_timer_set_fetch_host_clock_impl(ctx->ptr, impl, user_data, release);
+}
+/* Decode the args of a `fetch_host_clock` invocation; free `*out` with free(). */
+static inline int my_timer_decode_fetch_host_clock_args(const uint8_t* args_cbor, size_t args_len, const char** out, char** err) {
+    memset(out, 0, sizeof(*out));
+    return nimffi_decode_from_buf(my_timer_decv_Str, args_cbor, args_len, out, err);
+}
+/* Encodes reply and answers call_id. An encode failure answers the call with
+   the reason as an error, so the library does not wait out its timeout, and
+   returns NIMFFI_RET_ERR; when err is not NULL, *err is set to the reason
+   (the caller frees it). */
+static inline int my_timer_reverse_reply_fetch_host_clock(void* ctx, uint64_t call_id, const HostClock* reply, char** err) {
+    uint8_t* buf = NULL;
+    size_t len = 0;
+    char* why = NULL;
+    if (nimffi_encode_to_buf(my_timer_encv_HostClock, reply, &buf, &len, &why) != 0) {
+        const char* msg = why ? why : "reply encode failed";
+        (void)my_timer_reverse_reply(ctx, call_id, 1, (const uint8_t*)msg, strlen(msg));
+        if (err) *err = why; else free(why);
+        return NIMFFI_RET_ERR;
+    }
+    int rc = my_timer_reverse_reply(ctx, call_id, 0, buf, len);
+    free(buf);
+    return rc;
+}
+/* Only while ctx is alive: a deferred reply uses the impl's ctx token. */
+static inline int my_timer_ctx_reverse_reply_fetch_host_clock(const MyTimerCtx* ctx, uint64_t call_id, const HostClock* reply, char** err) {
+    return my_timer_reverse_reply_fetch_host_clock(ctx->ptr, call_id, reply, err);
+}
+
+/** Records the tick number that the host emits. */
+/* Encodes payload and emits it. An encode failure returns NIMFFI_RET_ERR and,
+   when err is not NULL, sets *err to the reason (the caller frees it). */
+static inline int my_timer_ctx_emit_on_host_tick(const MyTimerCtx* ctx, const OnHostTickReq* payload, char** err) {
+    uint8_t* buf = NULL;
+    size_t len = 0;
+    if (nimffi_encode_to_buf(my_timer_encv_OnHostTickReq, payload, &buf, &len, err) != 0) {
+        return NIMFFI_RET_ERR;
+    }
+    int rc = my_timer_emit_on_host_tick(ctx->ptr, buf, len);
+    free(buf);
+    return rc;
 }
 
 typedef void (*MyTimerEchoReplyFn)(int err_code, const EchoResponse* reply, const char* err_msg, void* user_data);
@@ -1359,6 +1556,128 @@ static inline int my_timer_ctx_schedule(const MyTimerCtx* ctx, const JobSpec* jo
     box->fn = on_reply;
     box->user_data = user_data;
     int ret = my_timer_schedule(ctx->ptr, my_timer_schedule_reply_trampoline, box, req_buf, req_len);
+    free(req_buf);
+    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
+        if (on_reply) on_reply(-1, NULL, "RET_MISSING_CALLBACK (internal error)", user_data);
+        free(box);
+        return -1;
+    }
+    return ret;
+}
+
+typedef void (*MyTimerHostClockReplyFn)(int err_code, const char* const* reply, const char* err_msg, void* user_data);
+typedef struct { MyTimerHostClockReplyFn fn; void* user_data; } MyTimerHostClockCallBox;
+static void my_timer_host_clock_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
+    MyTimerHostClockCallBox* box = (MyTimerHostClockCallBox*)ud;
+    /* Non-terminal progress ping: keep the box for the terminal reply. */
+    if (ret == NIMFFI_RET_STALE_WARN) return;
+    if (!box->fn) {
+        free(box);
+        return;
+    }
+    if (ret != 0) {
+        char* em = nimffi_dup_cstr_n(msg ? msg : "", msg ? len : 0);
+        box->fn(ret, NULL, em ? em : "FFI call failed", box->user_data);
+        free(em);
+        free(box);
+        return;
+    }
+    char* err = NULL;
+    const char* out;
+    memset(&out, 0, sizeof(out));
+    int dec = nimffi_decode_from_buf(my_timer_decv_Str, (const uint8_t*)msg, len, &out, &err);
+    if (dec != 0) {
+        box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
+        free(err);
+        do { free((void*)out); out = NULL; } while (0);
+        free(box);
+        return;
+    }
+    box->fn(NIMFFI_RET_OK, &out, NULL, box->user_data);
+    do { free((void*)out); out = NULL; } while (0);
+    free(box);
+}
+/** Calls the host-implemented `fetch_host_clock` interface and formats it. */
+static inline int my_timer_ctx_host_clock(const MyTimerCtx* ctx, MyTimerHostClockReplyFn on_reply, void* user_data) {
+    MyTimerHostClockReq ffi_req;
+    memset(&ffi_req, 0, sizeof(ffi_req));
+    uint8_t* req_buf = NULL;
+    size_t req_len = 0;
+    char* err = NULL;
+    if (nimffi_encode_to_buf(my_timer_encv_MyTimerHostClockReq, &ffi_req, &req_buf, &req_len, &err) != 0) {
+        if (on_reply) on_reply(-1, NULL, err ? err : "encode failed", user_data);
+        free(err);
+        return -1;
+    }
+    MyTimerHostClockCallBox* box = (MyTimerHostClockCallBox*)malloc(sizeof(MyTimerHostClockCallBox));
+    if (!box) {
+        free(req_buf);
+        if (on_reply) on_reply(-1, NULL, "out of memory", user_data);
+        return -1;
+    }
+    box->fn = on_reply;
+    box->user_data = user_data;
+    int ret = my_timer_host_clock(ctx->ptr, my_timer_host_clock_reply_trampoline, box, req_buf, req_len);
+    free(req_buf);
+    if (ret == NIMFFI_RET_MISSING_CALLBACK) {
+        if (on_reply) on_reply(-1, NULL, "RET_MISSING_CALLBACK (internal error)", user_data);
+        free(box);
+        return -1;
+    }
+    return ret;
+}
+
+typedef void (*MyTimerLastHostTickReplyFn)(int err_code, const int64_t* reply, const char* err_msg, void* user_data);
+typedef struct { MyTimerLastHostTickReplyFn fn; void* user_data; } MyTimerLastHostTickCallBox;
+static void my_timer_last_host_tick_reply_trampoline(int ret, const char* msg, size_t len, void* ud) {
+    MyTimerLastHostTickCallBox* box = (MyTimerLastHostTickCallBox*)ud;
+    /* Non-terminal progress ping: keep the box for the terminal reply. */
+    if (ret == NIMFFI_RET_STALE_WARN) return;
+    if (!box->fn) {
+        free(box);
+        return;
+    }
+    if (ret != 0) {
+        char* em = nimffi_dup_cstr_n(msg ? msg : "", msg ? len : 0);
+        box->fn(ret, NULL, em ? em : "FFI call failed", box->user_data);
+        free(em);
+        free(box);
+        return;
+    }
+    char* err = NULL;
+    int64_t out;
+    memset(&out, 0, sizeof(out));
+    int dec = nimffi_decode_from_buf(my_timer_decv_I64, (const uint8_t*)msg, len, &out, &err);
+    if (dec != 0) {
+        box->fn(-1, NULL, err ? err : "decode failed", box->user_data);
+        free(err);
+        free(box);
+        return;
+    }
+    box->fn(NIMFFI_RET_OK, &out, NULL, box->user_data);
+    free(box);
+}
+/** Reads the last tick number the `on_host_tick` reverse event recorded. */
+static inline int my_timer_ctx_last_host_tick(const MyTimerCtx* ctx, MyTimerLastHostTickReplyFn on_reply, void* user_data) {
+    MyTimerLastHostTickReq ffi_req;
+    memset(&ffi_req, 0, sizeof(ffi_req));
+    uint8_t* req_buf = NULL;
+    size_t req_len = 0;
+    char* err = NULL;
+    if (nimffi_encode_to_buf(my_timer_encv_MyTimerLastHostTickReq, &ffi_req, &req_buf, &req_len, &err) != 0) {
+        if (on_reply) on_reply(-1, NULL, err ? err : "encode failed", user_data);
+        free(err);
+        return -1;
+    }
+    MyTimerLastHostTickCallBox* box = (MyTimerLastHostTickCallBox*)malloc(sizeof(MyTimerLastHostTickCallBox));
+    if (!box) {
+        free(req_buf);
+        if (on_reply) on_reply(-1, NULL, "out of memory", user_data);
+        return -1;
+    }
+    box->fn = on_reply;
+    box->user_data = user_data;
+    int ret = my_timer_last_host_tick(ctx->ptr, my_timer_last_host_tick_reply_trampoline, box, req_buf, req_len);
     free(req_buf);
     if (ret == NIMFFI_RET_MISSING_CALLBACK) {
         if (on_reply) on_reply(-1, NULL, "RET_MISSING_CALLBACK (internal error)", user_data);

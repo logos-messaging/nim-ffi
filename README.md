@@ -79,6 +79,8 @@ The generated C export names are the snake_case form of the proc names, e.g.
 | `{.ffiCtor.}` | proc | The constructor. Returns `Future[Result[LibType, string]]`; creates the FFI context. |
 | `{.ffiDtor.}` | proc | The destructor. Exactly one param `(x: LibType)`; tears the context down. Must cancel and await everything it spawned — see [the teardown contract](#the-teardown-contract). |
 | `{.ffiEvent[: "wire_name"].}` | proc (empty body) | A library-initiated callback. Call the proc from any `{.ffi.}` handler to fire it. The wire name is optional — see below. |
+| `{.ffiReverse[("wire_name", timeout = ms)].}` | proc (no body) | **Experimental.** An interface that the library calls and the host implements at runtime. See below. |
+| `{.ffiReverseEvent[: "wire_name"].}` | proc (with body) | **Experimental.** A host-emitted event. The body is the handler and runs on the FFI processing thread. See below. |
 | `{.ffiHandle.}` | `ref object` | Marks a type as an opaque handle: it stays server-side and crosses the wire as a `uint64` id. |
 | `{.ffiConst.}` | `const` | Re-emits the value as a native constant in every generated binding — see below. |
 | `genBindings()` | call | Emits the bindings. Must be the **last** FFI call in the compilation root. |
@@ -301,6 +303,83 @@ The wire name is **optional**: when omitted it is derived from the proc name
 (`onPeerConnected` → `on_peer_connected`), matching how `{.ffi.}` derives its C
 export symbol. Pass a string literal (`{.ffiEvent: "custom_name".}`) only when
 you need a name that differs from the proc.
+
+### Reverse FFI (experimental)
+
+Reverse FFI lets the library declare an interface that the host implements at
+runtime. Both pragmas use CBOR.
+
+```nim
+# Host-implemented interface: no body, returns Future[Result[T, string]].
+# A comment-only body keeps the doc: Nim drops a `##` after a declaration without `=`.
+proc fetchHostClock(
+  precision: string
+): Future[Result[HostClock, string]] {.ffiReverse.} =
+  ## Asks the host for its wall clock.
+
+# Host-emitted event: the body runs on the FFI processing thread.
+proc onHostTick(tickNo: int) {.ffiReverseEvent.} =
+  lastHostTick = tickNo
+```
+
+An `{.ffi.}` handler awaits `fetchHostClock(...)` like any async proc. The host
+implementation runs on a per-context reverse worker thread, never on the FFI
+thread, so it may block without stalling it. The host answers through
+`<lib>_reverse_reply`, now or later and from any thread. Workers start on the
+first `set_impl`; `-d:ffiReverseWorkers` sets the count (default 1), so by
+default one blocked implementation holds every other reverse call of its context
+until it returns or their deadlines fire.
+
+```c
+typedef void (*FFIReverseImpl)(void* ctx, uint64_t call_id, const uint8_t* args,
+                               size_t args_len, void* user_data);
+typedef void (*FFIReverseRelease)(void* user_data);
+int <lib>_set_<wire>_impl(void* ctx, FFIReverseImpl impl, void* user_data,
+                          FFIReverseRelease release);   /* impl == NULL unregisters */
+int <lib>_reverse_reply(void* ctx, uint64_t call_id, int ret_code,
+                        const uint8_t* reply_cbor, size_t reply_len);
+int <lib>_emit_<wire>(void* ctx, const uint8_t* payload_cbor, size_t payload_len);
+```
+
+`set_impl` never waits. With a `release` the library owns `user_data` and frees
+it after the replaced implementation's last running invocation, so replacing an
+implementation is safe from any thread, even from inside itself. With a `NULL`
+release the host keeps `user_data` valid until the context is destroyed. If
+`set_impl` fails, the caller keeps `user_data`. Status codes are the shared
+`NIMFFI_RET_*`.
+
+The C header adds typed helpers: `<lib>_ctx_set_<wire>_impl`,
+`<lib>_decode_<wire>_args`, `<lib>_reverse_reply_<wire>`,
+`<lib>_reverse_reply_err` and `<lib>_ctx_emit_<wire>`. The reply helpers take
+the `ctx` token the implementation is handed, so a reply deferred past the
+context's destroy fails with `NIMFFI_RET_INVALID_CTX` instead of reading a
+freed `<Ctx>` wrapper. The `<lib>_ctx_reverse_reply_*` variants take the
+wrapper and are safe only while it is alive. The helpers that encode, the
+typed reply and `<lib>_ctx_emit_<wire>`, take a trailing `char** err`: when the
+value does not encode they return `NIMFFI_RET_ERR` and, unless `err` is `NULL`,
+set `*err` to the reason, which the caller frees. A reply that does not encode
+still answers the call, with that reason as the error.
+
+| Situation | Behavior |
+| --- | --- |
+| No implementation registered | The call fails at once. |
+| No reply before the deadline | The call fails after `ReverseCallTimeoutMs` (10 s) or the `timeout = ms` of the proc, and `reverse_call_timeout` fires with `reason: "timeout"`. |
+| Deadline or `cancelSoon()` while the call is queued | The worker skips the call, and the implementation never runs. |
+| Deadline or cancel while the implementation runs | The call fails at once, and the late reply is dropped by call id. |
+| Two replies for one call id | The first one completes the call; the second is dropped. |
+| `args` after the implementation returns | No longer valid: a deferred reply copies what it needs. |
+| More than `-d:ffiReverseQueueDepth` (1024) calls wait for a worker | The next one fails at once, and `reverse_call_timeout` fires with `reason: "queue_full"`. |
+| A reply over `-d:ffiMaxRequestPayloadBytes` (when set), or `NULL` with a length | `NIMFFI_RET_TOO_LARGE` or `NIMFFI_RET_INVALID_ARGUMENT`; nothing is queued. |
+| Recycle or shutdown has begun | A new reverse call fails at once instead of parking. |
+| A worker inside one implementation past `ReverseCallTimeoutMs` | `reverse_worker_blocked` fires with the proc and the time spent in it, then `reverse_worker_recovered` when it returns. |
+| Recycle while an implementation runs | Waits `RecycleTimeout`, then quarantines the slot with `RecycleFailure.ReverseImplBlocked`. |
+| Destroy, park or `<lib>_shutdown` with a stuck worker | The stuck worker leaks with the slot, and so does its `user_data`: `release` never runs under it. |
+| A host implementation destroys its own context | `<lib>_destroy` fails at once with `RET_ERR`, and the context stays usable: destroy it from another thread. |
+| A host implementation calls `<lib>_shutdown` | The call returns; the worker that runs it leaks and is not joined. |
+| `{.ffiReverseEvent.}` emit | The return code reports the enqueue only. |
+
+A reverse call takes no `{.ffiHandle.}` parameter, and only an `{.ffi.}` handler
+on the FFI processing thread can await it.
 
 ## Placement of `genBindings()`
 
