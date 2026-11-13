@@ -5,6 +5,8 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Changed
+- **`ffi_poll` is exported from `ffi` only under `-d:ffiPollMode`.** It was
+  exported in every mode; nothing in the repo used it outside poll mode.
 - **Poll-mode C exports return a request id instead of taking a callback.** A
   request export is `(ctx, req, len, req_id)` and returns a code; a ctor is
   `(req, len, ctx_out, req_id)` and hands the token back at once. A refusal
