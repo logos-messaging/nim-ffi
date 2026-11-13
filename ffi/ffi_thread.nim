@@ -112,12 +112,6 @@ proc submit(
 
   ok()
 
-when defined(ffiPollMode):
-  proc wakeFFIThread*(ctx: ptr FFIContext) {.raises: [], gcsafe.} =
-    ## Brings the FFI thread out of its wait: something it owns has changed.
-    ctx.reqSignal.fireSync().isOkOr:
-      error "failed to wake the FFI thread", error = error
-
 proc sendRequestToFFIThread*(
     ctx: ptr FFIContext,
     ffiRequest: ptr FFIThreadRequest,
