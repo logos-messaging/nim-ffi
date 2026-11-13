@@ -287,8 +287,8 @@ proc callHost*(
   if not rev.enqueue(inv, stampSeq()):
     # Both references are ours: nothing else ever saw this one.
     inv[].state.store(ReverseCallState.Settled)
-    release(inv)
-    release(inv)
+    release(inv) # the queue's reference, which was never taken
+    release(inv) # the waiter's reference: no future will ever wait on this call
     fut.complete(
       Result[seq[byte], string].err(
         $ReverseQueueDepth & " calls already wait for the host"
