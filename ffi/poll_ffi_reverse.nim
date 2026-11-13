@@ -300,7 +300,7 @@ proc callHost*(
     release(inv) # the waiter's reference: no future will ever wait on this call
     fut.complete(
       Result[seq[byte], string].err(
-        $ReverseQueueDepth & " calls already wait for the host"
+        "the host has not polled the last " & $ReverseQueueDepth & " calls: queue full"
       )
     )
     return fut
