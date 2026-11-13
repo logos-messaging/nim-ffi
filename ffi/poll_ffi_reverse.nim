@@ -11,7 +11,7 @@ import std/[atomics, locks, monotimes, tables]
 from std/times import initDuration
 import chronos
 import results
-from ./ffi_reverse import ReverseCallTimeoutMs, ReverseQueueDepth
+from ./ffi_reverse import ReverseCallTimeoutMs, ReverseQueueDepth, ReverseMailboxDepth
 
 type
   ReverseCallState* {.pure.} = enum
@@ -45,7 +45,9 @@ type
     nextCallId*: Atomic[uint64]
     queued*: int # invocations waiting for the host
     qHead*, qTail*: ptr ReverseInvocation
-    mailbox*: ptr ReverseReply # answers the FFI thread has not drained yet
+    mailbox*: ptr ReverseReply # answers the FFI thread has not drained yet, oldest first
+    mailboxTail*: ptr ReverseReply
+    mailboxCount*: int
     held*: ptr ReverseInvocation # the invocation the host is reading
 
 proc initReverse*(rev: var FFIReverse) =
@@ -150,11 +152,20 @@ proc releaseHeld*(rev: var FFIReverse) {.raises: [], gcsafe.} =
   release(rev.held)
   rev.held = nil
 
+proc freeReply*(reply: ptr ReverseReply) {.raises: [], gcsafe.} =
+  if reply.isNil():
+    return
+  if not reply[].data.isNil():
+    c_free(reply[].data)
+  c_free(reply)
+
 proc pushReply*(
     rev: var FFIReverse, callId: uint64, retCode: cint, data: pointer, dataLen: int
 ): bool {.raises: [], gcsafe.} =
-  ## Host thread. The FFI thread drains this and matches the id; an id it does
-  ## not know is dropped there, so a late or forged answer costs one allocation.
+  ## Host thread. The FFI thread drains this oldest first and matches the id, so
+  ## when the host answers an id twice the first answer wins and the second is
+  ## dropped as unknown. False when `ReverseMailboxDepth` answers are already
+  ## waiting; a late or forged answer costs one allocation until it is drained.
   let reply = cast[ptr ReverseReply](c_calloc(1, csize_t(sizeof(ReverseReply))))
   if reply.isNil():
     return false
@@ -169,8 +180,15 @@ proc pushReply*(
     reply[].data = buf
     reply[].dataLen = dataLen
   withLock rev.lock:
-    reply[].next = rev.mailbox
-    rev.mailbox = reply
+    if rev.mailboxCount >= ReverseMailboxDepth:
+      freeReply(reply)
+      return false
+    if rev.mailboxTail.isNil():
+      rev.mailbox = reply
+    else:
+      rev.mailboxTail[].next = reply
+    rev.mailboxTail = reply
+    rev.mailboxCount.inc()
   return true
 
 proc takeReplies*(rev: var FFIReverse): ptr ReverseReply {.raises: [], gcsafe.} =
@@ -178,14 +196,9 @@ proc takeReplies*(rev: var FFIReverse): ptr ReverseReply {.raises: [], gcsafe.} 
   withLock rev.lock:
     let head = rev.mailbox
     rev.mailbox = nil
+    rev.mailboxTail = nil
+    rev.mailboxCount = 0
     return head
-
-proc freeReply*(reply: ptr ReverseReply) {.raises: [], gcsafe.} =
-  if reply.isNil():
-    return
-  if not reply[].data.isNil():
-    c_free(reply[].data)
-  c_free(reply)
 
 proc dropQueuedCalls*(rev: var FFIReverse) {.raises: [], gcsafe.} =
   ## The next owner of the slot must not be handed these.
@@ -198,6 +211,8 @@ proc dropQueuedCalls*(rev: var FFIReverse) {.raises: [], gcsafe.} =
     rev.queued = 0
     replies = rev.mailbox
     rev.mailbox = nil
+    rev.mailboxTail = nil
+    rev.mailboxCount = 0
   while not invs.isNil():
     let nextInv = invs[].next
     invs[].state.store(ReverseCallState.Settled)
