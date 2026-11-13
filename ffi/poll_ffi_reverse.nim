@@ -22,7 +22,6 @@ type
   ReverseInvocation* = object ## Freed by whichever of the two sides lets go last.
     refs: Atomic[int]
     callId*: uint64
-    generation*: uint
     nameId*: uint64
     seqNum*: uint64
     deadline*: MonoTime
@@ -68,11 +67,7 @@ proc release*(inv: ptr ReverseInvocation) {.raises: [], gcsafe.} =
   c_free(inv)
 
 proc newInvocation*(
-    rev: var FFIReverse,
-    nameId: uint64,
-    generation: uint,
-    args: openArray[byte],
-    timeoutMs: int,
+    rev: var FFIReverse, nameId: uint64, args: openArray[byte], timeoutMs: int
 ): ptr ReverseInvocation {.raises: [].} =
   ## Nil when an allocation fails; the caller reports that as a failed call.
   let inv = cast[ptr ReverseInvocation](c_calloc(1, csize_t(sizeof(ReverseInvocation))))
@@ -89,7 +84,6 @@ proc newInvocation*(
   # Two owners from the start: the queue and the handler waiting for the answer.
   inv[].refs.store(2)
   inv[].callId = rev.nextCallId.fetchAdd(1) + 1
-  inv[].generation = generation
   inv[].nameId = nameId
   inv[].deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
   inv[].state.store(ReverseCallState.Queued)
@@ -293,7 +287,6 @@ proc callHost*(
     outbNotify: proc() {.gcsafe, raises: [].},
     rev: var FFIReverse,
     nameId: uint64,
-    generation: uint,
     args: openArray[byte],
     stampSeq: proc(): uint64 {.gcsafe, raises: [].},
     timeoutMs = ReverseCallTimeoutMs,
@@ -301,7 +294,7 @@ proc callHost*(
   ## FFI thread. Queues the question for the host and hands back the future its
   ## answer completes. The handler awaits it like any other call.
   let fut = newFuture[Result[seq[byte], string]]("ffi.callHost")
-  let inv = rev.newInvocation(nameId, generation, args, timeoutMs)
+  let inv = rev.newInvocation(nameId, args, timeoutMs)
   if inv.isNil():
     fut.complete(
       Result[seq[byte], string].err("out of memory: could not queue the call")

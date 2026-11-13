@@ -13,7 +13,7 @@ proc newRev(): ptr FFIReverse =
   return rev
 
 proc queueCall(rev: ptr FFIReverse, seqNum: uint64): ptr ReverseInvocation =
-  let inv = rev[].newInvocation(1'u64, 1'u, @[byte 0xa0], 1000)
+  let inv = rev[].newInvocation(1'u64, @[byte 0xa0], 1000)
   doAssert not inv.isNil()
   doAssert rev[].enqueue(inv, seqNum)
   return inv
@@ -46,7 +46,7 @@ suite "poll reverse state":
     var queued: seq[ptr ReverseInvocation] = @[]
     for i in 0 ..< ReverseQueueDepth:
       queued.add(queueCall(rev, uint64(i + 1)))
-    let extra = rev[].newInvocation(1'u64, 1'u, @[], 1000)
+    let extra = rev[].newInvocation(1'u64, @[], 1000)
     check not rev[].enqueue(extra, 99)
     release(extra)
     release(extra)
