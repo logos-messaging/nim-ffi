@@ -112,6 +112,12 @@ proc submit(
 
   ok()
 
+when defined(ffiPollMode):
+  proc wakeFFIThread*(ctx: ptr FFIContext) {.raises: [], gcsafe.} =
+    ## Brings the FFI thread out of its wait: something it owns has changed.
+    ctx.reqSignal.fireSync().isOkOr:
+      error "failed to wake the FFI thread", error = error
+
 proc sendRequestToFFIThread*(
     ctx: ptr FFIContext,
     ffiRequest: ptr FFIThreadRequest,
@@ -409,6 +415,11 @@ proc recycleContext[T](
   defer:
     ctx.finishRecycle(failure)
 
+  when defined(ffiPollMode):
+    # A poll-mode handler parked on the host would otherwise hold the drain open
+    # until its own deadline; the host does not answer a context it is destroying.
+    failPendingPollReverseCalls("the context is closing")
+
   # Before the drain: a handler parked on a reverse call holds the drain until its
   # deadline. `closing` first, so a handler or the dtor cannot park a new one after.
   ctx[].reverse.closing.store(true)
@@ -470,6 +481,16 @@ proc ffiNextEventSeqNumHook(): uint64 {.gcsafe, raises: [].} =
   return ffiOutboundPtr[].nextSeq()
 
 var ffiGenerationPtr {.threadvar.}: ptr Atomic[uint]
+
+when defined(ffiPollMode):
+  proc ffiCurrentOutbound*(): ptr FFIOutbound {.gcsafe, raises: [].} =
+    ## The outbound state of the context this thread serves; nil off an FFI thread.
+    return ffiOutboundPtr
+
+  proc ffiCurrentClaim*(): uint {.gcsafe, raises: [].} =
+    if ffiGenerationPtr.isNil():
+      return 0'u
+    return ffiGenerationPtr[].load()
 
 proc ffiHostPollsHook(): bool {.gcsafe, raises: [].} =
   if ffiOutboundPtr.isNil() or ffiGenerationPtr.isNil():
@@ -574,6 +595,10 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
       processQueue()
       drainReverseReplies()
+      when defined(ffiPollMode):
+        # Answers the host sent back, and calls it never answered.
+        ctx[].outbound.reverse.drainPollReverseReplies()
+        failOverduePollReverseCalls()
 
       # Block until a submit signals us, or at most 100ms.
       discard await ctx.reqSignal.wait().withTimeout(chronos.milliseconds(100))
@@ -581,6 +606,8 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
     # Drain once more for requests enqueued just before `running` flipped.
     processQueue()
     drainReverseReplies()
+    when defined(ffiPollMode):
+      ctx[].outbound.reverse.drainPollReverseReplies()
     # The host is shutting down and will not answer a parked reverse call.
     ctx[].reverse.closing.store(true)
     failPendingReverse("FFI context is shutting down; the reverse call was abandoned")
