@@ -51,7 +51,8 @@ const MsgKinds* = [
   MsgKind(
     name: "REVERSE_CALL",
     value: MsgReverseCall,
-    doc: "the library asks: answer id with <lib>_reverse_reply within duration_ms",
+    doc:
+      "the library asks and waits; id names the call and duration_ms is the time left to answer, measured as poll returns, so add it to your own monotonic clock at once",
   ),
   MsgKind(
     name: "NOT_RESPONDING_HEARTBEAT",
