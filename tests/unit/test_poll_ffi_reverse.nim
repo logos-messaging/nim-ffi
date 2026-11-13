@@ -50,6 +50,15 @@ proc hostTick*(): Future[Result[string, string]] {.ffiReverse.}
 proc rev_tick*(lib: ReverseLib): Future[Result[string, string]] {.ffi.} =
   return await hostTick()
 
+proc hostRenamed*(
+  url: string
+): Future[Result[string, string]] {.ffiReverse("asked_by_name", timeout = 300).}
+
+proc rev_renamed*(
+    lib: ReverseLib, url: string
+): Future[Result[string, string]] {.ffi.} =
+  return await hostRenamed(url)
+
 proc rev_destroy*(lib: ReverseLib) {.ffiDtor.} =
   discard
 
@@ -165,6 +174,22 @@ suite "a handler asks the host":
     ) == RET_OK
     let (reply, payload) = pollFor(token, MsgReply)
     check cborDecode(payload, string).value == "tock"
+
+  test "a wire name and a timeout in the pragma are honoured":
+    var token: FFICtxToken
+    createCtx(token)
+    defer:
+      discard rev_destroy(token)
+
+    var req = cborEncode(RevRenamedReq(url: "https://example.test/g"))
+    var reqId: uint64
+    check rev_renamed(token, encodedPtr(req), req.len.csize_t, addr reqId) == RET_OK
+
+    let (call, _) = pollFor(token, MsgReverseCall)
+    check call.nameId == nameId("asked_by_name")
+    check call.durationMs <= 300'u64
+    let (reply, _) = pollFor(token, MsgReply)
+    check reply.retCode == RET_ERR # unanswered: the 300 ms deadline, not the default
 
   test "a host that refuses is the handler's error":
     var token: FFICtxToken

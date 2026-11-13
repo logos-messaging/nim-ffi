@@ -10,7 +10,11 @@ import ../codegen/string_helpers
 proc reverseArgsTypeName(procName: string): string =
   return snakeToPascalCase(camelToSnakeCase(procName)) & "HostCall"
 
-proc buildPollFFIReverseProc*(prc: NimNode): NimNode {.compileTime.} =
+var pollReverseWireNames {.compileTime.}: seq[string]
+
+proc buildPollFFIReverseProc*(
+    prc: NimNode, wireName: string, timeoutNode: NimNode
+): NimNode {.compileTime.} =
   ## The `{.ffiReverse.}` expansion of a poll-mode build: the host answers through
   ## `<lib>_reverse_reply`, so there is no `set_impl`.
   ## `proc hostFetch(url: string): Future[Result[string, string]] {.ffiReverse.}`
@@ -37,7 +41,12 @@ proc buildPollFFIReverseProc*(prc: NimNode): NimNode {.compileTime.} =
   if procNameNode.kind == nnkPostfix:
     procNameNode = procNameNode[1]
   let procNameStr = $procNameNode
-  let wireName = camelToSnakeCase(procNameStr)
+  if wireName in pollReverseWireNames:
+    error(
+      "`.ffiReverse.` proc " & procNameStr & ": wire name '" & wireName &
+        "' is already used by another reverse proc; the host tells them apart by it"
+    )
+  pollReverseWireNames.add(wireName)
 
   # The arguments ride as one named map, the same shape a request uses, so the
   # host decodes one typed value instead of a positional list.
@@ -94,6 +103,7 @@ proc buildPollFFIReverseProc*(prc: NimNode): NimNode {.compileTime.} =
       argsCbor,
       proc(): uint64 {.gcsafe, raises: [].} =
         outb[].nextSeq(),
+      `timeoutNode`,
     )
     if `answer`.isErr():
       return err(`answer`.error)
