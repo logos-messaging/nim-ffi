@@ -38,6 +38,13 @@ proc hostSum*(a, b: int): Future[Result[int, string]] {.ffiReverse.}
 proc rev_sum*(lib: ReverseLib, x: int, y: int): Future[Result[int, string]] {.ffi.} =
   return await hostSum(x, y)
 
+proc hostNotify*(msg: string): Future[Result[void, string]] {.ffiReverse.}
+
+proc rev_notify*(lib: ReverseLib, msg: string): Future[Result[string, string]] {.ffi.} =
+  (await hostNotify(msg)).isOkOr:
+    return err("host said: " & error)
+  return ok("told")
+
 proc rev_destroy*(lib: ReverseLib) {.ffiDtor.} =
   discard
 
@@ -117,6 +124,22 @@ suite "a handler asks the host":
     ) == RET_OK
     let (reply, payload) = pollFor(token, MsgReply)
     check cborDecode(payload, int).value == 7
+
+  test "a call that returns nothing completes on the host's ok":
+    var token: FFICtxToken
+    createCtx(token)
+    defer:
+      discard rev_destroy(token)
+
+    var req = cborEncode(RevNotifyReq(msg: "hi"))
+    var reqId: uint64
+    check rev_notify(token, encodedPtr(req), req.len.csize_t, addr reqId) == RET_OK
+
+    let (call, _) = pollFor(token, MsgReverseCall)
+    check rev_reverse_reply(token, call.id, RET_OK, nil, 0) == RET_OK
+    let (reply, payload) = pollFor(token, MsgReply)
+    check reply.retCode == RET_OK
+    check cborDecode(payload, string).value == "told"
 
   test "a host that refuses is the handler's error":
     var token: FFICtxToken

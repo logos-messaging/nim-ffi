@@ -79,12 +79,14 @@ proc buildPollFFIReverseProc*(prc: NimNode): NimNode {.compileTime.} =
     argsCtor.add(a)
 
   let wireNameLit = newLit(wireName)
-  let callBody = quote:
+  let answer = ident("hostAnswer")
+  let callBody = newStmtList()
+  callBody.add quote do:
     let outb = ffiCurrentOutbound()
     if outb.isNil():
       return err("a reverse call can only be made from an FFI handler")
     let argsCbor = cborEncode(`argsCtor`)
-    let answer = await callHost(
+    let `answer` = await callHost(
       proc() {.gcsafe, raises: [].} =
         outb[].notifyOutbound(),
       outb[].reverse,
@@ -93,12 +95,18 @@ proc buildPollFFIReverseProc*(prc: NimNode): NimNode {.compileTime.} =
       proc(): uint64 {.gcsafe, raises: [].} =
         outb[].nextSeq(),
     )
-    if answer.isErr():
-      return err(answer.error)
-    let decoded = cborDecode(answer.value, `valueType`)
-    if decoded.isErr():
-      return err("the host's answer did not decode: " & decoded.error)
-    return ok(decoded.value)
+    if `answer`.isErr():
+      return err(`answer`.error)
+
+  if valueType.kind == nnkIdent and $valueType == "void":
+    callBody.add quote do:
+      return ok()
+  else:
+    callBody.add quote do:
+      let decoded = cborDecode(`answer`.value, `valueType`)
+      if decoded.isErr():
+        return err("the host's answer did not decode: " & decoded.error)
+      return ok(decoded.value)
 
   var callProc = prc.copyNimTree()
   callProc[^1] = callBody
