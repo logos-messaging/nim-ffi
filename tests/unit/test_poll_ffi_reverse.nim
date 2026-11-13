@@ -132,6 +132,16 @@ suite "a handler asks the host":
     let (reply, _) = pollFor(token, MsgReply)
     check reply.retCode == RET_OK
 
+  test "an answer too long to count is refused, not a crash":
+    var token: FFICtxToken
+    createCtx(token)
+    defer:
+      discard rev_destroy(token)
+
+    var answer = cborEncode("x")
+    check rev_reverse_reply(token, 1'u64, RET_OK, encodedPtr(answer), csize_t.high) ==
+      RET_TOO_LARGE
+
   test "a host that never answers does not park the handler for ever":
     var token: FFICtxToken
     createCtx(token)

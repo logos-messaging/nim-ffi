@@ -205,6 +205,10 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
       let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
       if `ctxIdent`.isNil():
         return RET_INVALID_CTX
+      # Checked on the csize_t, before the int conversion can raise a RangeDefect.
+      if payloadLen > csize_t(high(int)) or
+          (MaxRequestPayloadBytes > 0 and payloadLen > csize_t(MaxRequestPayloadBytes)):
+        return RET_TOO_LARGE
       if not `ctxIdent`[].outbound.reverse.pushReply(
         callId, retCode, cast[pointer](payload), int(payloadLen)
       ):
