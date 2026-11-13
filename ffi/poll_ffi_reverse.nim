@@ -252,19 +252,18 @@ proc drainPollReverseReplies*(rev: var FFIReverse) =
     let pending = ffiPendingReverse.getOrDefault(reply[].callId)
     if not pending.inv.isNil():
       ffiPendingReverse.del(reply[].callId)
-      var payload: seq[byte] = @[]
-      if reply[].dataLen > 0:
-        payload = newSeq[byte](reply[].dataLen)
-        copyMem(addr payload[0], reply[].data, reply[].dataLen)
-      var res = Result[seq[byte], string].ok(move(payload))
       if reply[].retCode != 0:
-        var text = ""
-        for i in 0 ..< reply[].dataLen:
-          text.add(char(reply[].data[i]))
-        if text.len == 0:
-          text = "the host refused the call"
-        res = Result[seq[byte], string].err(text)
-      settle(pending, move(res))
+        var text = "the host refused the call"
+        if reply[].dataLen > 0:
+          text = newString(reply[].dataLen)
+          copyMem(addr text[0], reply[].data, reply[].dataLen)
+        settle(pending, Result[seq[byte], string].err(text))
+      else:
+        var payload: seq[byte] = @[]
+        if reply[].dataLen > 0:
+          payload = newSeq[byte](reply[].dataLen)
+          copyMem(addr payload[0], reply[].data, reply[].dataLen)
+        settle(pending, Result[seq[byte], string].ok(move(payload)))
     freeReply(reply)
     reply = nextReply
 
