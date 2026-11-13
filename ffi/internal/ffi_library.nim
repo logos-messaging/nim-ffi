@@ -233,7 +233,6 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
       )
     )
 
-  when defined(ffiPollMode):
     # {libraryName}_last_error: an export returns a code, this gives the words.
     let lastErrorName = libraryName & "_last_error"
     let lastErrorBody = quote:
