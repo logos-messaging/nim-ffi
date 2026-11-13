@@ -11,10 +11,7 @@ import std/[atomics, locks, monotimes, tables]
 from std/times import initDuration
 import chronos
 import results
-from ./ffi_reverse import ReverseCallTimeoutMs
-
-const MaxPendingPollReverseCalls* {.intdefine: "ffiMaxPendingReverseCalls".} = 1024
-  ## Calls waiting for the host at once, per context.
+from ./ffi_reverse import ReverseCallTimeoutMs, ReverseQueueDepth
 
 type
   ReverseCallState* {.pure.} = enum
@@ -100,7 +97,7 @@ proc newInvocation*(
 proc enqueue*(rev: var FFIReverse, inv: ptr ReverseInvocation, seqNum: uint64): bool =
   ## False when too many calls already wait for the host.
   withLock rev.lock:
-    if rev.queued >= MaxPendingPollReverseCalls:
+    if rev.queued >= ReverseQueueDepth:
       return false
     inv[].seqNum = seqNum
     inv[].next = nil
@@ -296,7 +293,7 @@ proc callHost*(
     release(inv)
     fut.complete(
       Result[seq[byte], string].err(
-        $MaxPendingPollReverseCalls & " calls already wait for the host"
+        $ReverseQueueDepth & " calls already wait for the host"
       )
     )
     return fut

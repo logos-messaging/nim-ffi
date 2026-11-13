@@ -5,6 +5,7 @@
 import std/atomics
 import unittest2
 import ffi/poll_ffi_reverse
+from ffi/ffi_reverse import ReverseQueueDepth
 
 proc newRev(): ptr FFIReverse =
   let rev = cast[ptr FFIReverse](allocShared0(sizeof(FFIReverse)))
@@ -43,7 +44,7 @@ suite "poll reverse state":
   test "the queue refuses a call past its cap":
     let rev = newRev()
     var queued: seq[ptr ReverseInvocation] = @[]
-    for i in 0 ..< MaxPendingPollReverseCalls:
+    for i in 0 ..< ReverseQueueDepth:
       queued.add(queueCall(rev, uint64(i + 1)))
     let extra = rev[].newInvocation(1'u64, 1'u, @[], 1000)
     check not rev[].enqueue(extra, 99)
