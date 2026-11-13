@@ -108,7 +108,7 @@ proc buildPollFFIReverseProc*(
       `timeoutNode`,
     )
     if `answer`.isErr():
-      return err(`answer`.error)
+      return err("reverse call failed: " & `answer`.error)
 
   if valueType.kind == nnkIdent and $valueType == "void":
     callBody.add quote do:

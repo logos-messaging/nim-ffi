@@ -215,6 +215,7 @@ suite "a handler asks the host":
     for b in payload:
       text.add(char(b))
     check text.contains("no such thing")
+    check text.contains("reverse call failed:")
 
   test "an answer to an id nobody waits for is dropped":
     var token: FFICtxToken
