@@ -11,11 +11,7 @@ import std/[atomics, locks, monotimes, tables]
 from std/times import initDuration
 import chronos
 import results
-
-const PollReverseCallTimeoutMs* {.intdefine: "ffiReverseCallTimeoutMs".} = 10000
-  ## How long a handler waits for the host before its call fails. A host that
-  ## never polls must not park a handler for ever. Override
-  ## `-d:ffiPollReverseCallTimeoutMs=N`.
+from ./ffi_reverse import ReverseCallTimeoutMs
 
 const MaxPendingPollReverseCalls* {.intdefine: "ffiMaxPendingReverseCalls".} = 1024
   ## Calls waiting for the host at once, per context.
@@ -282,7 +278,7 @@ proc callHost*(
     generation: uint,
     args: openArray[byte],
     stampSeq: proc(): uint64 {.gcsafe, raises: [].},
-    timeoutMs = PollReverseCallTimeoutMs,
+    timeoutMs = ReverseCallTimeoutMs,
 ): Future[Result[seq[byte], string]] =
   ## FFI thread. Queues the question for the host and hands back the future its
   ## answer completes. The handler awaits it like any other call.
