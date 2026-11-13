@@ -7,6 +7,8 @@ import ../codegen/[meta, string_helpers, build_paths]
 import ./ffi_route
 import ./ffi_export
 import ./ffi_codegen_common
+when defined(ffiPollMode):
+  import ./poll_ffi_reverse_macro
 when defined(ffiGenBindings):
   import ../codegen/rust
   import ../codegen/cpp
@@ -2112,7 +2114,24 @@ macro ffiReverse*(args: varargs[untyped]): untyped =
   let prc = args[^1]
   if prc.kind notin {nnkProcDef, nnkFuncDef}:
     error("ffiReverse must be applied to a proc declaration")
-  return buildFFIReverseProc(prc, args[0 ..^ 2])
+  when defined(ffiPollMode):
+    # The host polls for the question instead of registering a callback.
+    var userProcName = prc[0]
+    if userProcName.kind == nnkPostfix:
+      userProcName = userProcName[1]
+    let pragmaArgs = resolveReversePragmaArgs(args[0 ..^ 2], userProcName)
+    for i in 1 ..< prc[3].len:
+      let group = prc[3][i]
+      for j in 0 ..< group.len - 2:
+        let where = "`.ffiReverse.` proc " & $userProcName & " parameter " & $group[j]
+        rejectRawPtrType(group[^2], where)
+        if isHandleType(group[^2]):
+          error(
+            where & ": an {.ffiHandle.} type cannot cross to the host in a reverse call"
+          )
+    return buildPollFFIReverseProc(prc, pragmaArgs.wireName, pragmaArgs.timeoutNode)
+  else:
+    return buildFFIReverseProc(prc, args[0 ..^ 2])
 
 proc buildFFIReverseEventProc(
     prc: NimNode, leading: seq[NimNode]

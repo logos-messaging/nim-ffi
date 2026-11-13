@@ -5,7 +5,8 @@
 import std/[atomics, os, strutils, tables]
 import chronos, results, unittest2
 import ffi/poll_ffi_reverse
-from ffi/ffi_reverse import ReverseQueueDepth
+from ffi/ffi_reverse import
+  ReverseQueueDepth, FFIReverseContext, ffiCurrentReverseContext, initReverseContext
 
 proc newRev(): ptr FFIReverse =
   let rev = cast[ptr FFIReverse](allocShared0(sizeof(FFIReverse)))
@@ -144,3 +145,15 @@ suite "poll reverse calls on one thread":
     check fut.read().error == "the context is closing"
     check ffiPendingReverse.len == 0
     rev[].dropQueuedCalls()
+
+  test "a call made while the context is closing fails at once":
+    let rev = newRev()
+    var closing: FFIReverseContext
+    initReverseContext(closing)
+    closing.closing.store(true)
+    ffiCurrentReverseContext = addr closing
+    let fut = ask(rev)
+    ffiCurrentReverseContext = nil
+    check fut.read().error.contains("closing")
+    check ffiPendingReverse.len == 0
+    check rev[].headSeq() == 0'u64

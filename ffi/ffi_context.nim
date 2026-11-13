@@ -151,10 +151,13 @@ proc ffiTeardownHook*[T](): var FFITeardownProc[T] =
   var hook {.global.}: FFITeardownProc[T]
   hook
 
-proc reverseWakeHook[T](ud: pointer) {.nimcall, gcsafe, raises: [].} =
+proc wakeFFIThread*[T](ctx: ptr FFIContext[T]) {.gcsafe, raises: [].} =
   ## Any host thread, maybe one without a Nim GC under refc, so no logging here. A
   ## failed wake needs no handling: the reply is queued and the FFI loop polls every 100ms.
-  discard cast[ptr FFIContext[T]](ud).reqSignal.fireSync()
+  discard ctx.reqSignal.fireSync()
+
+proc reverseWakeHook[T](ud: pointer) {.nimcall, gcsafe, raises: [].} =
+  cast[ptr FFIContext[T]](ud).wakeFFIThread()
 
 proc reverseGenerationHook[T](ud: pointer): uint {.nimcall, gcsafe, raises: [].} =
   return cast[ptr FFIContext[T]](ud).generation.load()

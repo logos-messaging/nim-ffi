@@ -199,6 +199,40 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
     )
 
   when defined(ffiPollMode):
+    # {libraryName}_reverse_reply: the host's answer to a NIMFFI_MSG_REVERSE_CALL.
+    let pollReverseReplyName = libraryName & "_reverse_reply"
+    let pollReverseReplyBody = quote:
+      let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
+      if `ctxIdent`.isNil():
+        return RET_INVALID_CTX
+      # Checked on the csize_t, before the int conversion can raise a RangeDefect.
+      if payloadLen > csize_t(high(int)) or
+          (MaxRequestPayloadBytes > 0 and payloadLen > csize_t(MaxRequestPayloadBytes)):
+        return RET_TOO_LARGE
+      if not `ctxIdent`[].outbound.reverse.pushReply(
+        callId, retCode, cast[pointer](payload), int(payloadLen)
+      ):
+        return RET_ERR
+      # The FFI thread matches the id; an answer it does not know is dropped there.
+      `ctxIdent`.wakeFFIThread()
+      return RET_OK
+
+    stmts.add(
+      newProc(
+        name = ident(pollReverseReplyName),
+        params = @[
+          ident("cint"),
+          newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
+          newIdentDefs(ident("callId"), ident("uint64")),
+          newIdentDefs(ident("retCode"), ident("cint")),
+          newIdentDefs(ident("payload"), nnkPtrTy.newTree(ident("byte"))),
+          newIdentDefs(ident("payloadLen"), ident("csize_t")),
+        ],
+        body = pollReverseReplyBody,
+        pragmas = cdeclExportPragma,
+      )
+    )
+
     # {libraryName}_last_error: an export returns a code, this gives the words.
     let lastErrorName = libraryName & "_last_error"
     let lastErrorBody = quote:
@@ -302,35 +336,36 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
       )
     )
 
-  # {libraryName}_reverse_reply: answers a {.ffiReverse.} call from any host thread.
-  let replyName = libraryName & "_reverse_reply"
-  let replyBody = quote:
-    when declared(initializeLibrary):
-      initializeLibrary()
-    let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
-    if `ctxIdent`.isNil():
-      return RET_INVALID_CTX
-    # Checked on the csize_t, before the int conversion can raise a RangeDefect.
-    if replyLen > csize_t(high(int)) or
-        (MaxRequestPayloadBytes > 0 and replyLen > csize_t(MaxRequestPayloadBytes)):
-      return RET_TOO_LARGE
-    return submitReverseReply(`ctxIdent`, callId, retCode, replyCbor, int(replyLen))
+  when not defined(ffiPollMode):
+    # {libraryName}_reverse_reply: answers a {.ffiReverse.} call from any host thread.
+    let replyName = libraryName & "_reverse_reply"
+    let replyBody = quote:
+      when declared(initializeLibrary):
+        initializeLibrary()
+      let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
+      if `ctxIdent`.isNil():
+        return RET_INVALID_CTX
+      # Checked on the csize_t, before the int conversion can raise a RangeDefect.
+      if replyLen > csize_t(high(int)) or
+          (MaxRequestPayloadBytes > 0 and replyLen > csize_t(MaxRequestPayloadBytes)):
+        return RET_TOO_LARGE
+      return submitReverseReply(`ctxIdent`, callId, retCode, replyCbor, int(replyLen))
 
-  stmts.add(
-    newProc(
-      name = ident(replyName),
-      params = @[
-        ident("cint"),
-        newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
-        newIdentDefs(ident("callId"), ident("uint64")),
-        newIdentDefs(ident("retCode"), ident("cint")),
-        newIdentDefs(ident("replyCbor"), nnkPtrTy.newTree(ident("byte"))),
-        newIdentDefs(ident("replyLen"), ident("csize_t")),
-      ],
-      body = replyBody,
-      pragmas = cdeclExportPragma,
+    stmts.add(
+      newProc(
+        name = ident(replyName),
+        params = @[
+          ident("cint"),
+          newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
+          newIdentDefs(ident("callId"), ident("uint64")),
+          newIdentDefs(ident("retCode"), ident("cint")),
+          newIdentDefs(ident("replyCbor"), nnkPtrTy.newTree(ident("byte"))),
+          newIdentDefs(ident("replyLen"), ident("csize_t")),
+        ],
+        body = replyBody,
+        pragmas = cdeclExportPragma,
+      )
     )
-  )
 
   # {libraryName}_shutdown
   let shutdownName = libraryName & "_shutdown"
