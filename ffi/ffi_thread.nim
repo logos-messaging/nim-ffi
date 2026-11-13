@@ -415,15 +415,13 @@ proc recycleContext[T](
   defer:
     ctx.finishRecycle(failure)
 
-  when defined(ffiPollMode):
-    # A poll-mode handler parked on the host would otherwise hold the drain open
-    # until its own deadline; the host does not answer a context it is destroying.
-    failPendingPollReverseCalls("the context is closing")
-
   # Before the drain: a handler parked on a reverse call holds the drain until its
   # deadline. `closing` first, so a handler or the dtor cannot park a new one after.
   ctx[].reverse.closing.store(true)
   failPendingReverse("FFI context is recycling; the reverse call was abandoned")
+  when defined(ffiPollMode):
+    # The host does not answer a context it is destroying.
+    failPendingPollReverseCalls("the context is closing")
 
   if not await drainOngoing(ongoing):
     # A handler that still runs answers a callback carrying userData the host
