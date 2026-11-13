@@ -220,8 +220,8 @@ proc settle(pending: PendingReverse, res: Result[seq[byte], string]) =
   release(pending.inv)
 
 proc drainPollReverseReplies*(rev: var FFIReverse) =
-  ## FFI thread. Answers the calls the host replied to; an id nobody waits for
-  ## is dropped, which is what a late answer to a timed-out call is.
+  ## FFI thread. Answers the calls the host replied to; and if nobody waits for it,
+  ## it is dropped, which is what a late answer to a timed-out call is.
   var reply = rev.takeReplies()
   while not reply.isNil():
     let nextReply = reply[].next
