@@ -131,8 +131,14 @@ proc popForHost*(rev: var FFIReverse): ptr ReverseInvocation {.raises: [], gcsaf
       rev.qTail = nil
     rev.queued.dec()
     inv[].next = nil
+  # Past its deadline the host could not answer in time, so it is not handed out;
+  # the FFI thread still fails the waiting handler with the timeout reason.
+  var target = ReverseCallState.Delivered
+  if getMonoTime() >= inv[].deadline:
+    target = ReverseCallState.Settled
   var expected = ReverseCallState.Queued
-  if inv[].state.compareExchange(expected, ReverseCallState.Delivered):
+  if inv[].state.compareExchange(expected, target) and
+      target == ReverseCallState.Delivered:
     return inv
   release(inv) # the queue's reference; the waiter has let go or will
   return nil
