@@ -218,8 +218,7 @@ proc takeMessage[T](ctx: ptr FFIContext[T], msg: ptr ptr PollResult): bool =
     eventSeq = ctx[].eventQueue.headSeq()
   let replySeq = outb[].replyHeadSeq()
   let staleSeq = outb[].staleHeadSeq()
-  var reverseSeq = 0'u64
-  reverseSeq = outb[].reverse.headSeq()
+  let reverseSeq = outb[].reverse.headSeq()
 
   let oldest = earliest(earliest(earliest(eventSeq, replySeq), staleSeq), reverseSeq)
   if oldest == 0:
