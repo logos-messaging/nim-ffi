@@ -87,7 +87,6 @@ proc buildPollFFIReverseProc*(prc: NimNode): NimNode {.compileTime.} =
         outb[].notifyOutbound(),
       outb[].reverse,
       nameId(`wireNameLit`),
-      ffiCurrentClaim(),
       argsCbor,
       proc(): uint64 {.gcsafe, raises: [].} =
         outb[].nextSeq(),

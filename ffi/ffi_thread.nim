@@ -487,11 +487,6 @@ when defined(ffiPollMode):
     ## The outbound state of the context this thread serves; nil off an FFI thread.
     return ffiOutboundPtr
 
-  proc ffiCurrentClaim*(): uint {.gcsafe, raises: [].} =
-    if ffiGenerationPtr.isNil():
-      return 0'u
-    return ffiGenerationPtr[].load()
-
 proc ffiHostPollsHook(): bool {.gcsafe, raises: [].} =
   if ffiOutboundPtr.isNil() or ffiGenerationPtr.isNil():
     return true
