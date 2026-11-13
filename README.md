@@ -412,8 +412,30 @@ ctx.emit_on_host_tick(7);            // reverse event, fire-and-forget
 | A host implementation calls `<lib>_shutdown` | The call returns; the worker that runs it leaks and is not joined. |
 | `{.ffiReverseEvent.}` emit | The return code reports the enqueue only. |
 
-A reverse call takes no `{.ffiHandle.}` parameter, and only an `{.ffi.}` handler
-on the FFI processing thread can await it.
+A reverse call takes no `{.ffiHandle.}` parameter, and only code on the FFI
+processing thread can await it: an `{.ffi.}` handler, or any async work running
+on that thread's event loop.
+
+To check an interface before its first call, ask which wires the host has not
+implemented yet. An unknown wire name is a compile error.
+
+The check is meaningful only in a request the host sends after it has
+registered its implementations: `<lib>_set_<wire>_impl` takes the token the
+`{.ffiCtor.}` returns, so the host can register only once the ctor has
+returned, and nothing orders that against the ctor body on the FFI thread. A
+check inside the ctor races the registration and usually sees every wire
+missing. Put it in a later request instead; liblogosdelivery runs it when the
+host calls `start_node`.
+
+Both return a `Result`: off the FFI processing thread there is no context to
+ask, and that is an error rather than "not implemented".
+
+```nim
+let missing = ?ffiReverseMissing(["fetch_host_clock", "host_note"])
+if missing.len > 0:
+  return err("host has not implemented " & missing.join(", "))
+doAssert ffiReverseImplemented("fetch_host_clock").get()
+```
 
 ## Placement of `genBindings()`
 

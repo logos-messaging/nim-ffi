@@ -93,6 +93,15 @@ All notable changes to this project are documented in this file.
   and Rust bindings use it, and catch an exception or a panic in the
   implementation. Replies are first-wins, lengths are checked before use, and
   a reverse call fails at once once a recycle or shutdown has begun.
+- `ffiReverseImplemented(wire)` and `ffiReverseMissing(wires)` tell code on the
+  FFI processing thread which host implementations are registered, so a library
+  can reject an unfulfilled interface up front instead of on its first call.
+  They return a `Result`, an error off the FFI thread, and are meaningful in a
+  request the host sends after registering, not in the `{.ffiCtor.}`. Wire
+  names resolve to impl ids at compile time.
+- Fix: `<lib>_set_<wire>_impl` compiles when its `{.ffiReverse.}` proc is in
+  another module than `declareLibrary`; `release` resolved to chronos'
+  `AsyncLock` / `AsyncSemaphore` overloads instead of the export's parameter.
 - Each `{.ffi.}` proc's `##` doc comment reaches the generated C header as a
   `/** ... */` block above the declaration and its wrapper.
 - `genBindings()` fails compilation when a library declares an `{.ffiCtor.}` but

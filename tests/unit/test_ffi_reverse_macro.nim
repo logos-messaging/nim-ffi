@@ -206,7 +206,43 @@ registerReqFFI(DrivePingRequest, h: ptr FFIContext[RevMacroLib]):
       return err(error)
     return ok("pinged")
 
+registerReqFFI(DriveMissingRequest, h: ptr FFIContext[RevMacroLib]):
+  proc(): Future[Result[string, string]] {.async.} =
+    let missing = ?ffiReverseMissing(["fetch_config", "host_note", "ping_host"])
+    return ok(missing.join(","))
+
+static:
+  # An unknown wire name is a compile error, not an always-missing entry.
+  doAssert not compiles(ffiReverseMissing(["no_such_wire"]))
+
 suite "{.ffiReverse.} through the generated exports":
+  test "ffiReverseMissing lists the wires the host has not implemented":
+    # Off an FFI thread there is no context to ask: an error, not "missing".
+    check ffiReverseMissing(["fetch_config"]).isErr()
+    check ffiReverseImplemented("fetch_config").isErr()
+    withLibCtx(ctx, token):
+      block:
+        setupCallbackData(rsp)
+        check sendRequestToFFIThread(
+          ctx, DriveMissingRequest.ffiNewReq(captureCb, addr rsp)
+        )
+          .isOk()
+        waitCallback(rsp)
+        check rsp.retCode == RET_OK
+        check "fetch_config,host_note,ping_host" in callbackMsg(rsp)
+
+      check revmacro_set_host_note_impl(token, ackNoteImpl, nil, nil) == RET_OK
+      block:
+        setupCallbackData(rsp)
+        check sendRequestToFFIThread(
+          ctx, DriveMissingRequest.ffiNewReq(captureCb, addr rsp)
+        )
+          .isOk()
+        waitCallback(rsp)
+        check rsp.retCode == RET_OK
+        check "fetch_config,ping_host" in callbackMsg(rsp)
+        check "host_note" notin callbackMsg(rsp)
+
   test "multi-param call: synthesized args object and typed reply roundtrip":
     setupCallbackData(rsp)
     withLibCtx(ctx, token):

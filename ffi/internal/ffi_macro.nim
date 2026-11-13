@@ -2051,18 +2051,27 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
   let poolIdent = ident(currentLibType & "FFIPool")
   let ctxIdent = ident("ctx")
   let regResIdent = genSym(nskLet, "regRes")
+  # The params are spliced into the body as the same idents. A bare name in
+  # `quote` is bound to what this module sees, and it imports chronos: `release`
+  # became chronos' AsyncLock/AsyncSemaphore overloads, and with the proc in
+  # another module than declareLibrary it no longer resolved to the param.
+  let tokenParam = ident("ctxToken")
+  let implParam = ident("impl")
+  let userDataParam = ident("userData")
+  let releaseParam = ident("release")
   let setBody = quote:
     when declared(initializeLibrary):
       initializeLibrary()
-    let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
+    let `ctxIdent` = `poolIdent`.resolveCtx(`tokenParam`)
     if `ctxIdent`.isNil():
       return RET_INVALID_CTX
-    if impl.isNil():
+    if `implParam`.isNil():
       `ctxIdent`[].reverse.unregisterImpl(`implIdLit`)
       return RET_OK
     # Refused: `userData` stays the caller's and `release` is never called for it.
-    let `regResIdent` =
-      `ctxIdent`[].reverse.registerImpl(`implIdLit`, impl, userData, release)
+    let `regResIdent` = `ctxIdent`[].reverse.registerImpl(
+      `implIdLit`, `implParam`, `userDataParam`, `releaseParam`
+    )
     if `regResIdent`.isErr():
       return `regResIdent`.error.toRetCode()
     return RET_OK
@@ -2072,10 +2081,10 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
       name = postfix(ident(setImplName), "*"),
       params = @[
         ident("cint"),
-        newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
-        newIdentDefs(ident("impl"), ident("FFIReverseImpl")),
-        newIdentDefs(ident("userData"), ident("pointer")),
-        newIdentDefs(ident("release"), ident("FFIReverseRelease")),
+        newIdentDefs(tokenParam, ident("FFICtxToken")),
+        newIdentDefs(implParam, ident("FFIReverseImpl")),
+        newIdentDefs(userDataParam, ident("pointer")),
+        newIdentDefs(releaseParam, ident("FFIReverseRelease")),
       ],
       body = setBody,
       pragmas = cdeclExportPragma(setImplName),
@@ -2113,6 +2122,43 @@ macro ffiReverse*(args: varargs[untyped]): untyped =
   if prc.kind notin {nnkProcDef, nnkFuncDef}:
     error("ffiReverse must be applied to a proc declaration")
   return buildFFIReverseProc(prc, args[0 ..^ 2])
+
+proc reverseImplId(wire: string): int {.compileTime.} =
+  ## The impl id `buildFFIReverseProc` gave the library's `{.ffiReverse.}` proc
+  ## with this wire name: its index among the library's reverse procs.
+  var implId = 0
+  for r in ffiReverseRegistry:
+    if r.libName == currentLibName:
+      if r.wireName == wire:
+        return implId
+      implId.inc()
+  error(
+    "no `.ffiReverse.` proc of " & currentLibName & " has the wire name '" & wire &
+      "' (declare the proc before checking it)"
+  )
+
+macro ffiReverseImplemented*(wire: static string): untyped =
+  ## FFI thread only: `Result[bool, string]`, whether the host registered an
+  ## impl for `wire` on this context; an error off an FFI thread. An unknown
+  ## wire is a compile error.
+  return newCall(ident("ffiReverseImplementedId"), newLit(reverseImplId(wire)))
+
+macro ffiReverseMissing*(wires: static openArray[string]): untyped =
+  ## FFI thread only: `Result[seq[string], string]`, the wires of `wires` the
+  ## host has not implemented, in order; empty when the interface is fulfilled.
+  ## Lets a library reject an unfulfilled interface up front instead of on its
+  ## first call. Meaningful only in a request the host sends after registering
+  ## its impls, never in the `{.ffiCtor.}`. An error off an FFI thread; an
+  ## unknown wire is a compile error.
+  var pairs = nnkBracket.newTree()
+  for w in wires:
+    pairs.add(
+      nnkTupleConstr.newTree(
+        nnkExprColonExpr.newTree(ident("wire"), newLit(w)),
+        nnkExprColonExpr.newTree(ident("implId"), newLit(reverseImplId(w))),
+      )
+    )
+  return newCall(ident("ffiReverseMissingIds"), pairs)
 
 proc buildFFIReverseEventProc(
     prc: NimNode, leading: seq[NimNode]
