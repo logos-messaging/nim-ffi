@@ -10,8 +10,13 @@ import ./helpers
 
 type ReverseLib = ref object
 
-type HostFetchHostCallArgs = object ## What the test decodes on the host side.
-  url*: string
+type
+  HostFetchHostCallArgs = object ## What the test decodes on the host side.
+    url*: string
+
+  HostSumHostCallArgs = object
+    a*: int
+    b*: int
 
 {.emit: "void librevNimMain(void) {}".}
 
@@ -27,6 +32,11 @@ proc rev_fetch*(lib: ReverseLib, url: string): Future[Result[string, string]] {.
   let body = (await hostFetch(url)).valueOr:
     return err("host said: " & error)
   return ok("got " & body)
+
+proc hostSum*(a, b: int): Future[Result[int, string]] {.ffiReverse.}
+
+proc rev_sum*(lib: ReverseLib, x: int, y: int): Future[Result[int, string]] {.ffi.} =
+  return await hostSum(x, y)
 
 proc rev_destroy*(lib: ReverseLib) {.ffiDtor.} =
   discard
@@ -83,6 +93,30 @@ suite "a handler asks the host":
     check reply.id == reqId
     check reply.retCode == RET_OK
     check cborDecode(payload, string).value == "got hello"
+
+  test "parameters declared together all reach the host":
+    var token: FFICtxToken
+    createCtx(token)
+    defer:
+      discard rev_destroy(token)
+
+    var req = cborEncode(RevSumReq(x: 2, y: 5))
+    var reqId: uint64
+    check rev_sum(token, encodedPtr(req), req.len.csize_t, addr reqId) == RET_OK
+
+    let (call, args) = pollFor(token, MsgReverseCall)
+    check call.nameId == nameId("host_sum")
+    let decoded = cborDecode(args, HostSumHostCallArgs)
+    check decoded.isOk()
+    check decoded.value.a == 2
+    check decoded.value.b == 5
+
+    var answer = cborEncode(7)
+    check rev_reverse_reply(
+      token, call.id, RET_OK, encodedPtr(answer), answer.len.csize_t
+    ) == RET_OK
+    let (reply, payload) = pollFor(token, MsgReply)
+    check cborDecode(payload, int).value == 7
 
   test "a host that refuses is the handler's error":
     var token: FFICtxToken

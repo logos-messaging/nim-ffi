@@ -45,12 +45,14 @@ proc buildPollFFIReverseProc*(prc: NimNode): NimNode {.compileTime.} =
   var fields: seq[NimNode] = @[]
   var assigns: seq[NimNode] = @[]
   for i in 1 ..< formalParams.len:
-    let paramName = formalParams[i][0]
-    let paramType = formalParams[i][1]
-    fields.add(
-      newTree(nnkIdentDefs, postfix(paramName, "*"), paramType, newEmptyNode())
-    )
-    assigns.add(newTree(nnkExprColonExpr, paramName, paramName))
+    let group = formalParams[i]
+    # A grouped `a, b: T` is one entry holding every name, then the type and default.
+    for j in 0 ..< group.len - 2:
+      let paramName = group[j]
+      fields.add(
+        newTree(nnkIdentDefs, postfix(paramName, "*"), group[^2], newEmptyNode())
+      )
+      assigns.add(newTree(nnkExprColonExpr, paramName, paramName))
   if fields.len == 0:
     fields.add(
       newTree(
