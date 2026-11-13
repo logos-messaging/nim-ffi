@@ -208,7 +208,8 @@ registerReqFFI(DrivePingRequest, h: ptr FFIContext[RevMacroLib]):
 
 registerReqFFI(DriveMissingRequest, h: ptr FFIContext[RevMacroLib]):
   proc(): Future[Result[string, string]] {.async.} =
-    return ok(ffiReverseMissing(["fetch_config", "host_note", "ping_host"]).join(","))
+    let missing = ?ffiReverseMissing(["fetch_config", "host_note", "ping_host"])
+    return ok(missing.join(","))
 
 static:
   # An unknown wire name is a compile error, not an always-missing entry.
@@ -216,8 +217,9 @@ static:
 
 suite "{.ffiReverse.} through the generated exports":
   test "ffiReverseMissing lists the wires the host has not implemented":
-    check ffiReverseMissing(["fetch_config"]) == @["fetch_config"] # off an FFI thread
-    check not ffiReverseImplemented("fetch_config")
+    # Off an FFI thread there is no context to ask: an error, not "missing".
+    check ffiReverseMissing(["fetch_config"]).isErr()
+    check ffiReverseImplemented("fetch_config").isErr()
     withLibCtx(ctx, token):
       block:
         setupCallbackData(rsp)
