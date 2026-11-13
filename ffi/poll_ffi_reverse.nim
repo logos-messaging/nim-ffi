@@ -117,22 +117,25 @@ proc headSeq*(rev: var FFIReverse): uint64 {.raises: [], gcsafe.} =
 
 proc popForHost*(rev: var FFIReverse): ptr ReverseInvocation {.raises: [], gcsafe.} =
   ## The poller takes the oldest call. A call that was settled while it waited
-  ## (timed out, or its context ended) is dropped rather than handed out.
-  while true:
-    var inv: ptr ReverseInvocation = nil
-    withLock rev.lock:
-      inv = rev.qHead
-      if inv.isNil():
-        return nil
-      rev.qHead = inv[].next
-      if rev.qHead.isNil():
-        rev.qTail = nil
-      rev.queued.dec()
-      inv[].next = nil
-    var expected = ReverseCallState.Queued
-    if inv[].state.compareExchange(expected, ReverseCallState.Delivered):
-      return inv
-    release(inv) # the queue's reference; the waiter has let go or will
+  ## (timed out, or its context ended) is dropped and nil comes back, not the
+  ## next call: `headSeq` promised the order of the one dropped, so a newer call
+  ## handed out now could overtake a reply or event with an older ticket. The
+  ## poll loop asks again with the order recomputed.
+  var inv: ptr ReverseInvocation = nil
+  withLock rev.lock:
+    inv = rev.qHead
+    if inv.isNil():
+      return nil
+    rev.qHead = inv[].next
+    if rev.qHead.isNil():
+      rev.qTail = nil
+    rev.queued.dec()
+    inv[].next = nil
+  var expected = ReverseCallState.Queued
+  if inv[].state.compareExchange(expected, ReverseCallState.Delivered):
+    return inv
+  release(inv) # the queue's reference; the waiter has let go or will
+  return nil
 
 proc releaseHeld*(rev: var FFIReverse) {.raises: [], gcsafe.} =
   ## Ends the host's use of the call it last polled.
