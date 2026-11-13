@@ -120,7 +120,12 @@ proc buildPollFFIReverseProc*(
 
   var callProc = prc.copyNimTree()
   callProc[^1] = callBody
-  callProc[4] = newTree(nnkPragma, ident("async"))
+  var pragmas = newTree(nnkPragma)
+  if prc[4].kind == nnkPragma:
+    for p in prc[4]:
+      pragmas.add(p)
+  pragmas.add(ident("async"))
+  callProc[4] = pragmas
 
   stmts.add(callProc)
   when defined(ffiDumpMacros):

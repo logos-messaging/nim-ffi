@@ -45,7 +45,7 @@ proc rev_notify*(lib: ReverseLib, msg: string): Future[Result[string, string]] {
     return err("host said: " & error)
   return ok("told")
 
-proc hostTick*(): Future[Result[string, string]] {.ffiReverse.}
+proc hostTick*(): Future[Result[string, string]] {.ffiReverse, gcsafe.}
 
 proc rev_tick*(lib: ReverseLib): Future[Result[string, string]] {.ffi.} =
   return await hostTick()
