@@ -6,6 +6,7 @@
 
 import std/[macros, strutils]
 import ../codegen/string_helpers
+import ../ffi_msg
 
 proc reverseArgsTypeName(procName: string): string =
   return snakeToPascalCase(camelToSnakeCase(procName)) & "HostCall"
@@ -87,7 +88,8 @@ proc buildPollFFIReverseProc*(
     argsExpr = quote:
       cborEncode(`argsCtor`)
 
-  let wireNameLit = newLit(wireName)
+  # Hashed here, once, not on every call.
+  let wireNameIdLit = newLit(nameId(wireName))
   let answer = ident("hostAnswer")
   let callBody = newStmtList()
   callBody.add quote do:
@@ -99,7 +101,7 @@ proc buildPollFFIReverseProc*(
       proc() {.gcsafe, raises: [].} =
         outb[].notifyOutbound(),
       outb[].reverse,
-      nameId(`wireNameLit`),
+      `wireNameIdLit`,
       argsCbor,
       proc(): uint64 {.gcsafe, raises: [].} =
         outb[].nextSeq(),
