@@ -1,0 +1,316 @@
+## Calls that go the other way: a handler asks the host for something and waits
+## for the answer. The question is a message the host polls for, like any other;
+## the answer comes back through `<lib>_reverse_reply`.
+##
+## Two directions, two owners. An invocation is produced by the FFI thread and
+## consumed by the poller; a reply is produced by a host thread and consumed by
+## the FFI thread, which is the only one that touches the pending table.
+
+import system/ansi_c
+import std/[atomics, locks, monotimes, tables]
+from std/times import initDuration
+import chronos
+import results
+from ./ffi_reverse import ReverseCallTimeoutMs, ReverseQueueDepth, ReverseMailboxDepth
+
+type
+  ReverseCallState* {.pure.} = enum
+    Queued ## waiting for the host to poll it
+    Delivered ## the host has it and owes an answer
+    Settled ## answered, timed out, or the context ended
+
+  ReverseInvocation* = object ## Freed by whichever of the two sides lets go last.
+    refs: Atomic[int]
+    callId*: uint64
+    nameId*: uint64
+    seqNum*: uint64
+    deadline*: MonoTime
+    state*: Atomic[ReverseCallState]
+    args*: ptr UncheckedArray[byte]
+    argsLen*: int
+    next*: ptr ReverseInvocation
+
+  ReverseReply* = object
+    callId*: uint64
+    retCode*: cint
+    data*: ptr UncheckedArray[byte]
+    dataLen*: int
+    next*: ptr ReverseReply
+
+  FFIReverse* = object
+    ## Lives as long as its pool slot, like the rest of the outbound state.
+    ready: bool
+    lock*: Lock
+    nextCallId*: Atomic[uint64]
+    queued*: int # invocations waiting for the host
+    qHead*, qTail*: ptr ReverseInvocation
+    mailbox*: ptr ReverseReply # answers the FFI thread has not drained yet, oldest first
+    mailboxTail*: ptr ReverseReply
+    mailboxCount*: int
+    held*: ptr ReverseInvocation # the invocation the host is reading
+
+proc initReverse*(rev: var FFIReverse) =
+  ## Idempotent: a rebuilt slot keeps it (re-initLock is UB).
+  if rev.ready:
+    return
+  rev.lock.initLock()
+  rev.ready = true
+
+proc release*(inv: ptr ReverseInvocation) {.raises: [], gcsafe.} =
+  ## The last owner frees the invocation and its arguments.
+  if inv.isNil():
+    return
+  if inv[].refs.fetchSub(1) != 1:
+    return
+  if not inv[].args.isNil():
+    c_free(inv[].args)
+  c_free(inv)
+
+proc newInvocation*(
+    rev: var FFIReverse, nameId: uint64, args: openArray[byte], timeoutMs: int
+): ptr ReverseInvocation {.raises: [].} =
+  ## Nil when an allocation fails; the caller reports that as a failed call.
+  let inv = cast[ptr ReverseInvocation](c_calloc(1, csize_t(sizeof(ReverseInvocation))))
+  if inv.isNil():
+    return nil
+  if args.len > 0:
+    let buf = cast[ptr UncheckedArray[byte]](c_malloc(csize_t(args.len)))
+    if buf.isNil():
+      c_free(inv)
+      return nil
+    copyMem(buf, unsafeAddr args[0], args.len)
+    inv[].args = buf
+    inv[].argsLen = args.len
+  # Two owners from the start: the queue and the handler waiting for the answer.
+  inv[].refs.store(2)
+  inv[].callId = rev.nextCallId.fetchAdd(1) + 1
+  inv[].nameId = nameId
+  inv[].deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
+  inv[].state.store(ReverseCallState.Queued)
+  return inv
+
+proc enqueue*(rev: var FFIReverse, inv: ptr ReverseInvocation, seqNum: uint64): bool =
+  ## False when too many calls already wait for the host.
+  withLock rev.lock:
+    if rev.queued >= ReverseQueueDepth:
+      return false
+    inv[].seqNum = seqNum
+    inv[].next = nil
+    if rev.qTail.isNil():
+      rev.qHead = inv
+    else:
+      rev.qTail[].next = inv
+    rev.qTail = inv
+    rev.queued.inc()
+  return true
+
+proc headSeq*(rev: var FFIReverse): uint64 {.raises: [], gcsafe.} =
+  ## The order mark of the oldest call waiting to be handed out, 0 when none.
+  withLock rev.lock:
+    if rev.qHead.isNil():
+      return 0'u64
+    return rev.qHead[].seqNum
+
+proc popForHost*(rev: var FFIReverse): ptr ReverseInvocation {.raises: [], gcsafe.} =
+  ## The poller takes the oldest call. A call that was settled while it waited
+  ## (timed out, or its context ended) is dropped and nil comes back, not the
+  ## next call: `headSeq` promised the order of the one dropped, so a newer call
+  ## handed out now could overtake a reply or event with an older ticket. The
+  ## poll loop asks again with the order recomputed.
+  var inv: ptr ReverseInvocation = nil
+  withLock rev.lock:
+    inv = rev.qHead
+    if inv.isNil():
+      return nil
+    rev.qHead = inv[].next
+    if rev.qHead.isNil():
+      rev.qTail = nil
+    rev.queued.dec()
+    inv[].next = nil
+  # Past its deadline the host could not answer in time, so it is not handed out;
+  # the FFI thread still fails the waiting handler with the timeout reason.
+  var target = ReverseCallState.Delivered
+  if getMonoTime() >= inv[].deadline:
+    target = ReverseCallState.Settled
+  var expected = ReverseCallState.Queued
+  if inv[].state.compareExchange(expected, target) and
+      target == ReverseCallState.Delivered:
+    return inv
+  release(inv) # the queue's reference; the waiter has let go or will
+  return nil
+
+proc releaseHeld*(rev: var FFIReverse) {.raises: [], gcsafe.} =
+  ## Ends the host's use of the call it last polled.
+  if rev.held.isNil():
+    return
+  release(rev.held)
+  rev.held = nil
+
+proc freeReply*(reply: ptr ReverseReply) {.raises: [], gcsafe.} =
+  if reply.isNil():
+    return
+  if not reply[].data.isNil():
+    c_free(reply[].data)
+  c_free(reply)
+
+proc pushReply*(
+    rev: var FFIReverse, callId: uint64, retCode: cint, data: pointer, dataLen: int
+): bool {.raises: [], gcsafe.} =
+  ## Host thread. The FFI thread drains this oldest first and matches the id, so
+  ## when the host answers an id twice the first answer wins and the second is
+  ## dropped as unknown. False when `ReverseMailboxDepth` answers are already
+  ## waiting; a late or forged answer costs one allocation until it is drained.
+  let reply = cast[ptr ReverseReply](c_calloc(1, csize_t(sizeof(ReverseReply))))
+  if reply.isNil():
+    return false
+  reply[].callId = callId
+  reply[].retCode = retCode
+  if dataLen > 0 and not data.isNil():
+    let buf = cast[ptr UncheckedArray[byte]](c_malloc(csize_t(dataLen)))
+    if buf.isNil():
+      c_free(reply)
+      return false
+    copyMem(buf, data, dataLen)
+    reply[].data = buf
+    reply[].dataLen = dataLen
+  withLock rev.lock:
+    if rev.mailboxCount >= ReverseMailboxDepth:
+      freeReply(reply)
+      return false
+    if rev.mailboxTail.isNil():
+      rev.mailbox = reply
+    else:
+      rev.mailboxTail[].next = reply
+    rev.mailboxTail = reply
+    rev.mailboxCount.inc()
+  return true
+
+proc takeReplies*(rev: var FFIReverse): ptr ReverseReply {.raises: [], gcsafe.} =
+  ## FFI thread. Takes the whole mailbox in one go.
+  withLock rev.lock:
+    let head = rev.mailbox
+    rev.mailbox = nil
+    rev.mailboxTail = nil
+    rev.mailboxCount = 0
+    return head
+
+proc dropQueuedCalls*(rev: var FFIReverse) {.raises: [], gcsafe.} =
+  ## The next owner of the slot must not be handed these.
+  var invs: ptr ReverseInvocation = nil
+  var replies: ptr ReverseReply = nil
+  withLock rev.lock:
+    invs = rev.qHead
+    rev.qHead = nil
+    rev.qTail = nil
+    rev.queued = 0
+    replies = rev.mailbox
+    rev.mailbox = nil
+    rev.mailboxTail = nil
+    rev.mailboxCount = 0
+  while not invs.isNil():
+    let nextInv = invs[].next
+    invs[].state.store(ReverseCallState.Settled)
+    release(invs)
+    invs = nextInv
+  while not replies.isNil():
+    let nextReply = replies[].next
+    freeReply(replies)
+    replies = nextReply
+
+## The FFI thread's side: one table of calls waiting for an answer.
+
+type PendingReverse* = object
+  inv*: ptr ReverseInvocation
+  fut*: Future[Result[seq[byte], string]]
+
+var ffiPendingReverse* {.threadvar.}: Table[uint64, PendingReverse]
+  ## FFI thread only, so no lock: it is the only thread that completes a future.
+
+proc rememberPending*(
+    inv: ptr ReverseInvocation, fut: Future[Result[seq[byte], string]]
+) =
+  ffiPendingReverse[inv[].callId] = PendingReverse(inv: inv, fut: fut)
+
+proc settle(pending: PendingReverse, res: sink Result[seq[byte], string]) =
+  pending.inv[].state.store(ReverseCallState.Settled)
+  if not pending.fut.finished():
+    pending.fut.complete(move(res))
+  release(pending.inv)
+
+proc drainPollReverseReplies*(rev: var FFIReverse) =
+  ## FFI thread. Answers the calls the host replied to; and if nobody waits for it,
+  ## it is dropped, which is what a late answer to a timed-out call is.
+  var reply = rev.takeReplies()
+  while not reply.isNil():
+    let nextReply = reply[].next
+    let pending = ffiPendingReverse.getOrDefault(reply[].callId)
+    if not pending.inv.isNil():
+      ffiPendingReverse.del(reply[].callId)
+      if reply[].retCode != 0:
+        var text = "the host refused the call"
+        if reply[].dataLen > 0:
+          text = newString(reply[].dataLen)
+          copyMem(addr text[0], reply[].data, reply[].dataLen)
+        settle(pending, Result[seq[byte], string].err(text))
+      else:
+        var payload: seq[byte] = @[]
+        if reply[].dataLen > 0:
+          payload = newSeq[byte](reply[].dataLen)
+          copyMem(addr payload[0], reply[].data, reply[].dataLen)
+        settle(pending, Result[seq[byte], string].ok(move(payload)))
+    freeReply(reply)
+    reply = nextReply
+
+proc failOverduePollReverseCalls*() =
+  ## FFI thread. A host that never answers must not park a handler for ever.
+  if ffiPendingReverse.len == 0:
+    return
+  let now = getMonoTime()
+  var overdue: seq[uint64] = @[]
+  for callId, pending in ffiPendingReverse:
+    if now >= pending.inv[].deadline:
+      overdue.add(callId)
+  for callId in overdue:
+    let pending = ffiPendingReverse[callId]
+    ffiPendingReverse.del(callId)
+    settle(pending, Result[seq[byte], string].err("the host did not answer in time"))
+
+proc failPendingPollReverseCalls*(reason: string) =
+  ## FFI thread, at teardown: nothing will answer these now.
+  if ffiPendingReverse.len == 0:
+    return
+  for _, pending in ffiPendingReverse:
+    settle(pending, Result[seq[byte], string].err(reason))
+  ffiPendingReverse.clear()
+
+proc callHost*(
+    outbNotify: proc() {.gcsafe, raises: [].},
+    rev: var FFIReverse,
+    nameId: uint64,
+    args: openArray[byte],
+    stampSeq: proc(): uint64 {.gcsafe, raises: [].},
+    timeoutMs = ReverseCallTimeoutMs,
+): Future[Result[seq[byte], string]] =
+  ## FFI thread. Queues the question for the host and hands back the future its
+  ## answer completes. The handler awaits it like any other call.
+  let fut = newFuture[Result[seq[byte], string]]("ffi.callHost")
+  let inv = rev.newInvocation(nameId, args, timeoutMs)
+  if inv.isNil():
+    fut.complete(
+      Result[seq[byte], string].err("out of memory: could not queue the call")
+    )
+    return fut
+  if not rev.enqueue(inv, stampSeq()):
+    # Both references are ours: nothing else ever saw this one.
+    inv[].state.store(ReverseCallState.Settled)
+    release(inv) # the queue's reference, which was never taken
+    release(inv) # the waiter's reference: no future will ever wait on this call
+    fut.complete(
+      Result[seq[byte], string].err(
+        "the host has not polled the last " & $ReverseQueueDepth & " calls: queue full"
+      )
+    )
+    return fut
+  rememberPending(inv, fut)
+  outbNotify()
+  return fut

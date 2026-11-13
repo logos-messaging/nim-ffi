@@ -19,6 +19,9 @@ import
 export
   ffi_events, ffi_reverse, ffi_handles, ffi_last_error, ffi_outbound, ffi_reply_target
 export ffi_request_queue.RequestQueueDepth
+when defined(ffiPollMode):
+  import ./poll_ffi_reverse
+  export poll_ffi_reverse
 
 type FFICtxToken* = distinct pointer
   ## Opaque handle the host holds for a context. Distinct from `pointer` so a raw
