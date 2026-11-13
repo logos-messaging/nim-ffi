@@ -73,10 +73,9 @@ proc newInvocation*(
     timeoutMs: int,
 ): ptr ReverseInvocation {.raises: [].} =
   ## Nil when an allocation fails; the caller reports that as a failed call.
-  let inv = cast[ptr ReverseInvocation](c_malloc(csize_t(sizeof(ReverseInvocation))))
+  let inv = cast[ptr ReverseInvocation](c_calloc(1, csize_t(sizeof(ReverseInvocation))))
   if inv.isNil():
     return nil
-  zeroMem(inv, sizeof(ReverseInvocation))
   if args.len > 0:
     let buf = cast[ptr UncheckedArray[byte]](c_malloc(csize_t(args.len)))
     if buf.isNil():
@@ -147,10 +146,9 @@ proc pushReply*(
 ): bool {.raises: [], gcsafe.} =
   ## Host thread. The FFI thread drains this and matches the id; an id it does
   ## not know is dropped there, so a late or forged answer costs one allocation.
-  let reply = cast[ptr ReverseReply](c_malloc(csize_t(sizeof(ReverseReply))))
+  let reply = cast[ptr ReverseReply](c_calloc(1, csize_t(sizeof(ReverseReply))))
   if reply.isNil():
     return false
-  zeroMem(reply, sizeof(ReverseReply))
   reply[].callId = callId
   reply[].retCode = retCode
   if dataLen > 0 and not data.isNil():
