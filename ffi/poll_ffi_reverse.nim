@@ -213,10 +213,10 @@ proc rememberPending*(
 ) =
   ffiPendingReverse[inv[].callId] = PendingReverse(inv: inv, fut: fut)
 
-proc settle(pending: PendingReverse, res: Result[seq[byte], string]) =
+proc settle(pending: PendingReverse, res: sink Result[seq[byte], string]) =
   pending.inv[].state.store(ReverseCallState.Settled)
   if not pending.fut.finished():
-    pending.fut.complete(res)
+    pending.fut.complete(move(res))
   release(pending.inv)
 
 proc drainPollReverseReplies*(rev: var FFIReverse) =
@@ -232,7 +232,7 @@ proc drainPollReverseReplies*(rev: var FFIReverse) =
       if reply[].dataLen > 0:
         payload = newSeq[byte](reply[].dataLen)
         copyMem(addr payload[0], reply[].data, reply[].dataLen)
-      var res = Result[seq[byte], string].ok(payload)
+      var res = Result[seq[byte], string].ok(move(payload))
       if reply[].retCode != 0:
         var text = ""
         for i in 0 ..< reply[].dataLen:
@@ -240,7 +240,7 @@ proc drainPollReverseReplies*(rev: var FFIReverse) =
         if text.len == 0:
           text = "the host refused the call"
         res = Result[seq[byte], string].err(text)
-      settle(pending, res)
+      settle(pending, move(res))
     freeReply(reply)
     reply = nextReply
 
