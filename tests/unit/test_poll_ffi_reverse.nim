@@ -164,3 +164,16 @@ suite "a handler asks the host":
     check rev_destroy(token) == RET_OK
     var msg: ptr PollResult
     check rev_poll(token, 0, addr msg) == RET_INVALID_CTX
+
+suite "shutdown with a call the host never answered":
+  # Last in the file: a shutdown takes the whole pool with it.
+  test "the library shuts down instead of waiting for the host":
+    var token: FFICtxToken
+    createCtx(token)
+
+    var req = cborEncode(RevFetchReq(url: "https://example.test/f"))
+    var reqId: uint64
+    check rev_fetch(token, encodedPtr(req), req.len.csize_t, addr reqId) == RET_OK
+    discard pollFor(token, MsgReverseCall)
+
+    check rev_shutdown() == 0

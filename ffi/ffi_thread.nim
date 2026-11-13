@@ -606,6 +606,12 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
     # The host is shutting down and will not answer a parked reverse call.
     ctx[].reverse.closing.store(true)
     failPendingReverse("FFI context is shutting down; the reverse call was abandoned")
+    when defined(ffiPollMode):
+      # The loop that failed overdue calls has ended, so a handler parked on the host
+      # would hold the drain below for ever.
+      failPendingPollReverseCalls(
+        "FFI context is shutting down; the reverse call was abandoned"
+      )
     cleanFinishedRequests()
     if pending.len > 0:
       try:
