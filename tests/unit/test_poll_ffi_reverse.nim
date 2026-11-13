@@ -45,6 +45,11 @@ proc rev_notify*(lib: ReverseLib, msg: string): Future[Result[string, string]] {
     return err("host said: " & error)
   return ok("told")
 
+proc hostTick*(): Future[Result[string, string]] {.ffiReverse.}
+
+proc rev_tick*(lib: ReverseLib): Future[Result[string, string]] {.ffi.} =
+  return await hostTick()
+
 proc rev_destroy*(lib: ReverseLib) {.ffiDtor.} =
   discard
 
@@ -140,6 +145,26 @@ suite "a handler asks the host":
     let (reply, payload) = pollFor(token, MsgReply)
     check reply.retCode == RET_OK
     check cborDecode(payload, string).value == "told"
+
+  test "a call without parameters sends an empty CBOR map":
+    var token: FFICtxToken
+    createCtx(token)
+    defer:
+      discard rev_destroy(token)
+
+    var req = cborEncode(RevTickReq())
+    var reqId: uint64
+    check rev_tick(token, encodedPtr(req), req.len.csize_t, addr reqId) == RET_OK
+
+    let (call, args) = pollFor(token, MsgReverseCall)
+    check call.nameId == nameId("host_tick")
+    check args == @[0xa0'u8]
+    var answer = cborEncode("tock")
+    check rev_reverse_reply(
+      token, call.id, RET_OK, encodedPtr(answer), answer.len.csize_t
+    ) == RET_OK
+    let (reply, payload) = pollFor(token, MsgReply)
+    check cborDecode(payload, string).value == "tock"
 
   test "a host that refuses is the handler's error":
     var token: FFICtxToken

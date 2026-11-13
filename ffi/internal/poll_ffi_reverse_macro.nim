@@ -53,30 +53,30 @@ proc buildPollFFIReverseProc*(prc: NimNode): NimNode {.compileTime.} =
         newTree(nnkIdentDefs, postfix(paramName, "*"), group[^2], newEmptyNode())
       )
       assigns.add(newTree(nnkExprColonExpr, paramName, paramName))
+  let stmts = newStmtList()
+  var argsExpr: NimNode
   if fields.len == 0:
-    fields.add(
-      newTree(
-        nnkIdentDefs,
-        postfix(ident("_placeholder"), "*"),
-        ident("uint8"),
-        newEmptyNode(),
-      )
-    )
-
-  let argsType = newTree(nnkTypeSection).add(
-      newTree(
-        nnkTypeDef,
-        postfix(argsTypeName, "*"),
-        newEmptyNode(),
+    # An empty CBOR map: the args stay valid CBOR with nothing to decode.
+    argsExpr = quote:
+      @[0xa0'u8]
+  else:
+    stmts.add(
+      newTree(nnkTypeSection).add(
         newTree(
-          nnkObjectTy, newEmptyNode(), newEmptyNode(), newTree(nnkRecList, fields)
-        ),
+          nnkTypeDef,
+          postfix(argsTypeName, "*"),
+          newEmptyNode(),
+          newTree(
+            nnkObjectTy, newEmptyNode(), newEmptyNode(), newTree(nnkRecList, fields)
+          ),
+        )
       )
     )
-
-  let argsCtor = newTree(nnkObjConstr, argsTypeName)
-  for a in assigns:
-    argsCtor.add(a)
+    let argsCtor = newTree(nnkObjConstr, argsTypeName)
+    for a in assigns:
+      argsCtor.add(a)
+    argsExpr = quote:
+      cborEncode(`argsCtor`)
 
   let wireNameLit = newLit(wireName)
   let answer = ident("hostAnswer")
@@ -85,7 +85,7 @@ proc buildPollFFIReverseProc*(prc: NimNode): NimNode {.compileTime.} =
     let outb = ffiCurrentOutbound()
     if outb.isNil():
       return err("a reverse call can only be made from an FFI handler")
-    let argsCbor = cborEncode(`argsCtor`)
+    let argsCbor = `argsExpr`
     let `answer` = await callHost(
       proc() {.gcsafe, raises: [].} =
         outb[].notifyOutbound(),
@@ -112,7 +112,7 @@ proc buildPollFFIReverseProc*(prc: NimNode): NimNode {.compileTime.} =
   callProc[^1] = callBody
   callProc[4] = newTree(nnkPragma, ident("async"))
 
-  let stmts = newStmtList(argsType, callProc)
+  stmts.add(callProc)
   when defined(ffiDumpMacros):
     echo stmts.repr
   return stmts
