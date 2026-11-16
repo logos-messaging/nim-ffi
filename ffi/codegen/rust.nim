@@ -527,7 +527,7 @@ proc generateApiRs*(
   lines.add("    let _ = tx.send(ffi_payload(ret, msg, len));")
   lines.add("}")
   lines.add("")
-  lines.add("fn ffi_call_sync<F>(timeout: Duration, f: F) -> FFIResult")
+  lines.add("fn ffi_call_sync<F>(timeout: Option<Duration>, f: F) -> FFIResult")
   lines.add("where")
   lines.add("    F: FnOnce(ffi::FFICallback, *mut c_void) -> c_int,")
   lines.add("{")
@@ -539,10 +539,16 @@ proc generateApiRs*(
   lines.add("        drop(unsafe { Box::from_raw(raw as *mut FFISender) });")
   lines.add("        return Err(\"RET_MISSING_CALLBACK (internal error)\".into());")
   lines.add("    }")
-  lines.add("    match rx.recv_timeout(timeout) {")
+  lines.add("    let received = match timeout {")
+  lines.add("        Some(t) => rx.recv_timeout(t),")
+  lines.add(
+    "        None => rx.recv().map_err(|_| flume::RecvTimeoutError::Disconnected),"
+  )
+  lines.add("    };")
+  lines.add("    match received {")
   lines.add("        Ok(payload) => payload,")
   lines.add("        Err(flume::RecvTimeoutError::Timeout) =>")
-  lines.add("            Err(format!(\"timed out after {:?}\", timeout)),")
+  lines.add("            Err(format!(\"timed out after {:?}\", timeout.unwrap_or_default())),")
   lines.add("        Err(flume::RecvTimeoutError::Disconnected) =>")
   lines.add(
     "            Err(\"callback channel disconnected before delivery\".into()),"
@@ -550,7 +556,23 @@ proc generateApiRs*(
   lines.add("    }")
   lines.add("}")
   lines.add("")
-  lines.add("async fn ffi_call_async<F>(timeout: Duration, f: F) -> FFIResult")
+  lines.add("/// Run `fut` with an optional limit: `None` waits with no limit. A timeout only")
+  lines.add("/// stops the wait; the Nim handler keeps running to completion.")
+  lines.add("pub async fn with_timeout<F, T>(")
+  lines.add("    limit: Option<Duration>,")
+  lines.add("    fut: F,")
+  lines.add(") -> Result<T, tokio::time::error::Elapsed>")
+  lines.add("where")
+  lines.add("    F: std::future::Future<Output = T>,")
+  lines.add("{")
+  lines.add("    match limit {")
+  lines.add("        Some(d) => tokio::time::timeout(d, fut).await,")
+  lines.add("        None => Ok(fut.await),")
+  lines.add("    }")
+  lines.add("}")
+  lines.add("")
+  lines.add("// Waits for the terminal RET_OK/RET_ERR with no limit; callers bound it with `with_timeout`.")
+  lines.add("async fn ffi_call_async<F>(f: F) -> FFIResult")
   lines.add("where")
   lines.add("    F: FnOnce(ffi::FFICallback, *mut c_void) -> c_int,")
   lines.add("{")
@@ -561,12 +583,11 @@ proc generateApiRs*(
   lines.add("        drop(unsafe { Box::from_raw(raw as *mut FFISender) });")
   lines.add("        return Err(\"RET_MISSING_CALLBACK (internal error)\".into());")
   lines.add("    }")
-  lines.add("    match tokio::time::timeout(timeout, rx.recv_async()).await {")
-  lines.add("        Ok(Ok(payload)) => payload,")
+  lines.add("    match rx.recv_async().await {")
+  lines.add("        Ok(payload) => payload,")
   lines.add(
-    "        Ok(Err(_)) => Err(\"callback channel disconnected before delivery\".into()),"
+    "        Err(_) => Err(\"callback channel disconnected before delivery\".into()),"
   )
-  lines.add("        Err(_) => Err(format!(\"timed out after {:?}\", timeout)),")
   lines.add("    }")
   lines.add("}")
   lines.add("")
@@ -809,7 +830,7 @@ proc generateApiRs*(
     lines.add("        let req = $1;" % [reqLit])
     lines.add("        let req_bytes = encode_cbor(&req)?;")
     # Ctor also fires the callback carrying the payload, so discard the synchronous *mut c_void and yield RET_OK to wait on the callback.
-    lines.add("        let raw_bytes = ffi_call_sync(timeout, |cb, ud| unsafe {")
+    lines.add("        let raw_bytes = ffi_call_sync(Some(timeout), |cb, ud| unsafe {")
     lines.add(
       "            let _ = ffi::$1(req_bytes.as_ptr(), req_bytes.len(), cb, ud);" %
         [ctor.procName]
@@ -832,7 +853,7 @@ proc generateApiRs*(
     lines.add("        let req = $1;" % [reqLit])
     lines.add("        let req_bytes = encode_cbor(&req)?;")
     # See `create`: discard the ctor's synchronous return; the callback delivers the ctx address.
-    lines.add("        let raw_bytes = ffi_call_async(timeout, move |cb, ud| unsafe {")
+    lines.add("        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {")
     lines.add(
       "            let _ = ffi::$1(req_bytes.as_ptr(), req_bytes.len(), cb, ud);" %
         [ctor.procName]
@@ -1019,8 +1040,6 @@ proc generateApiRs*(
           nimTypeToRust(ep.typeName)
       paramsList.add("$1: $2" % [snake, rustType])
       fieldInits.add(snake)
-    if isStatic:
-      paramsList.add("timeout: Duration")
     let paramsStr =
       if isStatic:
         paramsList.join(", ")
@@ -1036,51 +1055,72 @@ proc generateApiRs*(
         reqName & " {}"
 
     let retTypeForApi = if m.returnRidesAsPtr(): RustPtrType else: retRustType
-    let timeoutExpr = if isStatic: "timeout" else: "self.timeout"
     let ctxArg = if isStatic: "" else: "self.ptr, "
+    let argNames = fieldInits.join(", ")
 
-    lines.add(renderMemberDocComment(m.doc))
-    lines.add(
-      "    pub fn $1($2) -> Result<$3, String> {" %
-        [methodName, paramsStr, retTypeForApi]
-    )
-    lines.add("        let req = $1;" % [reqLit])
-    lines.add("        let req_bytes = encode_cbor(&req)?;")
-    lines.add(
-      "        let raw_bytes = ffi_call_sync($1, |cb, ud| unsafe {" % [timeoutExpr]
-    )
-    lines.add(
-      "            ffi::$1($2cb, ud, req_bytes.as_ptr(), req_bytes.len())" %
-        [m.procName, ctxArg]
-    )
-    lines.add("        })?;")
-    lines.add("        decode_cbor::<$1>(&raw_bytes)" % [retTypeForApi])
-    lines.add("    }")
-    lines.add("")
+    # Instance methods keep `self.timeout`; `_with_timeout` variants take `Option<Duration>` (None = wait with no Rust-side limit).
+    # A Rust-side timeout only stops the wait: the Nim handler keeps running to completion.
+    proc emitVariant(
+        lines: var seq[string],
+        m: FFIProcMeta,
+        name, params, retType, reqLit, ctxArg: string,
+        isStatic, isAsync: bool,
+        timeoutExpr: string,
+    ) =
+      let fnKw = if isAsync: "pub async fn" else: "pub fn"
+      lines.add("    $1 $2($3) -> Result<$4, String> {" % [fnKw, name, params, retType])
+      lines.add("        let req = $1;" % [reqLit])
+      lines.add("        let req_bytes = encode_cbor(&req)?;")
+      if isAsync:
+        if not isStatic:
+          lines.add("        let ptr = self.ptr as usize;")
+        lines.add("        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {")
+        lines.add(
+          "            ffi::$1($2cb, ud, req_bytes.as_ptr(), req_bytes.len())" %
+            [m.procName, if isStatic: "" else: "ptr as *mut c_void, "]
+        )
+        lines.add("        }).await?;")
+      else:
+        lines.add("        let raw_bytes = ffi_call_sync($1, |cb, ud| unsafe {" % [timeoutExpr])
+        lines.add(
+          "            ffi::$1($2cb, ud, req_bytes.as_ptr(), req_bytes.len())" %
+            [m.procName, ctxArg]
+        )
+        lines.add("        })?;")
+      lines.add("        decode_cbor::<$1>(&raw_bytes)" % [retType])
+      lines.add("    }")
+      lines.add("")
 
-    # async method: ptr cast to usize (Copy + Send) keeps the move closure and returned future Send for multi-threaded tokio runtimes.
-    lines.add(renderMemberDocComment(m.doc))
-    lines.add(
-      "    pub async fn $1_async($2) -> Result<$3, String> {" %
-        [methodName, paramsStr, retTypeForApi]
-    )
-    lines.add("        let req = $1;" % [reqLit])
-    lines.add("        let req_bytes = encode_cbor(&req)?;")
-    if not isStatic:
-      lines.add("        let ptr = self.ptr as usize;")
-    lines.add(
-      "        let raw_bytes = ffi_call_async($1, move |cb, ud| unsafe {" % [
-        timeoutExpr
-      ]
-    )
-    lines.add(
-      "            ffi::$1($2cb, ud, req_bytes.as_ptr(), req_bytes.len())" %
-        [m.procName, if isStatic: "" else: "ptr as *mut c_void, "]
-    )
-    lines.add("        }).await?;")
-    lines.add("        decode_cbor::<$1>(&raw_bytes)" % [retTypeForApi])
-    lines.add("    }")
-    lines.add("")
+    let asyncDoc = "    /// Waits for the terminal result with no limit; bound it with `with_timeout`."
+    if isStatic:
+      let syncParams =
+        if paramsList.len > 0: paramsStr & ", timeout: Duration"
+        else: "timeout: Duration"
+      lines.add(renderMemberDocComment(m.doc))
+      emitVariant(lines, m, methodName, syncParams, retTypeForApi, reqLit, ctxArg, true, false, "Some(timeout)")
+      lines.add(renderMemberDocComment(m.doc))
+      lines.add(asyncDoc)
+      emitVariant(lines, m, methodName & "_async", paramsStr, retTypeForApi, reqLit, ctxArg, true, true, "")
+    else:
+      let fwd = if argNames.len > 0: argNames & ", " else: ""
+      lines.add(renderMemberDocComment(m.doc))
+      lines.add(
+        "    pub fn $1($2) -> Result<$3, String> {" %
+          [methodName, paramsStr, retTypeForApi]
+      )
+      lines.add("        self.$1_with_timeout($2Some(self.timeout))" % [methodName, fwd])
+      lines.add("    }")
+      lines.add("")
+      lines.add(renderMemberDocComment(m.doc))
+      lines.add("    /// `timeout: None` waits for the terminal result with no Rust-side limit;")
+      lines.add("    /// a timeout only stops the wait, the Nim handler keeps running.")
+      emitVariant(
+        lines, m, methodName & "_with_timeout", paramsStr & ", timeout: Option<Duration>",
+        retTypeForApi, reqLit, ctxArg, false, false, "timeout",
+      )
+      lines.add(renderMemberDocComment(m.doc))
+      lines.add(asyncDoc)
+      emitVariant(lines, m, methodName & "_async", paramsStr, retTypeForApi, reqLit, ctxArg, false, true, "")
 
   # An associated fn, not a method: a host calls it with no context left to call it on.
   lines.add(renderMemberDocComment(ShutdownDoc))
