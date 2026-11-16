@@ -413,9 +413,9 @@ impl MyTimerCtx {
         self.echo_with_timeout(req, Some(self.timeout))
     }
 
-    /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
     /// `timeout: None` waits for the terminal result with no Rust-side limit;
     /// a timeout only stops the wait, the Nim handler keeps running.
+    /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
     pub fn echo_with_timeout(&self, req: EchoRequest, timeout: Option<Duration>) -> Result<EchoResponse, String> {
         let req = MyTimerEchoReq { req };
         let req_bytes = encode_cbor(&req)?;
@@ -425,8 +425,8 @@ impl MyTimerCtx {
         decode_cbor::<EchoResponse>(&raw_bytes)
     }
 
-    /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
     /// Waits for the terminal result with no limit; bound it with `with_timeout`.
+    /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
     pub async fn echo_async(&self, req: EchoRequest) -> Result<EchoResponse, String> {
         let req = MyTimerEchoReq { req };
         let req_bytes = encode_cbor(&req)?;
@@ -442,9 +442,9 @@ impl MyTimerCtx {
         self.version_with_timeout(Some(self.timeout))
     }
 
-    /// Returns the library's version string.
     /// `timeout: None` waits for the terminal result with no Rust-side limit;
     /// a timeout only stops the wait, the Nim handler keeps running.
+    /// Returns the library's version string.
     pub fn version_with_timeout(&self, timeout: Option<Duration>) -> Result<String, String> {
         let req = MyTimerVersionReq {};
         let req_bytes = encode_cbor(&req)?;
@@ -454,8 +454,8 @@ impl MyTimerCtx {
         decode_cbor::<String>(&raw_bytes)
     }
 
-    /// Returns the library's version string.
     /// Waits for the terminal result with no limit; bound it with `with_timeout`.
+    /// Returns the library's version string.
     pub async fn version_async(&self) -> Result<String, String> {
         let req = MyTimerVersionReq {};
         let req_bytes = encode_cbor(&req)?;
@@ -497,9 +497,9 @@ impl MyTimerCtx {
         self.schedule_with_timeout(job, retry, schedule, Some(self.timeout))
     }
 
-    /// Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
     /// `timeout: None` waits for the terminal result with no Rust-side limit;
     /// a timeout only stops the wait, the Nim handler keeps running.
+    /// Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
     pub fn schedule_with_timeout(&self, job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig, timeout: Option<Duration>) -> Result<ScheduleResult, String> {
         let req = MyTimerScheduleReq { job, retry, schedule };
         let req_bytes = encode_cbor(&req)?;
@@ -509,8 +509,8 @@ impl MyTimerCtx {
         decode_cbor::<ScheduleResult>(&raw_bytes)
     }
 
-    /// Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
     /// Waits for the terminal result with no limit; bound it with `with_timeout`.
+    /// Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
     pub async fn schedule_async(&self, job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig) -> Result<ScheduleResult, String> {
         let req = MyTimerScheduleReq { job, retry, schedule };
         let req_bytes = encode_cbor(&req)?;
@@ -526,9 +526,9 @@ impl MyTimerCtx {
         self.host_clock_with_timeout(Some(self.timeout))
     }
 
-    /// Calls the host-implemented `fetch_host_clock` interface and formats it.
     /// `timeout: None` waits for the terminal result with no Rust-side limit;
     /// a timeout only stops the wait, the Nim handler keeps running.
+    /// Calls the host-implemented `fetch_host_clock` interface and formats it.
     pub fn host_clock_with_timeout(&self, timeout: Option<Duration>) -> Result<String, String> {
         let req = MyTimerHostClockReq {};
         let req_bytes = encode_cbor(&req)?;
@@ -538,8 +538,8 @@ impl MyTimerCtx {
         decode_cbor::<String>(&raw_bytes)
     }
 
-    /// Calls the host-implemented `fetch_host_clock` interface and formats it.
     /// Waits for the terminal result with no limit; bound it with `with_timeout`.
+    /// Calls the host-implemented `fetch_host_clock` interface and formats it.
     pub async fn host_clock_async(&self) -> Result<String, String> {
         let req = MyTimerHostClockReq {};
         let req_bytes = encode_cbor(&req)?;
@@ -555,9 +555,9 @@ impl MyTimerCtx {
         self.last_host_tick_with_timeout(Some(self.timeout))
     }
 
-    /// Reads the last tick number the `on_host_tick` reverse event recorded.
     /// `timeout: None` waits for the terminal result with no Rust-side limit;
     /// a timeout only stops the wait, the Nim handler keeps running.
+    /// Reads the last tick number the `on_host_tick` reverse event recorded.
     pub fn last_host_tick_with_timeout(&self, timeout: Option<Duration>) -> Result<i64, String> {
         let req = MyTimerLastHostTickReq {};
         let req_bytes = encode_cbor(&req)?;
@@ -567,8 +567,8 @@ impl MyTimerCtx {
         decode_cbor::<i64>(&raw_bytes)
     }
 
-    /// Reads the last tick number the `on_host_tick` reverse event recorded.
     /// Waits for the terminal result with no limit; bound it with `with_timeout`.
+    /// Reads the last tick number the `on_host_tick` reverse event recorded.
     pub async fn last_host_tick_async(&self) -> Result<i64, String> {
         let req = MyTimerLastHostTickReq {};
         let req_bytes = encode_cbor(&req)?;

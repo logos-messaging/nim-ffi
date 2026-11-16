@@ -548,7 +548,9 @@ proc generateApiRs*(
   lines.add("    match received {")
   lines.add("        Ok(payload) => payload,")
   lines.add("        Err(flume::RecvTimeoutError::Timeout) =>")
-  lines.add("            Err(format!(\"timed out after {:?}\", timeout.unwrap_or_default())),")
+  lines.add(
+    "            Err(format!(\"timed out after {:?}\", timeout.unwrap_or_default())),"
+  )
   lines.add("        Err(flume::RecvTimeoutError::Disconnected) =>")
   lines.add(
     "            Err(\"callback channel disconnected before delivery\".into()),"
@@ -556,7 +558,9 @@ proc generateApiRs*(
   lines.add("    }")
   lines.add("}")
   lines.add("")
-  lines.add("/// Run `fut` with an optional limit: `None` waits with no limit. A timeout only")
+  lines.add(
+    "/// Run `fut` with an optional limit: `None` waits with no limit. A timeout only"
+  )
   lines.add("/// stops the wait; the Nim handler keeps running to completion.")
   lines.add("pub async fn with_timeout<F, T>(")
   lines.add("    limit: Option<Duration>,")
@@ -571,7 +575,9 @@ proc generateApiRs*(
   lines.add("    }")
   lines.add("}")
   lines.add("")
-  lines.add("// Waits for the terminal RET_OK/RET_ERR with no limit; callers bound it with `with_timeout`.")
+  lines.add(
+    "// Waits for the terminal RET_OK/RET_ERR with no limit; callers bound it with `with_timeout`."
+  )
   lines.add("async fn ffi_call_async<F>(f: F) -> FFIResult")
   lines.add("where")
   lines.add("    F: FnOnce(ffi::FFICallback, *mut c_void) -> c_int,")
@@ -1081,7 +1087,9 @@ proc generateApiRs*(
         )
         lines.add("        }).await?;")
       else:
-        lines.add("        let raw_bytes = ffi_call_sync($1, |cb, ud| unsafe {" % [timeoutExpr])
+        lines.add(
+          "        let raw_bytes = ffi_call_sync($1, |cb, ud| unsafe {" % [timeoutExpr]
+        )
         lines.add(
           "            ffi::$1($2cb, ud, req_bytes.as_ptr(), req_bytes.len())" %
             [m.procName, ctxArg]
@@ -1091,36 +1099,80 @@ proc generateApiRs*(
       lines.add("    }")
       lines.add("")
 
-    let asyncDoc = "    /// Waits for the terminal result with no limit; bound it with `with_timeout`."
+    let asyncDoc =
+      "    /// Waits for the terminal result with no limit; bound it with `with_timeout`."
     if isStatic:
       let syncParams =
-        if paramsList.len > 0: paramsStr & ", timeout: Duration"
-        else: "timeout: Duration"
+        if paramsList.len > 0:
+          paramsStr & ", timeout: Duration"
+        else:
+          "timeout: Duration"
       lines.add(renderMemberDocComment(m.doc))
-      emitVariant(lines, m, methodName, syncParams, retTypeForApi, reqLit, ctxArg, true, false, "Some(timeout)")
-      lines.add(renderMemberDocComment(m.doc))
+      emitVariant(
+        lines, m, methodName, syncParams, retTypeForApi, reqLit, ctxArg, true, false,
+        "Some(timeout)",
+      )
       lines.add(asyncDoc)
-      emitVariant(lines, m, methodName & "_async", paramsStr, retTypeForApi, reqLit, ctxArg, true, true, "")
+      lines.add(renderMemberDocComment(m.doc))
+      emitVariant(
+        lines,
+        m,
+        methodName & "_async",
+        paramsStr,
+        retTypeForApi,
+        reqLit,
+        ctxArg,
+        true,
+        true,
+        "",
+      )
     else:
-      let fwd = if argNames.len > 0: argNames & ", " else: ""
+      let fwd =
+        if argNames.len > 0:
+          argNames & ", "
+        else:
+          ""
       lines.add(renderMemberDocComment(m.doc))
       lines.add(
         "    pub fn $1($2) -> Result<$3, String> {" %
           [methodName, paramsStr, retTypeForApi]
       )
-      lines.add("        self.$1_with_timeout($2Some(self.timeout))" % [methodName, fwd])
+      lines.add(
+        "        self.$1_with_timeout($2Some(self.timeout))" % [methodName, fwd]
+      )
       lines.add("    }")
       lines.add("")
-      lines.add(renderMemberDocComment(m.doc))
-      lines.add("    /// `timeout: None` waits for the terminal result with no Rust-side limit;")
-      lines.add("    /// a timeout only stops the wait, the Nim handler keeps running.")
-      emitVariant(
-        lines, m, methodName & "_with_timeout", paramsStr & ", timeout: Option<Duration>",
-        retTypeForApi, reqLit, ctxArg, false, false, "timeout",
+      lines.add(
+        "    /// `timeout: None` waits for the terminal result with no Rust-side limit;"
       )
+      lines.add("    /// a timeout only stops the wait, the Nim handler keeps running.")
       lines.add(renderMemberDocComment(m.doc))
+      emitVariant(
+        lines,
+        m,
+        methodName & "_with_timeout",
+        paramsStr & ", timeout: Option<Duration>",
+        retTypeForApi,
+        reqLit,
+        ctxArg,
+        false,
+        false,
+        "timeout",
+      )
       lines.add(asyncDoc)
-      emitVariant(lines, m, methodName & "_async", paramsStr, retTypeForApi, reqLit, ctxArg, false, true, "")
+      lines.add(renderMemberDocComment(m.doc))
+      emitVariant(
+        lines,
+        m,
+        methodName & "_async",
+        paramsStr,
+        retTypeForApi,
+        reqLit,
+        ctxArg,
+        false,
+        true,
+        "",
+      )
 
   # An associated fn, not a method: a host calls it with no context left to call it on.
   lines.add(renderMemberDocComment(ShutdownDoc))
