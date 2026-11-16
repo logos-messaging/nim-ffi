@@ -2231,9 +2231,7 @@ proc buildFFIReverseEventProc(
     let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
     if `ctxIdent`.isNil():
       return RET_INVALID_CTX
-    # Checked on the csize_t, before the int conversion can raise a RangeDefect.
-    if payloadLen > csize_t(high(int)) or
-        (MaxRequestPayloadBytes > 0 and payloadLen > csize_t(MaxRequestPayloadBytes)):
+    if payloadTooLarge(payloadLen):
       return RET_TOO_LARGE
     if payloadCbor.isNil() and payloadLen > 0:
       return RET_INVALID_ARGUMENT
