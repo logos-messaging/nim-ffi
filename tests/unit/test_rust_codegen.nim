@@ -147,3 +147,52 @@ suite "reverse FFI: the Rust wrapper hands the impl box to the library":
     let buildRs = generateBuildRs("timer", "../timer.nim")
     check "cargo:rustc-link-arg=-Wl,-rpath," in buildRs
     check "repo_root.join(\"ffi\")" in buildRs
+
+suite "per-call timeout: sync takes Option<Duration>, async is bounded by with_timeout":
+  setup:
+    let procs = @[
+      FFIProcMeta(
+        procName: "timer_create",
+        libName: "timer",
+        kind: FFIKind.CTOR,
+        libTypeName: "Timer",
+        extraParams: @[],
+        returnTypeName: "Timer",
+      ),
+      FFIProcMeta(
+        procName: "timer_echo",
+        libName: "timer",
+        kind: FFIKind.FFI,
+        libTypeName: "Timer",
+        extraParams: @[FFIParamMeta(name: "req", typeName: "string")],
+        returnTypeName: "string",
+      ),
+      FFIProcMeta(
+        procName: "timer_lib_version",
+        libName: "timer",
+        kind: FFIKind.STATIC,
+        libTypeName: "Timer",
+        extraParams: @[],
+        returnTypeName: "string",
+      ),
+    ]
+    let api = generateApiRs(procs, "timer")
+
+  test "an instance method keeps self.timeout and gets a _with_timeout variant":
+    check "pub fn echo(&self, req: String) -> Result<String, String> {\n        self.echo_with_timeout(req, Some(self.timeout))" in
+      api
+    check "pub fn echo_with_timeout(&self, req: String, timeout: Option<Duration>)" in
+      api
+
+  test "async methods carry no timeout and the crate exports with_timeout":
+    check "pub async fn echo_async(&self, req: String)" in api
+    check "pub async fn with_timeout<F, T>(" in api
+    check "limit: Option<Duration>," in api
+    check "async fn ffi_call_async<F>(f: F)" in api
+
+  test "a static keeps its timeout on the sync fn only":
+    check "pub fn lib_version(timeout: Duration)" in api
+    check "pub async fn lib_version_async()" in api
+
+  test "the async ctor wait is documented as unbounded":
+    check "bound it with `with_timeout`" in api

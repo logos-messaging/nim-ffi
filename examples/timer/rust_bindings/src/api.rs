@@ -315,6 +315,7 @@ impl MyTimerCtx {
     }
 
     /// Creates the FFIContext + MyTimer; async via chronos.
+    /// `timeout` is only the default for this ctx's sync calls; the constructor wait itself has no limit, bound it with `with_timeout`.
     pub async fn new_async(config: TimerConfig, timeout: Duration) -> Result<Self, String> {
         let req = MyTimerCreateCtorReq { config };
         let req_bytes = encode_cbor(&req)?;

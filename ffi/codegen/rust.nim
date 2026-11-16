@@ -854,6 +854,9 @@ proc generateApiRs*(
 
     lines.add(renderMemberDocComment(ctor.doc))
     lines.add(
+      "    /// `timeout` is only the default for this ctx's sync calls; the constructor wait itself has no limit, bound it with `with_timeout`."
+    )
+    lines.add(
       "    pub async fn new_async($1) -> Result<Self, String> {" % [ctorParamsStr]
     )
     lines.add("        let req = $1;" % [reqLit])
