@@ -77,8 +77,9 @@ proc pollFor(
   while Moment.now() < deadline:
     var msg: ptr PollResult
     let rc = rev_poll(token, 200, addr msg)
-    if rc != RET_OK:
+    if rc == RET_TIMEOUT:
       continue
+    doAssert rc == RET_OK, "rev_poll failed with code: " & $rc
     var payload = newSeq[byte](int(msg.len))
     if msg.len > 0:
       copyMem(addr payload[0], msg.payload, int(msg.len))
