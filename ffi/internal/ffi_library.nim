@@ -128,6 +128,37 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
 
   return res
 
+proc reverseReplyExport(
+    name: string, poolIdent, ctxIdent, exportPragma, tail: NimNode, initLibrary: bool
+): NimNode {.compileTime.} =
+  ## `<lib>_reverse_reply`, in either mode: both resolve the token and refuse a length
+  ## that cannot be counted, and differ only in what `tail` does with the answer.
+  let body = newStmtList()
+  if initLibrary:
+    body.add quote do:
+      when declared(initializeLibrary):
+        initializeLibrary()
+  body.add quote do:
+    let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
+    if `ctxIdent`.isNil():
+      return RET_INVALID_CTX
+    if payloadTooLarge(replyLen):
+      return RET_TOO_LARGE
+  body.add(tail)
+  return newProc(
+    name = ident(name),
+    params = @[
+      ident("cint"),
+      newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
+      newIdentDefs(ident("callId"), ident("uint64")),
+      newIdentDefs(ident("retCode"), ident("cint")),
+      newIdentDefs(ident("replyCbor"), nnkPtrTy.newTree(ident("byte"))),
+      newIdentDefs(ident("replyLen"), ident("csize_t")),
+    ],
+    body = body,
+    pragmas = exportPragma,
+  )
+
 macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
   ## Declares a library and emits its `FFIContext` listener ABI (add/remove).
   currentLibType = $libType # so handle-receiver `.ffi.` procs can resolve the pool
@@ -200,15 +231,9 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
 
   when defined(ffiPollMode):
     # {libraryName}_reverse_reply: the host's answer to a NIMFFI_MSG_REVERSE_CALL.
-    let pollReverseReplyName = libraryName & "_reverse_reply"
-    let pollReverseReplyBody = quote:
-      let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
-      if `ctxIdent`.isNil():
-        return RET_INVALID_CTX
-      if payloadTooLarge(payloadLen):
-        return RET_TOO_LARGE
+    let pollReverseReplyTail = quote:
       if not `ctxIdent`[].outbound.reverse.pushReply(
-        callId, retCode, cast[pointer](payload), int(payloadLen)
+        callId, retCode, cast[pointer](replyCbor), int(replyLen)
       ):
         return RET_ERR
       # The FFI thread matches the id; an answer it does not know is dropped there.
@@ -216,18 +241,13 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
       return RET_OK
 
     stmts.add(
-      newProc(
-        name = ident(pollReverseReplyName),
-        params = @[
-          ident("cint"),
-          newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
-          newIdentDefs(ident("callId"), ident("uint64")),
-          newIdentDefs(ident("retCode"), ident("cint")),
-          newIdentDefs(ident("payload"), nnkPtrTy.newTree(ident("byte"))),
-          newIdentDefs(ident("payloadLen"), ident("csize_t")),
-        ],
-        body = pollReverseReplyBody,
-        pragmas = cdeclExportPragma,
+      reverseReplyExport(
+        libraryName & "_reverse_reply",
+        poolIdent,
+        ctxIdent,
+        cdeclExportPragma,
+        pollReverseReplyTail,
+        initLibrary = false,
       )
     )
 
@@ -336,30 +356,17 @@ macro declareLibrary*(libraryName: static[string], libType: untyped): untyped =
 
   when not defined(ffiPollMode):
     # {libraryName}_reverse_reply: answers a {.ffiReverse.} call from any host thread.
-    let replyName = libraryName & "_reverse_reply"
-    let replyBody = quote:
-      when declared(initializeLibrary):
-        initializeLibrary()
-      let `ctxIdent` = `poolIdent`.resolveCtx(ctxToken)
-      if `ctxIdent`.isNil():
-        return RET_INVALID_CTX
-      if payloadTooLarge(replyLen):
-        return RET_TOO_LARGE
+    let replyTail = quote:
       return submitReverseReply(`ctxIdent`, callId, retCode, replyCbor, int(replyLen))
 
     stmts.add(
-      newProc(
-        name = ident(replyName),
-        params = @[
-          ident("cint"),
-          newIdentDefs(ident("ctxToken"), ident("FFICtxToken")),
-          newIdentDefs(ident("callId"), ident("uint64")),
-          newIdentDefs(ident("retCode"), ident("cint")),
-          newIdentDefs(ident("replyCbor"), nnkPtrTy.newTree(ident("byte"))),
-          newIdentDefs(ident("replyLen"), ident("csize_t")),
-        ],
-        body = replyBody,
-        pragmas = cdeclExportPragma,
+      reverseReplyExport(
+        libraryName & "_reverse_reply",
+        poolIdent,
+        ctxIdent,
+        cdeclExportPragma,
+        replyTail,
+        initLibrary = true,
       )
     )
 
