@@ -413,6 +413,9 @@ proc recycleContext[T](
   # deadline. `closing` first, so a handler or the dtor cannot park a new one after.
   ctx[].reverse.closing.store(true)
   failPendingReverse("FFI context is recycling; the reverse call was abandoned")
+  when defined(ffiPollMode):
+    # The host does not answer a context it is destroying.
+    failPendingPollReverseCalls("the context is closing")
 
   if not await drainOngoing(ongoing):
     # A handler that still runs answers a callback carrying userData the host
@@ -470,6 +473,11 @@ proc ffiNextEventSeqNumHook(): uint64 {.gcsafe, raises: [].} =
   return ffiOutboundPtr[].nextSeq()
 
 var ffiGenerationPtr {.threadvar.}: ptr Atomic[uint]
+
+when defined(ffiPollMode):
+  proc ffiCurrentOutbound*(): ptr FFIOutbound {.gcsafe, raises: [].} =
+    ## The outbound state of the context this thread serves; nil off an FFI thread.
+    return ffiOutboundPtr
 
 proc ffiHostPollsHook(): bool {.gcsafe, raises: [].} =
   if ffiOutboundPtr.isNil() or ffiGenerationPtr.isNil():
@@ -574,6 +582,10 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
 
       processQueue()
       drainReverseReplies()
+      when defined(ffiPollMode):
+        # Answers the host sent back, and calls it never answered.
+        ctx[].outbound.reverse.drainPollReverseReplies()
+        failOverduePollReverseCalls()
 
       # Block until a submit signals us, or at most 100ms.
       discard await ctx.reqSignal.wait().withTimeout(chronos.milliseconds(100))
@@ -581,9 +593,17 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
     # Drain once more for requests enqueued just before `running` flipped.
     processQueue()
     drainReverseReplies()
+    when defined(ffiPollMode):
+      ctx[].outbound.reverse.drainPollReverseReplies()
     # The host is shutting down and will not answer a parked reverse call.
     ctx[].reverse.closing.store(true)
     failPendingReverse("FFI context is shutting down; the reverse call was abandoned")
+    when defined(ffiPollMode):
+      # The loop that failed overdue calls has ended, so a handler parked on the host
+      # would hold the drain below for ever.
+      failPendingPollReverseCalls(
+        "FFI context is shutting down; the reverse call was abandoned"
+      )
     cleanFinishedRequests()
     if pending.len > 0:
       try:

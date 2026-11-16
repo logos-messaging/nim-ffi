@@ -11,7 +11,8 @@ import std/[atomics, locks, monotimes, tables]
 from std/times import initDuration
 import chronos
 import results
-from ./ffi_reverse import ReverseCallTimeoutMs, ReverseQueueDepth, ReverseMailboxDepth
+from ./ffi_reverse import
+  ReverseCallTimeoutMs, ReverseQueueDepth, ReverseMailboxDepth, ffiCurrentReverseContext
 
 type
   ReverseCallState* {.pure.} = enum
@@ -294,6 +295,15 @@ proc callHost*(
   ## FFI thread. Queues the question for the host and hands back the future its
   ## answer completes. The handler awaits it like any other call.
   let fut = newFuture[Result[seq[byte], string]]("ffi.callHost")
+  let closing = ffiCurrentReverseContext
+  if not closing.isNil() and closing[].closing.load():
+    # Set before the teardown fails the parked calls, so nothing parks behind it.
+    fut.complete(
+      Result[seq[byte], string].err(
+        "the FFI context is closing: the reverse call was abandoned"
+      )
+    )
+    return fut
   let inv = rev.newInvocation(nameId, args, timeoutMs)
   if inv.isNil():
     fut.complete(
