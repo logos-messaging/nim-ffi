@@ -41,12 +41,6 @@ proc submit(
     return
       refuse(ffiRequest, RET_ERR, "out of memory: could not allocate the FFI request")
 
-  if ctx.eventQueueStuck.load():
-    return refuse(
-      ffiRequest, RET_QUEUE_FULL,
-      "event queue stuck - library cannot accept new requests",
-    )
-
   if onFFIThread:
     # A handler re-dispatching onto its own FFI thread would deadlock; reject.
     return refuse(
@@ -369,8 +363,8 @@ proc resetForNextOwner[T](ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]
   # A reused slot skips initContextResources, so the handle ids of the old owner
   # would otherwise resolve for the next one.
   ctx[].handles.releaseAll()
-  # Same reason: the sticky overflow flag would reject every request of the next owner, ctor included.
-  ctx.eventQueueStuck.store(false)
+  # Same reason: the next owner must not inherit the drops of the old one.
+  ctx[].eventQueue.resetDropCounts()
   # Still claimed by the owner being recycled, so its own requests are the ones to fail.
   rejectQueuedRequests(ctx, ctx.currentGeneration())
   ongoing[].setLen(0)
@@ -479,11 +473,6 @@ when defined(ffiPollMode):
     ## The outbound state of the context this thread serves; nil off an FFI thread.
     return ffiOutboundPtr
 
-proc ffiHostPollsHook(): bool {.gcsafe, raises: [].} =
-  if ffiOutboundPtr.isNil() or ffiGenerationPtr.isNil():
-    return true
-  return ffiOutboundPtr[].polledGeneration.load() == ffiGenerationPtr[].load()
-
 proc proveAlive(ctx: ptr FFIContext) =
   ## Stamps the heartbeat with now. A watcher that looks rarely can still tell
   ## how long ago the thread last beat, not only whether it moved.
@@ -493,7 +482,6 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   registerCloseDispatcherHook()
   ffiCurrentEventRegistry = addr ctx[].eventRegistry
   ffiCurrentEventQueue = addr ctx[].eventQueue
-  ffiCurrentEventQueueStuck = addr ctx[].eventQueueStuck
   ffiCurrentReverseContext = addr ctx[].reverse
   # A parked slot served again: the previous thread's shutdown left it closing.
   ctx[].reverse.closing.store(false)
@@ -502,8 +490,6 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   ffiGenerationPtr = addr ctx[].generation
   ffiCurrentNotifyEventEnqueued = ffiNotifyEventEnqueuedHook
   ffiNextEventSeqNum = ffiNextEventSeqNumHook
-  when defined(ffiPollMode):
-    ffiCurrentHostPolls = ffiHostPollsHook
   onFFIThread = true
   servedCtx = ctx
 

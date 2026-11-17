@@ -62,11 +62,12 @@ const MsgKinds* = [
   MsgKind(
     name: "NOT_RESPONDING_QUEUE_FULL",
     value: MsgNotRespondingQueueFull,
-    doc:
-      "the event queue overflowed; requests are refused until the context is recycled",
+    doc: "events kept being dropped for ffiEventOverflowSustainMs; requests still run",
   ),
   MsgKind(
-    name: "RESPONDING", value: MsgResponding, doc: "the FFI thread's heartbeat resumed"
+    name: "RESPONDING",
+    value: MsgResponding,
+    doc: "the heartbeat resumed, or the event drops stopped",
   ),
   MsgKind(
     name: "CLOSED", value: MsgClosed, doc: "the context is gone; every later poll fails"

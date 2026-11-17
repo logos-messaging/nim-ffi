@@ -14,6 +14,21 @@ All notable changes to this project are documented in this file.
   `new_async` still take a plain `Duration` (always bounded).
 
 ### Changed
+- **An event-queue overflow drops and counts; it no longer wedges the context.**
+  A full queue used to set a sticky flag that refused every later request until
+  the context was recycled. Now the event is dropped and counted per reason
+  (`ringFull`, `byteCapExceeded`, `allocFailed`), and requests keep running.
+  `dispatchFFIEvent` and `dispatchFFIEventCbor` yield a discardable `EnqueueResult`, so the producer can
+  react to a drop. `eventDrops(ctx)` returns the counts since the current owner
+  claimed the context.
+- **The event queue has a byte cap.** `-d:ffiMaxEventQueueBytes` (default 4 MiB)
+  limits the name and payload bytes queued at once, beside the slot count.
+- **`not_responding` fires on sustained overflow only.** Drops must go on for
+  `-d:ffiEventOverflowSustainMs` (default 1000) before the notice, and a burst
+  gives none. `responding` follows when the drops stop for the same time. The
+  event thread drains one ring's worth or a quarter of that window per pass,
+  whichever ends first, so a full ring or a slow listener cannot starve the
+  check.
 - **`ffi_poll` is exported from `ffi` only under `-d:ffiPollMode`.** It was
   exported in every mode; nothing in the repo used it outside poll mode.
 - **Poll-mode C exports return a request id instead of taking a callback.** A

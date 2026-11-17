@@ -193,8 +193,28 @@ registerReqFFI(BurstEmit, lib: ptr TestEvtLib):
       dispatchFFIEventCbor("latch", LatchPayload(iter: i))
     return ok("bursted")
 
+var gFlooding: Atomic[bool]
+
+registerReqFFI(FloodFor, lib: ptr TestEvtLib):
+  proc(ms: int): Future[Result[string, string]] {.async.} =
+    gFlooding.store(true)
+    defer:
+      gFlooding.store(false)
+    let deadline = Moment.now() + ms.milliseconds
+    while Moment.now() < deadline:
+      for i in 0 ..< EventQueueCapacity:
+        dispatchFFIEventCbor("flood", LatchPayload(iter: i))
+      # Yield so the heartbeat keeps beating and only the overflow reports.
+      await sleepAsync(1.milliseconds)
+    return ok("flooded")
+
+proc floodGatedListener(
+    retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
+) {.cdecl, gcsafe, raises: [].} =
+  waitNextDrop(cast[ptr EventQueue](userData)[], gFlooding)
+
 suite "queue overflow":
-  test "overflow sets stuck flag, fires onNotResponding, rejects new requests":
+  test "a burst overflow drops and counts, requests still run, no notice":
     var bp: BackpressureState
     initBackpressure(bp)
     defer:
@@ -202,7 +222,6 @@ suite "queue overflow":
 
     setupCallbackData(notif)
     setupCallbackData(rsp)
-    setupCallbackData(rejected)
 
     withPool(ctx):
       discard addEventListener(ctx[].eventRegistry, "latch", backpressureCb, addr bp)
@@ -228,17 +247,46 @@ suite "queue overflow":
       )
         .isOk()
       waitCallback(rsp)
+      # The blocked listener pins its event's slot, so one more burst event is lost.
+      check ctx.eventDrops() == EventDrops(ringFull: 9)
 
-      check ctx.eventQueueStuck.load()
-
-      let res =
-        sendRequestToFFIThread(ctx, PingEvent.ffiNewReq(testCallback, addr rejected))
-      check res.isErr()
-      check res.error.contains("stuck")
+      resetCalled(rsp)
+      check sendRequestToFFIThread(ctx, PingEvent.ffiNewReq(testCallback, addr rsp))
+        .isOk()
+      waitCallback(rsp)
+      check rsp.retCode == RET_OK
 
       acquire(bp.releaseLock)
       bp.release.store(true)
       signal(bp.releaseCond)
       release(bp.releaseLock)
 
-      check waitCallbackTimeout(notif, 2000)
+      check not waitCallbackTimeout(notif, 2 * EventOverflowSustainMs)
+
+  test "sustained drops fire onNotResponding once, then onResponding":
+    setupCallbackData(notif)
+    setupCallbackData(back)
+    setupCallbackData(rsp)
+
+    withPool(ctx):
+      discard addEventListener(
+        ctx[].eventRegistry, "flood", floodGatedListener, addr ctx[].eventQueue
+      )
+      discard addEventListener(
+        ctx[].eventRegistry, NotRespondingEventName, testCallback, addr notif
+      )
+      discard addEventListener(
+        ctx[].eventRegistry, RespondingEventName, testCallback, addr back
+      )
+
+      check sendRequestToFFIThread(
+        ctx, FloodFor.ffiNewReq(testCallback, addr rsp, 3 * EventOverflowSustainMs)
+      )
+        .isOk()
+
+      check waitCallbackTimeout(notif, 4 * EventOverflowSustainMs)
+      waitCallback(rsp)
+      check rsp.retCode == RET_OK
+      check ctx.eventDrops().ringFull > 0
+
+      check waitCallbackTimeout(back, 6 * EventOverflowSustainMs)
