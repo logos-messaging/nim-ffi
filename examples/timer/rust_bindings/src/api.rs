@@ -18,6 +18,7 @@ fn decode_cbor<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
 
 type FFIResult = Result<Vec<u8>, String>;
 type FFISender = flume::Sender<FFIResult>;
+const DISCONNECTED: &str = "callback channel disconnected before delivery";
 
 // Reconstruct the (ret, msg, len) tuple delivered by the C callback
 // into a Result<Vec<u8>, String>: payload on success, UTF-8 message on error.
@@ -114,7 +115,9 @@ unsafe extern "C" fn on_result(
     let _ = tx.send(ffi_payload(ret, msg, len));
 }
 
-fn ffi_call_sync<F>(timeout: Duration, f: F) -> FFIResult
+// `timeout: None` waits for the terminal RET_OK/RET_ERR with no Rust-side limit; a timeout only
+// stops the wait, the Nim handler keeps running to completion.
+fn ffi_call_sync<F>(timeout: Option<Duration>, f: F) -> FFIResult
 where
     F: FnOnce(ffi::FFICallback, *mut c_void) -> c_int,
 {
@@ -126,16 +129,17 @@ where
         drop(unsafe { Box::from_raw(raw as *mut FFISender) });
         return Err("RET_MISSING_CALLBACK (internal error)".into());
     }
-    match rx.recv_timeout(timeout) {
-        Ok(payload) => payload,
-        Err(flume::RecvTimeoutError::Timeout) =>
-            Err(format!("timed out after {:?}", timeout)),
-        Err(flume::RecvTimeoutError::Disconnected) =>
-            Err("callback channel disconnected before delivery".into()),
-    }
+    let payload = match timeout {
+        Some(t) => rx.recv_timeout(t).map_err(|e| match e {
+            flume::RecvTimeoutError::Timeout => format!("timed out after {:?}", t),
+            flume::RecvTimeoutError::Disconnected => DISCONNECTED.to_string(),
+        })?,
+        None => rx.recv().map_err(|_| DISCONNECTED.to_string())?,
+    };
+    payload
 }
 
-async fn ffi_call_async<F>(timeout: Duration, f: F) -> FFIResult
+async fn ffi_call_async<F>(timeout: Option<Duration>, f: F) -> FFIResult
 where
     F: FnOnce(ffi::FFICallback, *mut c_void) -> c_int,
 {
@@ -146,11 +150,14 @@ where
         drop(unsafe { Box::from_raw(raw as *mut FFISender) });
         return Err("RET_MISSING_CALLBACK (internal error)".into());
     }
-    match tokio::time::timeout(timeout, rx.recv_async()).await {
-        Ok(Ok(payload)) => payload,
-        Ok(Err(_)) => Err("callback channel disconnected before delivery".into()),
-        Err(_) => Err(format!("timed out after {:?}", timeout)),
-    }
+    let payload = match timeout {
+        Some(t) => tokio::time::timeout(t, rx.recv_async())
+            .await
+            .map_err(|_| format!("timed out after {:?}", t))?
+            .map_err(|_| DISCONNECTED.to_string())?,
+        None => rx.recv_async().await.map_err(|_| DISCONNECTED.to_string())?,
+    };
+    payload
 }
 
 struct OnEchoFiredHandler {
@@ -257,7 +264,33 @@ unsafe extern "C" fn fetch_host_clock_impl_trampoline(
 pub struct MyTimerCtx {
     ptr: *mut c_void,
     timeout: Duration,
+    calls: MyTimerCalls<'static>,
     listeners: std::sync::Mutex<std::collections::HashMap<u64, Box<dyn std::any::Any + Send>>>,
+}
+
+/// The calls of a `MyTimer` together with the limit each one waits for.
+/// `ctx.method(..)` uses the ctx default; `ctx.with_timeout(limit).method(..)`
+/// overrides it for that call (`None` waits with no Rust-side limit). A timeout
+/// only stops the wait: the Nim handler keeps running to completion.
+/// Not `Copy`/`Clone`, so it cannot outlive the ctx it borrows from.
+pub struct MyTimerCalls<'a> {
+    ptr: *mut c_void,
+    timeout: Option<Duration>,
+    _ctx: std::marker::PhantomData<&'a MyTimerCtx>,
+}
+
+impl std::ops::Deref for MyTimerCtx {
+    type Target = MyTimerCalls<'static>;
+    fn deref(&self) -> &Self::Target {
+        &self.calls
+    }
+}
+
+impl MyTimerCtx {
+    /// The same calls with another limit; `None` waits with no Rust-side limit.
+    pub fn with_timeout(&self, timeout: Option<Duration>) -> MyTimerCalls<'_> {
+        MyTimerCalls { ptr: self.ptr, timeout, _ctx: std::marker::PhantomData }
+    }
 }
 
 // SAFETY: The `ptr` field points to an FFIContext owned by the Nim runtime.
@@ -271,6 +304,9 @@ pub struct MyTimerCtx {
 // wrapper as Send + Sync.
 unsafe impl Send for MyTimerCtx {}
 unsafe impl Sync for MyTimerCtx {}
+// Same invariants: the view only holds the ctx pointer and a limit.
+unsafe impl Send for MyTimerCalls<'_> {}
+unsafe impl Sync for MyTimerCalls<'_> {}
 
 impl Drop for MyTimerCtx {
     fn drop(&mut self) {
@@ -286,26 +322,26 @@ impl MyTimerCtx {
     pub fn create(config: TimerConfig, timeout: Duration) -> Result<Self, String> {
         let req = MyTimerCreateCtorReq { config };
         let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_sync(timeout, |cb, ud| unsafe {
+        let raw_bytes = ffi_call_sync(Some(timeout), |cb, ud| unsafe {
             let _ = ffi::my_timer_create(req_bytes.as_ptr(), req_bytes.len(), cb, ud);
             0
         })?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
         let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
-        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })
+        Ok(Self { ptr: addr as *mut c_void, timeout, calls: MyTimerCalls { ptr: addr as *mut c_void, timeout: Some(timeout), _ctx: std::marker::PhantomData }, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })
     }
 
     /// Creates the FFIContext + MyTimer; async via chronos.
     pub async fn new_async(config: TimerConfig, timeout: Duration) -> Result<Self, String> {
         let req = MyTimerCreateCtorReq { config };
         let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_async(timeout, move |cb, ud| unsafe {
+        let raw_bytes = ffi_call_async(Some(timeout), move |cb, ud| unsafe {
             let _ = ffi::my_timer_create(req_bytes.as_ptr(), req_bytes.len(), cb, ud);
             0
         }).await?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
         let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
-        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })
+        Ok(Self { ptr: addr as *mut c_void, timeout, calls: MyTimerCalls { ptr: addr as *mut c_void, timeout: Some(timeout), _ctx: std::marker::PhantomData }, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })
     }
 
     fn add_listener_inner(
@@ -389,6 +425,36 @@ impl MyTimerCtx {
         if rc == NIMFFI_RET_OK { Ok(()) } else { Err(format!("emit on_host_tick: {}", ret_name(rc))) }
     }
 
+    pub fn lib_version(timeout: Duration) -> Result<String, String> {
+        let req = MyTimerLibVersionReq {};
+        let req_bytes = encode_cbor(&req)?;
+        let raw_bytes = ffi_call_sync(Some(timeout), |cb, ud| unsafe {
+            ffi::my_timer_lib_version(cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        })?;
+        decode_cbor::<String>(&raw_bytes)
+    }
+
+    pub async fn lib_version_async(timeout: Duration) -> Result<String, String> {
+        let req = MyTimerLibVersionReq {};
+        let req_bytes = encode_cbor(&req)?;
+        let raw_bytes = ffi_call_async(Some(timeout), move |cb, ud| unsafe {
+            ffi::my_timer_lib_version(cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        }).await?;
+        decode_cbor::<String>(&raw_bytes)
+    }
+
+    /// Stop every context the library still holds and join their threads.
+    /// Call it before the process exits when a context is still alive, or when a
+    /// static proc built the shared context.
+    /// Returns 0 when every context stopped, 1 when one was left running.
+    /// This wrapper reports that as true.
+    pub fn shutdown() -> bool {
+        unsafe { ffi::my_timer_shutdown() == 0 }
+    }
+
+}
+
+impl MyTimerCalls<'_> {
     /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
     pub fn echo(&self, req: EchoRequest) -> Result<EchoResponse, String> {
         let req = MyTimerEchoReq { req };
@@ -511,33 +577,6 @@ impl MyTimerCtx {
             ffi::my_timer_last_host_tick(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
         }).await?;
         decode_cbor::<i64>(&raw_bytes)
-    }
-
-    pub fn lib_version(timeout: Duration) -> Result<String, String> {
-        let req = MyTimerLibVersionReq {};
-        let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_sync(timeout, |cb, ud| unsafe {
-            ffi::my_timer_lib_version(cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        })?;
-        decode_cbor::<String>(&raw_bytes)
-    }
-
-    pub async fn lib_version_async(timeout: Duration) -> Result<String, String> {
-        let req = MyTimerLibVersionReq {};
-        let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_async(timeout, move |cb, ud| unsafe {
-            ffi::my_timer_lib_version(cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        }).await?;
-        decode_cbor::<String>(&raw_bytes)
-    }
-
-    /// Stop every context the library still holds and join their threads.
-    /// Call it before the process exits when a context is still alive, or when a
-    /// static proc built the shared context.
-    /// Returns 0 when every context stopped, 1 when one was left running.
-    /// This wrapper reports that as true.
-    pub fn shutdown() -> bool {
-        unsafe { ffi::my_timer_shutdown() == 0 }
     }
 
 }
