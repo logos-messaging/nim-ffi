@@ -709,10 +709,6 @@ proc emitListenerApi(
   lines.add("}")
   lines.add("")
 
-func fillTpl(tpl: string, subs: varargs[(string, string)]): string =
-  ## A `.tpl` with its `{{NAME}}` placeholders filled, minus its final newline.
-  tpl.multiReplace(subs).strip(leading = false, chars = {'\n'})
-
 proc emitReverseMachinery(
     lines: var seq[string],
     reg: var CTypeReg,

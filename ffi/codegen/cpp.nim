@@ -257,10 +257,6 @@ func reverseImplFnType(r: FFIReverseMeta): string =
   else:
     "std::function<void($1, const $2&)>" % [reverseCallStruct(r), argsCpp]
 
-func fillTpl(tpl: string, subs: varargs[(string, string)]): string =
-  ## A `.tpl` with its `{{NAME}}` placeholders filled, minus its final newline.
-  tpl.multiReplace(subs).strip(leading = false, chars = {'\n'})
-
 proc emitReverseApi(
     lines: var seq[string],
     ctxTypeName, libName: string,
