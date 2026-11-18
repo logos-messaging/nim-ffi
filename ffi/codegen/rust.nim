@@ -1,11 +1,36 @@
 ## Rust binding generator: emits a complete Rust crate using CBOR (ciborium).
 
-import std/strutils
+import std/[strutils, sequtils]
 import ./meta, ./string_helpers, ./types_ir, ./consts, ./build_paths, ../ret_codes
 
 ## Wire-format Rust type for any Nim `ptr T`/`pointer`; fixed 64-bit for a
 ## host-independent CBOR payload size (mirrors CppPtrType).
 const RustPtrType* = "u64"
+
+const
+  CargoTomlTpl = staticRead("templates/rust/Cargo.toml.tpl")
+  BuildRsTpl = staticRead("templates/rust/build.rs.tpl")
+  LibRsTpl = staticRead("templates/rust/lib.rs.tpl")
+  FfiPreludeTpl = staticRead("templates/rust/ffi_prelude.rs.tpl")
+  FfiReverseTypesTpl = staticRead("templates/rust/ffi_reverse_types.rs.tpl")
+  RuntimeTpl = staticRead("templates/rust/runtime.rs.tpl")
+  EventTrampolineTpl = staticRead("templates/rust/event_trampoline.rs.tpl")
+  ReverseCallTpl = staticRead("templates/rust/reverse_call.rs.tpl")
+  ReverseReplyTpl = staticRead("templates/rust/reverse_reply.rs.tpl")
+  ReverseReplyVoidTpl = staticRead("templates/rust/reverse_reply_void.rs.tpl")
+  ReverseInvokeTpl = staticRead("templates/rust/reverse_invoke.rs.tpl")
+  ReverseInvokeNoArgsTpl = staticRead("templates/rust/reverse_invoke_no_args.rs.tpl")
+  CtxStructTpl = staticRead("templates/rust/ctx_struct.rs.tpl")
+  CtxDropTpl = staticRead("templates/rust/ctx_drop.rs.tpl")
+  CtorTpl = staticRead("templates/rust/ctor.rs.tpl")
+  ListenerInnerTpl = staticRead("templates/rust/listener_inner.rs.tpl")
+  ListenerApiTpl = staticRead("templates/rust/listener_api.rs.tpl")
+  RemoveListenerTpl = staticRead("templates/rust/remove_listener.rs.tpl")
+  ReverseSetImplTpl = staticRead("templates/rust/reverse_set_impl.rs.tpl")
+  ReverseEmitTpl = staticRead("templates/rust/reverse_emit.rs.tpl")
+  MethodSyncTpl = staticRead("templates/rust/method_sync.rs.tpl")
+  MethodAsyncTpl = staticRead("templates/rust/method_async.rs.tpl")
+  ShutdownTpl = staticRead("templates/rust/shutdown.rs.tpl")
 
 func rustScalar(s: ScalarKind): string =
   case s
@@ -98,92 +123,17 @@ proc generateCargoToml*(libName: string, needsBytes = false): string =
   # Add serde_bytes only when a `seq[byte]` goes on the wire as a CBOR byte string.
   let serdeBytesDep = if needsBytes: "\nserde_bytes = \"0.11\"" else: ""
   return
-    """[package]
-name = "$1"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-serde = { version = "1", features = ["derive"] }$2
-ciborium = "0.2"
-flume = { version = "0.11", default-features = false, features = ["async"] }
-tokio = { version = "1", features = ["sync", "time"] }
-
-[dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
-""" %
-    [libName, serdeBytesDep]
+    CargoTomlTpl.fillTpl(("{{LIB}}", libName), ("{{SERDE_BYTES_DEP}}", serdeBytesDep)) &
+    "\n"
 
 proc generateBuildRs*(libName: string, nimSrcRelPath: string): string =
   ## Generates build.rs that compiles the Nim library; nimSrcRelPath is relative
   ## to the crate directory.
   let escapedSrc = nimSrcRelPath.replace("\\", "\\\\")
-  return
-    """use std::path::PathBuf;
-use std::process::Command;
-
-fn main() {
-    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let nim_src = manifest.join("$1");
-    let nim_src = nim_src.canonicalize().unwrap_or(manifest.join("$1"));
-
-    // Walk up to find the nim-ffi repo root (directory containing nim_src's library)
-    // The repo root is where nim c should be run from (contains config.nims).
-    // We assume nim_src lives somewhere under repo_root.
-    // Derive repo_root as the ancestor that contains the .nimble file or config.nims.
-    let mut repo_root = nim_src.clone();
-    loop {
-        repo_root = match repo_root.parent() {
-            Some(p) => p.to_path_buf(),
-            None => break,
-        };
-        if repo_root.join("config.nims").exists() || repo_root.join("ffi.nimble").exists() {
-            break;
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    let lib_ext = "dylib";
-    #[cfg(target_os = "linux")]
-    let lib_ext = "so";
-
-    let out_lib = repo_root.join(format!("lib$2.{lib_ext}"));
-
-    let mut cmd = Command::new("nim");
-    cmd.arg("c")
-        .arg("--mm:orc")
-        .arg("-d:chronicles_log_level=WARN")
-        .arg("--app:lib")
-        .arg("--noMain")
-        .arg(format!("--nimMainPrefix:lib$2"))
-        .arg(format!("-o:{}", out_lib.display()));
-    cmd.arg(&nim_src).current_dir(&repo_root);
-
-    let status = cmd.status().expect("failed to run nim compiler");
-    assert!(status.success(), "Nim compilation failed");
-
-    println!("cargo:rustc-link-search={}", repo_root.display());
-    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", repo_root.display());
-    println!("cargo:rustc-link-lib=$2");
-    // Tests and examples then find the library without DYLD_/LD_LIBRARY_PATH.
-    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", repo_root.display());
-    println!("cargo:rerun-if-changed={}", nim_src.display());
-    // Inside the nim-ffi checkout, a runtime change must rebuild the library too.
-    let ffi_dir = repo_root.join("ffi");
-    if ffi_dir.is_dir() {
-        println!("cargo:rerun-if-changed={}", ffi_dir.display());
-    }
-}
-""" %
-    [escapedSrc, libName]
+  return BuildRsTpl.fillTpl(("{{NIM_SRC}}", escapedSrc), ("{{LIB}}", libName)) & "\n"
 
 proc generateLibRs*(): string =
-  return """mod ffi;
-mod types;
-mod api;
-pub use types::*;
-pub use api::*;
-"""
+  return LibRsTpl
 
 func reverseCallStruct(r: FFIReverseMeta): string =
   capitalizeFirstLetter(r.nimProcName) & "Call"
@@ -217,14 +167,7 @@ proc generateFFIRs*(
   ## Generates ffi.rs with extern "C" declarations; each proc takes one CBOR
   ## buffer (ptr+len) as its request payload.
   var lines: seq[string] = @[]
-  lines.add("use std::os::raw::{c_char, c_int, c_void};")
-  lines.add("")
-  lines.add("pub type FFICallback = unsafe extern \"C\" fn(")
-  lines.add("    ret: c_int,")
-  lines.add("    msg: *const c_char,")
-  lines.add("    len: usize,")
-  lines.add("    user_data: *mut c_void,")
-  lines.add(");")
+  lines.add(FfiPreludeTpl.fillTpl())
   lines.add("")
 
   var libNames: seq[string] = @[]
@@ -300,22 +243,7 @@ proc generateFFIRs*(
 
   if reverse.len > 0:
     lines.add("")
-    lines.add(
-      "/// Runs on a reverse worker thread and may block; answer with `ctx`, the calling owner's token, via `<lib>_reverse_reply`."
-    )
-    lines.add("pub type FFIReverseImpl = unsafe extern \"C\" fn(")
-    lines.add("    ctx: *mut c_void,")
-    lines.add("    call_id: u64,")
-    lines.add("    args: *const u8,")
-    lines.add("    args_len: usize,")
-    lines.add("    user_data: *mut c_void,")
-    lines.add(");")
-    lines.add(
-      "/// Frees an impl's `user_data` once no invocation uses it; runs on any thread."
-    )
-    lines.add(
-      "pub type FFIReverseRelease = unsafe extern \"C\" fn(user_data: *mut c_void);"
-    )
+    lines.add(FfiReverseTypesTpl.fillTpl())
 
   return lines.join("\n") & "\n"
 
@@ -399,6 +327,59 @@ proc generateTypesRs*(
 
   return lines.join("\n")
 
+proc rustParamDecls(params: seq[FFIParamMeta]): seq[string] =
+  var decls: seq[string] = @[]
+  for ep in params:
+    let rustType =
+      if ep.ridesAsPtr():
+        RustPtrType
+      else:
+        nimTypeToRust(ep.typeName)
+    decls.add("$1: $2" % [camelToSnakeCase(ep.name), rustType])
+  return decls
+
+proc reqLiteral(reqName: string, params: seq[FFIParamMeta]): string =
+  if params.len == 0:
+    return reqName & " {}"
+  return reqName & " { " & params.mapIt(camelToSnakeCase(it.name)).join(", ") & " }"
+
+func docBlock(doc: string): string =
+  ## `doc` as `///` lines, each newline-ended, for a `{{DOC}}` that leads a line.
+  var rendered = ""
+  for line in renderMemberDocComment(doc):
+    rendered.add(line & "\n")
+  return rendered
+
+proc emitReverseCall(lines: var seq[string], libName: string, r: FFIReverseMeta) =
+  let reply =
+    if r.replyTypeName.len > 0:
+      ReverseReplyTpl.fillTpl(
+        ("{{REPLY_TYPE}}", nimTypeToRust(r.replyTypeName)),
+        ("{{WIRE}}", r.wireName),
+        ("{{LIB}}", libName),
+      )
+    else:
+      ReverseReplyVoidTpl.fillTpl(("{{WIRE}}", r.wireName), ("{{LIB}}", libName))
+  let argsRust = reverseArgsRust(r)
+  let invoke =
+    if argsRust.len == 0:
+      ReverseInvokeNoArgsTpl.fillTpl()
+    else:
+      ReverseInvokeTpl.fillTpl(("{{ARGS}}", argsRust))
+  lines.add(
+    ReverseCallTpl.fillTpl(
+      ("{{WIRE}}", r.wireName),
+      ("{{CALL}}", reverseCallStruct(r)),
+      ("{{BOX}}", reverseBoxStruct(r)),
+      ("{{BOUND}}", reverseImplBound(r)),
+      ("{{SNAKE}}", reverseSnake(r)),
+      ("{{LIB}}", libName),
+      ("{{REPLY}}", reply),
+      ("{{INVOKE}}", invoke),
+    )
+  )
+  lines.add("")
+
 proc generateApiRs*(
     procs: seq[FFIProcMeta],
     libName: string,
@@ -422,375 +403,52 @@ proc generateApiRs*(
 
   let ctxTypeName = libTypeName & "Ctx"
 
-  lines.add("use std::os::raw::{c_char, c_int, c_void};")
-  lines.add("use std::slice;")
-  lines.add("use std::time::Duration;")
-  lines.add("use serde::de::DeserializeOwned;")
-  lines.add("use serde::Serialize;")
-  lines.add("use super::ffi;")
-  lines.add("use super::types::*;")
+  let retCodes =
+    if reverse.len > 0 or reverseEvents.len > 0:
+      rustRetCodeConsts() & "\n\n" & rustRetNameFn()
+    else:
+      rustRetCodeConsts()
+  lines.add(RuntimeTpl.fillTpl(("// {{RET_CODES}}", retCodes)))
   lines.add("")
 
-  lines.add("fn encode_cbor<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {")
-  lines.add("    let mut buf = Vec::new();")
-  lines.add(
-    "    ciborium::ser::into_writer(value, &mut buf).map_err(|e| e.to_string())?;"
-  )
-  lines.add("    Ok(buf)")
-  lines.add("}")
-  lines.add("")
-  lines.add("fn decode_cbor<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {")
-  lines.add("    ciborium::de::from_reader(bytes).map_err(|e| e.to_string())")
-  lines.add("}")
-  lines.add("")
-
-  # FFI trampoline: user_data owns a Box<flume::Sender>; a late callback sends into a closed receiver, which is harmless.
-  lines.add("type FFIResult = Result<Vec<u8>, String>;")
-  lines.add("type FFISender = flume::Sender<FFIResult>;")
-  lines.add("")
-  lines.add("// Reconstruct the (ret, msg, len) tuple delivered by the C callback")
-  lines.add(
-    "// into a Result<Vec<u8>, String>: payload on success, UTF-8 message on error."
-  )
-  lines.add(
-    "// `from_utf8_lossy` accepts non-UTF-8 error bytes by inserting U+FFFD; the"
-  )
-  lines.add(
-    "// alternative would be to dispatch a separate Err for invalid UTF-8, but the"
-  )
-  lines.add("// codegen contract is that Nim handlers emit `string` error payloads, so")
-  lines.add("// invalid UTF-8 here would be a Nim-side bug.")
-  lines.add(
-    "unsafe fn ffi_payload(ret: c_int, msg: *const c_char, len: usize) -> FFIResult {"
-  )
-  lines.add("    let bytes = if msg.is_null() || len == 0 {")
-  lines.add("        Vec::new()")
-  lines.add("    } else {")
-  lines.add("        slice::from_raw_parts(msg as *const u8, len).to_vec()")
-  lines.add("    };")
-  lines.add("    if ret == NIMFFI_RET_OK { Ok(bytes) }")
-  lines.add("    else        { Err(String::from_utf8_lossy(&bytes).into_owned()) }")
-  lines.add("}")
-  lines.add("")
-  lines.add("// nim-ffi result-callback status codes, emitted from ffi/ret_codes.nim.")
-  lines.add(rustRetCodeConsts())
-  lines.add("")
-  if reverse.len > 0 or reverseEvents.len > 0:
-    lines.add(rustRetNameFn())
-    lines.add("")
-  lines.add("unsafe extern \"C\" fn on_result(")
-  lines.add("    ret: c_int,")
-  lines.add("    msg: *const c_char,")
-  lines.add("    len: usize,")
-  lines.add("    user_data: *mut c_void,")
-  lines.add(") {")
-  lines.add(
-    "    // NIMFFI_RET_STALE_WARN (3) is a non-terminal progress ping: the request"
-  )
-  lines.add(
-    "    // is still running. This wrapper only delivers the final result, so ignore"
-  )
-  lines.add(
-    "    // it WITHOUT reclaiming the box — a terminal callback still owns the Sender."
-  )
-  lines.add("    if ret == NIMFFI_RET_STALE_WARN { return; }")
-  lines.add("")
-  lines.add("    // Take ownership of the boxed Sender — dropping it at end of scope")
-  lines.add("    // releases the only outstanding handle.")
-  lines.add("    let tx = Box::from_raw(user_data as *mut FFISender);")
-  lines.add("")
-  lines.add(
-    "    // `tx.send` returns Err only if the awaiting future was dropped (and with it"
-  )
-  lines.add(
-    "    // the Receiver): e.g. tokio::time::timeout elapsed, a tokio::select! branch"
-  )
-  lines.add(
-    "    // lost the race, or the future was dropped before being awaited. This cannot"
-  )
-  lines.add("    // happen with the crate's own examples but may occur in arbitrary")
-  lines.add("    // downstream consumers, so we discard the Err safely.")
-  lines.add(
-    "    // Given that this is invoked from a Nim thread, we can't propagate the error by panicking or"
-  )
-  lines.add(
-    "    // returning a Result. Furthermore, an API dev may intentionally set a timeout in the await,"
-  )
-  lines.add(
-    "    // in which case is also fine to discard the send error in this case because the API user will"
-  )
-  lines.add("    // handle the timeout expiry in their own code.")
-  lines.add(
-    "    // The important part is to ensure that the callback doesn't panic or block indefinitely if the"
-  )
-  lines.add("    // receiver is gone.")
-  lines.add("    let _ = tx.send(ffi_payload(ret, msg, len));")
-  lines.add("}")
-  lines.add("")
-  lines.add("fn ffi_call_sync<F>(timeout: Option<Duration>, f: F) -> FFIResult")
-  lines.add("where")
-  lines.add("    F: FnOnce(ffi::FFICallback, *mut c_void) -> c_int,")
-  lines.add("{")
-  lines.add("    let (tx, rx) = flume::bounded::<FFIResult>(1);")
-  lines.add("    let raw = Box::into_raw(Box::new(tx)) as *mut c_void;")
-  lines.add("    let ret = f(on_result, raw);")
-  lines.add("    if ret == NIMFFI_RET_MISSING_CALLBACK {")
-  lines.add("        // Callback will never fire; reclaim the box to avoid a leak.")
-  lines.add("        drop(unsafe { Box::from_raw(raw as *mut FFISender) });")
-  lines.add("        return Err(\"RET_MISSING_CALLBACK (internal error)\".into());")
-  lines.add("    }")
-  lines.add("    let received = match timeout {")
-  lines.add("        Some(t) => rx.recv_timeout(t),")
-  lines.add(
-    "        None => rx.recv().map_err(|_| flume::RecvTimeoutError::Disconnected),"
-  )
-  lines.add("    };")
-  lines.add("    match received {")
-  lines.add("        Ok(payload) => payload,")
-  lines.add("        Err(flume::RecvTimeoutError::Timeout) =>")
-  lines.add(
-    "            Err(format!(\"timed out after {:?}\", timeout.unwrap_or_default())),"
-  )
-  lines.add("        Err(flume::RecvTimeoutError::Disconnected) =>")
-  lines.add(
-    "            Err(\"callback channel disconnected before delivery\".into()),"
-  )
-  lines.add("    }")
-  lines.add("}")
-  lines.add("")
-  lines.add(
-    "/// Run `fut` with an optional limit: `None` waits with no limit. A timeout only"
-  )
-  lines.add("/// stops the wait; the Nim handler keeps running to completion.")
-  lines.add("pub async fn with_timeout<F, T>(")
-  lines.add("    limit: Option<Duration>,")
-  lines.add("    fut: F,")
-  lines.add(") -> Result<T, tokio::time::error::Elapsed>")
-  lines.add("where")
-  lines.add("    F: std::future::Future<Output = T>,")
-  lines.add("{")
-  lines.add("    match limit {")
-  lines.add("        Some(d) => tokio::time::timeout(d, fut).await,")
-  lines.add("        None => Ok(fut.await),")
-  lines.add("    }")
-  lines.add("}")
-  lines.add("")
-  lines.add(
-    "// Waits for the terminal RET_OK/RET_ERR with no limit; callers bound it with `with_timeout`."
-  )
-  lines.add("async fn ffi_call_async<F>(f: F) -> FFIResult")
-  lines.add("where")
-  lines.add("    F: FnOnce(ffi::FFICallback, *mut c_void) -> c_int,")
-  lines.add("{")
-  lines.add("    let (tx, rx) = flume::bounded::<FFIResult>(1);")
-  lines.add("    let raw = Box::into_raw(Box::new(tx)) as *mut c_void;")
-  lines.add("    let ret = f(on_result, raw);")
-  lines.add("    if ret == NIMFFI_RET_MISSING_CALLBACK {")
-  lines.add("        drop(unsafe { Box::from_raw(raw as *mut FFISender) });")
-  lines.add("        return Err(\"RET_MISSING_CALLBACK (internal error)\".into());")
-  lines.add("    }")
-  lines.add("    match rx.recv_async().await {")
-  lines.add("        Ok(payload) => payload,")
-  lines.add(
-    "        Err(_) => Err(\"callback channel disconnected before delivery\".into()),"
-  )
-  lines.add("    }")
-  lines.add("}")
-  lines.add("")
-
-  # Per-listener handler boxes + extern "C" trampolines: the Box is kept alive in `listeners`, its raw pointer is the per-event `user_data`.
+  # `listeners` keeps each Box alive; its raw pointer is the per-event `user_data`.
   if events.len > 0:
     for ev in events:
-      let handlerStruct = capitalizeFirstLetter(ev.nimProcName) & "Handler"
-      let trampolineName = camelToSnakeCase(ev.nimProcName) & "_trampoline"
-      lines.add("struct $1 {" % [handlerStruct])
-      lines.add("    f: Box<dyn Fn(&$1) + Send + Sync>," % [ev.payloadTypeName])
-      lines.add("}")
-      lines.add("")
-      lines.add("unsafe extern \"C\" fn $1(" % [trampolineName])
-      lines.add("    ret: c_int, msg: *const c_char, len: usize, ud: *mut c_void,")
-      lines.add(") {")
-      lines.add("    if ud.is_null() || ret != 0 || msg.is_null() || len == 0 {")
-      lines.add("        return;")
-      lines.add("    }")
-      lines.add("    let h = &*(ud as *const $1);" % [handlerStruct])
-      lines.add("    let bytes = slice::from_raw_parts(msg as *const u8, len);")
-      lines.add("    #[derive(serde::Deserialize)]")
-      lines.add("    struct Envelope { payload: $1 }" % [ev.payloadTypeName])
       lines.add(
-        "    if let Ok(env) = ciborium::de::from_reader::<Envelope, _>(bytes) {"
+        EventTrampolineTpl.fillTpl(
+          ("{{EVENT_SNAKE}}", camelToSnakeCase(ev.nimProcName)),
+          ("{{EVENT}}", capitalizeFirstLetter(ev.nimProcName)),
+          ("{{PAYLOAD}}", ev.payloadTypeName),
+        )
       )
-      lines.add("        (h.f)(&env.payload);")
-      lines.add("    }")
-      lines.add("}")
       lines.add("")
 
-    # Public handle returned by every add_…_listener call.
     lines.add("#[derive(Debug, Clone, Copy)]")
     lines.add("pub struct ListenerHandle { pub id: u64 }")
     lines.add("")
 
-  # The token holds the ctx as usize, so that a host thread can answer later.
   for r in reverse:
-    let callStruct = reverseCallStruct(r)
-    let boxStruct = reverseBoxStruct(r)
-    let tramp = reverseSnake(r) & "_impl_trampoline"
-    let argsRust = reverseArgsRust(r)
-    lines.add(
-      "/// Answer token for one `$1` call (`Copy`). Reply once, from any thread;" %
-        [r.wireName]
-    )
-    lines.add(
-      "/// a late or second reply is dropped, and one after destroy returns an error."
-    )
-    lines.add("#[derive(Debug, Clone, Copy)]")
-    lines.add("pub struct $1 { ctx: usize, id: u64 }" % [callStruct])
-    lines.add("")
-    lines.add("impl $1 {" % [callStruct])
-    if r.replyTypeName.len > 0:
-      let replyRust = nimTypeToRust(r.replyTypeName)
-      lines.add(
-        "    /// A reply that does not encode still answers the call, with the reason"
-      )
-      lines.add("    /// as the error, so the library does not wait out its timeout.")
-      lines.add("    pub fn reply(&self, r: &$1) -> Result<(), String> {" % [replyRust])
-      lines.add("        let b = match encode_cbor(r) {")
-      lines.add("            Ok(b) => b,")
-      lines.add("            Err(e) => {")
-      lines.add("                let _ = self.fail(&e);")
-      lines.add(
-        "                return Err(format!(\"reply $1: {e}\"));" % [r.wireName]
-      )
-      lines.add("            }")
-      lines.add("        };")
-      lines.add(
-        "        let rc = unsafe { ffi::$1_reverse_reply(self.ctx as *mut c_void, self.id, 0, b.as_ptr(), b.len()) };" %
-          [libName]
-      )
-      lines.add(
-        "        if rc == NIMFFI_RET_OK { Ok(()) } else { Err(format!(\"reply $1: {}\", ret_name(rc))) }" %
-          [r.wireName]
-      )
-      lines.add("    }")
-    else:
-      lines.add("    pub fn reply(&self) -> Result<(), String> {")
-      lines.add(
-        "        let rc = unsafe { ffi::$1_reverse_reply(self.ctx as *mut c_void, self.id, 0, std::ptr::null(), 0) };" %
-          [libName]
-      )
-      lines.add(
-        "        if rc == NIMFFI_RET_OK { Ok(()) } else { Err(format!(\"reply $1: {}\", ret_name(rc))) }" %
-          [r.wireName]
-      )
-      lines.add("    }")
-    lines.add("    pub fn fail(&self, msg: &str) -> Result<(), String> {")
-    lines.add(
-      "        let rc = unsafe { ffi::$1_reverse_reply(self.ctx as *mut c_void, self.id, 1, msg.as_ptr(), msg.len()) };" %
-        [libName]
-    )
-    lines.add(
-      "        if rc == NIMFFI_RET_OK { Ok(()) } else { Err(format!(\"fail $1: {}\", ret_name(rc))) }" %
-        [r.wireName]
-    )
-    lines.add("    }")
-    lines.add("}")
-    lines.add("")
-    lines.add("struct $1 {" % [boxStruct])
-    lines.add("    f: Box<dyn $1>," % [reverseImplBound(r)])
-    lines.add("}")
-    lines.add("")
-    lines.add("/// The library calls it once no invocation runs the box any more.")
-    lines.add(
-      "unsafe extern \"C\" fn $1_impl_release(ud: *mut c_void) {" % [reverseSnake(r)]
-    )
-    lines.add(
-      "    if !ud.is_null() { drop(Box::from_raw(ud as *mut $1)); }" % [boxStruct]
-    )
-    lines.add("}")
-    lines.add("")
-    lines.add("unsafe extern \"C\" fn $1(" % [tramp])
-    lines.add(
-      "    ctx: *mut c_void, call_id: u64, args: *const u8, len: usize, ud: *mut c_void,"
-    )
-    lines.add(") {")
-    lines.add("    if ud.is_null() { return; }")
-    lines.add("    let b = &*(ud as *const $1);" % [boxStruct])
-    # The calling owner's token, not one captured at set time.
-    lines.add("    let call = $1 { ctx: ctx as usize, id: call_id };" % [callStruct])
-    lines.add(
-      "    // A panic must not unwind into the library's worker thread: it would abort."
-    )
-    lines.add("    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {")
-    if argsRust.len == 0:
-      lines.add("        let _ = (args, len);")
-      lines.add("        (b.f)(call);")
-    else:
-      lines.add("        let bytes = if args.is_null() || len == 0 {")
-      lines.add("            &[][..]")
-      lines.add("        } else {")
-      lines.add("            slice::from_raw_parts(args, len)")
-      lines.add("        };")
-      lines.add("        match decode_cbor::<$1>(bytes) {" % [argsRust])
-      lines.add("            Ok(a) => (b.f)(call, a),")
-      lines.add("            Err(e) => {")
-      lines.add(
-        "                let _ = call.fail(&format!(\"reverse args decode failed: {e}\"));"
-      )
-      lines.add("            }")
-      lines.add("        }")
-    lines.add("    }));")
-    lines.add("    if r.is_err() {")
-    lines.add(
-      "        let _ = call.fail(\"host impl panicked\"); // dropped if it already replied"
-    )
-    lines.add("    }")
-    lines.add("}")
-    lines.add("")
+    lines.emitReverseCall(libName, r)
 
-  lines.add("/// High-level context for `$1`." % [libTypeName])
-  lines.add("pub struct $1 {" % [ctxTypeName])
-  lines.add("    ptr: *mut c_void,")
-  lines.add("    timeout: Duration,")
-  if events.len > 0:
-    # Keeps each handler box alive while its listener id is live on the Nim side.
-    lines.add(
-      "    listeners: std::sync::Mutex<std::collections::HashMap<u64, Box<dyn std::any::Any + Send>>>,"
+  let callsTypeName = libTypeName & "Calls"
+  let listenersField =
+    if events.len > 0:
+      "\n    listeners: std::sync::Mutex<std::collections::HashMap<u64, Box<dyn std::any::Any + Send>>>,"
+    else:
+      ""
+  lines.add(
+    CtxStructTpl.fillTpl(
+      ("{{LIB_TYPE}}", libTypeName),
+      ("{{CTX}}", ctxTypeName),
+      ("{{CALLS}}", callsTypeName),
+      ("{{LISTENERS_FIELD}}", listenersField),
     )
-  lines.add("}")
-  lines.add("")
-  # SAFETY block applies to both impls below.
-  lines.add(
-    "// SAFETY: The `ptr` field points to an FFIContext owned by the Nim runtime."
   )
-  lines.add("// Every call through the generated FFI proc goes through")
-  lines.add(
-    "// `sendRequestToFFIThread` on the Nim side, which only enqueues the request"
-  )
-  lines.add("// onto a mutex-guarded MPSC queue (sound from any number of threads) and")
-  lines.add(
-    "// wakes the single FFI thread that dispatches every handler. The context is"
-  )
-  lines.add(
-    "// thus never mutated non-atomically from the caller's thread. The Nim-side"
-  )
-  lines.add("// reentrancy guard (`onFFIThread` threadvar) prevents handlers from")
-  lines.add("// re-entering the dispatcher. These invariants make it sound to mark the")
-  lines.add("// wrapper as Send + Sync.")
-  lines.add("unsafe impl Send for $1 {}" % [ctxTypeName])
-  lines.add("unsafe impl Sync for $1 {}" % [ctxTypeName])
   lines.add("")
 
-  # Drop tears down the Nim runtime when the ctx goes out of scope; without it, forgetting the ctx leaks the entire runtime (FFI thread, watchdog, chronos).
+  # `listeners` drops after `drop` returns, when the dylib has joined its threads.
   if dtorProcName.len > 0:
-    lines.add("impl Drop for $1 {" % [ctxTypeName])
-    lines.add("    fn drop(&mut self) {")
-    lines.add("        if !self.ptr.is_null() {")
-    lines.add("            unsafe { ffi::$1(self.ptr); }" % [dtorProcName])
-    lines.add("            self.ptr = std::ptr::null_mut();")
-    lines.add("        }")
-    # `listeners` drops after this body; the dylib has joined its threads by then, so no callback is mid-flight against the raw pointers we handed it.
-    lines.add("    }")
-    lines.add("}")
+    lines.add(CtxDropTpl.fillTpl(("{{CTX}}", ctxTypeName), ("{{DTOR}}", dtorProcName)))
     lines.add("")
 
   lines.add("impl $1 {" % [ctxTypeName])
@@ -798,26 +456,15 @@ proc generateApiRs*(
   var selfExtras: seq[string] = @[]
   if events.len > 0:
     selfExtras.add("listeners: std::sync::Mutex::new(std::collections::HashMap::new())")
+  let callsInit =
+    "calls: $1 { ptr: addr as *mut c_void, timeout: Some(timeout), _ctx: std::marker::PhantomData }" %
+    [callsTypeName]
   let selfInit =
-    if selfExtras.len > 0:
-      "        Ok(Self { ptr: addr as *mut c_void, timeout, " & selfExtras.join(", ") &
-        " })"
-    else:
-      "        Ok(Self { ptr: addr as *mut c_void, timeout })"
+    "        Ok(Self { ptr: addr as *mut c_void, timeout, " & callsInit &
+    (if selfExtras.len > 0: ", " & selfExtras.join(", ") else: "") & " })"
 
   for ctor in ctors:
-    let reqName = reqStructName(ctor)
-    var paramsList: seq[string] = @[]
-    var fieldInits: seq[string] = @[]
-    for ep in ctor.extraParams:
-      let snake = camelToSnakeCase(ep.name)
-      let rustType =
-        if ep.ridesAsPtr():
-          RustPtrType
-        else:
-          nimTypeToRust(ep.typeName)
-      paramsList.add("$1: $2" % [snake, rustType])
-      fieldInits.add(snake)
+    let paramsList = rustParamDecls(ctor.extraParams)
     # `create` and `new_async` take an explicit `timeout: Duration` that flows into `self.timeout` so subsequent method calls inherit it.
     let ctorParamsStr =
       if paramsList.len > 0:
@@ -825,230 +472,81 @@ proc generateApiRs*(
       else:
         "timeout: Duration"
 
-    let reqLit =
-      if fieldInits.len > 0:
-        reqName & " { " & fieldInits.join(", ") & " }"
-      else:
-        reqName & " {}"
-
-    lines.add(renderMemberDocComment(ctor.doc))
-    lines.add("    pub fn create($1) -> Result<Self, String> {" % [ctorParamsStr])
-    lines.add("        let req = $1;" % [reqLit])
-    lines.add("        let req_bytes = encode_cbor(&req)?;")
-    # Ctor also fires the callback carrying the payload, so discard the synchronous *mut c_void and yield RET_OK to wait on the callback.
-    lines.add("        let raw_bytes = ffi_call_sync(Some(timeout), |cb, ud| unsafe {")
+    # The callback delivers the ctx address as a CBOR text string; the ctor's return value goes unused.
     lines.add(
-      "            let _ = ffi::$1(req_bytes.as_ptr(), req_bytes.len(), cb, ud);" %
-        [ctor.procName]
+      CtorTpl.fillTpl(
+        ("{{DOC}}", docBlock(ctor.doc)),
+        ("{{PARAMS}}", ctorParamsStr),
+        ("{{REQ}}", reqLiteral(reqStructName(ctor), ctor.extraParams)),
+        ("{{PROC}}", ctor.procName),
+        ("{{SELF_INIT}}", selfInit),
+      )
     )
-    lines.add("            0")
-    lines.add("        })?;")
-    # Ctor success payload is a CBOR text string holding the ctx address.
-    lines.add("        let addr_str: String = decode_cbor(&raw_bytes)?;")
-    lines.add(
-      "        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;"
-    )
-    lines.add(selfInit)
-    lines.add("    }")
-    lines.add("")
-
-    lines.add(renderMemberDocComment(ctor.doc))
-    lines.add(
-      "    /// `timeout` is only the default for this ctx's sync calls; the constructor wait itself has no limit, bound it with `with_timeout`."
-    )
-    lines.add(
-      "    pub async fn new_async($1) -> Result<Self, String> {" % [ctorParamsStr]
-    )
-    lines.add("        let req = $1;" % [reqLit])
-    lines.add("        let req_bytes = encode_cbor(&req)?;")
-    # See `create`: discard the ctor's synchronous return; the callback delivers the ctx address.
-    lines.add("        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {")
-    lines.add(
-      "            let _ = ffi::$1(req_bytes.as_ptr(), req_bytes.len(), cb, ud);" %
-        [ctor.procName]
-    )
-    lines.add("            0")
-    lines.add("        }).await?;")
-    lines.add("        let addr_str: String = decode_cbor(&raw_bytes)?;")
-    lines.add(
-      "        let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;"
-    )
-    lines.add(selfInit)
-    lines.add("    }")
     lines.add("")
 
   if events.len > 0:
-    # Shared by every public `add_*_listener`: caller owns the concrete-typed box, erased to `dyn Any + Send` only on hand-off.
-    lines.add("    fn add_listener_inner(")
-    lines.add("        &self,")
-    lines.add("        event_name: *const c_char,")
-    lines.add("        callback: ffi::FFICallback,")
-    lines.add("        raw: *mut c_void,")
-    lines.add("        owned: Box<dyn std::any::Any + Send>,")
-    lines.add("    ) -> ListenerHandle {")
-    lines.add("        let id = unsafe {")
-    lines.add(
-      "            ffi::$1_add_event_listener(self.ptr, event_name, callback, raw)" %
-        [libName]
-    )
-    lines.add("        };")
-    lines.add("        if id != 0 {")
-    lines.add("            self.listeners.lock().unwrap().insert(id, owned);")
-    lines.add("        }")
-    lines.add("        ListenerHandle { id }")
-    lines.add("    }")
+    lines.add(ListenerInnerTpl.fillTpl(("{{LIB}}", libName)))
     lines.add("")
 
     for ev in events:
-      let methodName = "add_" & camelToSnakeCase(ev.nimProcName) & "_listener"
-      let handlerStruct = capitalizeFirstLetter(ev.nimProcName) & "Handler"
-      let trampolineName = camelToSnakeCase(ev.nimProcName) & "_trampoline"
-      lines.add(renderMemberDocComment(ev.doc))
       lines.add(
-        "    /// Register a typed listener for `$1`. The returned handle can be" %
-          [ev.wireName]
+        ListenerApiTpl.fillTpl(
+          ("{{DOC}}", docBlock(ev.doc)),
+          ("{{WIRE}}", ev.wireName),
+          ("{{EVENT_SNAKE}}", camelToSnakeCase(ev.nimProcName)),
+          ("{{EVENT}}", capitalizeFirstLetter(ev.nimProcName)),
+          ("{{PAYLOAD}}", ev.payloadTypeName),
+        )
       )
-      lines.add("    /// passed to `remove_event_listener` to unregister.")
-      lines.add("    pub fn $1<F>(&self, handler: F) -> ListenerHandle" % [methodName])
-      lines.add("    where F: Fn(&$1) + Send + Sync + 'static," % [ev.payloadTypeName])
-      lines.add("    {")
-      lines.add(
-        "        let owned: Box<$1> = Box::new($1 { f: Box::new(handler) });" %
-          [handlerStruct]
-      )
-      lines.add(
-        "        let raw = &*owned as *const $1 as *mut c_void;" % [handlerStruct]
-      )
-      lines.add(
-        "        self.add_listener_inner(b\"$1\\0\".as_ptr() as *const c_char, $2, raw, owned)" %
-          [ev.wireName, trampolineName]
-      )
-      lines.add("    }")
       lines.add("")
 
-    # Remove by handle; drops the Box after the C ABI confirms unregistration.
-    lines.add("    /// Remove a previously-registered listener by handle. Returns true")
-    lines.add("    /// if the listener existed and was removed; false otherwise.")
-    lines.add(
-      "    pub fn remove_event_listener(&self, handle: ListenerHandle) -> bool {"
-    )
-    lines.add("        if handle.id == 0 { return false; }")
-    lines.add("        let rc = unsafe {")
-    lines.add(
-      "            ffi::$1_remove_event_listener(self.ptr, handle.id)" % [libName]
-    )
-    lines.add("        };")
-    lines.add("        self.listeners.lock().unwrap().remove(&handle.id);")
-    lines.add("        rc == 0")
-    lines.add("    }")
+    lines.add(RemoveListenerTpl.fillTpl(("{{LIB}}", libName)))
     lines.add("")
 
   for r in reverse:
-    let snake = reverseSnake(r)
-    let boxStruct = reverseBoxStruct(r)
-    let tramp = snake & "_impl_trampoline"
-    lines.add(renderMemberDocComment(r.doc))
+    var doc = docBlock(r.doc)
     if reverseArgsRust(r).len > 0:
-      lines.add(
-        "    /// The closure runs on a reverse worker and owns its arguments, so a deferred"
+      doc.add(
+        "    /// The closure runs on a reverse worker and owns its arguments, so a deferred\n" &
+          "    /// reply can move them to another thread.\n"
       )
-      lines.add("    /// reply can move them to another thread.")
-    lines.add("    pub fn set_$1_impl<F>(&self, f: F) -> Result<(), String>" % [snake])
-    lines.add("    where F: $1 + 'static," % [reverseImplBound(r)])
-    lines.add("    {")
     lines.add(
-      "        let raw = Box::into_raw(Box::new($1 { f: Box::new(f) })) as *mut c_void;" %
-        [boxStruct]
+      ReverseSetImplTpl.fillTpl(
+        ("{{DOC}}", doc),
+        ("{{SNAKE}}", reverseSnake(r)),
+        ("{{BOUND}}", reverseImplBound(r)),
+        ("{{BOX}}", reverseBoxStruct(r)),
+        ("{{LIB}}", libName),
+        ("{{WIRE}}", r.wireName),
+      )
     )
-    lines.add(
-      "        // The library owns the box now: it releases it once no invocation runs it."
-    )
-    lines.add("        let rc = unsafe {")
-    lines.add(
-      "            ffi::$1_set_$2_impl(self.ptr, Some($3), raw, Some($4_impl_release))" %
-        [libName, r.wireName, tramp, snake]
-    )
-    lines.add("        };")
-    lines.add("        if rc != NIMFFI_RET_OK {")
-    lines.add(
-      "            drop(unsafe { Box::from_raw(raw as *mut $1) }); // refused: still ours" %
-        [boxStruct]
-    )
-    lines.add(
-      "            return Err(format!(\"set $1 impl: {}\", ret_name(rc)));" %
-        [r.wireName]
-    )
-    lines.add("        }")
-    lines.add("        Ok(())")
-    lines.add("    }")
-    lines.add("")
-    lines.add("    pub fn clear_$1_impl(&self) -> Result<(), String> {" % [snake])
-    lines.add(
-      "        let rc = unsafe { ffi::$1_set_$2_impl(self.ptr, None, std::ptr::null_mut(), None) };" %
-        [libName, r.wireName]
-    )
-    lines.add(
-      "        if rc == NIMFFI_RET_OK { Ok(()) } else { Err(format!(\"clear $1 impl: {}\", ret_name(rc))) }" %
-        [r.wireName]
-    )
-    lines.add("    }")
     lines.add("")
   for rev in reverseEvents:
-    var params: seq[string] = @[]
-    var inits: seq[string] = @[]
-    for p in rev.params:
-      let snakeName = camelToSnakeCase(p.name)
-      params.add("$1: $2" % [snakeName, nimTypeToRust(p.typeName)])
-      inits.add(snakeName)
+    let params = rustParamDecls(rev.params)
     let paramsStr =
       if params.len > 0:
         "&self, " & params.join(", ")
       else:
         "&self"
-    let reqLit =
-      if inits.len > 0:
-        rev.reqTypeName & " { " & inits.join(", ") & " }"
-      else:
-        rev.reqTypeName & " {}"
-    lines.add(renderMemberDocComment(rev.doc))
     lines.add(
-      "    pub fn emit_$1($2) -> Result<(), String> {" %
-        [camelToSnakeCase(rev.nimProcName), paramsStr]
+      ReverseEmitTpl.fillTpl(
+        ("{{DOC}}", docBlock(rev.doc)),
+        ("{{NAME}}", camelToSnakeCase(rev.nimProcName)),
+        ("{{PARAMS}}", paramsStr),
+        ("{{REQ}}", reqLiteral(rev.reqTypeName, rev.params)),
+        ("{{LIB}}", libName),
+        ("{{WIRE}}", rev.wireName),
+      )
     )
-    lines.add("        let payload = $1;" % [reqLit])
-    lines.add(
-      "        let b = encode_cbor(&payload).map_err(|e| format!(\"emit $1: {e}\"))?;" %
-        [rev.wireName]
-    )
-    lines.add(
-      "        let rc = unsafe { ffi::$1_emit_$2(self.ptr, b.as_ptr(), b.len()) };" %
-        [libName, rev.wireName]
-    )
-    lines.add(
-      "        if rc == NIMFFI_RET_OK { Ok(()) } else { Err(format!(\"emit $1: {}\", ret_name(rc))) }" %
-        [rev.wireName]
-    )
-    lines.add("    }")
     lines.add("")
 
   # A static is an associated fn: no `&self` to read `timeout` from, so it takes one.
+  var callsBody: seq[string] = @[]
   for m in classified.replyProcs():
     let isStatic = m.isStatic()
-    let methodName = stripLibPrefix(m.procName, libName)
-    let retRustType = nimTypeToRust(m.returnTypeName)
-    let reqName = reqStructName(m)
-
-    var paramsList: seq[string] = @[]
-    var fieldInits: seq[string] = @[]
-    for ep in m.extraParams:
-      let snake = camelToSnakeCase(ep.name)
-      let rustType =
-        if ep.ridesAsPtr():
-          RustPtrType
-        else:
-          nimTypeToRust(ep.typeName)
-      paramsList.add("$1: $2" % [snake, rustType])
-      fieldInits.add(snake)
+    var paramsList = rustParamDecls(m.extraParams)
+    if isStatic:
+      paramsList.add("timeout: Duration")
     let paramsStr =
       if isStatic:
         paramsList.join(", ")
@@ -1057,135 +555,61 @@ proc generateApiRs*(
       else:
         "&self"
 
-    let reqLit =
-      if fieldInits.len > 0:
-        reqName & " { " & fieldInits.join(", ") & " }"
+    let retTypeForApi =
+      if m.returnRidesAsPtr():
+        RustPtrType
       else:
-        reqName & " {}"
+        nimTypeToRust(m.returnTypeName)
+    let common = [
+      ("{{DOC}}", docBlock(m.doc)),
+      ("{{NAME}}", stripLibPrefix(m.procName, libName)),
+      ("{{PARAMS}}", paramsStr),
+      ("{{RET}}", retTypeForApi),
+      ("{{REQ}}", reqLiteral(reqStructName(m), m.extraParams)),
+      ("{{PROC}}", m.procName),
+      ("{{TIMEOUT}}", if isStatic: "Some(timeout)" else: "self.timeout"),
+    ]
 
-    let retTypeForApi = if m.returnRidesAsPtr(): RustPtrType else: retRustType
-    let ctxArg = if isStatic: "" else: "self.ptr, "
-    let argNames = fieldInits.join(", ")
+    # Statics stay associated fns of the ctx; instance methods live on the calls view.
+    var blk: seq[string] = @[]
+    blk.add(
+      MethodSyncTpl.fillTpl(
+        @common & ("{{CTX_ARG}}", if isStatic: "" else: "self.ptr, ")
+      )
+    )
+    blk.add("")
 
-    # Instance methods keep `self.timeout`; `_with_timeout` variants take `Option<Duration>` (None = wait with no Rust-side limit).
-    # A Rust-side timeout only stops the wait: the Nim handler keeps running to completion.
-    proc emitVariant(
-        lines: var seq[string],
-        m: FFIProcMeta,
-        name, params, retType, reqLit, ctxArg: string,
-        isStatic, isAsync: bool,
-        timeoutExpr: string,
-    ) =
-      let fnKw = if isAsync: "pub async fn" else: "pub fn"
-      lines.add("    $1 $2($3) -> Result<$4, String> {" % [fnKw, name, params, retType])
-      lines.add("        let req = $1;" % [reqLit])
-      lines.add("        let req_bytes = encode_cbor(&req)?;")
-      if isAsync:
-        if not isStatic:
-          lines.add("        let ptr = self.ptr as usize;")
-        lines.add("        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {")
-        lines.add(
-          "            ffi::$1($2cb, ud, req_bytes.as_ptr(), req_bytes.len())" %
-            [m.procName, if isStatic: "" else: "ptr as *mut c_void, "]
-        )
-        lines.add("        }).await?;")
-      else:
-        lines.add(
-          "        let raw_bytes = ffi_call_sync($1, |cb, ud| unsafe {" % [timeoutExpr]
-        )
-        lines.add(
-          "            ffi::$1($2cb, ud, req_bytes.as_ptr(), req_bytes.len())" %
-            [m.procName, ctxArg]
-        )
-        lines.add("        })?;")
-      lines.add("        decode_cbor::<$1>(&raw_bytes)" % [retType])
-      lines.add("    }")
-      lines.add("")
-
-    let asyncDoc =
-      "    /// Waits for the terminal result with no limit; bound it with `with_timeout`."
+    # The ptr rides as usize (Copy + Send), so the future is Send on a multi-threaded runtime.
+    blk.add(
+      MethodAsyncTpl.fillTpl(
+        @common &
+          @[
+            ("{{CTX_ARG}}", if isStatic: "" else: "ptr as *mut c_void, "),
+            (
+              "{{PTR_COPY}}",
+              if isStatic: "" else: "        let ptr = self.ptr as usize;\n",
+            ),
+          ]
+      )
+    )
+    blk.add("")
     if isStatic:
-      let syncParams =
-        if paramsList.len > 0:
-          paramsStr & ", timeout: Duration"
-        else:
-          "timeout: Duration"
-      lines.add(renderMemberDocComment(m.doc))
-      emitVariant(
-        lines, m, methodName, syncParams, retTypeForApi, reqLit, ctxArg, true, false,
-        "Some(timeout)",
-      )
-      lines.add(asyncDoc)
-      lines.add(renderMemberDocComment(m.doc))
-      emitVariant(
-        lines,
-        m,
-        methodName & "_async",
-        paramsStr,
-        retTypeForApi,
-        reqLit,
-        ctxArg,
-        true,
-        true,
-        "",
-      )
+      lines.add(blk)
     else:
-      let fwd =
-        if argNames.len > 0:
-          argNames & ", "
-        else:
-          ""
-      lines.add(renderMemberDocComment(m.doc))
-      lines.add(
-        "    pub fn $1($2) -> Result<$3, String> {" %
-          [methodName, paramsStr, retTypeForApi]
-      )
-      lines.add(
-        "        self.$1_with_timeout($2Some(self.timeout))" % [methodName, fwd]
-      )
-      lines.add("    }")
-      lines.add("")
-      lines.add(
-        "    /// `timeout: None` waits for the terminal result with no Rust-side limit;"
-      )
-      lines.add("    /// a timeout only stops the wait, the Nim handler keeps running.")
-      lines.add(renderMemberDocComment(m.doc))
-      emitVariant(
-        lines,
-        m,
-        methodName & "_with_timeout",
-        paramsStr & ", timeout: Option<Duration>",
-        retTypeForApi,
-        reqLit,
-        ctxArg,
-        false,
-        false,
-        "timeout",
-      )
-      lines.add(asyncDoc)
-      lines.add(renderMemberDocComment(m.doc))
-      emitVariant(
-        lines,
-        m,
-        methodName & "_async",
-        paramsStr,
-        retTypeForApi,
-        reqLit,
-        ctxArg,
-        false,
-        true,
-        "",
-      )
+      callsBody.add(blk)
 
   # An associated fn, not a method: a host calls it with no context left to call it on.
-  lines.add(renderMemberDocComment(ShutdownDoc))
-  lines.add("    /// This wrapper reports that as true.")
-  lines.add("    pub fn shutdown() -> bool {")
-  lines.add("        unsafe { ffi::$1_shutdown() == 0 }" % [libName])
-  lines.add("    }")
+  lines.add(
+    ShutdownTpl.fillTpl(("{{DOC}}", docBlock(ShutdownDoc)), ("{{LIB}}", libName))
+  )
   lines.add("")
 
   lines.add("}")
+  lines.add("")
+  if callsBody.len > 0:
+    lines.add("impl $1<'_> {" % [callsTypeName])
+    lines.add(callsBody)
+    lines.add("}")
   return lines.join("\n") & "\n"
 
 proc generateRustCrate*(

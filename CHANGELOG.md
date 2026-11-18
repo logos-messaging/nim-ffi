@@ -5,16 +5,15 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
-- **Rust: per-call timeout.** Each instance method gets `<m>_with_timeout`
-  taking `Option<Duration>` (`None` = no Rust-side limit); `<m>` keeps
-  `self.timeout`. The crate exports `with_timeout(Option<Duration>, fut)` to
-  bound any `*_async` call. A timeout only stops the wait: the Nim handler runs
-  to completion.
+- **Rust: per-call timeout.** `ctx.with_timeout(Some(d)).echo(..)` and
+  `.echo_async(..)` override the ctx default for one call; `with_timeout(None)`
+  waits for the terminal `RET_OK`/`RET_ERR` with no Rust-side limit. Instance
+  methods now live on a generated `<Lib>Calls` view the ctx derefs to, so
+  existing `ctx.echo(..)` calls are unchanged. A Rust-side timeout only stops
+  the wait: the Nim handler runs to completion. Statics and `create` /
+  `new_async` still take a plain `Duration` (always bounded).
 
 ### Changed
-- **Rust `*_async` calls no longer time out on their own** (they wait for the
-  terminal `RET_OK`/`RET_ERR`, as #129 intends); wrap them in `with_timeout`.
-  Static `*_async` no longer take a `timeout` argument.
 - **`ffi_poll` is exported from `ffi` only under `-d:ffiPollMode`.** It was
   exported in every mode; nothing in the repo used it outside poll mode.
 - **Poll-mode C exports return a request id instead of taking a callback.** A

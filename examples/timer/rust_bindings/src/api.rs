@@ -18,6 +18,7 @@ fn decode_cbor<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
 
 type FFIResult = Result<Vec<u8>, String>;
 type FFISender = flume::Sender<FFIResult>;
+const DISCONNECTED: &str = "callback channel disconnected before delivery";
 
 // Reconstruct the (ret, msg, len) tuple delivered by the C callback
 // into a Result<Vec<u8>, String>: payload on success, UTF-8 message on error.
@@ -114,6 +115,8 @@ unsafe extern "C" fn on_result(
     let _ = tx.send(ffi_payload(ret, msg, len));
 }
 
+// `timeout: None` waits for the terminal RET_OK/RET_ERR with no Rust-side limit; a timeout only
+// stops the wait, the Nim handler keeps running to completion.
 fn ffi_call_sync<F>(timeout: Option<Duration>, f: F) -> FFIResult
 where
     F: FnOnce(ffi::FFICallback, *mut c_void) -> c_int,
@@ -126,36 +129,17 @@ where
         drop(unsafe { Box::from_raw(raw as *mut FFISender) });
         return Err("RET_MISSING_CALLBACK (internal error)".into());
     }
-    let received = match timeout {
-        Some(t) => rx.recv_timeout(t),
-        None => rx.recv().map_err(|_| flume::RecvTimeoutError::Disconnected),
+    let payload = match timeout {
+        Some(t) => rx.recv_timeout(t).map_err(|e| match e {
+            flume::RecvTimeoutError::Timeout => format!("timed out after {:?}", t),
+            flume::RecvTimeoutError::Disconnected => DISCONNECTED.to_string(),
+        })?,
+        None => rx.recv().map_err(|_| DISCONNECTED.to_string())?,
     };
-    match received {
-        Ok(payload) => payload,
-        Err(flume::RecvTimeoutError::Timeout) =>
-            Err(format!("timed out after {:?}", timeout.unwrap_or_default())),
-        Err(flume::RecvTimeoutError::Disconnected) =>
-            Err("callback channel disconnected before delivery".into()),
-    }
+    payload
 }
 
-/// Run `fut` with an optional limit: `None` waits with no limit. A timeout only
-/// stops the wait; the Nim handler keeps running to completion.
-pub async fn with_timeout<F, T>(
-    limit: Option<Duration>,
-    fut: F,
-) -> Result<T, tokio::time::error::Elapsed>
-where
-    F: std::future::Future<Output = T>,
-{
-    match limit {
-        Some(d) => tokio::time::timeout(d, fut).await,
-        None => Ok(fut.await),
-    }
-}
-
-// Waits for the terminal RET_OK/RET_ERR with no limit; callers bound it with `with_timeout`.
-async fn ffi_call_async<F>(f: F) -> FFIResult
+async fn ffi_call_async<F>(timeout: Option<Duration>, f: F) -> FFIResult
 where
     F: FnOnce(ffi::FFICallback, *mut c_void) -> c_int,
 {
@@ -166,10 +150,14 @@ where
         drop(unsafe { Box::from_raw(raw as *mut FFISender) });
         return Err("RET_MISSING_CALLBACK (internal error)".into());
     }
-    match rx.recv_async().await {
-        Ok(payload) => payload,
-        Err(_) => Err("callback channel disconnected before delivery".into()),
-    }
+    let payload = match timeout {
+        Some(t) => tokio::time::timeout(t, rx.recv_async())
+            .await
+            .map_err(|_| format!("timed out after {:?}", t))?
+            .map_err(|_| DISCONNECTED.to_string())?,
+        None => rx.recv_async().await.map_err(|_| DISCONNECTED.to_string())?,
+    };
+    payload
 }
 
 struct OnEchoFiredHandler {
@@ -276,7 +264,33 @@ unsafe extern "C" fn fetch_host_clock_impl_trampoline(
 pub struct MyTimerCtx {
     ptr: *mut c_void,
     timeout: Duration,
+    calls: MyTimerCalls<'static>,
     listeners: std::sync::Mutex<std::collections::HashMap<u64, Box<dyn std::any::Any + Send>>>,
+}
+
+/// The calls of a `MyTimer` together with the limit each one waits for.
+/// `ctx.method(..)` uses the ctx default; `ctx.with_timeout(limit).method(..)`
+/// overrides it for that call (`None` waits with no Rust-side limit). A timeout
+/// only stops the wait: the Nim handler keeps running to completion.
+/// Not `Copy`/`Clone`, so it cannot outlive the ctx it borrows from.
+pub struct MyTimerCalls<'a> {
+    ptr: *mut c_void,
+    timeout: Option<Duration>,
+    _ctx: std::marker::PhantomData<&'a MyTimerCtx>,
+}
+
+impl std::ops::Deref for MyTimerCtx {
+    type Target = MyTimerCalls<'static>;
+    fn deref(&self) -> &Self::Target {
+        &self.calls
+    }
+}
+
+impl MyTimerCtx {
+    /// The same calls with another limit; `None` waits with no Rust-side limit.
+    pub fn with_timeout(&self, timeout: Option<Duration>) -> MyTimerCalls<'_> {
+        MyTimerCalls { ptr: self.ptr, timeout, _ctx: std::marker::PhantomData }
+    }
 }
 
 // SAFETY: The `ptr` field points to an FFIContext owned by the Nim runtime.
@@ -290,6 +304,9 @@ pub struct MyTimerCtx {
 // wrapper as Send + Sync.
 unsafe impl Send for MyTimerCtx {}
 unsafe impl Sync for MyTimerCtx {}
+// Same invariants: the view only holds the ctx pointer and a limit.
+unsafe impl Send for MyTimerCalls<'_> {}
+unsafe impl Sync for MyTimerCalls<'_> {}
 
 impl Drop for MyTimerCtx {
     fn drop(&mut self) {
@@ -311,21 +328,20 @@ impl MyTimerCtx {
         })?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
         let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
-        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })
+        Ok(Self { ptr: addr as *mut c_void, timeout, calls: MyTimerCalls { ptr: addr as *mut c_void, timeout: Some(timeout), _ctx: std::marker::PhantomData }, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })
     }
 
     /// Creates the FFIContext + MyTimer; async via chronos.
-    /// `timeout` is only the default for this ctx's sync calls; the constructor wait itself has no limit, bound it with `with_timeout`.
     pub async fn new_async(config: TimerConfig, timeout: Duration) -> Result<Self, String> {
         let req = MyTimerCreateCtorReq { config };
         let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {
+        let raw_bytes = ffi_call_async(Some(timeout), move |cb, ud| unsafe {
             let _ = ffi::my_timer_create(req_bytes.as_ptr(), req_bytes.len(), cb, ud);
             0
         }).await?;
         let addr_str: String = decode_cbor(&raw_bytes)?;
         let addr: usize = addr_str.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
-        Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })
+        Ok(Self { ptr: addr as *mut c_void, timeout, calls: MyTimerCalls { ptr: addr as *mut c_void, timeout: Some(timeout), _ctx: std::marker::PhantomData }, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })
     }
 
     fn add_listener_inner(
@@ -409,177 +425,6 @@ impl MyTimerCtx {
         if rc == NIMFFI_RET_OK { Ok(()) } else { Err(format!("emit on_host_tick: {}", ret_name(rc))) }
     }
 
-    /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
-    pub fn echo(&self, req: EchoRequest) -> Result<EchoResponse, String> {
-        self.echo_with_timeout(req, Some(self.timeout))
-    }
-
-    /// `timeout: None` waits for the terminal result with no Rust-side limit;
-    /// a timeout only stops the wait, the Nim handler keeps running.
-    /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
-    pub fn echo_with_timeout(&self, req: EchoRequest, timeout: Option<Duration>) -> Result<EchoResponse, String> {
-        let req = MyTimerEchoReq { req };
-        let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_sync(timeout, |cb, ud| unsafe {
-            ffi::my_timer_echo(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        })?;
-        decode_cbor::<EchoResponse>(&raw_bytes)
-    }
-
-    /// Waits for the terminal result with no limit; bound it with `with_timeout`.
-    /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
-    pub async fn echo_async(&self, req: EchoRequest) -> Result<EchoResponse, String> {
-        let req = MyTimerEchoReq { req };
-        let req_bytes = encode_cbor(&req)?;
-        let ptr = self.ptr as usize;
-        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {
-            ffi::my_timer_echo(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        }).await?;
-        decode_cbor::<EchoResponse>(&raw_bytes)
-    }
-
-    /// Returns the library's version string.
-    pub fn version(&self) -> Result<String, String> {
-        self.version_with_timeout(Some(self.timeout))
-    }
-
-    /// `timeout: None` waits for the terminal result with no Rust-side limit;
-    /// a timeout only stops the wait, the Nim handler keeps running.
-    /// Returns the library's version string.
-    pub fn version_with_timeout(&self, timeout: Option<Duration>) -> Result<String, String> {
-        let req = MyTimerVersionReq {};
-        let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_sync(timeout, |cb, ud| unsafe {
-            ffi::my_timer_version(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        })?;
-        decode_cbor::<String>(&raw_bytes)
-    }
-
-    /// Waits for the terminal result with no limit; bound it with `with_timeout`.
-    /// Returns the library's version string.
-    pub async fn version_async(&self) -> Result<String, String> {
-        let req = MyTimerVersionReq {};
-        let req_bytes = encode_cbor(&req)?;
-        let ptr = self.ptr as usize;
-        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {
-            ffi::my_timer_version(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        }).await?;
-        decode_cbor::<String>(&raw_bytes)
-    }
-
-    pub fn complex(&self, req: ComplexRequest) -> Result<ComplexResponse, String> {
-        self.complex_with_timeout(req, Some(self.timeout))
-    }
-
-    /// `timeout: None` waits for the terminal result with no Rust-side limit;
-    /// a timeout only stops the wait, the Nim handler keeps running.
-    pub fn complex_with_timeout(&self, req: ComplexRequest, timeout: Option<Duration>) -> Result<ComplexResponse, String> {
-        let req = MyTimerComplexReq { req };
-        let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_sync(timeout, |cb, ud| unsafe {
-            ffi::my_timer_complex(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        })?;
-        decode_cbor::<ComplexResponse>(&raw_bytes)
-    }
-
-    /// Waits for the terminal result with no limit; bound it with `with_timeout`.
-    pub async fn complex_async(&self, req: ComplexRequest) -> Result<ComplexResponse, String> {
-        let req = MyTimerComplexReq { req };
-        let req_bytes = encode_cbor(&req)?;
-        let ptr = self.ptr as usize;
-        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {
-            ffi::my_timer_complex(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        }).await?;
-        decode_cbor::<ComplexResponse>(&raw_bytes)
-    }
-
-    /// Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
-    pub fn schedule(&self, job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig) -> Result<ScheduleResult, String> {
-        self.schedule_with_timeout(job, retry, schedule, Some(self.timeout))
-    }
-
-    /// `timeout: None` waits for the terminal result with no Rust-side limit;
-    /// a timeout only stops the wait, the Nim handler keeps running.
-    /// Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
-    pub fn schedule_with_timeout(&self, job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig, timeout: Option<Duration>) -> Result<ScheduleResult, String> {
-        let req = MyTimerScheduleReq { job, retry, schedule };
-        let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_sync(timeout, |cb, ud| unsafe {
-            ffi::my_timer_schedule(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        })?;
-        decode_cbor::<ScheduleResult>(&raw_bytes)
-    }
-
-    /// Waits for the terminal result with no limit; bound it with `with_timeout`.
-    /// Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
-    pub async fn schedule_async(&self, job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig) -> Result<ScheduleResult, String> {
-        let req = MyTimerScheduleReq { job, retry, schedule };
-        let req_bytes = encode_cbor(&req)?;
-        let ptr = self.ptr as usize;
-        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {
-            ffi::my_timer_schedule(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        }).await?;
-        decode_cbor::<ScheduleResult>(&raw_bytes)
-    }
-
-    /// Calls the host-implemented `fetch_host_clock` interface and formats it.
-    pub fn host_clock(&self) -> Result<String, String> {
-        self.host_clock_with_timeout(Some(self.timeout))
-    }
-
-    /// `timeout: None` waits for the terminal result with no Rust-side limit;
-    /// a timeout only stops the wait, the Nim handler keeps running.
-    /// Calls the host-implemented `fetch_host_clock` interface and formats it.
-    pub fn host_clock_with_timeout(&self, timeout: Option<Duration>) -> Result<String, String> {
-        let req = MyTimerHostClockReq {};
-        let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_sync(timeout, |cb, ud| unsafe {
-            ffi::my_timer_host_clock(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        })?;
-        decode_cbor::<String>(&raw_bytes)
-    }
-
-    /// Waits for the terminal result with no limit; bound it with `with_timeout`.
-    /// Calls the host-implemented `fetch_host_clock` interface and formats it.
-    pub async fn host_clock_async(&self) -> Result<String, String> {
-        let req = MyTimerHostClockReq {};
-        let req_bytes = encode_cbor(&req)?;
-        let ptr = self.ptr as usize;
-        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {
-            ffi::my_timer_host_clock(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        }).await?;
-        decode_cbor::<String>(&raw_bytes)
-    }
-
-    /// Reads the last tick number the `on_host_tick` reverse event recorded.
-    pub fn last_host_tick(&self) -> Result<i64, String> {
-        self.last_host_tick_with_timeout(Some(self.timeout))
-    }
-
-    /// `timeout: None` waits for the terminal result with no Rust-side limit;
-    /// a timeout only stops the wait, the Nim handler keeps running.
-    /// Reads the last tick number the `on_host_tick` reverse event recorded.
-    pub fn last_host_tick_with_timeout(&self, timeout: Option<Duration>) -> Result<i64, String> {
-        let req = MyTimerLastHostTickReq {};
-        let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_sync(timeout, |cb, ud| unsafe {
-            ffi::my_timer_last_host_tick(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        })?;
-        decode_cbor::<i64>(&raw_bytes)
-    }
-
-    /// Waits for the terminal result with no limit; bound it with `with_timeout`.
-    /// Reads the last tick number the `on_host_tick` reverse event recorded.
-    pub async fn last_host_tick_async(&self) -> Result<i64, String> {
-        let req = MyTimerLastHostTickReq {};
-        let req_bytes = encode_cbor(&req)?;
-        let ptr = self.ptr as usize;
-        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {
-            ffi::my_timer_last_host_tick(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
-        }).await?;
-        decode_cbor::<i64>(&raw_bytes)
-    }
-
     pub fn lib_version(timeout: Duration) -> Result<String, String> {
         let req = MyTimerLibVersionReq {};
         let req_bytes = encode_cbor(&req)?;
@@ -589,11 +434,10 @@ impl MyTimerCtx {
         decode_cbor::<String>(&raw_bytes)
     }
 
-    /// Waits for the terminal result with no limit; bound it with `with_timeout`.
-    pub async fn lib_version_async() -> Result<String, String> {
+    pub async fn lib_version_async(timeout: Duration) -> Result<String, String> {
         let req = MyTimerLibVersionReq {};
         let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_async(move |cb, ud| unsafe {
+        let raw_bytes = ffi_call_async(Some(timeout), move |cb, ud| unsafe {
             ffi::my_timer_lib_version(cb, ud, req_bytes.as_ptr(), req_bytes.len())
         }).await?;
         decode_cbor::<String>(&raw_bytes)
@@ -606,6 +450,133 @@ impl MyTimerCtx {
     /// This wrapper reports that as true.
     pub fn shutdown() -> bool {
         unsafe { ffi::my_timer_shutdown() == 0 }
+    }
+
+}
+
+impl MyTimerCalls<'_> {
+    /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
+    pub fn echo(&self, req: EchoRequest) -> Result<EchoResponse, String> {
+        let req = MyTimerEchoReq { req };
+        let req_bytes = encode_cbor(&req)?;
+        let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
+            ffi::my_timer_echo(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        })?;
+        decode_cbor::<EchoResponse>(&raw_bytes)
+    }
+
+    /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
+    pub async fn echo_async(&self, req: EchoRequest) -> Result<EchoResponse, String> {
+        let req = MyTimerEchoReq { req };
+        let req_bytes = encode_cbor(&req)?;
+        let ptr = self.ptr as usize;
+        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
+            ffi::my_timer_echo(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        }).await?;
+        decode_cbor::<EchoResponse>(&raw_bytes)
+    }
+
+    /// Returns the library's version string.
+    pub fn version(&self) -> Result<String, String> {
+        let req = MyTimerVersionReq {};
+        let req_bytes = encode_cbor(&req)?;
+        let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
+            ffi::my_timer_version(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        })?;
+        decode_cbor::<String>(&raw_bytes)
+    }
+
+    /// Returns the library's version string.
+    pub async fn version_async(&self) -> Result<String, String> {
+        let req = MyTimerVersionReq {};
+        let req_bytes = encode_cbor(&req)?;
+        let ptr = self.ptr as usize;
+        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
+            ffi::my_timer_version(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        }).await?;
+        decode_cbor::<String>(&raw_bytes)
+    }
+
+    pub fn complex(&self, req: ComplexRequest) -> Result<ComplexResponse, String> {
+        let req = MyTimerComplexReq { req };
+        let req_bytes = encode_cbor(&req)?;
+        let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
+            ffi::my_timer_complex(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        })?;
+        decode_cbor::<ComplexResponse>(&raw_bytes)
+    }
+
+    pub async fn complex_async(&self, req: ComplexRequest) -> Result<ComplexResponse, String> {
+        let req = MyTimerComplexReq { req };
+        let req_bytes = encode_cbor(&req)?;
+        let ptr = self.ptr as usize;
+        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
+            ffi::my_timer_complex(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        }).await?;
+        decode_cbor::<ComplexResponse>(&raw_bytes)
+    }
+
+    /// Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
+    pub fn schedule(&self, job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig) -> Result<ScheduleResult, String> {
+        let req = MyTimerScheduleReq { job, retry, schedule };
+        let req_bytes = encode_cbor(&req)?;
+        let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
+            ffi::my_timer_schedule(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        })?;
+        decode_cbor::<ScheduleResult>(&raw_bytes)
+    }
+
+    /// Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
+    pub async fn schedule_async(&self, job: JobSpec, retry: RetryPolicy, schedule: ScheduleConfig) -> Result<ScheduleResult, String> {
+        let req = MyTimerScheduleReq { job, retry, schedule };
+        let req_bytes = encode_cbor(&req)?;
+        let ptr = self.ptr as usize;
+        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
+            ffi::my_timer_schedule(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        }).await?;
+        decode_cbor::<ScheduleResult>(&raw_bytes)
+    }
+
+    /// Calls the host-implemented `fetch_host_clock` interface and formats it.
+    pub fn host_clock(&self) -> Result<String, String> {
+        let req = MyTimerHostClockReq {};
+        let req_bytes = encode_cbor(&req)?;
+        let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
+            ffi::my_timer_host_clock(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        })?;
+        decode_cbor::<String>(&raw_bytes)
+    }
+
+    /// Calls the host-implemented `fetch_host_clock` interface and formats it.
+    pub async fn host_clock_async(&self) -> Result<String, String> {
+        let req = MyTimerHostClockReq {};
+        let req_bytes = encode_cbor(&req)?;
+        let ptr = self.ptr as usize;
+        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
+            ffi::my_timer_host_clock(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        }).await?;
+        decode_cbor::<String>(&raw_bytes)
+    }
+
+    /// Reads the last tick number the `on_host_tick` reverse event recorded.
+    pub fn last_host_tick(&self) -> Result<i64, String> {
+        let req = MyTimerLastHostTickReq {};
+        let req_bytes = encode_cbor(&req)?;
+        let raw_bytes = ffi_call_sync(self.timeout, |cb, ud| unsafe {
+            ffi::my_timer_last_host_tick(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        })?;
+        decode_cbor::<i64>(&raw_bytes)
+    }
+
+    /// Reads the last tick number the `on_host_tick` reverse event recorded.
+    pub async fn last_host_tick_async(&self) -> Result<i64, String> {
+        let req = MyTimerLastHostTickReq {};
+        let req_bytes = encode_cbor(&req)?;
+        let ptr = self.ptr as usize;
+        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {
+            ffi::my_timer_last_host_tick(ptr as *mut c_void, cb, ud, req_bytes.as_ptr(), req_bytes.len())
+        }).await?;
+        decode_cbor::<i64>(&raw_bytes)
     }
 
 }

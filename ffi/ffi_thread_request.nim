@@ -14,6 +14,12 @@ const MaxRequestPayloadBytes* {.intdefine: "ffiMaxRequestPayloadBytes".} = 0
   ## Largest CBOR `data` a submit accepts; 0 = unlimited. Opt in with
   ## `-d:ffiMaxRequestPayloadBytes=<n>`.
 
+func payloadTooLarge*(len: csize_t): bool =
+  ## Checked on the csize_t, before an int conversion can raise a RangeDefect.
+  return
+    len > csize_t(high(int)) or
+    (MaxRequestPayloadBytes > 0 and len > csize_t(MaxRequestPayloadBytes))
+
 type
   QueueLink* = object
     ## Where a request sits in one outbound queue; it is its own node, so a

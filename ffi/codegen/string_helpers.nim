@@ -43,6 +43,10 @@ func renderBlockDocComment*(doc: string, indent = ""): seq[string] =
   rendered.add(indent & " */")
   return rendered
 
+func fillTpl*(tpl: string, subs: varargs[(string, string)]): string =
+  ## A `.tpl` with its `{{NAME}}` placeholders filled, minus its final newline.
+  return tpl.multiReplace(subs).strip(leading = false, chars = {'\n'})
+
 const RemoveListenerDoc* = """Unregister a listener by id.
 A call from another thread returns after the last delivery to that listener,
 so its user data is then safe to free.
