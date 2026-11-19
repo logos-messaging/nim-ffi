@@ -284,7 +284,7 @@ suite "templates: every placeholder is filled":
       bare
     check "impl Drop for" notin bare
     check "impl Drop for TimerCtx {" in files[4]
-    check "ffi::timer_destroy(self.ptr);" in files[4]
+    check "ffi::timer_destroy(self.ptr)" in files[4]
 
   test "the listener machinery appears only with events":
     let withEv = files[4]

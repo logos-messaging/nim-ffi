@@ -18,6 +18,7 @@ const nimFlagsRefc = "--mm:refc -d:chronicles_log_level=WARN"
 const timerSrc = "examples/timer/timer.nim"
 const echoSrc = "examples/echo/echo.nim"
 const perfbenchSrc = "tests/perf/benchlib/perfbench.nim"
+const tickerSrc = "tests/e2e/ticker/ticker.nim"
 
 import std/[algorithm, os, strutils]
 
@@ -140,6 +141,15 @@ proc applySanitizerEnv(san: string) =
       putEnv(key, value.replace("@REPO_ROOT@", thisDir()))
     echo key & "=" & getEnv(key)
 
+proc hostTriple(): string =
+  let info = thisDir() / "tests/e2e/ticker/rust_bindings/rustc-vV.txt"
+  exec "rustc -vV > " & quoteShell(info)
+  for line in readFile(info).splitLines():
+    if line.startsWith("host: "):
+      return line["host: ".len .. ^1]
+  echo "rustc -vV reported no host triple"
+  quit(QuitFailure)
+
 proc genBindingsCmd(flags, src: string, langs = "rust", outDir = ""): string =
   ## One `nim c` that emits `langs` (comma-separated) from `src`. Output dir and
   ## embedded source path default to `<lang>_bindings/` next to `src`; `outDir`
@@ -250,6 +260,7 @@ task test_cpp_e2e, "Build and run the C++ end-to-end tests for the timer example
   # Regenerate the C++ bindings so the suite always runs against fresh codegen.
   runOrQuit "nimble genbindings_cpp"
   runOrQuit "nimble genbindings_cpp_echo"
+  runOrQuit "nimble genbindings_ticker"
   # Reset the cache: a previous *_sanitized configure left the sanitizer on.
   runOrQuit "cmake -S tests/e2e/cpp -B tests/e2e/cpp/build" &
     " -DNIM_FFI_MM=orc -DNIM_FFI_SANITIZER=none"
@@ -289,6 +300,28 @@ task run_examples_rust, "Build and run the Rust example programs":
   for example in ["sync_main", "sync_client", "tokio_main", "tokio_client"]:
     runOrQuit "cargo run --locked --manifest-path " & manifest & " --example " & example
 
+task test_rust_e2e,
+  "Run the Rust listener-lifetime tests against the ticker fixture, under ASan when NIM_FFI_SAN=asan-ubsan":
+  runOrQuit "nimble genbindings_ticker"
+  var cmd =
+    "cargo test --locked --manifest-path tests/e2e/ticker/rust_bindings/Cargo.toml"
+  if getEnv("NIM_FFI_SAN", "none") == "asan-ubsan":
+    applySanitizerEnv("asan-ubsan")
+    # The sanitizer flag is nightly-only; RUSTC_BOOTSTRAP unlocks it on stable.
+    putEnv("RUSTC_BOOTSTRAP", "1")
+    putEnv("RUSTFLAGS", "-Zsanitizer=address")
+    # LSan then sees the Nim heap, which still points at the boxes that a failed destroy keeps.
+    putEnv("NIM_FFI_EXTRA_ARGS", "-d:useMalloc")
+    # Rust links the LLVM ASan runtime, which prints raw offsets without llvm-symbolizer, and lsan.supp then matches no frame.
+    let symbolizer = findExe("llvm-symbolizer")
+    if symbolizer.len == 0:
+      echo "llvm-symbolizer is not on PATH; the LSan suppressions need symbolized frames"
+      quit(QuitFailure)
+    putEnv("ASAN_SYMBOLIZER_PATH", symbolizer)
+    # An explicit target keeps the flag off build.rs and the proc macros.
+    cmd.add " --target " & hostTriple()
+  runOrQuit cmd
+
 task test_sanitized,
   "Run all unit tests under a sanitizer (NIM_FFI_SAN) and mm (NIM_FFI_MM)":
   let san = getEnv("NIM_FFI_SAN", "none")
@@ -306,6 +339,7 @@ task test_cpp_e2e_sanitized,
   applySanitizerEnv(san)
   runOrQuit "nimble genbindings_cpp"
   runOrQuit "nimble genbindings_cpp_echo"
+  runOrQuit "nimble genbindings_ticker"
   runOrQuit "cmake -S tests/e2e/cpp -B tests/e2e/cpp/build" & " -DNIM_FFI_MM=" & mm &
     " -DNIM_FFI_SANITIZER=" & san
   runOrQuit "cmake --build tests/e2e/cpp/build --config Debug -j"
@@ -337,6 +371,9 @@ task genbindings_cpp, "Generate C++ bindings for the timer example":
 task genbindings_cpp_echo, "Generate C++ bindings for the echo example":
   runOrQuit genBindingsCmd(nimFlagsOrc, echoSrc, "cpp")
   runOrQuit genBindingsCmd(nimFlagsRefc, echoSrc, "cpp")
+
+task genbindings_ticker, "Generate C++ and Rust bindings for the ticker e2e fixture":
+  runOrQuit genBindingsCmd(nimFlagsOrc, tickerSrc, "cpp,rust")
 
 task genbindings_c, "Generate C bindings for the timer example":
   runOrQuit genBindingsCmd(nimFlagsOrc, timerSrc, "c")

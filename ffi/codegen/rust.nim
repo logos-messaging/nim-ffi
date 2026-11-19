@@ -22,6 +22,8 @@ const
   ReverseInvokeNoArgsTpl = staticRead("templates/rust/reverse_invoke_no_args.rs.tpl")
   CtxStructTpl = staticRead("templates/rust/ctx_struct.rs.tpl")
   CtxDropTpl = staticRead("templates/rust/ctx_drop.rs.tpl")
+  CtxDropListenersTpl = staticRead("templates/rust/ctx_drop_listeners.rs.tpl")
+  DispatchScopeTpl = staticRead("templates/rust/dispatch_scope.rs.tpl")
   CtorTpl = staticRead("templates/rust/ctor.rs.tpl")
   ListenerInnerTpl = staticRead("templates/rust/listener_inner.rs.tpl")
   ListenerApiTpl = staticRead("templates/rust/listener_api.rs.tpl")
@@ -413,6 +415,9 @@ proc generateApiRs*(
 
   # `listeners` keeps each Box alive; its raw pointer is the per-event `user_data`.
   if events.len > 0:
+    # The outermost trampoline on a thread drops the boxes removed inside its dispatch.
+    lines.add(DispatchScopeTpl.fillTpl())
+    lines.add("")
     for ev in events:
       lines.add(
         EventTrampolineTpl.fillTpl(
@@ -448,7 +453,9 @@ proc generateApiRs*(
 
   # `listeners` drops after `drop` returns, when the dylib has joined its threads.
   if dtorProcName.len > 0:
-    lines.add(CtxDropTpl.fillTpl(("{{CTX}}", ctxTypeName), ("{{DTOR}}", dtorProcName)))
+    # A failed destroy leaves the event thread live, and it still holds each box as user_data.
+    let dtorTpl = if events.len > 0: CtxDropListenersTpl else: CtxDropTpl
+    lines.add(dtorTpl.fillTpl(("{{CTX}}", ctxTypeName), ("{{DTOR}}", dtorProcName)))
     lines.add("")
 
   lines.add("impl $1 {" % [ctxTypeName])
@@ -500,7 +507,11 @@ proc generateApiRs*(
       )
       lines.add("")
 
-    lines.add(RemoveListenerTpl.fillTpl(("{{LIB}}", libName)))
+    lines.add(
+      RemoveListenerTpl.fillTpl(
+        ("{{DOC}}", docBlock(DeferredRemoveListenerDoc)), ("{{LIB}}", libName)
+      )
+    )
     lines.add("")
 
   for r in reverse:
