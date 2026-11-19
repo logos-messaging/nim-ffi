@@ -1,7 +1,7 @@
 {{DOC}}    pub fn create({{PARAMS}}) -> Result<Self, String> {
         let req = {{REQ}};
         let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_sync(Some(timeout), |cb, ud| unsafe {
+        let raw_bytes = ffi_call_sync(Some(timeout), None, |cb, ud| unsafe {
             let _ = ffi::{{PROC}}(req_bytes.as_ptr(), req_bytes.len(), cb, ud);
             0
         })?;
@@ -13,7 +13,7 @@
 {{DOC}}    pub async fn new_async({{PARAMS}}) -> Result<Self, String> {
         let req = {{REQ}};
         let req_bytes = encode_cbor(&req)?;
-        let raw_bytes = ffi_call_async(Some(timeout), move |cb, ud| unsafe {
+        let raw_bytes = ffi_call_async(Some(timeout), None, move |cb, ud| unsafe {
             let _ = ffi::{{PROC}}(req_bytes.as_ptr(), req_bytes.len(), cb, ud);
             0
         }).await?;

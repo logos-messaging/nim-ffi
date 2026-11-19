@@ -18,6 +18,12 @@ fn decode_cbor<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
 
 type FFIResult = Result<Vec<u8>, String>;
 type FFISender = flume::Sender<FFIResult>;
+/// Gets the elapsed time on each RET_STALE_WARN. Runs on a library thread, also after a timeout.
+pub type Progress = std::sync::Arc<dyn Fn(Duration) + Send + Sync>;
+struct CallSlot {
+    tx: FFISender,
+    progress: Option<Progress>,
+}
 const DISCONNECTED: &str = "callback channel disconnected before delivery";
 
 // Reconstruct the (ret, msg, len) tuple delivered by the C callback
@@ -45,14 +51,24 @@ unsafe extern "C" fn on_result(
     len: usize,
     user_data: *mut c_void,
 ) {
-    // NIMFFI_RET_STALE_WARN (3) is a non-terminal progress ping: the request
-    // is still running. This wrapper only delivers the final result, so ignore
-    // it WITHOUT reclaiming the box — a terminal callback still owns the Sender.
-    if ret == NIMFFI_RET_STALE_WARN { return; }
+    // Non-terminal ping: do not reclaim the box, the terminal callback still owns it.
+    if ret == NIMFFI_RET_STALE_WARN {
+        let slot = &*(user_data as *const CallSlot);
+        if let Some(progress) = &slot.progress {
+            let text = if msg.is_null() { &[][..] } else { slice::from_raw_parts(msg as *const u8, len) };
+            let ms = std::str::from_utf8(text).ok().and_then(|t| t.trim().parse::<u64>().ok());
+            let ms = ms.unwrap_or(0);
+            // A panic must not unwind into the library thread: it would abort.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                progress(Duration::from_millis(ms))
+            }));
+        }
+        return;
+    }
 
-    // Take ownership of the boxed Sender — dropping it at end of scope
+    // Take ownership of the boxed slot — dropping it at end of scope
     // releases the only outstanding handle.
-    let tx = Box::from_raw(user_data as *mut FFISender);
+    let tx = Box::from_raw(user_data as *mut CallSlot).tx;
 
     // `tx.send` returns Err only if the awaiting future was dropped (and with it
     // the Receiver): e.g. tokio::time::timeout elapsed, a tokio::select! branch
@@ -70,16 +86,16 @@ unsafe extern "C" fn on_result(
 
 // `timeout: None` waits for the terminal RET_OK/RET_ERR with no Rust-side limit; a timeout only
 // stops the wait, the Nim handler keeps running to completion.
-fn ffi_call_sync<F>(timeout: Option<Duration>, f: F) -> FFIResult
+fn ffi_call_sync<F>(timeout: Option<Duration>, progress: Option<Progress>, f: F) -> FFIResult
 where
     F: FnOnce(ffi::FFICallback, *mut c_void) -> c_int,
 {
     let (tx, rx) = flume::bounded::<FFIResult>(1);
-    let raw = Box::into_raw(Box::new(tx)) as *mut c_void;
+    let raw = Box::into_raw(Box::new(CallSlot { tx, progress })) as *mut c_void;
     let ret = f(on_result, raw);
     if ret == NIMFFI_RET_MISSING_CALLBACK {
         // Callback will never fire; reclaim the box to avoid a leak.
-        drop(unsafe { Box::from_raw(raw as *mut FFISender) });
+        drop(unsafe { Box::from_raw(raw as *mut CallSlot) });
         return Err("RET_MISSING_CALLBACK (internal error)".into());
     }
     let payload = match timeout {
@@ -92,15 +108,15 @@ where
     payload
 }
 
-async fn ffi_call_async<F>(timeout: Option<Duration>, f: F) -> FFIResult
+async fn ffi_call_async<F>(timeout: Option<Duration>, progress: Option<Progress>, f: F) -> FFIResult
 where
     F: FnOnce(ffi::FFICallback, *mut c_void) -> c_int,
 {
     let (tx, rx) = flume::bounded::<FFIResult>(1);
-    let raw = Box::into_raw(Box::new(tx)) as *mut c_void;
+    let raw = Box::into_raw(Box::new(CallSlot { tx, progress })) as *mut c_void;
     let ret = f(on_result, raw);
     if ret == NIMFFI_RET_MISSING_CALLBACK {
-        drop(unsafe { Box::from_raw(raw as *mut FFISender) });
+        drop(unsafe { Box::from_raw(raw as *mut CallSlot) });
         return Err("RET_MISSING_CALLBACK (internal error)".into());
     }
     let payload = match timeout {
