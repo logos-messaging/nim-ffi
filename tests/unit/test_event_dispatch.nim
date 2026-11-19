@@ -221,7 +221,7 @@ suite "event thread drains queued events":
         0'u64,
         unsafeAddr payload[0],
         payload.len,
-      )
+      ) == EnqueueResult.Queued
 
       waitCallback(evt)
       check evt.retCode == RET_OK
@@ -248,7 +248,7 @@ suite "oversize payload falls back to heap":
         0'u64,
         unsafeAddr payload[0],
         payload.len,
-      )
+      ) == EnqueueResult.Queued
 
       waitCallback(evt)
       check evt.retCode == RET_OK
@@ -274,7 +274,7 @@ suite "oversize event name falls back to heap":
         0'u64,
         unsafeAddr payload[0],
         payload.len,
-      )
+      ) == EnqueueResult.Queued
 
       waitCallback(evt)
       check evt.retCode == RET_OK

@@ -4,7 +4,7 @@
 {.pragma: callback, cdecl, raises: [], gcsafe.}
 
 import system/ansi_c
-import std/[atomics, locks, options]
+import std/[atomics, locks, sequtils, options, tables]
 import chronicles
 import results
 import ./ffi_types, ./cbor_serial, ./ffi_msg
@@ -204,6 +204,12 @@ const MaxEventNameBytes* {.intdefine: "ffiMaxEventNameBytes".} = 64
   ## Per-slot name slab (incl. NUL); longer names take the heap fallback.
   ## Override `-d:ffiMaxEventNameBytes=N`.
 
+const MaxEventQueueBytes* {.intdefine: "ffiMaxEventQueueBytes".} = 4 * 1024 * 1024
+  ## Limit on the name and payload bytes queued at once, slab and heap alike.
+
+const EventOverflowSustainMs* {.intdefine: "ffiEventOverflowSustainMs".} = 1000
+  ## How long drops go on before `not_responding`, and stop before `responding`.
+
 const emptyListenerPayload*: cstring = ""
   ## Non-nil zero-length stand-in for empty payloads/names (nil would be UB for
   ## consumers doing memcpy even at len 0).
@@ -219,12 +225,27 @@ type
     data*: ptr UncheckedArray[byte]
     dataLen*: int
     dataHeapOwned*: bool
+    bytes*: int ## What this event charges against `MaxEventQueueBytes`.
+
+  EnqueueResult* {.pure.} = enum
+    Queued
+    DroppedNoQueue ## this thread has no event queue installed
+    DroppedSlots ## every ring slot holds an undelivered event
+    DroppedBytes ## the event would take the queue past `MaxEventQueueBytes`
+    DroppedNoMem ## the heap fallback for an oversize name or payload failed
+
+  EventDrops* = object ## Events lost per reason since the context was claimed.
+    ringFull*: uint64 ## every ring slot held an undelivered event
+    byteCapExceeded*: uint64 ## would pass `MaxEventQueueBytes`
+    allocFailed*: uint64 ## heap fallback for an oversize name or payload failed
 
   EventQueue* = object # SPSC ring; plain lock since ops are short and uncontended.
     lock*: Lock
     head*: int
     tail*: int
     count*: int
+    bytes*: int
+    drops*: EventDrops
     buf*: ptr UncheckedArray[QueuedEvent]
     slab*: ptr UncheckedArray[ptr UncheckedArray[byte]]
     nameSlab*: ptr UncheckedArray[ptr UncheckedArray[byte]]
@@ -242,6 +263,8 @@ proc initEventQueue*(q: var EventQueue): Result[void, string] =
   q.head = 0
   q.tail = 0
   q.count = 0
+  q.bytes = 0
+  q.drops = EventDrops()
   q.buf = allocRing[QueuedEvent](EventQueueCapacity)
   q.slab = allocRing[ptr UncheckedArray[byte]](EventQueueCapacity)
   q.nameSlab = allocRing[ptr UncheckedArray[byte]](EventQueueCapacity)
@@ -283,6 +306,7 @@ proc deinitEventQueue*(q: var EventQueue) {.raises: [].} =
   q.head = 0
   q.tail = 0
   q.count = 0
+  q.bytes = 0
   q.lock.deinitLock()
 
 proc copyIntoSlot(
@@ -301,30 +325,49 @@ proc copyIntoSlot(
   copyMem(heapBuf, src, nbytes)
   (heapBuf, true, true)
 
+func total*(d: EventDrops): uint64 =
+  return d.ringFull + d.byteCapExceeded + d.allocFailed
+
+proc countDrop(q: var EventQueue, why: EnqueueResult): EnqueueResult =
+  ## Call with `q.lock` held.
+  case why
+  of EnqueueResult.DroppedSlots:
+    q.drops.ringFull.inc()
+  of EnqueueResult.DroppedBytes:
+    q.drops.byteCapExceeded.inc()
+  of EnqueueResult.DroppedNoMem:
+    q.drops.allocFailed.inc()
+  of EnqueueResult.Queued, EnqueueResult.DroppedNoQueue:
+    discard
+  return why
+
 proc tryEnqueueEvent*(
     q: var EventQueue, name: cstring, nameId, seqNum: uint64, src: pointer, dataLen: int
-): bool {.raises: [], gcsafe.} =
+): EnqueueResult {.raises: [], gcsafe.} =
   ## Copies `name` (NUL included) and payload into the tail slot's reused buffers
-  ## or a heap fallback; false when the ring is full or a fallback alloc fails.
+  ## or a heap fallback. A refused event is counted in `drops` and lost.
+  # Include the NUL so the stored copy stays a valid cstring.
+  let nameBytes =
+    if name.isNil():
+      0
+    else:
+      name.len + 1
+  let bytes = nameBytes + max(dataLen, 0)
   withLock q.lock:
     if q.count >= EventQueueCapacity:
-      return false
+      return q.countDrop(EnqueueResult.DroppedSlots)
+    if q.bytes + bytes > MaxEventQueueBytes:
+      return q.countDrop(EnqueueResult.DroppedBytes)
     let slot = q.tail
-    # Include the NUL so the stored copy stays a valid cstring.
-    let nameBytes =
-      if name.isNil():
-        0
-      else:
-        name.len + 1
     let nameRes =
       copyIntoSlot(q.nameSlab[slot], MaxEventNameBytes, nameBytes, cast[pointer](name))
     if not nameRes.ok:
-      return false
+      return q.countDrop(EnqueueResult.DroppedNoMem)
     let dataRes = copyIntoSlot(q.slab[slot], MaxEventPayloadBytes, dataLen, src)
     if not dataRes.ok:
       if nameRes.heap:
         c_free(nameRes.buf)
-      return false
+      return q.countDrop(EnqueueResult.DroppedNoMem)
     let nameCStr =
       if nameRes.buf.isNil():
         emptyListenerPayload
@@ -338,10 +381,20 @@ proc tryEnqueueEvent*(
       data: dataRes.buf,
       dataLen: dataLen,
       dataHeapOwned: dataRes.heap,
+      bytes: bytes,
     )
     q.tail = (q.tail + 1) mod EventQueueCapacity
     q.count.inc()
-  true
+    q.bytes += bytes
+  return EnqueueResult.Queued
+
+proc dropCounts*(q: var EventQueue): EventDrops {.raises: [], gcsafe.} =
+  withLock q.lock:
+    return q.drops
+
+proc resetDropCounts*(q: var EventQueue) {.raises: [], gcsafe.} =
+  withLock q.lock:
+    q.drops = EventDrops()
 
 proc peekEvent*(q: var EventQueue): Option[QueuedEvent] {.raises: [], gcsafe.} =
   ## Returns the head without advancing (slot stays pinned so the producer can't
@@ -356,6 +409,7 @@ proc commitDequeue*(q: var EventQueue) {.raises: [], gcsafe.} =
   withLock q.lock:
     if q.count == 0:
       return
+    q.bytes -= q.buf[q.head].bytes
     releaseEvent(q.buf[q.head])
     q.buf[q.head] = QueuedEvent()
     q.head = (q.head + 1) mod EventQueueCapacity
@@ -406,6 +460,7 @@ proc popEventInto*(
       swap(q.nameSlab[slot], held.nameSlab)
       qe.name = cast[cstring](held.nameSlab)
     held.event = qe
+    q.bytes -= qe.bytes
     q.buf[slot] = QueuedEvent()
     q.head = (q.head + 1) mod EventQueueCapacity
     q.count.dec()
@@ -427,6 +482,7 @@ proc clearEventQueue*(q: var EventQueue) {.raises: [], gcsafe.} =
   ## Drops every queued event: the next owner of a slot must not see them.
   withLock q.lock:
     while q.count > 0:
+      q.bytes -= q.buf[q.head].bytes
       releaseEvent(q.buf[q.head])
       q.buf[q.head] = QueuedEvent()
       q.head = (q.head + 1) mod EventQueueCapacity
@@ -481,54 +537,89 @@ var ffiCurrentEventRegistry* {.threadvar.}: ptr FFIEventRegistry
 var ffiCurrentEventQueue* {.threadvar.}: ptr EventQueue
   # Installed by the FFI thread so dispatch templates need no `ctx`.
 
-var ffiCurrentEventQueueStuck* {.threadvar.}: ptr Atomic[bool]
-  # Sticky overflow flag; FFI request entry point reads it to reject.
-
 var ffiCurrentNotifyEventEnqueued* {.threadvar.}: proc() {.gcsafe, raises: [].}
   # Wake hook so this module needn't depend on chronos; nil-safe.
 
 var ffiNextEventSeqNum* {.threadvar.}: proc(): uint64 {.gcsafe, raises: [].}
   # Gives an event its place in the context's message order; nil-safe, 0 when unset.
 
-var ffiCurrentHostPolls* {.threadvar.}: proc(): bool {.gcsafe, raises: [].}
-  # Whether anyone is collecting this context's events. Nil means someone is.
-
 var ffiEventDropLogged {.threadvar.}: bool
   # A full queue stays full for every event that follows; log the first drop only.
 
-template enqueueOrMarkStuck(eventName: string, src: pointer, dataLen: int) =
-  ## Enqueues into the reused slot buffers; on queue-full sets the sticky stuck
-  ## flag and wakes the event thread (firing onNotResponding here would run the
-  ## listeners on the FFI thread).
-  block enqueueBlock:
-    let q = ffiCurrentEventQueue
-    if q.isNil():
-      chronicles.error "event queue not set on this thread", event = eventName
-      break enqueueBlock
-    var seqNum = 0'u64
-    if not ffiNextEventSeqNum.isNil():
-      seqNum = ffiNextEventSeqNum()
-    if not q[].tryEnqueueEvent(
-      cstring(eventName), nameId(eventName), seqNum, src, dataLen
-    ):
-      if not ffiEventDropLogged:
-        ffiEventDropLogged = true
-        chronicles.error "event queue full; dropping events until it drains",
-          event = eventName, capacity = EventQueueCapacity
-      # A host that never collects this context's events did not ask for them:
-      # dropping them is its choice, and must not wedge the library's requests.
-      let collected = ffiCurrentHostPolls.isNil() or ffiCurrentHostPolls()
-      if collected and not ffiCurrentEventQueueStuck.isNil():
-        ffiCurrentEventQueueStuck[].store(true)
-      if not ffiCurrentNotifyEventEnqueued.isNil():
-        ffiCurrentNotifyEventEnqueued()
-      break enqueueBlock
+proc enqueueFFIEvent*(
+    eventName: string, src: pointer, dataLen: int
+): EnqueueResult {.discardable, raises: [], gcsafe.} =
+  ## FFI thread only. A dropped event is counted and lost; requests keep running.
+  let q = ffiCurrentEventQueue
+  if q.isNil():
+    chronicles.error "event queue not set on this thread", event = eventName
+    return EnqueueResult.DroppedNoQueue
+
+  var seqNum = 0'u64
+  if not ffiNextEventSeqNum.isNil():
+    seqNum = ffiNextEventSeqNum()
+  let res =
+    q[].tryEnqueueEvent(cstring(eventName), nameId(eventName), seqNum, src, dataLen)
+  if res != EnqueueResult.Queued and not ffiEventDropLogged:
+    ffiEventDropLogged = true
+    chronicles.error "event queue dropping events until it drains",
+      event = eventName,
+      reason = $res,
+      capacity = EventQueueCapacity,
+      maxBytes = MaxEventQueueBytes
+  elif res == EnqueueResult.Queued:
     ffiEventDropLogged = false
-    if not ffiCurrentNotifyEventEnqueued.isNil():
-      ffiCurrentNotifyEventEnqueued()
+
+  # A drop also wakes the consumer, because the consumer drains the backlog.
+  if not ffiCurrentNotifyEventEnqueued.isNil():
+    ffiCurrentNotifyEventEnqueued()
+  return res
+
+type
+  OverflowWatch* = object
+    ## Tells a burst of drops from sustained overflow, from the drop counter alone.
+    primed: bool
+    seen: uint64
+    active: bool
+    since, last: int64 # ms
+    notified: bool
+
+  OverflowChange* {.pure.} = enum
+    NoChange
+    Sustained ## drops went on for `EventOverflowSustainMs`
+    Cleared ## no drop for `EventOverflowSustainMs` after a `Sustained`
+
+proc step*(w: var OverflowWatch, drops: uint64, nowMs: int64): OverflowChange =
+  ## Primes on the first call. Returns `Sustained` once per episode, and `Cleared`
+  ## only after a `Sustained`.
+  if not w.primed:
+    w = OverflowWatch(primed: true, seen: drops)
+    return OverflowChange.NoChange
+
+  if drops != w.seen:
+    w.seen = drops
+    if not w.active:
+      w.active = true
+      w.since = nowMs
+    w.last = nowMs
+
+  if not w.active:
+    return OverflowChange.NoChange
+
+  if nowMs - w.last > EventOverflowSustainMs:
+    w.active = false
+    if w.notified:
+      w.notified = false
+      return OverflowChange.Cleared
+    return OverflowChange.NoChange
+
+  if not w.notified and w.last - w.since >= EventOverflowSustainMs:
+    w.notified = true
+    return OverflowChange.Sustained
+  return OverflowChange.NoChange
 
 template dispatchFFIEvent*(eventName: string, body: untyped) =
-  ## `body` yields string/seq[byte]. FFI thread only: enqueues; event thread fans out.
+  ## `body` yields string/seq[byte]. FFI thread only; yields a discardable `EnqueueResult`.
   block:
     let evtName: string = eventName
     let bodyVal = body
@@ -538,7 +629,7 @@ template dispatchFFIEvent*(eventName: string, body: untyped) =
         unsafeAddr bodyVal[0]
       else:
         nil
-    enqueueOrMarkStuck(evtName, src, dataLen)
+    enqueueFFIEvent(evtName, src, dataLen)
 
 template dispatchFFIEventCbor*(eventName: string, eventPayload: typed) =
   ## Typed CBOR variant; param is `eventPayload` to avoid clobbering
@@ -559,4 +650,4 @@ template dispatchFFIEventCbor*(eventName: string, eventPayload: typed) =
         unsafeAddr encoded[0]
       else:
         nil
-    enqueueOrMarkStuck(evtName, src, encoded.len)
+    enqueueFFIEvent(evtName, src, encoded.len)

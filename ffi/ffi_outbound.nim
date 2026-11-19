@@ -32,7 +32,7 @@ type
     generation*: uint
     startedAt*: MonoTime
     notifiedStale*: bool
-    notifiedStuck*: bool
+    overflow*: OverflowWatch
 
   FFIOutbound* = object
     ## Lives as long as its pool slot, like the slot's signals: a host thread may

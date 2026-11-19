@@ -83,10 +83,16 @@ proc checkLiveness[T](
   if watch.generation != generation:
     watch[] = HeartbeatWatch(generation: generation, startedAt: now)
 
-  if not watch.notifiedStuck and ctx.eventQueueStuck.load():
-    watch.notifiedStuck = true
+  let drops = ctx[].eventQueue.dropCounts().total()
+  case watch.overflow.step(drops, now.ticks div 1_000_000)
+  of OverflowChange.Sustained:
     fill(msg, ctx[].outbound, MsgNotRespondingQueueFull)
     return true
+  of OverflowChange.Cleared:
+    fill(msg, ctx[].outbound, MsgResponding)
+    return true
+  of OverflowChange.NoChange:
+    discard
 
   if msBetween(watch.startedAt, now) <= HeartbeatStartDelayMs:
     return false

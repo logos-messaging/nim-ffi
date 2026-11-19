@@ -103,7 +103,6 @@ type FFIContext*[T] = object
   outbound*: FFIOutbound
   ffiHeartbeat*: Atomic[int64]
     ## `MonoTime` ticks of the FFI thread's last beat; 0 before the first.
-  eventQueueStuck*: Atomic[bool]
   ffiThreadExited*: Atomic[bool]
     # set once FFI thread (incl. async {.ffiDtor.}) is done; event thread drains until then
   running: Atomic[bool]
@@ -342,7 +341,6 @@ proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ctx[].outbound.queueLive = true
   ctx.ffiHeartbeat.store(0)
   ctx.libReady.store(false)
-  ctx.eventQueueStuck.store(false)
   ctx.ffiThreadExited.store(false)
   ctx.staleWarnInterval = StaleWarnInterval
 
@@ -406,6 +404,10 @@ proc isInUse*[T](ctx: ptr FFIContext[T]): bool =
 proc currentGeneration*[T](ctx: ptr FFIContext[T]): uint =
   ## The generation of the live claim; a request carries it so the FFI thread can drop it once the slot changes owner.
   ctx.generation.load()
+
+proc eventDrops*[T](ctx: ptr FFIContext[T]): EventDrops =
+  ## Events lost to a full queue since the current owner claimed the context.
+  return ctx[].eventQueue.dropCounts()
 
 proc markAsActive*[T](ctx: ptr FFIContext[T]) =
   ## Reused context: its worker threads are still alive; re-arm for requests.

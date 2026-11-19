@@ -56,6 +56,21 @@ registerReqFFI(BurstEmit, lib: ptr TestPollLib):
       dispatchFFIEventCbor("latch", LatchPayload(iter: i))
     return ok("bursted")
 
+var gFlooding: Atomic[bool]
+
+registerReqFFI(FloodFor, lib: ptr TestPollLib):
+  proc(ms: int): Future[Result[string, string]] {.async.} =
+    gFlooding.store(true)
+    defer:
+      gFlooding.store(false)
+    let deadline = Moment.now() + ms.milliseconds
+    while Moment.now() < deadline:
+      for i in 0 ..< EventQueueCapacity:
+        dispatchFFIEventCbor("latch", LatchPayload(iter: i))
+      # Yield so the heartbeat keeps beating and only the overflow reports.
+      await sleepAsync(1.milliseconds)
+    return ok("flooded")
+
 registerReqFFI(EmitLater, lib: ptr TestPollLib):
   proc(delayMs: int): Future[Result[string, string]] {.async.} =
     await sleepAsync(delayMs.milliseconds)
@@ -315,53 +330,50 @@ suite "wake handle":
       check pollMsg(ctx, 2000).ret == RET_OK
 
 suite "event queue overflow":
-  test "a host that never polled loses the events, not its requests":
+  test "a burst overflow drops and counts, requests still run, no notice":
     withPool(ctx):
       submit(ctx, BurstEmit, EventQueueCapacity + 8)
-      waitUntil(ctx[].eventQueue.count == EventQueueCapacity)
-      os.sleep(50)
-      check not ctx.eventQueueStuck.load()
+      waitUntil(ctx.eventDrops().ringFull == 8)
+      check ctx[].eventQueue.count == EventQueueCapacity
       submit(ctx, Ping)
       # The events that fit are ahead of it in the queue.
-      var msg = pollMsg(ctx)
-      while msg.ret == RET_OK and msg.kind == MsgEvent:
-        msg = pollMsg(ctx)
-      check msg.kind == MsgReply
-      check msg.retCode == RET_OK
-
-  test "overflow marks the context stuck, poll reports it once, requests are refused":
-    withPool(ctx):
-      # A host that polls wants its events: losing one is a fault, not a preference.
-      check pollMsg(ctx, 0).ret == RET_TIMEOUT
-      submit(ctx, BurstEmit, EventQueueCapacity + 8)
-      waitUntil(ctx.eventQueueStuck.load())
-
-      let res = sendRequestToFFIThread(ctx, Ping.ffiNewReq(noopCallback, nil))
-      check res.isErr()
-      check res.error.contains("stuck")
-
-      let report = pollMsg(ctx)
-      check report.ret == RET_OK
-      check report.kind == MsgNotRespondingQueueFull
-      check report.seqNum == 0
-
-      # The report is not repeated, and the events that fit are all there.
-      var events = 0
-      var lastSeq = 0'u64
       var replies = 0
       while true:
-        let got = pollMsg(ctx, 200)
+        let got = pollMsg(ctx, 2 * EventOverflowSustainMs)
         if got.ret != RET_OK:
           break
-        if got.kind == MsgEvent:
-          check got.seqNum > lastSeq
-          lastSeq = got.seqNum
-          events.inc()
-        else:
-          check got.kind == MsgReply
+        check got.kind in [MsgEvent, MsgReply]
+        if got.kind == MsgReply:
+          check got.retCode == RET_OK
           replies.inc()
-      check events >= EventQueueCapacity
-      check replies == 1
+      check replies == 2
+
+  test "sustained drops report not_responding once, then responding":
+    withPool(ctx):
+      submit(ctx, FloodFor, 3 * EventOverflowSustainMs)
+      var reports = 0
+      var recovered = false
+      var replied = false
+      while not recovered:
+        let got = pollMsg(ctx, 2 * EventOverflowSustainMs)
+        check got.ret == RET_OK
+        if got.ret != RET_OK:
+          break
+        case got.kind
+        of MsgNotRespondingQueueFull:
+          check not replied
+          reports.inc()
+        of MsgResponding:
+          recovered = true
+        of MsgReply:
+          check got.retCode == RET_OK
+          replied = true
+        else:
+          check got.kind == MsgEvent
+          waitNextDrop(ctx[].eventQueue, gFlooding)
+      check reports == 1
+      check replied
+      check ctx.eventDrops().ringFull > 0
 
 suite "replies through poll":
   test "a reply carries the id of its request and the CBOR return value":

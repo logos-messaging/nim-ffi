@@ -16,6 +16,14 @@ proc noopCallback*(
 ) {.cdecl, gcsafe, raises: [].} =
   discard
 
+proc waitNextDrop*(
+    q: var EventQueue, flooding: var Atomic[bool]
+) {.gcsafe, raises: [].} =
+  ## A consumer gated on the producer: the ring stays full while `flooding` holds.
+  let seen = q.dropCounts().total()
+  while flooding.load() and q.dropCounts().total() == seen:
+    discard
+
 proc waitFlag*(flag: var Atomic[bool], timeoutMs = 5000): bool =
   let deadline = Moment.now() + timeoutMs.milliseconds
   while not flag.load():
