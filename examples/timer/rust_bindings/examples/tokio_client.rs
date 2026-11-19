@@ -20,6 +20,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[2] Version: {version}");
     assert_eq!(version, TIMER_VERSION);
 
+    // Per-call limit: `None` waits with no Rust-side limit, `Some(d)` overrides the ctx default.
+    let unbounded = ctx.with_timeout(None).version_async().await?;
+    let bounded = ctx.with_timeout(Some(Duration::from_secs(5))).version_async().await?;
+    assert_eq!(unbounded, bounded);
+
     let echo1 = ctx
         .echo_async(EchoRequest {
             message: "hello from tokio".into(),

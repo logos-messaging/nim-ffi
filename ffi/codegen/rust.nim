@@ -430,6 +430,7 @@ proc generateApiRs*(
   for r in reverse:
     lines.emitReverseCall(libName, r)
 
+  let callsTypeName = libTypeName & "Calls"
   let listenersField =
     if events.len > 0:
       "\n    listeners: std::sync::Mutex<std::collections::HashMap<u64, Box<dyn std::any::Any + Send>>>,"
@@ -439,6 +440,7 @@ proc generateApiRs*(
     CtxStructTpl.fillTpl(
       ("{{LIB_TYPE}}", libTypeName),
       ("{{CTX}}", ctxTypeName),
+      ("{{CALLS}}", callsTypeName),
       ("{{LISTENERS_FIELD}}", listenersField),
     )
   )
@@ -454,12 +456,12 @@ proc generateApiRs*(
   var selfExtras: seq[string] = @[]
   if events.len > 0:
     selfExtras.add("listeners: std::sync::Mutex::new(std::collections::HashMap::new())")
+  let callsInit =
+    "calls: $1 { ptr: addr as *mut c_void, timeout: Some(timeout), _ctx: std::marker::PhantomData }" %
+    [callsTypeName]
   let selfInit =
-    if selfExtras.len > 0:
-      "        Ok(Self { ptr: addr as *mut c_void, timeout, " & selfExtras.join(", ") &
-        " })"
-    else:
-      "        Ok(Self { ptr: addr as *mut c_void, timeout })"
+    "        Ok(Self { ptr: addr as *mut c_void, timeout, " & callsInit &
+    (if selfExtras.len > 0: ", " & selfExtras.join(", ") else: "") & " })"
 
   for ctor in ctors:
     let paramsList = rustParamDecls(ctor.extraParams)
@@ -539,6 +541,7 @@ proc generateApiRs*(
     lines.add("")
 
   # A static is an associated fn: no `&self` to read `timeout` from, so it takes one.
+  var callsBody: seq[string] = @[]
   for m in classified.replyProcs():
     let isStatic = m.isStatic()
     var paramsList = rustParamDecls(m.extraParams)
@@ -564,18 +567,20 @@ proc generateApiRs*(
       ("{{RET}}", retTypeForApi),
       ("{{REQ}}", reqLiteral(reqStructName(m), m.extraParams)),
       ("{{PROC}}", m.procName),
-      ("{{TIMEOUT}}", if isStatic: "timeout" else: "self.timeout"),
+      ("{{TIMEOUT}}", if isStatic: "Some(timeout)" else: "self.timeout"),
     ]
 
-    lines.add(
+    # Statics stay associated fns of the ctx; instance methods live on the calls view.
+    var blk: seq[string] = @[]
+    blk.add(
       MethodSyncTpl.fillTpl(
         @common & ("{{CTX_ARG}}", if isStatic: "" else: "self.ptr, ")
       )
     )
-    lines.add("")
+    blk.add("")
 
     # The ptr rides as usize (Copy + Send), so the future is Send on a multi-threaded runtime.
-    lines.add(
+    blk.add(
       MethodAsyncTpl.fillTpl(
         @common &
           @[
@@ -587,7 +592,11 @@ proc generateApiRs*(
           ]
       )
     )
-    lines.add("")
+    blk.add("")
+    if isStatic:
+      lines.add(blk)
+    else:
+      callsBody.add(blk)
 
   # An associated fn, not a method: a host calls it with no context left to call it on.
   lines.add(
@@ -596,6 +605,11 @@ proc generateApiRs*(
   lines.add("")
 
   lines.add("}")
+  lines.add("")
+  if callsBody.len > 0:
+    lines.add("impl $1<'_> {" % [callsTypeName])
+    lines.add(callsBody)
+    lines.add("}")
   return lines.join("\n") & "\n"
 
 proc generateRustCrate*(
