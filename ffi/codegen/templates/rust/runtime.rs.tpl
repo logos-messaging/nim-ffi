@@ -18,6 +18,7 @@ fn decode_cbor<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
 
 type FFIResult = Result<Vec<u8>, String>;
 type FFISender = flume::Sender<FFIResult>;
+const DISCONNECTED: &str = "callback channel disconnected before delivery";
 
 // Reconstruct the (ret, msg, len) tuple delivered by the C callback
 // into a Result<Vec<u8>, String>: payload on success, UTF-8 message on error.
@@ -67,7 +68,9 @@ unsafe extern "C" fn on_result(
     let _ = tx.send(ffi_payload(ret, msg, len));
 }
 
-fn ffi_call_sync<F>(timeout: Duration, f: F) -> FFIResult
+// `timeout: None` waits for the terminal RET_OK/RET_ERR with no Rust-side limit; a timeout only
+// stops the wait, the Nim handler keeps running to completion.
+fn ffi_call_sync<F>(timeout: Option<Duration>, f: F) -> FFIResult
 where
     F: FnOnce(ffi::FFICallback, *mut c_void) -> c_int,
 {
@@ -79,16 +82,17 @@ where
         drop(unsafe { Box::from_raw(raw as *mut FFISender) });
         return Err("RET_MISSING_CALLBACK (internal error)".into());
     }
-    match rx.recv_timeout(timeout) {
-        Ok(payload) => payload,
-        Err(flume::RecvTimeoutError::Timeout) =>
-            Err(format!("timed out after {:?}", timeout)),
-        Err(flume::RecvTimeoutError::Disconnected) =>
-            Err("callback channel disconnected before delivery".into()),
-    }
+    let payload = match timeout {
+        Some(t) => rx.recv_timeout(t).map_err(|e| match e {
+            flume::RecvTimeoutError::Timeout => format!("timed out after {:?}", t),
+            flume::RecvTimeoutError::Disconnected => DISCONNECTED.to_string(),
+        })?,
+        None => rx.recv().map_err(|_| DISCONNECTED.to_string())?,
+    };
+    payload
 }
 
-async fn ffi_call_async<F>(timeout: Duration, f: F) -> FFIResult
+async fn ffi_call_async<F>(timeout: Option<Duration>, f: F) -> FFIResult
 where
     F: FnOnce(ffi::FFICallback, *mut c_void) -> c_int,
 {
@@ -99,9 +103,12 @@ where
         drop(unsafe { Box::from_raw(raw as *mut FFISender) });
         return Err("RET_MISSING_CALLBACK (internal error)".into());
     }
-    match tokio::time::timeout(timeout, rx.recv_async()).await {
-        Ok(Ok(payload)) => payload,
-        Ok(Err(_)) => Err("callback channel disconnected before delivery".into()),
-        Err(_) => Err(format!("timed out after {:?}", timeout)),
-    }
+    let payload = match timeout {
+        Some(t) => tokio::time::timeout(t, rx.recv_async())
+            .await
+            .map_err(|_| format!("timed out after {:?}", t))?
+            .map_err(|_| DISCONNECTED.to_string())?,
+        None => rx.recv_async().await.map_err(|_| DISCONNECTED.to_string())?,
+    };
+    payload
 }

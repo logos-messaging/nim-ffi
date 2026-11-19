@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Rust: per-call timeout.** `ctx.with_timeout(Some(d)).echo(..)` and
+  `.echo_async(..)` override the ctx default for one call; `with_timeout(None)`
+  waits for the terminal `RET_OK`/`RET_ERR` with no Rust-side limit. Instance
+  methods now live on a generated `<Lib>Calls` view the ctx derefs to, so
+  existing `ctx.echo(..)` calls are unchanged. A Rust-side timeout only stops
+  the wait: the Nim handler runs to completion. Statics and `create` /
+  `new_async` still take a plain `Duration` (always bounded).
+
 ### Changed
 - **`ffi_poll` is exported from `ffi` only under `-d:ffiPollMode`.** It was
   exported in every mode; nothing in the repo used it outside poll mode.
@@ -32,6 +41,12 @@ All notable changes to this project are documented in this file.
   sem, so a rebuild with no source change does not regenerate the bindings:
   delete the nimcache dir after you change the bindings dir, `-d:targetLang` or
   `-d:ffiOutputDir`.
+- **A failed callback-mode ctor gives its pool slot back.** The ctor body
+  runs after `<lib>_create` returns the token, and the generated wrappers drop
+  that token. Each failed construction thus kept a slot, and after 32 failures
+  every create failed with "FFI context pool exhausted". The FFI thread now
+  recycles the context after the error reply. The token then stops resolving,
+  and a destroy with it returns `RET_ERR` and does nothing.
 - **A callback-mode ctor refuses a NULL callback.** `<lib>_create(req, len,
   NULL, NULL)` returned a token, and the FFI thread later called address 0.
   The ctor now returns NULL and claims no slot.

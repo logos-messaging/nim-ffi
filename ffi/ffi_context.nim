@@ -429,15 +429,21 @@ proc awaitClaimReleased[T](ctx: ptr FFIContext[T], claimed: uint): bool =
     os.sleep(1)
   false
 
+proc beginRecycle[T](ctx: ptr FFIContext[T]): bool =
+  ## Moves an Active ctx to RecyclePending; false when another recycle owns it.
+  var expected = CtxLifecycle.Active
+  if not ctx.lifecycle.compareExchange(expected, CtxLifecycle.RecyclePending):
+    return false
+
+  ctx.recycleAbandoned.store(false)
+  true
+
 proc requestRecycle*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## Frees the lib and releases the slot, keeping its threads for the next createFFIContext.
   let claimed = ctx.currentGeneration()
 
-  var expected = CtxLifecycle.Active
-  if not ctx.lifecycle.compareExchange(expected, CtxLifecycle.RecyclePending):
+  if not ctx.beginRecycle():
     return err("requestRecycle: context is not Active (already recycling)")
-
-  ctx.recycleAbandoned.store(false)
 
   # A recycle that timed out can fire late. The CAS makes this the only recycle
   # in flight, so drop that stale fire before the wait below can answer to it.
@@ -491,6 +497,14 @@ proc submitReverseReply*[T](
     return RET_INVALID_ARGUMENT
 
   return ctx[].reverse.pushReply(callId, retCode, data, dataLen)
+
+proc recycleAfterFailedCtor*[T](ctx: ptr FFIContext[T]) =
+  ## FFI thread only: hands the recycle to the FFI loop, where `requestRecycle` would wait on its own thread.
+  if not ctx.beginRecycle():
+    return
+
+  ctx.reqSignal.fireSync().isOkOr:
+    error "failed to wake the FFI loop for a failed ctor recycle", err = error
 
 const ThreadExitTimeoutMs* {.intdefine: "ffiThreadExitTimeoutMs".} = 1500
   ## Per-thread exit wait; past it stopAndJoinThreads leaks the ctx rather than hangs.

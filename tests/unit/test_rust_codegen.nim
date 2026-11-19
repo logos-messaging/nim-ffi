@@ -242,7 +242,7 @@ suite "templates: every placeholder is filled":
       api
     check "    /// Make a timer.\n    pub async fn new_async(config: TimerConfig, timeout: Duration)" in
       api
-    check "    }\n\n    pub fn echo(&self, req: EchoRequest) -> Result<EchoResponse, String> {" in
+    check "impl TimerCalls<'_> {\n    pub fn echo(&self, req: EchoRequest) -> Result<EchoResponse, String> {" in
       api
     for f in [files[3], files[4], files[5]]:
       check "\n\n\n" notin f
@@ -289,12 +289,12 @@ suite "templates: every placeholder is filled":
   test "the listener machinery appears only with events":
     let withEv = files[4]
     let without = files[5]
-    check "    timeout: Duration,\n    listeners: std::sync::Mutex<" in withEv
+    check "    calls: TimerCalls<'static>,\n    listeners: std::sync::Mutex<" in withEv
     check withEv.count(
-      "Ok(Self { ptr: addr as *mut c_void, timeout, listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })"
+      ", listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })"
     ) == 2
-    check "    timeout: Duration,\n}" in without
-    check "Ok(Self { ptr: addr as *mut c_void, timeout })" in without
+    check "    calls: TimerCalls<'static>,\n}" in without
+    check "_ctx: std::marker::PhantomData } })" in without
     for needle in [
       "listeners", "ListenerHandle", "add_event_listener", "remove_event_listener",
       "_trampoline",
@@ -417,3 +417,54 @@ suite "templates: every placeholder is filled":
   test "shutdown is an associated fn with its doc flush above":
     check "    /// This wrapper reports that as true.\n    pub fn shutdown() -> bool {\n        unsafe { ffi::timer_shutdown() == 0 }" in
       files[5]
+
+suite "per-call timeout: the calls view carries the limit":
+  setup:
+    let procs = @[
+      FFIProcMeta(
+        procName: "timer_create",
+        libName: "timer",
+        kind: FFIKind.CTOR,
+        libTypeName: "Timer",
+        extraParams: @[],
+        returnTypeName: "Timer",
+      ),
+      FFIProcMeta(
+        procName: "timer_echo",
+        libName: "timer",
+        kind: FFIKind.FFI,
+        libTypeName: "Timer",
+        extraParams: @[FFIParamMeta(name: "req", typeName: "string")],
+        returnTypeName: "string",
+      ),
+      FFIProcMeta(
+        procName: "timer_lib_version",
+        libName: "timer",
+        kind: FFIKind.STATIC,
+        libTypeName: "Timer",
+        extraParams: @[],
+        returnTypeName: "string",
+      ),
+    ]
+    let api = generateApiRs(procs, "timer")
+
+  test "the ctx derefs to a calls view and with_timeout re-limits it":
+    check "impl std::ops::Deref for TimerCtx" in api
+    check "pub fn with_timeout(&self, timeout: Option<Duration>) -> TimerCalls<'_>" in
+      api
+    check "timeout: Option<Duration>,\n    _ctx: std::marker::PhantomData<&'a TimerCtx>," in
+      api
+
+  test "sync and async instance methods read the view's limit":
+    check "impl TimerCalls<'_> {" in api
+    check "ffi_call_sync(self.timeout, |cb, ud| unsafe {\n            ffi::timer_echo(" in
+      api
+    check "ffi_call_async(self.timeout, move |cb, ud| unsafe {" in api
+
+  test "a static stays an associated fn of the ctx with a plain Duration":
+    check "pub fn lib_version(timeout: Duration)" in api
+    check "pub async fn lib_version_async(timeout: Duration)" in api
+
+  test "the view cannot be copied out of the ctx":
+    check "pub struct TimerCalls<'a>" in api
+    check "derive(Clone, Copy)]\npub struct TimerCalls" notin api
