@@ -4,14 +4,20 @@
 ## What the macro writes is the asking side — the arguments as one CBOR map, the
 ## wait, and the answer decoded into the declared return type.
 
-import std/[macros, strutils]
+import std/[macros, macrocache, strutils]
 import ../codegen/string_helpers
 import ../ffi_msg
 
 proc reverseArgsTypeName(procName: string): string =
   return snakeToPascalCase(camelToSnakeCase(procName)) & "HostCall"
 
-var pollReverseWireNames {.compileTime.}: seq[string]
+const pollReverseWireNames = CacheSeq"ffi.pollReverseWireNames"
+
+proc isPollReverseWire(wireName: string): bool {.compileTime.} =
+  for node in pollReverseWireNames:
+    if node.strVal == wireName:
+      return true
+  return false
 
 proc buildPollFFIReverseProc*(
     prc: NimNode, wireName: string, timeoutNode: NimNode
@@ -42,12 +48,12 @@ proc buildPollFFIReverseProc*(
   if procNameNode.kind == nnkPostfix:
     procNameNode = procNameNode[1]
   let procNameStr = $procNameNode
-  if wireName in pollReverseWireNames:
+  if wireName.isPollReverseWire():
     error(
       "`.ffiReverse.` proc " & procNameStr & ": wire name '" & wireName &
         "' is already used by another reverse proc; the host tells them apart by it"
     )
-  pollReverseWireNames.add(wireName)
+  pollReverseWireNames.add(newLit(wireName))
 
   # The arguments ride as one named map, the same shape a request uses, so the
   # host decodes one typed value instead of a positional list.
