@@ -20,6 +20,10 @@
 // bytes: the CBOR (or, for a text reply, the UTF-8) is the caller's to decode
 // with whatever codec it already has.
 //
+// This is the low-level API: a host calls call()/submit() with raw CBOR and the
+// library's exported function pointers. A generated typed client is meant to sit
+// on top and call these for the user.
+//
 // Header-only; requires nim_ffi.h beside it. Bind the library's five fixed
 // exports into a Library, then create, call, submit, reverseReply and drain:
 //
