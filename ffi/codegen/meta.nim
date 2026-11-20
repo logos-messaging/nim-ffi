@@ -1,7 +1,7 @@
 ## Compile-time metadata types for FFI binding generation, populated by the
 ## {.ffiCtor.}/{.ffi.} macros and consumed by codegen.
 
-import std/[json, macrocache, macros, options]
+import std/[json, macrocache, macros, options, sequtils]
 
 type
   FFIParamMeta* = object
@@ -172,6 +172,75 @@ template markGenBindingsEmitted*() =
 
 template genBindingsEmitted*(): bool =
   genBindingsCache.value > 0
+
+func builtinTypes*(): seq[FFITypeMeta] =
+  ## Payload types of the liveness events the runtime emits on every library.
+  func f(name, typeName: string): FFIFieldMeta =
+    FFIFieldMeta(name: name, typeName: typeName)
+
+  @[
+    FFITypeMeta(
+      name: "NotRespondingReason",
+      enumValues: @[
+        FFIEnumValueMeta(name: "heartbeat", wire: "heartbeat", ord: 0),
+        FFIEnumValueMeta(name: "queueFull", wire: "queueFull", ord: 1),
+      ],
+    ),
+    FFITypeMeta(
+      name: "NotRespondingEvent", fields: @[f("reason", "NotRespondingReason")]
+    ),
+    FFITypeMeta(name: "RespondingEvent", fields: @[f("reason", "NotRespondingReason")]),
+    FFITypeMeta(
+      name: "ReverseWorkerBlockedEvent",
+      fields: @[
+        f("worker", "int"),
+        f("callId", "uint64"),
+        f("procName", "string"),
+        f("elapsedMs", "int64"),
+      ],
+    ),
+    FFITypeMeta(name: "ReverseWorkerRecoveredEvent", fields: @[f("worker", "int")]),
+  ]
+
+func builtinEvents*(libName: string): seq[FFIEventMeta] =
+  ## `not_responding`, `responding` and the reverse-worker events, typed like declared ones.
+  func ev(wire, procName, payload, doc: string): FFIEventMeta =
+    FFIEventMeta(
+      wireName: wire,
+      nimProcName: procName,
+      libName: libName,
+      payloadTypeName: payload,
+      doc: doc,
+    )
+
+  @[
+    ev(
+      "not_responding", "notResponding", "NotRespondingEvent",
+      "The library stopped responding: its FFI thread stalled or the event queue overflowed.",
+    ),
+    ev(
+      "responding", "responding", "RespondingEvent",
+      "The library responds again after `not_responding`.",
+    ),
+    ev(
+      "reverse_worker_blocked", "reverseWorkerBlocked", "ReverseWorkerBlockedEvent",
+      "A reverse worker has been inside one implementation past the call timeout.",
+    ),
+    ev(
+      "reverse_worker_recovered", "reverseWorkerRecovered",
+      "ReverseWorkerRecoveredEvent", "A blocked reverse worker returned.",
+    ),
+  ]
+
+func withBuiltinTypes*(types: seq[FFITypeMeta]): seq[FFITypeMeta] =
+  ## `types` plus the builtin event types that it does not declare itself.
+  let declared = types.mapIt(it.name)
+  return types & builtinTypes().filterIt(it.name notin declared)
+
+func withBuiltinEvents*(libName: string, events: seq[FFIEventMeta]): seq[FFIEventMeta] =
+  ## `events` plus the builtin events that it does not declare itself.
+  let declared = events.mapIt(it.wireName)
+  return events & builtinEvents(libName).filterIt(it.wireName notin declared)
 
 func isEnum*(t: FFITypeMeta): bool =
   return t.enumValues.len > 0

@@ -956,14 +956,16 @@ func generateCCborHeader*(): string =
 
 proc generateCLibHeader*(
     procs: seq[FFIProcMeta],
-    types: seq[FFITypeMeta],
+    declaredTypes: seq[FFITypeMeta],
     libName: string,
-    events: seq[FFIEventMeta] = @[],
+    declaredEvents: seq[FFIEventMeta] = @[],
     consts: seq[FFIConstMeta] = @[],
     reverse: seq[FFIReverseMeta] = @[],
     reverseEvents: seq[FFIReverseEventMeta] = @[],
 ): string =
   ## The `<lib>.h` header: library structs, monomorphised codecs and async API.
+  let events = withBuiltinEvents(libName, declaredEvents)
+  let types = withBuiltinTypes(declaredTypes)
   let classified = classifyProcs(procs)
   let ctors = classified.ctors
   let libType = libTypeName(ctors, libName)
