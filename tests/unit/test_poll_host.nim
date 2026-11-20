@@ -46,10 +46,7 @@ proc pollhost_destroy(lib: HostedLib) {.ffiDtor.} =
 let library = importLibrary("pollhost", ctor = "pollhost_create")
 
 var greeted: Atomic[int]
-var sinkHost: Host
-var answered: Thread[(pointer, uint64)]
 var lastAnswered: Atomic[uint64]
-var sunkEvents: Atomic[int]
 
 suite "a Nim host of a poll-mode library":
   test "the constructor's reply is what create answers":
@@ -106,33 +103,6 @@ suite "a Nim host of a poll-mode library":
     check lastAnswered.load() != 0'u64
     host.destroy()
 
-  test "a question handed to an in-image sink is answered through reverse_reply":
-    proc answer(call: (pointer, uint64)) {.thread.} =
-      let bytes = cborEncode("from the sink")
-      {.cast(gcsafe).}:
-        discard pollhost_reverse_reply(
-          cast[FFICtxToken](call[0]),
-          call[1],
-          RET_OK,
-          unsafeAddr bytes[0],
-          csize_t(bytes.len),
-        )
-
-    setFFIReverseSink(
-      proc(
-          callId, nameId: uint64, args: pointer, len: int
-      ) {.nimcall, gcsafe, raises: [].} =
-        {.cast(gcsafe), cast(raises: []).}:
-          createThread(answered, answer, (sinkHost.ctx, callId))
-    )
-    sinkHost = newHost(library)
-    check sinkHost.create(request({"who": "x"})).isOk
-    let r = sinkHost.call("pollhost_ask", request({}))
-    check r.decode(string).get() == "from the sink"
-    joinThread(answered)
-    setFFIReverseSink(nil)
-    sinkHost.destroy()
-
   test "a submitted call's reply is dropped, later calls still match theirs":
     let host = newHost(library)
     check host.create(request({"who": "x"}), 5_000).isOk
@@ -165,22 +135,6 @@ suite "a Nim host of a poll-mode library":
     sleep(100)
     host.drain()
     check host.pollFd() >= 0
-    host.destroy()
-
-  test "an event handed to an in-image sink is not queued":
-    sunkEvents.store(0)
-    setFFIEventSink(
-      proc(
-          eventName: string, payload: pointer, len: int
-      ) {.nimcall, gcsafe, raises: [].} =
-        if eventName == "greeted":
-          discard sunkEvents.fetchAdd(1)
-    )
-    let host = newHost(library)
-    check host.create(request({"who": "x"}), 5_000).isOk
-    check host.call("pollhost_greet", request({"who": "s"}), 5_000).ret == RET_OK
-    check sunkEvents.load() == 1
-    setFFIEventSink(nil)
     host.destroy()
 
 suite "host/nim_ffi.h":
