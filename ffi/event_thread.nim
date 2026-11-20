@@ -3,8 +3,15 @@
 ## NotResponding/Responding on FFI-heartbeat stall/recovery.
 
 type
+  NotRespondingReason* {.pure.} = enum
+    heartbeat ## FFI thread stalled; recreate the context
+    queueFull ## sustained event-queue overflow; recovers on its own
+
   NotRespondingEvent* = object
+    reason*: NotRespondingReason
+
   RespondingEvent* = object
+    reason*: NotRespondingReason
 
 const
   NotRespondingEventName* = "not_responding"
@@ -46,12 +53,12 @@ proc emitLivenessEvent[T, P](ctx: ptr FFIContext[T], name: string, payload: P) =
       cast[pointer](emptyListenerPayload)
   ctx.dispatchToListeners(name, dataPtr, event.len)
 
-proc onNotResponding*(ctx: ptr FFIContext) =
-  emitLivenessEvent(ctx, NotRespondingEventName, NotRespondingEvent())
+proc onNotResponding*(ctx: ptr FFIContext, reason: NotRespondingReason) =
+  emitLivenessEvent(ctx, NotRespondingEventName, NotRespondingEvent(reason: reason))
 
-proc onResponding*(ctx: ptr FFIContext) =
-  ## Fired once when the heartbeat resumes after a NotRespondingEvent.
-  emitLivenessEvent(ctx, RespondingEventName, RespondingEvent())
+proc onResponding*(ctx: ptr FFIContext, reason: NotRespondingReason) =
+  ## Fired once when `reason` ends. Another reason may still be active.
+  emitLivenessEvent(ctx, RespondingEventName, RespondingEvent(reason: reason))
 
 type
   ReverseWorkerBlockedEvent* = object
@@ -134,12 +141,12 @@ proc check[T](hb: var HeartbeatMonitor, ctx: ptr FFIContext[T]) =
   let cur = ctx.ffiHeartbeat.load()
   if cur != hb.lastValue:
     if hb.notifiedStale:
-      onResponding(ctx)
+      onResponding(ctx, NotRespondingReason.heartbeat)
     hb.lastValue = cur
     hb.lastChange = Moment.now()
     hb.notifiedStale = false
   elif not hb.notifiedStale and Moment.now() - hb.lastChange > FFIHeartbeatStaleThreshold:
-    onNotResponding(ctx)
+    onNotResponding(ctx, NotRespondingReason.heartbeat)
     hb.notifiedStale = true
 
 proc eventRun[T](ctx: ptr FFIContext[T]) {.async.} =
@@ -167,9 +174,9 @@ proc eventRun[T](ctx: ptr FFIContext[T]) {.async.} =
       let drops = ctx[].eventQueue.dropCounts().total()
       case overflow.step(drops, getMonoTime().ticks div 1_000_000)
       of OverflowChange.Sustained:
-        onNotResponding(ctx)
+        onNotResponding(ctx, NotRespondingReason.queueFull)
       of OverflowChange.Cleared:
-        onResponding(ctx)
+        onResponding(ctx, NotRespondingReason.queueFull)
       of OverflowChange.NoChange:
         discard
       # A recycle parks the loop in the teardown on purpose; a stall there is
