@@ -77,6 +77,9 @@ proc checkLiveness[T](
   # A recycle parks the FFI loop in the teardown on purpose; a stall there is not a fault.
   if ctx.lifecycle.load() != CtxLifecycle.Active:
     return false
+  # Teardown frees the queue and its lock under `pollLock`, once the threads are joined.
+  if not ctx[].outbound.queueLive:
+    return false
 
   let now = getMonoTime()
   let watch = addr ctx[].outbound.watch

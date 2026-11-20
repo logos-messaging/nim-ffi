@@ -3,7 +3,7 @@
 ## `-d:ffiPollMode` (see the .cfg beside this file), which is the mode where the
 ## library hands its messages out instead of calling the host.
 
-import std/[atomics, os, strutils]
+import std/[atomics, locks, monotimes, os, strutils]
 import unittest2
 import results
 import ffi
@@ -510,3 +510,24 @@ suite "destroy":
       check pool.destroyFFIContext(ctx).isOk()
       joinThread(th)
       check poller.events.load() == Count
+
+  test "a poll under a torn-down queue does not read its drop counters":
+    const
+      ProbeDrops = 5'u64
+      MsPerTick = 1_000_000'i64
+    withPool(ctx):
+      let generation = ctx.currentGeneration()
+      let outb = addr ctx[].outbound
+      # A live drop episode: one more read of the counters (0 drops) reports it as sustained.
+      let nowMs = getMonoTime().ticks div MsPerTick
+      outb.watch = HeartbeatWatch(generation: generation, startedAt: getMonoTime())
+      check outb.watch.overflow.step(ProbeDrops, nowMs - EventOverflowSustainMs) ==
+        OverflowChange.NoChange
+      check outb.watch.overflow.step(ProbeDrops + 1, nowMs - EventOverflowSustainMs) ==
+        OverflowChange.NoChange
+      withLock outb.pollLock:
+        outb.queueLive = false
+      let got = pollMsg(ctx, generation, 0)
+      withLock outb.pollLock:
+        outb.queueLive = true
+      check got.ret == RET_TIMEOUT
