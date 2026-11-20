@@ -62,13 +62,13 @@ typedef struct {
 } PollResult;
 
 #define NIMFFI_MSG_REPLY 1  /* id is the request; ret_code OK: payload is its CBOR, ERR: UTF-8 text */
-#define NIMFFI_MSG_EVENT 2  /* name_id names it; payload is its CBOR */
 #define NIMFFI_MSG_STALE 3  /* request id is still running; duration_ms is the ms in flight, and its REPLY still comes */
-#define NIMFFI_MSG_REVERSE_CALL 4  /* the library asks and waits; id names the call and duration_ms is the time left to answer */
+#define NIMFFI_MSG_EVENT 2  /* name_id names it; payload is its CBOR */
+#define NIMFFI_MSG_REVERSE_CALL 4  /* the library asks and waits; id names the call and duration_ms is the time left to answer, measured as poll returns, so add it to your own monotonic clock at once */
 #define NIMFFI_MSG_NOT_RESPONDING_HEARTBEAT 5  /* the FFI thread's heartbeat stalled */
-#define NIMFFI_MSG_RESPONDING 6  /* the FFI thread's heartbeat resumed */
+#define NIMFFI_MSG_NOT_RESPONDING_QUEUE_FULL 8  /* events kept being dropped for ffiEventOverflowSustainMs; requests still run */
+#define NIMFFI_MSG_RESPONDING 6  /* the heartbeat resumed, or the event drops stopped */
 #define NIMFFI_MSG_CLOSED 7  /* the context is gone; every later poll fails */
-#define NIMFFI_MSG_NOT_RESPONDING_QUEUE_FULL 8  /* the event queue overflowed; requests are refused until the context is recycled */
 
 #endif /* NIMFFI_POLL_RESULT_DECLARED */
 

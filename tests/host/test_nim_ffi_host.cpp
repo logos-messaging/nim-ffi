@@ -20,8 +20,11 @@ static uint64_t nextId = 0;
 static uint64_t lastReverseCall = 0;
 static int lastReverseRet = -1;
 static int fakeCtx = 1;
+static int pollRet = -1;                // when set, poll answers with it
+static int createRet = NIMFFI_RET_OK;
 
 static int fakeCreate(const uint8_t*, size_t, void** ctx, uint64_t* id) {
+  if (createRet != NIMFFI_RET_OK) return createRet;
   *ctx = &fakeCtx;
   *id = ++nextId;
   queue.push_back({NIMFFI_MSG_REPLY, *id, 0, NIMFFI_RET_OK, {}});
@@ -29,6 +32,7 @@ static int fakeCreate(const uint8_t*, size_t, void** ctx, uint64_t* id) {
 }
 static int fakeDestroy(void*) { return NIMFFI_RET_OK; }
 static int fakePoll(void*, int32_t timeoutMs, const PollResult** out) {
+  if (pollRet >= 0) return pollRet;
   if (queue.empty()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(timeoutMs));
     return NIMFFI_RET_TIMEOUT;
@@ -135,6 +139,63 @@ int main() {
           NIMFFI_RET_OK);
     h.drain();
     CHECK(seen == 1);
+  }
+  {  // a library reply that itself says TIMEOUT is a reply, not the host's deadline
+    Host h(lib());
+    up(h);
+    script = [](uint64_t id) { queue.push_back({NIMFFI_MSG_REPLY, id, 0, NIMFFI_RET_TIMEOUT, {'x'}}); };
+    Reply r = h.call(fakeMethod, {}, kShort);
+    CHECK(r.ret == NIMFFI_RET_TIMEOUT && r.error == "x");
+    script = [](uint64_t id) { queue.push_back({NIMFFI_MSG_REPLY, id, 0, NIMFFI_RET_OK, {}}); };
+    CHECK(h.call(fakeMethod, {}, kShort).ret == NIMFFI_RET_OK);
+    h.drain();  // nothing stale left behind
+    CHECK(queue.empty());
+  }
+  {  // a submit still pending when the context closes hears about it
+    Host h(lib());
+    up(h);
+    script = nullptr;
+    int closed = 0;
+    CHECK(h.submit(fakeMethod, {}, [&](const Reply& r) { closed += (r.ret == NIMFFI_RET_CLOSED); }) ==
+          NIMFFI_RET_OK);
+    queue.push_back({NIMFFI_MSG_CLOSED, 0, 0, NIMFFI_RET_OK, {}});
+    h.drain();
+    CHECK(closed == 1 && !h.alive());
+  }
+  {  // destroy() also fails what is pending
+    Host h(lib());
+    up(h);
+    script = nullptr;
+    int closed = 0;
+    h.submit(fakeMethod, {}, [&](const Reply& r) { closed += (r.ret == NIMFFI_RET_CLOSED); });
+    h.destroy();
+    CHECK(closed == 1);
+  }
+  {  // a poll that says the context is closed ends it, instead of draining forever
+    Host h(lib());
+    up(h);
+    pollRet = NIMFFI_RET_CLOSED;
+    h.drain();
+    pollRet = -1;
+    CHECK(!h.alive());
+  }
+  {  // a create that is refused leaves no context behind
+    Host h(lib());
+    createRet = NIMFFI_RET_ERR;
+    Reply r = h.create({}, kShort);
+    createRet = NIMFFI_RET_OK;
+    CHECK(r.ret == NIMFFI_RET_ERR && !h.alive());
+  }
+  {  // drain() does not wait for a call another thread is pumping
+    Host h(lib());
+    up(h);
+    script = nullptr;
+    std::thread t([&] { h.call(fakeMethod, {}, std::chrono::milliseconds(300)); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    const auto start = std::chrono::steady_clock::now();
+    h.drain();
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(100));
+    t.join();
   }
   std::puts("ok");
   return 0;

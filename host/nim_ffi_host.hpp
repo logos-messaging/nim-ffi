@@ -20,7 +20,19 @@
 // bytes: the CBOR (or, for a text reply, the UTF-8) is the caller's to decode
 // with whatever codec it already has.
 //
-// Header-only; requires nim_ffi.h beside it.
+// Header-only; requires nim_ffi.h beside it. Bind the library's five fixed
+// exports into a Library, then create, call, submit, reverseReply and drain:
+//
+//   nim_ffi::Host host({my_create, my_destroy, my_poll, my_poll_fd, my_reverse_reply});
+//   host.onReverseCall([&](uint64_t call, uint64_t name, const uint8_t* args, size_t len) {
+//     /* answer, from any thread: */ host.reverseReply(call, NIMFFI_RET_OK, cbor_bytes);
+//   });
+//   host.create(cbor_of({{"configJson", "{}"}}), 5s);
+//   auto r = host.call(my_send, cbor_of({{"messageJson", msg}}), 30s);   // pumps meanwhile
+//
+// One pump at a time: drain() returns at once when another thread is already
+// inside call(), create() or drain(), because that thread is serving the queue.
+// destroy() waits for it.
 #ifndef NIM_FFI_HOST_HPP
 #define NIM_FFI_HOST_HPP
 
@@ -95,12 +107,12 @@ class Host {
       return r;
     }
     ctx_ = ctx;
-    r = waitFor(id, timeout);
+    bool timedOut = false;
+    r = waitFor(id, timeout, timedOut);
+    if (timedOut) r.error = timeoutText(timeout);
     if (r.ret != NIMFFI_RET_OK) {
-      if (r.ret == NIMFFI_RET_TIMEOUT && r.error.empty()) r.error = timeoutText(timeout);
       if (void* c = ctx_.exchange(nullptr)) lib_.destroy(c);
-      settled_.clear();
-      done_.clear();
+      failPending(NIMFFI_RET_CLOSED, "context destroyed");
     }
     return r;
   }
@@ -108,8 +120,7 @@ class Host {
   void destroy() {
     std::lock_guard<std::recursive_mutex> lock(lock_);
     if (void* c = ctx_.exchange(nullptr)) lib_.destroy(c);
-    settled_.clear();
-    done_.clear();
+    failPending(NIMFFI_RET_CLOSED, "context destroyed");
   }
 
   bool alive() const { return ctx_.load() != nullptr; }
@@ -137,8 +148,9 @@ class Host {
       r.error = "not accepted, rc=" + std::to_string(rc);
       return r;
     }
-    r = waitFor(id, timeout);
-    if (r.ret == NIMFFI_RET_TIMEOUT) {
+    bool timedOut = false;
+    r = waitFor(id, timeout, timedOut);
+    if (timedOut) {
       r.error = timeoutText(timeout);
       done_[id] = [](const Reply&) {};  // the late reply is still promised: drop it on arrival
     }
@@ -174,12 +186,18 @@ class Host {
   // Dispatches every message queued right now. What the event loop calls
   // when fd() is readable.
   void drain() {
-    std::lock_guard<std::recursive_mutex> lock(lock_);
-    if (!ctx_) return;
-    const PollResult* m = nullptr;
-    while (ctx_ && lib_.poll(ctx_, 0, &m) == NIMFFI_RET_OK && m) {
-      dispatch(m);
-      m = nullptr;
+    std::unique_lock<std::recursive_mutex> lock(lock_, std::try_to_lock);
+    if (!lock.owns_lock() || !ctx_) return;  // another thread is pumping already
+    for (;;) {
+      const PollResult* m = nullptr;
+      const int rc = lib_.poll(ctx_, 0, &m);
+      if (rc == NIMFFI_RET_OK && m) {
+        dispatch(m);
+        if (!ctx_) return;
+      } else {
+        if (rc == NIMFFI_RET_CLOSED || rc == NIMFFI_RET_INVALID_CTX) markClosed();
+        return;
+      }
     }
   }
 
@@ -203,7 +221,26 @@ class Host {
     return r;
   }
 
-  Reply waitFor(uint64_t id, std::chrono::milliseconds timeout) {
+  // The context is gone: nothing more will come, and every waiter or `submit`
+  // callback is told so instead of waiting for a reply that cannot arrive.
+  void markClosed() {
+    ctx_ = nullptr;
+    failPending(NIMFFI_RET_CLOSED, "context closed");
+  }
+
+  void failPending(int ret, const char* text) {
+    auto pending = std::move(done_);
+    done_.clear();
+    settled_.clear();
+    Reply r;
+    r.ret = ret;
+    r.error = text;
+    for (auto& entry : pending) entry.second(r);
+  }
+
+  // `timedOut` is set only when the host's own deadline ran out, so a library
+  // reply that itself carries NIMFFI_RET_TIMEOUT is not mistaken for it.
+  Reply waitFor(uint64_t id, std::chrono::milliseconds timeout, bool& timedOut) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     for (;;) {
       if (auto it = settled_.find(id); it != settled_.end()) {
@@ -221,6 +258,7 @@ class Host {
           deadline - std::chrono::steady_clock::now());
       if (left.count() <= 0) {
         r.ret = NIMFFI_RET_TIMEOUT;
+        timedOut = true;
         return r;
       }
       const PollResult* m = nullptr;
@@ -228,6 +266,7 @@ class Host {
       if (rc == NIMFFI_RET_OK && m) {
         dispatch(m);
       } else if (rc != NIMFFI_RET_TIMEOUT && rc != NIMFFI_RET_OK) {
+        if (rc == NIMFFI_RET_CLOSED || rc == NIMFFI_RET_INVALID_CTX) markClosed();
         r.ret = rc;
         r.error = "poll rc=" + std::to_string(rc);
         return r;
@@ -257,7 +296,7 @@ class Host {
         }
         break;
       case NIMFFI_MSG_CLOSED:
-        ctx_ = nullptr;  // nothing more will come; waiters see NIMFFI_RET_CLOSED
+        markClosed();  // waiters see NIMFFI_RET_CLOSED
         break;
       default:
         break;  // STALE and the liveness ticks: the deadline decides

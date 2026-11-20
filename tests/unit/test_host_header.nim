@@ -15,3 +15,8 @@ suite "host/nim_ffi.h matches the Nim sources":
   test "every message kind is defined with its value":
     for kind in MsgKinds:
       check header.contains(&"#define NIMFFI_MSG_{kind.name} {kind.value} ")
+
+  test "the message struct and kinds are the ones the library's own header declares":
+    # The struct layout and every kind's doc, byte for byte: a field added on
+    # the Nim side without the header following would shift every read.
+    check header.contains(cMsgDecl())

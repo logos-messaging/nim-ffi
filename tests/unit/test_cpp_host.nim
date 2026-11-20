@@ -10,10 +10,10 @@ const
 
 suite "nim_ffi::Host (C++)":
   test "the pump behaves against a scripted library":
-    let exe = getTempDir() / "nim_ffi_host_test"
+    let exe = getTempDir() / ("nim_ffi_host_test_" & $getCurrentProcessId())
     let (build, buildCode) = execCmdEx(
-      "c++ -std=c++17 -Wall -Wextra -pthread -o " & quoteShell(exe) & " " &
-        quoteShell(source)
+      "c++ -std=c++17 -Wall -Wextra -pthread -fsanitize=address,undefined -o " &
+        quoteShell(exe) & " " & quoteShell(source)
     )
     check buildCode == 0
     if buildCode != 0:
@@ -21,5 +21,6 @@ suite "nim_ffi::Host (C++)":
     let (output, code) = execCmdEx(quoteShell(exe))
     check code == 0
     check output.contains("ok")
+    removeFile(exe)
     if code != 0:
       echo output
