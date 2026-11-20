@@ -1,4 +1,4 @@
-## The poll model from the host's side, in Nim.
+## The poll mode from the host's side, in Nim.
 ##
 ## For a Nim host of a `-d:ffiPollMode` library: a program that loaded one,
 ## or a library shipped inside a larger Nim image -- a Logos module, say --

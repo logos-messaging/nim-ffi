@@ -1,4 +1,4 @@
-/* nim-ffi poll model: what a host sees.
+/* nim-ffi poll mode: what a host sees.
  *
  * A library built with -d:ffiPollMode exports, per library <lib>:
  *

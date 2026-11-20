@@ -1,4 +1,4 @@
-// nim-ffi poll model: the host side, once.
+// nim-ffi poll mode: the host side, once.
 //
 // A poll-mode library hands the host every message -- method replies, events,
 // and the library's own questions (REVERSE_CALL) -- through one queue per
