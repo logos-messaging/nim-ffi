@@ -282,24 +282,21 @@ suite "templates: every placeholder is filled":
       bare
     check "    pub async fn new_async(timeout: Duration) -> Result<Self, String> {" in
       bare
-    check "impl Drop for" notin bare
+    check "impl Drop for TimerCtx" notin bare
     check "impl Drop for TimerCtx {" in files[4]
     check "ffi::timer_destroy(self.ptr)" in files[4]
 
-  test "the listener machinery appears only with events":
+  test "a library without declared events still gets the builtin listeners":
     let withEv = files[4]
     let without = files[5]
-    check "    calls: TimerCalls<'static>,\n    listeners: std::sync::Mutex<" in withEv
-    check withEv.count(
-      ", listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })"
-    ) == 2
-    check "    calls: TimerCalls<'static>,\n}" in without
-    check "_ctx: std::marker::PhantomData } })" in without
-    for needle in [
-      "listeners", "ListenerHandle", "add_event_listener", "remove_event_listener",
-      "_trampoline",
-    ]:
-      check needle notin without
+    for api in [withEv, without]:
+      check "    calls: TimerCalls<'static>,\n    listeners: std::sync::Mutex<" in api
+      check api.count(
+        ", listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })"
+      ) == 2
+    check "pub fn add_not_responding_listener<F>" in without
+    check "add_on_tick_listener" in withEv
+    check "add_on_tick_listener" notin without
 
   test "an event gets a handler struct, a trampoline and a listener fn named from its proc and wire":
     let api = files[4]

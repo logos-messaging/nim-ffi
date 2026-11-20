@@ -49,6 +49,12 @@ proc mutateCb(
     gAddedId = addEventListener(gReg[], "reentrant", noopCb, nil)
   gDispatched.store(true)
 
+proc selfRemoveCb(
+    retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
+) {.cdecl, gcsafe, raises: [].} =
+  gRemoved.store(removeEventListener(gReg[], gSelfId))
+  gDispatched.store(true)
+
 proc blockCb(
     retCode: cint, msg: ptr cchar, len: csize_t, userData: pointer
 ) {.cdecl, gcsafe, raises: [].} =
@@ -100,3 +106,18 @@ suite "listener reentrancy":
       gRelease.store(true)
       joinThread(remover)
       check snapshotListeners(ctx[].eventRegistry, "reentrant").len == 0
+
+  test "a liveness listener removes itself from inside its own callback":
+    withPool(ctx):
+      gRemoved.store(false)
+      gDispatched.store(false)
+      gReg = addr ctx[].eventRegistry
+      gSelfId =
+        addEventListener(ctx[].eventRegistry, NotRespondingEventName, selfRemoveCb, nil)
+      check gSelfId > 0
+
+      onNotResponding(ctx, NotRespondingReason.queueFull)
+
+      check gDispatched.load()
+      check gRemoved.load()
+      check snapshotListeners(ctx[].eventRegistry, NotRespondingEventName).len == 0

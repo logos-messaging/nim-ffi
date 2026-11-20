@@ -258,9 +258,12 @@ func rustConstType(typeName: string): string =
   return renderNative(rustMap, t)
 
 proc generateTypesRs*(
-    types: seq[FFITypeMeta], procs: seq[FFIProcMeta], consts: seq[FFIConstMeta] = @[]
+    declaredTypes: seq[FFITypeMeta],
+    procs: seq[FFIProcMeta],
+    consts: seq[FFIConstMeta] = @[],
 ): string =
-  ## Generates types.rs: Rust structs for user FFI types and each per-proc Req.
+  ## Generates types.rs: Rust structs for user FFI types, the builtin event types and each per-proc Req.
+  let types = withBuiltinTypes(declaredTypes)
   var lines: seq[string] = @[]
   lines.add("use serde::{Deserialize, Serialize};")
   lines.add("")
@@ -385,12 +388,13 @@ proc emitReverseCall(lines: var seq[string], libName: string, r: FFIReverseMeta)
 proc generateApiRs*(
     procs: seq[FFIProcMeta],
     libName: string,
-    events: seq[FFIEventMeta] = @[],
+    declaredEvents: seq[FFIEventMeta] = @[],
     reverse: seq[FFIReverseMeta] = @[],
     reverseEvents: seq[FFIReverseEventMeta] = @[],
 ): string =
   ## Generates api.rs with a blocking and a tokio-async high-level API.
   ## Requests/responses are CBOR (ciborium); errors are raw UTF-8 strings.
+  let events = withBuiltinEvents(libName, declaredEvents)
   var lines: seq[string] = @[]
 
   let classified = classifyProcs(procs)

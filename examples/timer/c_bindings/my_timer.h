@@ -94,6 +94,25 @@ typedef struct {
 typedef struct {
     int64_t tickNo;
 } OnHostTickReq;
+typedef enum {
+    NOT_RESPONDING_REASON_HEARTBEAT = 0,
+    NOT_RESPONDING_REASON_QUEUE_FULL = 1
+} NotRespondingReason;
+typedef struct {
+    NotRespondingReason reason;
+} NotRespondingEvent;
+typedef struct {
+    NotRespondingReason reason;
+} RespondingEvent;
+typedef struct {
+    int64_t worker;
+    uint64_t callId;
+    const char* procName;
+    int64_t elapsedMs;
+} ReverseWorkerBlockedEvent;
+typedef struct {
+    int64_t worker;
+} ReverseWorkerRecoveredEvent;
 typedef struct {
     TimerConfig config;
 } MyTimerCreateCtorReq;
@@ -781,6 +800,153 @@ static inline CborError my_timer_dec_OnHostTickReq(
     if (err) return err;
     return cbor_value_advance(it);
 }
+static inline CborError my_timer_enc_NotRespondingReason(
+        CborEncoder* e, const NotRespondingReason* v) {
+    switch (*v) {
+    case NOT_RESPONDING_REASON_HEARTBEAT: return cbor_encode_text_stringz(e, "heartbeat");
+    case NOT_RESPONDING_REASON_QUEUE_FULL: return cbor_encode_text_stringz(e, "queueFull");
+    }
+    return CborErrorImproperValue;
+}
+static inline CborError my_timer_dec_NotRespondingReason(
+        CborValue* it, NotRespondingReason* out) {
+    if (!cbor_value_is_text_string(it)) return CborErrorImproperValue;
+    size_t len = 0;
+    CborError err = cbor_value_get_string_length(it, &len);
+    if (err) return err;
+    char buf[10];
+    if (len >= sizeof(buf)) return CborErrorImproperValue;
+    size_t copied = sizeof(buf);
+    err = cbor_value_copy_text_string(it, buf, &copied, NULL);
+    if (err) return err;
+    buf[len] = '\0';
+    if (strcmp(buf, "heartbeat") == 0) { *out = NOT_RESPONDING_REASON_HEARTBEAT; return cbor_value_advance(it); }
+    if (strcmp(buf, "queueFull") == 0) { *out = NOT_RESPONDING_REASON_QUEUE_FULL; return cbor_value_advance(it); }
+    return CborErrorImproperValue;
+}
+static inline CborError my_timer_enc_NotRespondingEvent(
+        CborEncoder* e, const NotRespondingEvent* v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(e, &m, 1);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "reason");
+    if (err) return err;
+    err = my_timer_enc_NotRespondingReason(&m, &v->reason);
+    if (err) return err;
+    return cbor_encoder_close_container(e, &m);
+}
+static inline CborError my_timer_dec_NotRespondingEvent(
+        CborValue* it, NotRespondingEvent* out) {
+    if (!cbor_value_is_map(it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(it, "reason", &field);
+    if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = my_timer_dec_NotRespondingReason(&field, &out->reason);
+    if (err) return err;
+    return cbor_value_advance(it);
+}
+static inline CborError my_timer_enc_RespondingEvent(
+        CborEncoder* e, const RespondingEvent* v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(e, &m, 1);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "reason");
+    if (err) return err;
+    err = my_timer_enc_NotRespondingReason(&m, &v->reason);
+    if (err) return err;
+    return cbor_encoder_close_container(e, &m);
+}
+static inline CborError my_timer_dec_RespondingEvent(
+        CborValue* it, RespondingEvent* out) {
+    if (!cbor_value_is_map(it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(it, "reason", &field);
+    if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = my_timer_dec_NotRespondingReason(&field, &out->reason);
+    if (err) return err;
+    return cbor_value_advance(it);
+}
+static inline CborError my_timer_enc_ReverseWorkerBlockedEvent(
+        CborEncoder* e, const ReverseWorkerBlockedEvent* v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(e, &m, 4);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "worker");
+    if (err) return err;
+    err = nimffi_enc_i64(&m, &v->worker);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "callId");
+    if (err) return err;
+    err = nimffi_enc_u64(&m, &v->callId);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "procName");
+    if (err) return err;
+    err = nimffi_enc_str(&m, &v->procName);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "elapsedMs");
+    if (err) return err;
+    err = nimffi_enc_i64(&m, &v->elapsedMs);
+    if (err) return err;
+    return cbor_encoder_close_container(e, &m);
+}
+static inline CborError my_timer_dec_ReverseWorkerBlockedEvent(
+        CborValue* it, ReverseWorkerBlockedEvent* out) {
+    if (!cbor_value_is_map(it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(it, "worker", &field);
+    if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = nimffi_dec_i64(&field, &out->worker);
+    if (err) return err;
+    err = cbor_value_map_find_value(it, "callId", &field);
+    if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = nimffi_dec_u64(&field, &out->callId);
+    if (err) return err;
+    err = cbor_value_map_find_value(it, "procName", &field);
+    if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = nimffi_dec_str(&field, &out->procName);
+    if (err) return err;
+    err = cbor_value_map_find_value(it, "elapsedMs", &field);
+    if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = nimffi_dec_i64(&field, &out->elapsedMs);
+    if (err) return err;
+    return cbor_value_advance(it);
+}
+static inline void my_timer_free_ReverseWorkerBlockedEvent(ReverseWorkerBlockedEvent* v) {
+    if (!v) return;
+    do { free((void*)v->procName); v->procName = NULL; } while (0);
+}
+static inline CborError my_timer_enc_ReverseWorkerRecoveredEvent(
+        CborEncoder* e, const ReverseWorkerRecoveredEvent* v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(e, &m, 1);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "worker");
+    if (err) return err;
+    err = nimffi_enc_i64(&m, &v->worker);
+    if (err) return err;
+    return cbor_encoder_close_container(e, &m);
+}
+static inline CborError my_timer_dec_ReverseWorkerRecoveredEvent(
+        CborValue* it, ReverseWorkerRecoveredEvent* out) {
+    if (!cbor_value_is_map(it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(it, "worker", &field);
+    if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = nimffi_dec_i64(&field, &out->worker);
+    if (err) return err;
+    return cbor_value_advance(it);
+}
 static inline CborError my_timer_enc_MyTimerCreateCtorReq(
         CborEncoder* e, const MyTimerCreateCtorReq* v) {
     CborEncoder m;
@@ -1098,6 +1264,79 @@ static void my_timer_on_job_scheduled_trampoline(int ret, const char* msg, size_
     my_timer_free_OnJobScheduledPayload(&payload);
 }
 
+typedef void (*MyTimerNotRespondingFn)(const NotRespondingEvent* evt, void* user_data);
+typedef struct { MyTimerNotRespondingFn fn; void* user_data; } MyTimerNotRespondingBox;
+static void my_timer_not_responding_trampoline(int ret, const char* msg, size_t len, void* ud) {
+    if (!ud || ret != 0 || !msg || len == 0) return;
+    MyTimerNotRespondingBox* box = (MyTimerNotRespondingBox*)ud;
+    if (!box->fn) return;
+    CborParser parser;
+    CborValue it;
+    if (cbor_parser_init((const uint8_t*)msg, len, 0, &parser, &it) != CborNoError) return;
+    if (!cbor_value_is_map(&it)) return;
+    CborValue payloadField;
+    if (cbor_value_map_find_value(&it, "payload", &payloadField) != CborNoError) return;
+    NotRespondingEvent payload;
+    memset(&payload, 0, sizeof(payload));
+    if (my_timer_dec_NotRespondingEvent(&payloadField, &payload) != CborNoError) return;
+    box->fn(&payload, box->user_data);
+}
+
+typedef void (*MyTimerRespondingFn)(const RespondingEvent* evt, void* user_data);
+typedef struct { MyTimerRespondingFn fn; void* user_data; } MyTimerRespondingBox;
+static void my_timer_responding_trampoline(int ret, const char* msg, size_t len, void* ud) {
+    if (!ud || ret != 0 || !msg || len == 0) return;
+    MyTimerRespondingBox* box = (MyTimerRespondingBox*)ud;
+    if (!box->fn) return;
+    CborParser parser;
+    CborValue it;
+    if (cbor_parser_init((const uint8_t*)msg, len, 0, &parser, &it) != CborNoError) return;
+    if (!cbor_value_is_map(&it)) return;
+    CborValue payloadField;
+    if (cbor_value_map_find_value(&it, "payload", &payloadField) != CborNoError) return;
+    RespondingEvent payload;
+    memset(&payload, 0, sizeof(payload));
+    if (my_timer_dec_RespondingEvent(&payloadField, &payload) != CborNoError) return;
+    box->fn(&payload, box->user_data);
+}
+
+typedef void (*MyTimerReverseWorkerBlockedFn)(const ReverseWorkerBlockedEvent* evt, void* user_data);
+typedef struct { MyTimerReverseWorkerBlockedFn fn; void* user_data; } MyTimerReverseWorkerBlockedBox;
+static void my_timer_reverse_worker_blocked_trampoline(int ret, const char* msg, size_t len, void* ud) {
+    if (!ud || ret != 0 || !msg || len == 0) return;
+    MyTimerReverseWorkerBlockedBox* box = (MyTimerReverseWorkerBlockedBox*)ud;
+    if (!box->fn) return;
+    CborParser parser;
+    CborValue it;
+    if (cbor_parser_init((const uint8_t*)msg, len, 0, &parser, &it) != CborNoError) return;
+    if (!cbor_value_is_map(&it)) return;
+    CborValue payloadField;
+    if (cbor_value_map_find_value(&it, "payload", &payloadField) != CborNoError) return;
+    ReverseWorkerBlockedEvent payload;
+    memset(&payload, 0, sizeof(payload));
+    if (my_timer_dec_ReverseWorkerBlockedEvent(&payloadField, &payload) != CborNoError) return;
+    box->fn(&payload, box->user_data);
+    my_timer_free_ReverseWorkerBlockedEvent(&payload);
+}
+
+typedef void (*MyTimerReverseWorkerRecoveredFn)(const ReverseWorkerRecoveredEvent* evt, void* user_data);
+typedef struct { MyTimerReverseWorkerRecoveredFn fn; void* user_data; } MyTimerReverseWorkerRecoveredBox;
+static void my_timer_reverse_worker_recovered_trampoline(int ret, const char* msg, size_t len, void* ud) {
+    if (!ud || ret != 0 || !msg || len == 0) return;
+    MyTimerReverseWorkerRecoveredBox* box = (MyTimerReverseWorkerRecoveredBox*)ud;
+    if (!box->fn) return;
+    CborParser parser;
+    CborValue it;
+    if (cbor_parser_init((const uint8_t*)msg, len, 0, &parser, &it) != CborNoError) return;
+    if (!cbor_value_is_map(&it)) return;
+    CborValue payloadField;
+    if (cbor_value_map_find_value(&it, "payload", &payloadField) != CborNoError) return;
+    ReverseWorkerRecoveredEvent payload;
+    memset(&payload, 0, sizeof(payload));
+    if (my_timer_dec_ReverseWorkerRecoveredEvent(&payloadField, &payload) != CborNoError) return;
+    box->fn(&payload, box->user_data);
+}
+
 /* ============================================================ */
 /* High-level context wrapper                                   */
 /* ============================================================ */
@@ -1229,6 +1468,90 @@ static inline uint64_t my_timer_ctx_add_on_job_scheduled_listener(MyTimerCtx* ct
     box->fn = fn;
     box->user_data = user_data;
     uint64_t id = my_timer_add_event_listener(ctx->ptr, "on_job_scheduled", my_timer_on_job_scheduled_trampoline, box);
+    if (id == 0) { free(box); return 0; }
+    if (ctx->listeners_len == ctx->listeners_cap) {
+        size_t ncap = ctx->listeners_cap ? ctx->listeners_cap * 2 : 4;
+        MyTimerCtxListener* grown = (MyTimerCtxListener*)realloc(ctx->listeners, ncap * sizeof(MyTimerCtxListener));
+        if (!grown) { my_timer_remove_event_listener(ctx->ptr, id); free(box); return 0; }
+        ctx->listeners = grown;
+        ctx->listeners_cap = ncap;
+    }
+    ctx->listeners[ctx->listeners_len].id = id;
+    ctx->listeners[ctx->listeners_len].box = box;
+    ctx->listeners_len++;
+    return id;
+}
+
+/** The library stopped responding: its FFI thread stalled or the event queue overflowed. */
+static inline uint64_t my_timer_ctx_add_not_responding_listener(MyTimerCtx* ctx, MyTimerNotRespondingFn fn, void* user_data) {
+    MyTimerNotRespondingBox* box = (MyTimerNotRespondingBox*)malloc(sizeof(MyTimerNotRespondingBox));
+    if (!box) return 0;
+    box->fn = fn;
+    box->user_data = user_data;
+    uint64_t id = my_timer_add_event_listener(ctx->ptr, "not_responding", my_timer_not_responding_trampoline, box);
+    if (id == 0) { free(box); return 0; }
+    if (ctx->listeners_len == ctx->listeners_cap) {
+        size_t ncap = ctx->listeners_cap ? ctx->listeners_cap * 2 : 4;
+        MyTimerCtxListener* grown = (MyTimerCtxListener*)realloc(ctx->listeners, ncap * sizeof(MyTimerCtxListener));
+        if (!grown) { my_timer_remove_event_listener(ctx->ptr, id); free(box); return 0; }
+        ctx->listeners = grown;
+        ctx->listeners_cap = ncap;
+    }
+    ctx->listeners[ctx->listeners_len].id = id;
+    ctx->listeners[ctx->listeners_len].box = box;
+    ctx->listeners_len++;
+    return id;
+}
+
+/** The library responds again after `not_responding`. */
+static inline uint64_t my_timer_ctx_add_responding_listener(MyTimerCtx* ctx, MyTimerRespondingFn fn, void* user_data) {
+    MyTimerRespondingBox* box = (MyTimerRespondingBox*)malloc(sizeof(MyTimerRespondingBox));
+    if (!box) return 0;
+    box->fn = fn;
+    box->user_data = user_data;
+    uint64_t id = my_timer_add_event_listener(ctx->ptr, "responding", my_timer_responding_trampoline, box);
+    if (id == 0) { free(box); return 0; }
+    if (ctx->listeners_len == ctx->listeners_cap) {
+        size_t ncap = ctx->listeners_cap ? ctx->listeners_cap * 2 : 4;
+        MyTimerCtxListener* grown = (MyTimerCtxListener*)realloc(ctx->listeners, ncap * sizeof(MyTimerCtxListener));
+        if (!grown) { my_timer_remove_event_listener(ctx->ptr, id); free(box); return 0; }
+        ctx->listeners = grown;
+        ctx->listeners_cap = ncap;
+    }
+    ctx->listeners[ctx->listeners_len].id = id;
+    ctx->listeners[ctx->listeners_len].box = box;
+    ctx->listeners_len++;
+    return id;
+}
+
+/** A reverse worker has been inside one implementation past the call timeout. */
+static inline uint64_t my_timer_ctx_add_reverse_worker_blocked_listener(MyTimerCtx* ctx, MyTimerReverseWorkerBlockedFn fn, void* user_data) {
+    MyTimerReverseWorkerBlockedBox* box = (MyTimerReverseWorkerBlockedBox*)malloc(sizeof(MyTimerReverseWorkerBlockedBox));
+    if (!box) return 0;
+    box->fn = fn;
+    box->user_data = user_data;
+    uint64_t id = my_timer_add_event_listener(ctx->ptr, "reverse_worker_blocked", my_timer_reverse_worker_blocked_trampoline, box);
+    if (id == 0) { free(box); return 0; }
+    if (ctx->listeners_len == ctx->listeners_cap) {
+        size_t ncap = ctx->listeners_cap ? ctx->listeners_cap * 2 : 4;
+        MyTimerCtxListener* grown = (MyTimerCtxListener*)realloc(ctx->listeners, ncap * sizeof(MyTimerCtxListener));
+        if (!grown) { my_timer_remove_event_listener(ctx->ptr, id); free(box); return 0; }
+        ctx->listeners = grown;
+        ctx->listeners_cap = ncap;
+    }
+    ctx->listeners[ctx->listeners_len].id = id;
+    ctx->listeners[ctx->listeners_len].box = box;
+    ctx->listeners_len++;
+    return id;
+}
+
+/** A blocked reverse worker returned. */
+static inline uint64_t my_timer_ctx_add_reverse_worker_recovered_listener(MyTimerCtx* ctx, MyTimerReverseWorkerRecoveredFn fn, void* user_data) {
+    MyTimerReverseWorkerRecoveredBox* box = (MyTimerReverseWorkerRecoveredBox*)malloc(sizeof(MyTimerReverseWorkerRecoveredBox));
+    if (!box) return 0;
+    box->fn = fn;
+    box->user_data = user_data;
+    uint64_t id = my_timer_add_event_listener(ctx->ptr, "reverse_worker_recovered", my_timer_reverse_worker_recovered_trampoline, box);
     if (id == 0) { free(box); return 0; }
     if (ctx->listeners_len == ctx->listeners_cap) {
         size_t ncap = ctx->listeners_cap ? ctx->listeners_cap * 2 : 4;

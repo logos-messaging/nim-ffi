@@ -14,6 +14,14 @@ pub enum JobPriority {
     JpHigh,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NotRespondingReason {
+    #[serde(rename = "heartbeat")]
+    Heartbeat,
+    #[serde(rename = "queueFull")]
+    QueueFull,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimerConfig {
     pub name: String,
@@ -115,6 +123,32 @@ pub struct HostClock {
 pub struct OnHostTickReq {
     #[serde(rename = "tickNo")]
     pub tick_no: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotRespondingEvent {
+    pub reason: NotRespondingReason,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RespondingEvent {
+    pub reason: NotRespondingReason,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReverseWorkerBlockedEvent {
+    pub worker: i64,
+    #[serde(rename = "callId")]
+    pub call_id: u64,
+    #[serde(rename = "procName")]
+    pub proc_name: String,
+    #[serde(rename = "elapsedMs")]
+    pub elapsed_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReverseWorkerRecoveredEvent {
+    pub worker: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

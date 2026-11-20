@@ -396,6 +396,136 @@ constexpr int64_t MAX_DELAY_MS = 5000;
 constexpr uint32_t DEFAULT_BACKOFF_MS = 250;
 constexpr const char* TIMER_VERSION = "nim-timer v0.1.0";
 
+#ifndef NIM_FFI_BUILTIN_EVENT_TYPES_HPP_INCLUDED
+#define NIM_FFI_BUILTIN_EVENT_TYPES_HPP_INCLUDED
+enum class NotRespondingReason {
+    heartbeat = 0,
+    queueFull = 1,
+};
+inline CborError encode_cbor(CborEncoder& e, const NotRespondingReason& v) {
+    switch (v) {
+    case NotRespondingReason::heartbeat: return cbor_encode_text_stringz(&e, "heartbeat");
+    case NotRespondingReason::queueFull: return cbor_encode_text_stringz(&e, "queueFull");
+    }
+    return CborErrorImproperValue;
+}
+inline CborError decode_cbor(CborValue& it, NotRespondingReason& v) {
+    std::string name;
+    CborError err = decode_cbor(it, name);
+    if (err) return err;
+    if (name == "heartbeat") { v = NotRespondingReason::heartbeat; return CborNoError; }
+    if (name == "queueFull") { v = NotRespondingReason::queueFull; return CborNoError; }
+    return CborErrorImproperValue;
+}
+
+struct NotRespondingEvent {
+    NotRespondingReason reason;
+};
+inline CborError encode_cbor(CborEncoder& e, const NotRespondingEvent& v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(&e, &m, 1);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "reason"); if (err) return err;
+    err = encode_cbor(m, v.reason);              if (err) return err;
+    return cbor_encoder_close_container(&e, &m);
+}
+inline CborError decode_cbor(CborValue& it, NotRespondingEvent& v) {
+    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(&it, "reason", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.reason); if (err) return err;
+    return cbor_value_advance(&it);
+}
+
+struct RespondingEvent {
+    NotRespondingReason reason;
+};
+inline CborError encode_cbor(CborEncoder& e, const RespondingEvent& v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(&e, &m, 1);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "reason"); if (err) return err;
+    err = encode_cbor(m, v.reason);              if (err) return err;
+    return cbor_encoder_close_container(&e, &m);
+}
+inline CborError decode_cbor(CborValue& it, RespondingEvent& v) {
+    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(&it, "reason", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.reason); if (err) return err;
+    return cbor_value_advance(&it);
+}
+
+struct ReverseWorkerBlockedEvent {
+    int64_t worker;
+    uint64_t callId;
+    std::string procName;
+    int64_t elapsedMs;
+};
+inline CborError encode_cbor(CborEncoder& e, const ReverseWorkerBlockedEvent& v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(&e, &m, 4);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "worker"); if (err) return err;
+    err = encode_cbor(m, v.worker);              if (err) return err;
+    err = cbor_encode_text_stringz(&m, "callId"); if (err) return err;
+    err = encode_cbor(m, v.callId);              if (err) return err;
+    err = cbor_encode_text_stringz(&m, "procName"); if (err) return err;
+    err = encode_cbor(m, v.procName);              if (err) return err;
+    err = cbor_encode_text_stringz(&m, "elapsedMs"); if (err) return err;
+    err = encode_cbor(m, v.elapsedMs);              if (err) return err;
+    return cbor_encoder_close_container(&e, &m);
+}
+inline CborError decode_cbor(CborValue& it, ReverseWorkerBlockedEvent& v) {
+    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(&it, "worker", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.worker); if (err) return err;
+    err = cbor_value_map_find_value(&it, "callId", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.callId); if (err) return err;
+    err = cbor_value_map_find_value(&it, "procName", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.procName); if (err) return err;
+    err = cbor_value_map_find_value(&it, "elapsedMs", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.elapsedMs); if (err) return err;
+    return cbor_value_advance(&it);
+}
+
+struct ReverseWorkerRecoveredEvent {
+    int64_t worker;
+};
+inline CborError encode_cbor(CborEncoder& e, const ReverseWorkerRecoveredEvent& v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(&e, &m, 1);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "worker"); if (err) return err;
+    err = encode_cbor(m, v.worker);              if (err) return err;
+    return cbor_encoder_close_container(&e, &m);
+}
+inline CborError decode_cbor(CborValue& it, ReverseWorkerRecoveredEvent& v) {
+    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(&it, "worker", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.worker); if (err) return err;
+    return cbor_value_advance(&it);
+}
+
+#endif
+
+// ============================================================
+// User-declared FFI types
+// ============================================================
+
 enum class JobPriority {
     jpLow = 0,
     jpNormal = 1,
@@ -418,10 +548,6 @@ inline CborError decode_cbor(CborValue& it, JobPriority& v) {
     if (name == "high") { v = JobPriority::jpHigh; return CborNoError; }
     return CborErrorImproperValue;
 }
-
-// ============================================================
-// User-declared FFI types
-// ============================================================
 
 struct TimerConfig {
     std::string name;
@@ -1165,6 +1291,54 @@ public:
         auto* raw = owned.get();
         const auto id = my_timer_add_event_listener(
             ptr_, "on_job_scheduled", &MyTimerCtx::typedTrampoline<OnJobScheduledPayload>, raw);
+        if (id == 0) return ListenerHandle{0};
+        std::lock_guard<std::mutex> lock(listenersMu_);
+        listeners_.emplace(id, std::move(owned));
+        return ListenerHandle{id};
+    }
+
+    /// The library stopped responding: its FFI thread stalled or the event queue overflowed.
+    ListenerHandle addOnNotRespondingListener(std::function<void(const NotRespondingEvent&)> handler) {
+        auto owned = std::make_unique<TypedListener<NotRespondingEvent>>(std::move(handler));
+        auto* raw = owned.get();
+        const auto id = my_timer_add_event_listener(
+            ptr_, "not_responding", &MyTimerCtx::typedTrampoline<NotRespondingEvent>, raw);
+        if (id == 0) return ListenerHandle{0};
+        std::lock_guard<std::mutex> lock(listenersMu_);
+        listeners_.emplace(id, std::move(owned));
+        return ListenerHandle{id};
+    }
+
+    /// The library responds again after `not_responding`.
+    ListenerHandle addOnRespondingListener(std::function<void(const RespondingEvent&)> handler) {
+        auto owned = std::make_unique<TypedListener<RespondingEvent>>(std::move(handler));
+        auto* raw = owned.get();
+        const auto id = my_timer_add_event_listener(
+            ptr_, "responding", &MyTimerCtx::typedTrampoline<RespondingEvent>, raw);
+        if (id == 0) return ListenerHandle{0};
+        std::lock_guard<std::mutex> lock(listenersMu_);
+        listeners_.emplace(id, std::move(owned));
+        return ListenerHandle{id};
+    }
+
+    /// A reverse worker has been inside one implementation past the call timeout.
+    ListenerHandle addOnReverseWorkerBlockedListener(std::function<void(const ReverseWorkerBlockedEvent&)> handler) {
+        auto owned = std::make_unique<TypedListener<ReverseWorkerBlockedEvent>>(std::move(handler));
+        auto* raw = owned.get();
+        const auto id = my_timer_add_event_listener(
+            ptr_, "reverse_worker_blocked", &MyTimerCtx::typedTrampoline<ReverseWorkerBlockedEvent>, raw);
+        if (id == 0) return ListenerHandle{0};
+        std::lock_guard<std::mutex> lock(listenersMu_);
+        listeners_.emplace(id, std::move(owned));
+        return ListenerHandle{id};
+    }
+
+    /// A blocked reverse worker returned.
+    ListenerHandle addOnReverseWorkerRecoveredListener(std::function<void(const ReverseWorkerRecoveredEvent&)> handler) {
+        auto owned = std::make_unique<TypedListener<ReverseWorkerRecoveredEvent>>(std::move(handler));
+        auto* raw = owned.get();
+        const auto id = my_timer_add_event_listener(
+            ptr_, "reverse_worker_recovered", &MyTimerCtx::typedTrampoline<ReverseWorkerRecoveredEvent>, raw);
         if (id == 0) return ListenerHandle{0};
         std::lock_guard<std::mutex> lock(listenersMu_);
         listeners_.emplace(id, std::move(owned));

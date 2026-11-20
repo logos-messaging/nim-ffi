@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Typed listeners for the liveness events.** Every binding now has a typed
+  registration for `not_responding`, `responding`, `reverse_worker_blocked` and
+  `reverse_worker_recovered`, with no `{.ffiEvent.}` declared: C
+  `<lib>_ctx_add_not_responding_listener`, C++ `addOnNotRespondingListener`,
+  Rust `add_not_responding_listener`. They share the decoder of declared events.
+  The `not_responding` and `responding` payloads carry `reason`
+  (`NotRespondingReason`: `heartbeat` or `queueFull`), so a host tells a wedged
+  FFI thread from a sustained queue overflow. The raw `add_event_listener` still works.
 - **Rust: per-call timeout.** `ctx.with_timeout(Some(d)).echo(..)` and
   `.echo_async(..)` override the ctx default for one call; `with_timeout(None)`
   waits for the terminal `RET_OK`/`RET_ERR` with no Rust-side limit. Instance
