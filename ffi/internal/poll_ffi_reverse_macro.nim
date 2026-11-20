@@ -54,7 +54,7 @@ proc buildPollFFIReverseProc*(
         "' is already used by another reverse proc; the host tells them apart by it"
     )
   pollReverseWireNames.add(newLit(wireName))
-  claimNameId(wireName, "reverse call")
+  claimNameId(wireName, nkReverseCall)
 
   # The arguments ride as one named map, the same shape a request uses, so the
   # host decodes one typed value instead of a positional list.

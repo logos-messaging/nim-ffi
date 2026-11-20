@@ -1,7 +1,7 @@
 ## Compile-time metadata types for FFI binding generation, populated by the
 ## {.ffiCtor.}/{.ffi.} macros and consumed by codegen.
 
-import std/[json, macrocache, macros, options, strutils]
+import std/[json, macrocache, macros, options]
 import ../ffi_msg
 
 type
@@ -166,52 +166,58 @@ template currentLibName*(): string =
 template currentLibType*(): string =
   libTypeCache.cacheLast()
 
-type FFINameIdClaim* = object
-  ## One wire name of a library and the `nameId` a polled message carries for it.
-  id*: uint64
-  wireName*: string
-  kind*: string
-    ## "event" or "reverse call": each is matched within its own message kind.
-  libName*: string
+type
+  FFINameKind* = enum
+    ## A polled message names an event or a reverse call by `nameId`; each kind is
+    ## matched within its own namespace.
+    nkEvent = "event"
+    nkReverseCall = "reverse call"
 
-func clashingName*(claims: openArray[FFINameIdClaim], claim: FFINameIdClaim): string =
-  ## The other name already holding `claim.id` in the same library and kind; "" if none.
-  for c in claims:
-    if c.id == claim.id and c.kind == claim.kind and c.libName == claim.libName and
-        c.wireName != claim.wireName:
-      return c.wireName
-  return ""
+  FFINameIdClaim* = object
+    ## One wire name of a library and the `nameId` a polled message carries for it.
+    id*: uint64
+    wireName*: string
+    kind*: FFINameKind
+    libName*: string
 
 proc addNameIdClaim*(claim: FFINameIdClaim) {.compileTime.} =
+  ## Records a claim without checking it. `claimNameId` is the checked entry; this
+  ## is public so a test can forge a clash, since a real FNV-1a 64 collision
+  ## cannot be written down.
   nameIdCache.add(
-    newLit(claim.kind & "\n" & claim.libName & "\n" & claim.wireName & "\n" & $claim.id)
+    newTree(
+      nnkBracket,
+      newLit($claim.kind),
+      newLit(claim.libName),
+      newLit(claim.wireName),
+      newLit(claim.id),
+    )
   )
 
-proc claimNameId*(wireName, kind: string) {.compileTime.} =
+proc claimNameId*(wireName: string, kind: FFINameKind) {.compileTime.} =
   ## A polled message names its event or reverse call by `nameId` alone, so two
   ## names sharing one id would reach the host as the same thing. Stop the build.
-  var held: seq[FFINameIdClaim]
+  let id = nameId(wireName)
+  let libName = currentLibName()
   for node in nameIdCache:
-    let parts = node.strVal.split('\n')
-    held.add(
-      FFINameIdClaim(
-        id: parseBiggestUInt(parts[3]).uint64,
-        wireName: parts[2],
-        kind: parts[0],
-        libName: parts[1],
+    if node[0].strVal == $kind and node[1].strVal == libName and
+        uint64(node[3].intVal) == id and node[2].strVal != wireName:
+      error(
+        "the " & $kind & " names \"" & wireName & "\" and \"" & node[2].strVal &
+          "\" hash to the same name id: " & nameIdLiteral(wireName) &
+          "; rename one of them"
       )
-    )
-  let claim = FFINameIdClaim(
-    id: nameId(wireName), wireName: wireName, kind: kind, libName: currentLibName()
+  addNameIdClaim(
+    FFINameIdClaim(id: id, wireName: wireName, kind: kind, libName: libName)
   )
-  let other = held.clashingName(claim)
-  if other.len > 0:
-    error(
-      "the " & kind & " names \"" & wireName & "\" and \"" & other &
-        "\" hash to the same name id (" & nameIdLiteral(wireName) &
-        "); rename one of them"
-    )
-  addNameIdClaim(claim)
+
+macro claimDispatchedEvent*(eventName: untyped): untyped =
+  ## `dispatchFFIEvent` takes any name, declared or not, and a polled message
+  ## carries its `nameId`: a name written as a literal is claimed like a declared
+  ## one. A name only known at run time cannot be.
+  if eventName.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+    claimNameId(eventName.strVal, nkEvent)
+  return newStmtList()
 
 template libraryDeclared*(): bool =
   libTypeCache.len > 0
