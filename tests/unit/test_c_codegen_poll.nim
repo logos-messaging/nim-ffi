@@ -10,7 +10,7 @@ proc field(n, t: string): FFIFieldMeta =
 proc param(n, t: string, isPtr = false): FFIParamMeta =
   FFIParamMeta(name: n, typeName: t, isPtr: isPtr)
 
-suite "generateCLibHeader: the poll model":
+suite "generateCLibHeader: the poll mode":
   setup:
     let procs = @[
       FFIProcMeta(

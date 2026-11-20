@@ -1009,11 +1009,11 @@ proc generateCLibHeader*(
   lines.add("")
 
   when defined(ffiPollMode):
-    # Poll model: every export answers with a message read from `<lib>_poll`, so
+    # Poll mode: every export answers with a message read from `<lib>_poll`, so
     # the header declares that message instead of the callback wrappers; a host
     # brings its own loop (see `host/`).
     lines.add("/* ============================================================ */")
-    lines.add("/* The poll model: every export submits a CBOR request (a map    */")
+    lines.add("/* The poll mode: every export submits a CBOR request (a map    */")
     lines.add("/* keyed by the proc's parameter names) and, when it returns     */")
     lines.add("/* NIMFFI_RET_OK, promises exactly one REPLY message carrying    */")
     lines.add("/* *req_id_out. Replies, events and the library's own questions  */")
