@@ -2,11 +2,12 @@
 ## through its C exports -- the shape a library takes when it ships inside a
 ## larger Nim program. Built with `-d:ffiPollMode` (see the .cfg beside this).
 
-import std/[atomics, os]
+import std/[atomics, monotimes, os, strutils, times]
 import unittest2
 import results
 import ffi
 import ffi/poll_host
+import ffi/ffi_msg
 
 type HostedLib = object
 
@@ -48,11 +49,13 @@ var greeted: Atomic[int]
 var sinkHost: Host
 var answered: Thread[(pointer, uint64)]
 var lastAnswered: Atomic[uint64]
+var sunkEvents: Atomic[int]
 
 suite "a Nim host of a poll-mode library":
   test "the constructor's reply is what create answers":
     let host = newHost(library)
-    check host.create(request({"who": ""}), 5_000).error == "nobody to greet"
+    check host.create(request({"who": ""}), 5_000).error ==
+      "constructor failed: nobody to greet"
     check host.ctx.isNil
     check host.create(request({"who": "world"}), 5_000).isOk
     check not host.ctx.isNil
@@ -82,8 +85,8 @@ suite "a Nim host of a poll-mode library":
     let r = host.call("pollhost_refuse", request({}))
     check r.ret == RET_ERR
     check r.error == "no"
-    check r.decode(string).error == "no"
-    check r.outcome.error == "no"
+    check r.decode(string).error == "reply is not a value: no"
+    check r.outcome.error == "call failed: no"
     host.destroy()
 
   test "a reverse call is served from inside the wait":
@@ -138,3 +141,50 @@ suite "a Nim host of a poll-mode library":
     check r.decode(string).get() == "hello b"
     host.drain()
     host.destroy()
+
+  test "a call times out by the clock even while events keep arriving":
+    let host = newHost(
+      library,
+      onEvent = proc(nameId: uint64, payload: seq[byte]) {.gcsafe, raises: [].} =
+        discard,
+    )
+    check host.create(request({"who": "x"}), 5_000).isOk
+    # Each greet emits an event, so every poll of the wait returns a message.
+    for i in 0 ..< 200:
+      check host.submit("pollhost_greet", request({"who": "flood"})).isOk
+    let started = getMonoTime()
+    let r = host.call("pollhost_ask", request({}), 100)
+    check (getMonoTime() - started).inMilliseconds < 5_000
+    host.destroy()
+
+  test "the late reply of a timed-out call is dropped, not kept":
+    let host = newHost(library)
+    check host.create(request({"who": "x"}), 5_000).isOk
+    let r = host.call("pollhost_greet", request({"who": "a"}), 0)
+    check r.ret == RET_TIMEOUT
+    sleep(100)
+    host.drain()
+    check host.pollFd() >= 0
+    host.destroy()
+
+  test "an event handed to an in-image sink is not queued":
+    sunkEvents.store(0)
+    setFFIEventSink(
+      proc(
+          eventName: string, payload: pointer, len: int
+      ) {.nimcall, gcsafe, raises: [].} =
+        if eventName == "greeted":
+          discard sunkEvents.fetchAdd(1)
+    )
+    let host = newHost(library)
+    check host.create(request({"who": "x"}), 5_000).isOk
+    check host.call("pollhost_greet", request({"who": "s"}), 5_000).ret == RET_OK
+    check sunkEvents.load() == 1
+    setFFIEventSink(nil)
+    host.destroy()
+
+suite "host/nim_ffi.h":
+  test "declares every message kind the library sends":
+    const header = staticRead("../../host/nim_ffi.h")
+    for k in MsgKinds:
+      check ("#define NIMFFI_MSG_" & k.name & " " & $k.value & " ") in header

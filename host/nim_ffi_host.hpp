@@ -25,10 +25,12 @@
 #define NIM_FFI_HOST_HPP
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <set>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -42,7 +44,7 @@ struct Library {
   int (*create)(const uint8_t* req, size_t len, void** ctx_out, uint64_t* id_out);
   int (*destroy)(void* ctx);
   int (*poll)(void* ctx, int32_t timeout_ms, const PollResult** msg);
-  int (*poll_fd)(void* ctx);
+  int64_t (*poll_fd)(void* ctx);  // an fd on POSIX, a HANDLE on Windows
   int (*reverse_reply)(void* ctx, uint64_t call_id, int ret, const uint8_t* payload, size_t len);
 };
 
@@ -96,28 +98,30 @@ class Host {
     ctx_ = ctx;
     r = waitFor(id, timeout);
     if (r.ret != NIMFFI_RET_OK) {
-      if (ctx_) lib_.destroy(ctx_);
-      ctx_ = nullptr;
+      if (void* held = ctx_.exchange(nullptr)) lib_.destroy(held);
       settled_.clear();
       done_.clear();
+      dropped_.clear();
     }
     return r;
   }
 
   void destroy() {
     std::lock_guard<std::recursive_mutex> lock(lock_);
-    if (ctx_) {
-      lib_.destroy(ctx_);
-      ctx_ = nullptr;
-    }
+    // Cleared before the library tears down, so a late reverseReply sees null.
+    if (void* ctx = ctx_.exchange(nullptr)) lib_.destroy(ctx);
     settled_.clear();
     done_.clear();
+    dropped_.clear();
   }
 
   bool alive() const { return ctx_ != nullptr; }
-  void* ctx() const { return ctx_; }
-  // Readable while a message waits; -1 without a context.
-  int fd() const { return ctx_ ? lib_.poll_fd(ctx_) : -1; }
+  void* ctx() const { return ctx_.load(); }
+  // Readable while a message waits; -1 without a context. 64-bit: an fd or a HANDLE.
+  int64_t fd() const {
+    void* ctx = ctx_;
+    return ctx ? lib_.poll_fd(ctx) : -1;
+  }
 
   // Submits `method` and pumps this thread until its reply, or `timeout`.
   Reply call(Method method, const Bytes& req, std::chrono::milliseconds timeout) {
@@ -150,7 +154,13 @@ class Host {
     if (!ctx_) return NIMFFI_RET_INVALID_CTX;
     uint64_t id = 0;
     const int rc = method(ctx_, req.data(), req.size(), &id);
-    if (rc == NIMFFI_RET_OK && done) done_[id] = std::move(done);
+    if (rc == NIMFFI_RET_OK) {
+      if (done) {
+        done_[id] = std::move(done);
+      } else {
+        dropped_.insert(id);  // fire and forget: the reply is read and dropped
+      }
+    }
     drain();  // whatever is already queued, including a reply that came at once
     return rc;
   }
@@ -158,7 +168,7 @@ class Host {
   // Answers a REVERSE_CALL. Any thread. `payload` is the reply's CBOR on
   // NIMFFI_RET_OK, otherwise UTF-8 text.
   void reverseReply(uint64_t call_id, int ret, const uint8_t* payload, size_t len) {
-    void* ctx = ctx_;  // read without the lock: replies come from other threads
+    void* ctx = ctx_.load();  // not under the lock: replies come from other threads
     if (!ctx) return;
     lib_.reverse_reply(ctx, call_id, ret, payload, len);
   }
@@ -173,9 +183,9 @@ class Host {
   // when fd() is readable.
   void drain() {
     std::lock_guard<std::recursive_mutex> lock(lock_);
-    if (!ctx_) return;
     const PollResult* m = nullptr;
-    while (lib_.poll(ctx_, 0, &m) == NIMFFI_RET_OK && m) {
+    // Re-read each turn: a handler or CLOSED may have cleared the context.
+    while (ctx_ && lib_.poll(ctx_, 0, &m) == NIMFFI_RET_OK && m) {
       dispatch(m);
       m = nullptr;
     }
@@ -214,6 +224,7 @@ class Host {
       const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
           deadline - std::chrono::steady_clock::now());
       if (left.count() <= 0) {
+        dropped_.insert(id);  // a reply that comes later has no caller
         r.ret = NIMFFI_RET_TIMEOUT;
         return r;
       }
@@ -236,7 +247,7 @@ class Host {
           Done done = std::move(it->second);
           done_.erase(it);
           done(decodeReply(m));
-        } else {
+        } else if (dropped_.erase(m->id) == 0) {
           settled_[m->id] = decodeReply(m);  // kept until its caller asks
         }
         break;
@@ -259,10 +270,12 @@ class Host {
   }
 
   Library lib_;
-  void* ctx_ = nullptr;
+  // Atomic: reverseReply reads it from other threads while the pump writes it.
+  std::atomic<void*> ctx_{nullptr};
   std::recursive_mutex lock_;  // the queue is pumped from one thread at a time
   std::map<uint64_t, Reply> settled_;  // replies seen before their waiter asked
   std::map<uint64_t, Done> done_;      // replies nobody waits for
+  std::set<uint64_t> dropped_;         // replies whose caller gave up, or never cared
   EventHandler on_event_;
   ReverseHandler on_reverse_;
 };

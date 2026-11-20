@@ -15,7 +15,7 @@
 ## reverse call's CBOR arguments. The exports are bound by their C names, so a
 ## host depends on the ABI and not on how the library was built.
 
-import std/[macros, sets, tables]
+import std/[macros, monotimes, sets, tables, times]
 import results
 import ./ffi_msg, ./ret_codes
 import cbor_serialization
@@ -33,6 +33,8 @@ type
     cdecl, gcsafe, raises: []
   .} ## Any `{.ffi.}` export: the request is a CBOR map keyed by its parameter names.
   DestroyFn* = proc(ctx: pointer): cint {.cdecl, gcsafe, raises: [].}
+  PollFdFn* = proc(ctx: pointer): int64 {.cdecl, gcsafe, raises: [].}
+    ## `<lib>_poll_fd`: readable while a message waits. 64-bit: an fd or a HANDLE.
   PollFn* = proc(ctx: pointer, timeoutMs: int32, msg: ptr ptr PollResult): cint {.
     cdecl, gcsafe, raises: []
   .}
@@ -44,6 +46,7 @@ type
     create*: CtorFn
     destroy*: DestroyFn
     poll*: PollFn
+    pollFd*: PollFdFn ## for a host with an event loop of its own
     reverseReply*: ReverseReplyFn ## nil for a library that asks nothing back
 
   Reply* = object
@@ -63,7 +66,8 @@ type
     onReverseCall*: ReverseHandler
     timeoutMs*: int ## what a call waits for its reply when it names no deadline
     settled: Table[uint64, Reply] # replies read before their caller asked
-    unwaited: HashSet[uint64] # submitted with no one waiting: their replies are dropped
+    unwaited: HashSet[uint64]
+      # submitted with no one waiting, or given up on: replies are dropped
     closed: bool
 
 const
@@ -105,6 +109,11 @@ template importPoll*(name: static string): PollFn =
 
     PollFn(bound)
 
+template importPollFd*(name: static string): PollFdFn =
+  block:
+    proc bound(ctx: pointer): int64 {.importc: name, cdecl, gcsafe, raises: [].}
+    PollFdFn(bound)
+
 template importReverseReply*(name: static string): ReverseReplyFn =
   block:
     proc bound(
@@ -120,6 +129,7 @@ template importLibrary*(prefix: static string, ctor: static string): Library =
     create: importCtor(ctor),
     destroy: importDestroy(prefix & "_destroy"),
     poll: importPoll(prefix & "_poll"),
+    pollFd: importPollFd(prefix & "_poll_fd"),
     reverseReply: importReverseReply(prefix & "_reverse_reply"),
   )
 
@@ -194,7 +204,7 @@ proc reverseReply*(
 ): cint {.gcsafe, raises: [].} =
   ## Answers a reverse call. `payload` is the reply's CBOR value on RET_OK, the
   ## error text otherwise.
-  if host.lib.reverseReply.isNil or host.ctx.isNil:
+  if host.lib.reverseReply.isNil() or host.ctx.isNil():
     return RET_ERR
   return host.lib.reverseReply(
     host.ctx, callId, ret, bytesPtr(payload), csize_t(payload.len)
@@ -213,10 +223,10 @@ proc dispatch(host: Host, m: ptr PollResult) =
     else:
       host.settled[m.id] = decodeReply(m)
   of MsgEvent:
-    if not host.onEvent.isNil:
+    if not host.onEvent.isNil():
       host.onEvent(m.nameId, bytesOf(m))
   of MsgReverseCall:
-    if not host.onReverseCall.isNil:
+    if not host.onReverseCall.isNil():
       host.onReverseCall(m.id, m.nameId, bytesOf(m))
     else:
       discard host.reverseReply(m.id, RET_ERR, "no handler for reverse calls")
@@ -225,21 +235,28 @@ proc dispatch(host: Host, m: ptr PollResult) =
   else:
     discard # STALE and the liveness ticks: the deadline decides
 
+proc pollFd*(host: Host): int64 =
+  ## `<lib>_poll_fd` of the held context, for a host's own event loop; -1 without one.
+  if host.ctx.isNil() or host.lib.pollFd.isNil():
+    return -1
+  return host.lib.pollFd(host.ctx)
+
 proc drain*(host: Host) =
   ## Reads everything already queued, without waiting. For a host with an
   ## event loop of its own, when `<lib>_poll_fd` is readable.
-  if host.ctx.isNil:
+  if host.ctx.isNil():
     return
   while not host.closed:
     var m: ptr PollResult = nil
-    if host.lib.poll(host.ctx, 0'i32, addr m) != RET_OK or m.isNil:
+    if host.lib.poll(host.ctx, 0'i32, addr m) != RET_OK or m.isNil():
       return
     host.dispatch(m)
 
 proc waitFor*(host: Host, id: uint64, timeoutMs = HostDefault): Reply =
   ## Pumps the context on the calling thread until reply `id`, or the deadline.
+  ## The deadline is wall time: messages served on the way do not extend it.
   let timeoutMs = host.deadline(timeoutMs)
-  var left = timeoutMs
+  let due = getMonoTime() + initDuration(milliseconds = timeoutMs)
   while true:
     if host.settled.hasKey(id):
       let r = host.settled[id]
@@ -247,58 +264,60 @@ proc waitFor*(host: Host, id: uint64, timeoutMs = HostDefault): Reply =
       return r
     if host.closed:
       return Reply(ret: RET_ERR, error: "the context is closed")
+    let left = (due - getMonoTime()).inMilliseconds
     if left <= 0:
+      # A reply that comes later has no caller: drop it instead of keeping it.
+      host.unwaited.incl(id)
       return Reply(ret: RET_TIMEOUT, error: "no reply within " & $timeoutMs & " ms")
     var m: ptr PollResult = nil
-    let slice = min(left, int(SliceMs))
-    let rc = host.lib.poll(host.ctx, int32(slice), addr m)
-    if rc == RET_OK and not m.isNil:
+    let rc = host.lib.poll(host.ctx, int32(min(left, int64(SliceMs))), addr m)
+    if rc == RET_OK and not m.isNil():
       host.dispatch(m)
-    elif rc == RET_TIMEOUT:
-      left -= slice
-    elif rc != RET_OK:
+    elif rc != RET_OK and rc != RET_TIMEOUT:
       return Reply(ret: rc, error: "poll rc=" & $rc)
+
+proc failure(r: Reply): string =
+  return
+    if r.error.len > 0:
+      r.error
+    else:
+      "rc=" & $r.ret
 
 proc create*(
     host: Host, req: openArray[byte], timeoutMs = HostDefault
 ): Result[void, string] =
   ## Runs the constructor and waits for its reply: the host holds the context
   ## from here on. On failure the context is destroyed again.
-  if not host.ctx.isNil:
-    return err("the host already holds a context")
+  if not host.ctx.isNil():
+    return err("could not create: the host already holds a context")
   var ctx: pointer = nil
   var id: uint64 = 0
   let rc = host.lib.create(bytesPtr(req), csize_t(req.len), addr ctx, addr id)
-  if rc != RET_OK or ctx.isNil:
-    return err("constructor not accepted, rc=" & $rc)
+  if rc != RET_OK or ctx.isNil():
+    return err("constructor not accepted: rc=" & $rc)
   host.ctx = ctx
   host.closed = false
   let ready = host.waitFor(id, timeoutMs)
   if ready.ret != RET_OK:
     discard host.lib.destroy(ctx)
     host.ctx = nil
-    return err(
-      if ready.error.len > 0:
-        ready.error
-      else:
-        "rc=" & $ready.ret
-    )
+    return err("constructor failed: " & ready.failure)
   return ok()
 
 proc destroy*(host: Host) =
-  if not host.ctx.isNil:
+  if not host.ctx.isNil():
     discard host.lib.destroy(host.ctx)
     host.ctx = nil
   host.settled.clear()
   host.unwaited.clear()
 
 proc send(host: Host, m: MethodFn, req: openArray[byte]): Result[uint64, string] =
-  if host.ctx.isNil:
-    return err("no context")
+  if host.ctx.isNil():
+    return err("could not send: no context")
   var id: uint64 = 0
   let rc = m(host.ctx, bytesPtr(req), csize_t(req.len), addr id)
   if rc != RET_OK:
-    return err("not accepted, rc=" & $rc)
+    return err("request not accepted: rc=" & $rc)
   return ok(id)
 
 proc submit*(host: Host, m: MethodFn, req: openArray[byte]): Result[void, string] =
@@ -334,23 +353,16 @@ proc encode*[T](req: T): seq[byte] =
   ## fields of `req`. An object with no fields is the empty request.
   return cborEncode(req)
 
-proc failure(r: Reply): string =
-  return
-    if r.error.len > 0:
-      r.error
-    else:
-      "rc=" & $r.ret
-
 proc outcome*(r: Reply): Result[void, string] =
   ## Whether the call succeeded, for a reply whose value means nothing to the caller.
   return
     if r.ret == RET_OK:
       ok()
     else:
-      err(r.failure)
+      err("call failed: " & r.failure)
 
 proc decode*(r: Reply, T: typedesc): Result[T, string] =
   ## The value of a RET_OK reply.
   if r.ret != RET_OK:
-    return err(r.failure)
+    return err("reply is not a value: " & r.failure)
   return cborDecode(r.payload, T)

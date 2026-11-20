@@ -557,6 +557,8 @@ proc setFFIEventSink*(sink: FFIEventSink) =
   ## a library shipped inside a larger Nim program whose host has no thread
   ## of its own to poll from: the event is handed over where it is emitted,
   ## and `payload` is only valid for the call. Set before the first event.
+  ## Process-wide and context-blind: for an image holding one context of the
+  ## library. Nothing is queued, so nothing is counted as dropped either.
   ffiEventSink = sink
 
 proc enqueueFFIEvent*(

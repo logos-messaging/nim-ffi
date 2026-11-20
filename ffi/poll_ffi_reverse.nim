@@ -296,6 +296,8 @@ proc setFFIReverseSink*(sink: FFIReverseSink) =
   ## Hands every reverse call to `sink` instead of the queue `<lib>_poll`
   ## serves: for a library shipped inside a larger Nim program whose host has
   ## no thread of its own to poll from. Set before the first question.
+  ## Process-wide and context-blind: for an image holding one context of the
+  ## library, whose token the host already has from its constructor.
   ffiReverseSink = sink
 
 proc callHost*(

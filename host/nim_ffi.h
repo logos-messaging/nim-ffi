@@ -7,7 +7,7 @@
  *   int <lib>_shutdown(void);
  *   int <lib>_<method>(void* ctx, const uint8_t* req, size_t len, uint64_t* id_out);
  *   int <lib>_poll(void* ctx, int32_t timeout_ms, const PollResult** msg);
- *   int <lib>_poll_fd(void* ctx);
+ *   int64_t <lib>_poll_fd(void* ctx);  (an fd on POSIX, a HANDLE on Windows)
  *   int <lib>_reverse_reply(void* ctx, uint64_t call_id, int ret, const uint8_t* payload, size_t len);
  *
  * A request is a CBOR map keyed by the proc's parameter names. NIMFFI_RET_OK
