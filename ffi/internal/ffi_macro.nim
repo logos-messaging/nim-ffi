@@ -1838,6 +1838,7 @@ proc buildFFIEventProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compileTi
   )
   resultStmts.add(generated)
 
+  claimNameId(wireName, "event")
   addFFIEvent(
     FFIEventMeta(
       wireName: wireName,
