@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **The Nim host of the poll model.** `ffi/poll_host` is the same host in Nim
+  (`importLibrary`, `request({...})`, `call`, `submit`, `decode`, `outcome`,
+  `reverseReply`). For a library shipped inside a larger Nim program,
+  `setFFIEventSink` and `setFFIReverseSink` hand it events and questions on the
+  emitting thread.
 - **The C++ host of the poll model.** `host/nim_ffi.h` declares what a
   `-d:ffiPollMode` library hands out; `host/nim_ffi_host.hpp` is a header-only
   C++17 host for one context. It owns no thread: a call pumps on the calling

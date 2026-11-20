@@ -546,10 +546,26 @@ var ffiNextEventSeqNum* {.threadvar.}: proc(): uint64 {.gcsafe, raises: [].}
 var ffiEventDropLogged {.threadvar.}: bool
   # A full queue stays full for every event that follows; log the first drop only.
 
+type FFIEventSink* =
+  proc(eventName: string, payload: pointer, len: int) {.nimcall, gcsafe, raises: [].}
+  ## A host living in this same image, taking events on the emitting thread.
+
+var ffiEventSink: FFIEventSink
+
+proc setFFIEventSink*(sink: FFIEventSink) =
+  ## Routes every event to `sink` instead of the queue `<lib>_poll` serves. For
+  ## a library shipped inside a larger Nim program whose host has no thread
+  ## of its own to poll from: the event is handed over where it is emitted,
+  ## and `payload` is only valid for the call. Set before the first event.
+  ffiEventSink = sink
+
 proc enqueueFFIEvent*(
     eventName: string, src: pointer, dataLen: int
 ): EnqueueResult {.discardable, raises: [], gcsafe.} =
   ## FFI thread only. A dropped event is counted and lost; requests keep running.
+  if not ffiEventSink.isNil():
+    ffiEventSink(eventName, src, dataLen)
+    return EnqueueResult.Queued
   let q = ffiCurrentEventQueue
   if q.isNil():
     chronicles.error "event queue not set on this thread", event = eventName
