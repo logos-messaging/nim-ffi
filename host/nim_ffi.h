@@ -1,4 +1,4 @@
-/* nim-ffi poll model: what a host sees.
+/* nim-ffi poll mode: what a host sees.
  *
  * A library built with -d:ffiPollMode exports, per library <lib>:
  *
@@ -7,7 +7,7 @@
  *   int <lib>_shutdown(void);
  *   int <lib>_<method>(void* ctx, const uint8_t* req, size_t len, uint64_t* id_out);
  *   int <lib>_poll(void* ctx, int32_t timeout_ms, const PollResult** msg);
- *   int <lib>_poll_fd(void* ctx);
+ *   int64_t <lib>_poll_fd(void* ctx);  (an fd on POSIX, a HANDLE on Windows)
  *   int <lib>_reverse_reply(void* ctx, uint64_t call_id, int ret, const uint8_t* payload, size_t len);
  *
  * A request is a CBOR map keyed by the proc's parameter names. NIMFFI_RET_OK
@@ -40,6 +40,10 @@ extern "C" {
 #define NIMFFI_RET_BUSY 7
 #define NIMFFI_RET_QUEUE_FULL 8
 #define NIMFFI_RET_TOO_LARGE 9
+#define NIMFFI_RET_NOT_ACTIVE 10
+#define NIMFFI_RET_WORKERS_FAILED 11
+#define NIMFFI_RET_INVALID_ARGUMENT 12
+#define NIMFFI_RET_OUT_OF_MEMORY 13
 #endif
 
 #ifndef NIMFFI_POLL_RESULT_DECLARED

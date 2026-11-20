@@ -1,4 +1,4 @@
-# host/ — the poll model from the host's side
+# host/ — the poll mode from the host's side
 
 `nim_ffi.h` is the C declaration of what a `-d:ffiPollMode` library hands a
 host: `PollResult`, the `NIMFFI_MSG_*` kinds, the `NIMFFI_RET_*` codes and
