@@ -25,6 +25,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bounded = ctx.with_timeout(Some(Duration::from_secs(5))).version_async().await?;
     assert_eq!(unbounded, bounded);
 
+    // Progress: called every ~5 s while a handler still runs, so a call with no limit is not silent.
+    let watched = ctx
+        .with_timeout(None)
+        .with_progress(|elapsed| eprintln!("still running after {elapsed:?}"))
+        .version_async()
+        .await?;
+    assert_eq!(watched, bounded);
+
     let echo1 = ctx
         .echo_async(EchoRequest {
             message: "hello from tokio".into(),

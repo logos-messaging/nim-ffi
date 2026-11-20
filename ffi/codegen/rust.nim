@@ -464,7 +464,7 @@ proc generateApiRs*(
   if events.len > 0:
     selfExtras.add("listeners: std::sync::Mutex::new(std::collections::HashMap::new())")
   let callsInit =
-    "calls: $1 { ptr: addr as *mut c_void, timeout: Some(timeout), _ctx: std::marker::PhantomData }" %
+    "calls: $1 { ptr: addr as *mut c_void, timeout: Some(timeout), progress: None, _ctx: std::marker::PhantomData }" %
     [callsTypeName]
   let selfInit =
     "        Ok(Self { ptr: addr as *mut c_void, timeout, " & callsInit &
@@ -579,6 +579,7 @@ proc generateApiRs*(
       ("{{REQ}}", reqLiteral(reqStructName(m), m.extraParams)),
       ("{{PROC}}", m.procName),
       ("{{TIMEOUT}}", if isStatic: "Some(timeout)" else: "self.timeout"),
+      ("{{PROGRESS}}", if isStatic: "None" else: "self.progress.clone()"),
     ]
 
     # Statics stay associated fns of the ctx; instance methods live on the calls view.

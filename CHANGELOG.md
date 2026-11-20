@@ -13,6 +13,17 @@ All notable changes to this project are documented in this file.
   the wait: the Nim handler runs to completion. Statics and `create` /
   `new_async` still take a plain `Duration` (always bounded).
 
+- **C++: per-call timeout, same shape as Rust.** `ctx->withTimeout(limit)`
+  returns a `<Lib>Calls` view whose sync and `*Async` calls use `limit`;
+  `std::nullopt` waits with no limit. The ctx derives from the view, so
+  `ctx->echo(..)` is unchanged. `*Async` no longer runs the sync call on a
+  thread: the callback settles the future, and a shared timer enforces a limit.
+  Statics and `create` still take a plain `milliseconds`.
+- **Progress callback (Rust and C++).** `with_progress(f)` (Rust) and
+  `withProgress(f)` (C++) on a ctx or a calls view call `f(elapsed)` each time a
+  handler still runs (`RET_STALE_WARN`, about every 5 s). The callback runs on a
+  library thread and may still fire after a timeout, until the handler ends.
+
 ### Changed
 - **An event-queue overflow drops and counts; it no longer wedges the context.**
   A full queue used to set a sticky flag that refused every later request until
