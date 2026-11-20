@@ -451,7 +451,7 @@ codecs) for a host that brings its own loop.
   answer; it exists only under the poll mode. The host has
   `-d:ffiReverseCallTimeoutMs` (10 s unless set) to answer.
 - A synchronous export (no parameters, a plain return type) stays a plain C
-  function in both models.
+  function in both modes.
 
 ## Placement of `genBindings()`
 

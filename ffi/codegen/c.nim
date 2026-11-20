@@ -1060,7 +1060,7 @@ proc generateCLibHeader*(
     lines.add(
       "int " & libName & "_poll(void* ctx, int32_t timeout_ms, const PollResult** msg);"
     )
-    lines.add("int " & libName & "_poll_fd(void* ctx);")
+    lines.add("int64_t " & libName & "_poll_fd(void* ctx);")
     lines.add(
       "int " & libName & "_reverse_reply(void* ctx, uint64_t call_id, int ret, " &
         "const uint8_t* payload, size_t len);"

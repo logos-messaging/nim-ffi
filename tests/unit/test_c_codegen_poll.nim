@@ -59,7 +59,7 @@ suite "generateCLibHeader: the poll mode":
     check "int timer_destroy(void* ctx);" in header
     check "int timer_poll(void* ctx, int32_t timeout_ms, const PollResult** msg);" in
       header
-    check "int timer_poll_fd(void* ctx);" in header
+    check "int64_t timer_poll_fd(void* ctx);" in header
     check "int timer_reverse_reply(void* ctx, uint64_t call_id, int ret, const uint8_t* payload, size_t len);" in
       header
 
