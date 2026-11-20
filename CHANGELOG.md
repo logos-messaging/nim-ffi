@@ -5,6 +5,10 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **The C++ host of the poll model.** `host/nim_ffi.h` declares what a
+  `-d:ffiPollMode` library hands out; `host/nim_ffi_host.hpp` is a header-only
+  C++17 host for one context. It owns no thread: a call pumps on the calling
+  thread until its reply, serving events and reverse calls on the way.
 - **Rust: per-call timeout.** `ctx.with_timeout(Some(d)).echo(..)` and
   `.echo_async(..)` override the ctx default for one call; `with_timeout(None)`
   waits for the terminal `RET_OK`/`RET_ERR` with no Rust-side limit. Instance
