@@ -965,12 +965,9 @@ proc generateCLibHeader*(
     reverseEvents: seq[FFIReverseEventMeta] = @[],
     pollMode = defined(ffiPollMode),
 ): string =
-  ## The `<lib>.h` header: library structs, monomorphised codecs and the C ABI.
-  ## Under the callback model it adds the typed async wrappers; under the poll
-  ## model (`pollMode`) every export has one shape and answers with a message
-  ## read from `<lib>_poll`, so the header declares the message, the exports and
-  ## the codecs, and a host brings its own loop (host/nim_ffi_host.hpp,
-  ## ffi/poll_host.nim).
+  ## The `<lib>.h` header: structs, codecs and the C ABI. Callback model: plus
+  ## typed async wrappers. Poll model (`pollMode`): plus the `<lib>_poll` message
+  ## instead, since a host brings its own loop (see `host/`).
   let classified = classifyProcs(procs)
   let ctors = classified.ctors
   let libType = libTypeName(ctors, libName)
