@@ -14,10 +14,12 @@ import
   ./ffi_outbound,
   ./ffi_thread_request,
   ./ffi_request_queue,
+  ./liveness_events,
   ./cbor_serial
 
 export
-  ffi_events, ffi_reverse, ffi_handles, ffi_last_error, ffi_outbound, ffi_reply_target
+  ffi_events, ffi_reverse, ffi_handles, ffi_last_error, ffi_outbound, ffi_reply_target,
+  liveness_events
 export ffi_request_queue.RequestQueueDepth
 when defined(ffiPollMode):
   import ./poll_ffi_reverse

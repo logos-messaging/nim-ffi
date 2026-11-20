@@ -94,6 +94,25 @@ typedef struct {
 typedef struct {
     int64_t tickNo;
 } OnHostTickReq;
+#ifndef NIM_FFI_BUILTIN_NOT_RESPONDING_REASON_DEFINED
+#define NIM_FFI_BUILTIN_NOT_RESPONDING_REASON_DEFINED
+typedef enum {
+    NOT_RESPONDING_REASON_HEARTBEAT = 0,
+    NOT_RESPONDING_REASON_QUEUE_FULL = 1
+} NotRespondingReason;
+#endif
+#ifndef NIM_FFI_BUILTIN_NOT_RESPONDING_EVENT_DEFINED
+#define NIM_FFI_BUILTIN_NOT_RESPONDING_EVENT_DEFINED
+typedef struct {
+    NotRespondingReason reason;
+} NotRespondingEvent;
+#endif
+#ifndef NIM_FFI_BUILTIN_RESPONDING_EVENT_DEFINED
+#define NIM_FFI_BUILTIN_RESPONDING_EVENT_DEFINED
+typedef struct {
+    NotRespondingReason reason;
+} RespondingEvent;
+#endif
 typedef struct {
     TimerConfig config;
 } MyTimerCreateCtorReq;
@@ -781,6 +800,76 @@ static inline CborError my_timer_dec_OnHostTickReq(
     if (err) return err;
     return cbor_value_advance(it);
 }
+static inline CborError my_timer_enc_NotRespondingReason(
+        CborEncoder* e, const NotRespondingReason* v) {
+    switch (*v) {
+    case NOT_RESPONDING_REASON_HEARTBEAT: return cbor_encode_text_stringz(e, "heartbeat");
+    case NOT_RESPONDING_REASON_QUEUE_FULL: return cbor_encode_text_stringz(e, "queueFull");
+    }
+    return CborErrorImproperValue;
+}
+static inline CborError my_timer_dec_NotRespondingReason(
+        CborValue* it, NotRespondingReason* out) {
+    if (!cbor_value_is_text_string(it)) return CborErrorImproperValue;
+    size_t len = 0;
+    CborError err = cbor_value_get_string_length(it, &len);
+    if (err) return err;
+    char buf[10];
+    if (len >= sizeof(buf)) return CborErrorImproperValue;
+    size_t copied = sizeof(buf);
+    err = cbor_value_copy_text_string(it, buf, &copied, NULL);
+    if (err) return err;
+    buf[len] = '\0';
+    if (strcmp(buf, "heartbeat") == 0) { *out = NOT_RESPONDING_REASON_HEARTBEAT; return cbor_value_advance(it); }
+    if (strcmp(buf, "queueFull") == 0) { *out = NOT_RESPONDING_REASON_QUEUE_FULL; return cbor_value_advance(it); }
+    return CborErrorImproperValue;
+}
+static inline CborError my_timer_enc_NotRespondingEvent(
+        CborEncoder* e, const NotRespondingEvent* v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(e, &m, 1);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "reason");
+    if (err) return err;
+    err = my_timer_enc_NotRespondingReason(&m, &v->reason);
+    if (err) return err;
+    return cbor_encoder_close_container(e, &m);
+}
+static inline CborError my_timer_dec_NotRespondingEvent(
+        CborValue* it, NotRespondingEvent* out) {
+    if (!cbor_value_is_map(it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(it, "reason", &field);
+    if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = my_timer_dec_NotRespondingReason(&field, &out->reason);
+    if (err) return err;
+    return cbor_value_advance(it);
+}
+static inline CborError my_timer_enc_RespondingEvent(
+        CborEncoder* e, const RespondingEvent* v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(e, &m, 1);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "reason");
+    if (err) return err;
+    err = my_timer_enc_NotRespondingReason(&m, &v->reason);
+    if (err) return err;
+    return cbor_encoder_close_container(e, &m);
+}
+static inline CborError my_timer_dec_RespondingEvent(
+        CborValue* it, RespondingEvent* out) {
+    if (!cbor_value_is_map(it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(it, "reason", &field);
+    if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = my_timer_dec_NotRespondingReason(&field, &out->reason);
+    if (err) return err;
+    return cbor_value_advance(it);
+}
 static inline CborError my_timer_enc_MyTimerCreateCtorReq(
         CborEncoder* e, const MyTimerCreateCtorReq* v) {
     CborEncoder m;
@@ -1098,6 +1187,42 @@ static void my_timer_on_job_scheduled_trampoline(int ret, const char* msg, size_
     my_timer_free_OnJobScheduledPayload(&payload);
 }
 
+typedef void (*MyTimerNotRespondingFn)(const NotRespondingEvent* evt, void* user_data);
+typedef struct { MyTimerNotRespondingFn fn; void* user_data; } MyTimerNotRespondingBox;
+static void my_timer_not_responding_trampoline(int ret, const char* msg, size_t len, void* ud) {
+    if (!ud || ret != 0 || !msg || len == 0) return;
+    MyTimerNotRespondingBox* box = (MyTimerNotRespondingBox*)ud;
+    if (!box->fn) return;
+    CborParser parser;
+    CborValue it;
+    if (cbor_parser_init((const uint8_t*)msg, len, 0, &parser, &it) != CborNoError) return;
+    if (!cbor_value_is_map(&it)) return;
+    CborValue payloadField;
+    if (cbor_value_map_find_value(&it, "payload", &payloadField) != CborNoError) return;
+    NotRespondingEvent payload;
+    memset(&payload, 0, sizeof(payload));
+    if (my_timer_dec_NotRespondingEvent(&payloadField, &payload) != CborNoError) return;
+    box->fn(&payload, box->user_data);
+}
+
+typedef void (*MyTimerRespondingFn)(const RespondingEvent* evt, void* user_data);
+typedef struct { MyTimerRespondingFn fn; void* user_data; } MyTimerRespondingBox;
+static void my_timer_responding_trampoline(int ret, const char* msg, size_t len, void* ud) {
+    if (!ud || ret != 0 || !msg || len == 0) return;
+    MyTimerRespondingBox* box = (MyTimerRespondingBox*)ud;
+    if (!box->fn) return;
+    CborParser parser;
+    CborValue it;
+    if (cbor_parser_init((const uint8_t*)msg, len, 0, &parser, &it) != CborNoError) return;
+    if (!cbor_value_is_map(&it)) return;
+    CborValue payloadField;
+    if (cbor_value_map_find_value(&it, "payload", &payloadField) != CborNoError) return;
+    RespondingEvent payload;
+    memset(&payload, 0, sizeof(payload));
+    if (my_timer_dec_RespondingEvent(&payloadField, &payload) != CborNoError) return;
+    box->fn(&payload, box->user_data);
+}
+
 /* ============================================================ */
 /* High-level context wrapper                                   */
 /* ============================================================ */
@@ -1229,6 +1354,48 @@ static inline uint64_t my_timer_ctx_add_on_job_scheduled_listener(MyTimerCtx* ct
     box->fn = fn;
     box->user_data = user_data;
     uint64_t id = my_timer_add_event_listener(ctx->ptr, "on_job_scheduled", my_timer_on_job_scheduled_trampoline, box);
+    if (id == 0) { free(box); return 0; }
+    if (ctx->listeners_len == ctx->listeners_cap) {
+        size_t ncap = ctx->listeners_cap ? ctx->listeners_cap * 2 : 4;
+        MyTimerCtxListener* grown = (MyTimerCtxListener*)realloc(ctx->listeners, ncap * sizeof(MyTimerCtxListener));
+        if (!grown) { my_timer_remove_event_listener(ctx->ptr, id); free(box); return 0; }
+        ctx->listeners = grown;
+        ctx->listeners_cap = ncap;
+    }
+    ctx->listeners[ctx->listeners_len].id = id;
+    ctx->listeners[ctx->listeners_len].box = box;
+    ctx->listeners_len++;
+    return id;
+}
+
+/** The library stopped responding: its FFI thread stalled or the event queue overflowed. */
+static inline uint64_t my_timer_ctx_add_not_responding_listener(MyTimerCtx* ctx, MyTimerNotRespondingFn fn, void* user_data) {
+    MyTimerNotRespondingBox* box = (MyTimerNotRespondingBox*)malloc(sizeof(MyTimerNotRespondingBox));
+    if (!box) return 0;
+    box->fn = fn;
+    box->user_data = user_data;
+    uint64_t id = my_timer_add_event_listener(ctx->ptr, "not_responding", my_timer_not_responding_trampoline, box);
+    if (id == 0) { free(box); return 0; }
+    if (ctx->listeners_len == ctx->listeners_cap) {
+        size_t ncap = ctx->listeners_cap ? ctx->listeners_cap * 2 : 4;
+        MyTimerCtxListener* grown = (MyTimerCtxListener*)realloc(ctx->listeners, ncap * sizeof(MyTimerCtxListener));
+        if (!grown) { my_timer_remove_event_listener(ctx->ptr, id); free(box); return 0; }
+        ctx->listeners = grown;
+        ctx->listeners_cap = ncap;
+    }
+    ctx->listeners[ctx->listeners_len].id = id;
+    ctx->listeners[ctx->listeners_len].box = box;
+    ctx->listeners_len++;
+    return id;
+}
+
+/** The library responds again after `not_responding`. */
+static inline uint64_t my_timer_ctx_add_responding_listener(MyTimerCtx* ctx, MyTimerRespondingFn fn, void* user_data) {
+    MyTimerRespondingBox* box = (MyTimerRespondingBox*)malloc(sizeof(MyTimerRespondingBox));
+    if (!box) return 0;
+    box->fn = fn;
+    box->user_data = user_data;
+    uint64_t id = my_timer_add_event_listener(ctx->ptr, "responding", my_timer_responding_trampoline, box);
     if (id == 0) { free(box); return 0; }
     if (ctx->listeners_len == ctx->listeners_cap) {
         size_t ncap = ctx->listeners_cap ? ctx->listeners_cap * 2 : 4;

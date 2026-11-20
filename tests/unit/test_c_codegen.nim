@@ -129,6 +129,10 @@ static inline int timer_ctx_destroy(TimerCtx* ctx) {
     if (!ctx) return NIMFFI_RET_OK;
     int rc = NIMFFI_RET_OK;
     if (ctx->ptr) { rc = timer_destroy(ctx->ptr); ctx->ptr = NULL; }
+    if (rc == NIMFFI_RET_OK) {
+        for (size_t i = 0; i < ctx->listeners_len; i++) free(ctx->listeners[i].box);
+    }
+    free(ctx->listeners);
     free(ctx);
     return rc;
 }""" in
@@ -291,8 +295,8 @@ static inline int timer_ctx_destroy(TimerCtx* ctx) {
         header
     )
 
-suite "generateCLibHeader: no-event libraries stay lean":
-  test "a library without events has no listener bookkeeping":
+suite "generateCLibHeader: libraries without declared events":
+  test "a library without events still gets the builtin listeners":
     let procs = @[
       FFIProcMeta(
         procName: "timer_create",
@@ -304,8 +308,8 @@ suite "generateCLibHeader: no-event libraries stay lean":
       )
     ]
     let header = generateCLibHeader(procs, @[], "timer")
-    check "listeners_len" notin header
-    check "_add_event_listener" in header # raw ABI symbol is always declared
+    check "listeners_len" in header
+    check "_add_event_listener" in header
 
   test "a library without a dtor still reports success from ctx_destroy":
     let procs = @[
@@ -324,6 +328,10 @@ suite "generateCLibHeader: no-event libraries stay lean":
 static inline int timer_ctx_destroy(TimerCtx* ctx) {
     if (!ctx) return NIMFFI_RET_OK;
     int rc = NIMFFI_RET_OK;
+    if (rc == NIMFFI_RET_OK) {
+        for (size_t i = 0; i < ctx->listeners_len; i++) free(ctx->listeners[i].box);
+    }
+    free(ctx->listeners);
     free(ctx);
     return rc;
 }""" in

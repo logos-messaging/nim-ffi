@@ -243,6 +243,46 @@ unsafe extern "C" fn on_job_scheduled_trampoline(
     }
 }
 
+struct NotRespondingHandler {
+    f: Box<dyn Fn(&NotRespondingEvent) + Send + Sync>,
+}
+
+unsafe extern "C" fn not_responding_trampoline(
+    ret: c_int, msg: *const c_char, len: usize, ud: *mut c_void,
+) {
+    let _scope = DispatchScope::enter();
+    if ud.is_null() || ret != 0 || msg.is_null() || len == 0 {
+        return;
+    }
+    let h = &*(ud as *const NotRespondingHandler);
+    let bytes = slice::from_raw_parts(msg as *const u8, len);
+    #[derive(serde::Deserialize)]
+    struct Envelope { payload: NotRespondingEvent }
+    if let Ok(env) = ciborium::de::from_reader::<Envelope, _>(bytes) {
+        (h.f)(&env.payload);
+    }
+}
+
+struct RespondingHandler {
+    f: Box<dyn Fn(&RespondingEvent) + Send + Sync>,
+}
+
+unsafe extern "C" fn responding_trampoline(
+    ret: c_int, msg: *const c_char, len: usize, ud: *mut c_void,
+) {
+    let _scope = DispatchScope::enter();
+    if ud.is_null() || ret != 0 || msg.is_null() || len == 0 {
+        return;
+    }
+    let h = &*(ud as *const RespondingHandler);
+    let bytes = slice::from_raw_parts(msg as *const u8, len);
+    #[derive(serde::Deserialize)]
+    struct Envelope { payload: RespondingEvent }
+    if let Ok(env) = ciborium::de::from_reader::<Envelope, _>(bytes) {
+        (h.f)(&env.payload);
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ListenerHandle { pub id: u64 }
 
@@ -462,6 +502,28 @@ impl MyTimerCtx {
         let owned: Box<OnJobScheduledHandler> = Box::new(OnJobScheduledHandler { f: Box::new(handler) });
         let raw = &*owned as *const OnJobScheduledHandler as *mut c_void;
         self.add_listener_inner(b"on_job_scheduled\0".as_ptr() as *const c_char, on_job_scheduled_trampoline, raw, owned)
+    }
+
+    /// The library stopped responding: its FFI thread stalled or the event queue overflowed.
+    /// Register a typed listener for `not_responding`. The returned handle can be
+    /// passed to `remove_event_listener` to unregister.
+    pub fn add_not_responding_listener<F>(&self, handler: F) -> ListenerHandle
+    where F: Fn(&NotRespondingEvent) + Send + Sync + 'static,
+    {
+        let owned: Box<NotRespondingHandler> = Box::new(NotRespondingHandler { f: Box::new(handler) });
+        let raw = &*owned as *const NotRespondingHandler as *mut c_void;
+        self.add_listener_inner(b"not_responding\0".as_ptr() as *const c_char, not_responding_trampoline, raw, owned)
+    }
+
+    /// The library responds again after `not_responding`.
+    /// Register a typed listener for `responding`. The returned handle can be
+    /// passed to `remove_event_listener` to unregister.
+    pub fn add_responding_listener<F>(&self, handler: F) -> ListenerHandle
+    where F: Fn(&RespondingEvent) + Send + Sync + 'static,
+    {
+        let owned: Box<RespondingHandler> = Box::new(RespondingHandler { f: Box::new(handler) });
+        let raw = &*owned as *const RespondingHandler as *mut c_void;
+        self.add_listener_inner(b"responding\0".as_ptr() as *const c_char, responding_trampoline, raw, owned)
     }
 
     /// Unregister a listener and release the box that holds the handler.

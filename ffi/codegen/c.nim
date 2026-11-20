@@ -1,7 +1,7 @@
 ## C99 binding generator: emits the three CBOR headers. C lacks generics, so
 ## each distinct `seq[T]`/`Option[T]` is monomorphised per type.
 
-import std/[strutils, tables, sets, options]
+import std/[strutils, tables, sets, options, sequtils]
 import
   ./meta,
   ./string_helpers,
@@ -87,6 +87,8 @@ type CTypeReg = object
   owns: Table[string, bool] ## C type name → owns-heap-memory
   decls: seq[string]
   codecs: seq[string]
+  shared: HashSet[string]
+    ## builtin types every lib header defines; guarded once per translation unit.
 
 func encFn(reg: CTypeReg, cType: string): string =
   let suffix = leafSuffix(cType)
@@ -212,6 +214,14 @@ func enumConstName*(typeName, valueName: string): string =
   ## C/CDDL-safe constant name for an enum value, e.g. ("Color", "cRed") → COLOR_C_RED.
   return identToUpperSnake(typeName) & "_" & identToUpperSnake(valueName)
 
+func addTypeDecl(reg: var CTypeReg, name, decl: string) =
+  if name notin reg.shared:
+    reg.decls.add(decl)
+    return
+
+  let guard = "NIM_FFI_BUILTIN_" & identToUpperSnake(name) & "_DEFINED"
+  reg.decls.add("#ifndef " & guard & "\n#define " & guard & "\n" & decl & "\n#endif")
+
 proc emitEnumType(reg: var CTypeReg, t: FFITypeMeta) =
   ## A `{.ffi.}` enum becomes a C enum whose codec maps to the CBOR text form
   ## (the value's Nim symbol name, or its associated string) that
@@ -220,7 +230,9 @@ proc emitEnumType(reg: var CTypeReg, t: FFITypeMeta) =
   for v in t.enumValues:
     members.add("    " & enumConstName(t.name, v.name) & " = " & $v.ord & ",")
   members[^1].removeSuffix(',')
-  reg.decls.add("typedef enum {\n" & members.join("\n") & "\n} " & t.name & ";")
+  reg.addTypeDecl(
+    t.name, "typedef enum {\n" & members.join("\n") & "\n} " & t.name & ";"
+  )
 
   var longest = 0
   for v in t.enumValues:
@@ -271,7 +283,9 @@ proc emitStructType(reg: var CTypeReg, t: FFITypeMeta) =
     members.add((f.name, cType, owns))
   if members.len == 0:
     fieldDecls.add("    char _nimffi_empty; /* C forbids empty structs */")
-  reg.decls.add("typedef struct {\n" & fieldDecls.join("\n") & "\n} " & t.name & ";")
+  reg.addTypeDecl(
+    t.name, "typedef struct {\n" & fieldDecls.join("\n") & "\n} " & t.name & ";"
+  )
 
   var body: seq[string] = @[]
   body.add("static inline CborError " & reg.libName & "_enc_" & t.name & "(")
@@ -959,21 +973,27 @@ func generateCCborHeader*(): string =
 
 proc generateCLibHeader*(
     procs: seq[FFIProcMeta],
-    types: seq[FFITypeMeta],
+    declaredTypes: seq[FFITypeMeta],
     libName: string,
-    events: seq[FFIEventMeta] = @[],
+    declaredEvents: seq[FFIEventMeta] = @[],
     consts: seq[FFIConstMeta] = @[],
     reverse: seq[FFIReverseMeta] = @[],
     reverseEvents: seq[FFIReverseEventMeta] = @[],
 ): string =
   ## The `<lib>.h` header: structs, codecs and the C ABI, plus the typed async
   ## wrappers of the callback model.
+  let events = withBuiltinEvents(libName, declaredEvents)
+  let types = withBuiltinTypes(declaredTypes)
   let classified = classifyProcs(procs)
   let ctors = classified.ctors
   let libType = libTypeName(ctors, libName)
   let ctxType = libType & "Ctx"
 
   var reg = newCTypeReg(libName, libType, types, procs)
+  let declaredNames = declaredTypes.mapIt(it.name)
+  for t in builtinTypes():
+    if t.name notin declaredNames:
+      reg.shared.incl(t.name)
   let (reqTypes, respTypes) =
     monomorphiseAll(reg, types, procs, classified.replyProcs(), events)
 

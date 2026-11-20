@@ -1,8 +1,8 @@
 ## Compile-time metadata types for FFI binding generation, populated by the
 ## {.ffiCtor.}/{.ffi.} macros and consumed by codegen.
 
-import std/[json, macrocache, macros, options]
-import ../ffi_msg
+import std/[json, macrocache, macros, options, sequtils]
+import ../[ffi_msg, liveness_events]
 
 type
   FFIParamMeta* = object
@@ -227,6 +227,60 @@ template markGenBindingsEmitted*() =
 
 template genBindingsEmitted*(): bool =
   genBindingsCache.value > 0
+
+func enumMeta(T: typedesc[enum]): FFITypeMeta =
+  let values = T.toSeq.mapIt(FFIEnumValueMeta(name: $it, wire: $it, ord: ord(it)))
+  FFITypeMeta(name: $T, enumValues: values)
+
+func structMeta(T: typedesc[object]): FFITypeMeta =
+  var fields: seq[FFIFieldMeta] = @[]
+  for fieldName, value in default(T).fieldPairs:
+    fields.add(FFIFieldMeta(name: fieldName, typeName: $typeof(value)))
+  FFITypeMeta(name: $T, fields: fields)
+
+func builtinTypes*(): seq[FFITypeMeta] =
+  ## Payload types of the liveness events the runtime emits on every library.
+  @[
+    enumMeta(NotRespondingReason),
+    structMeta(NotRespondingEvent),
+    structMeta(RespondingEvent),
+  ]
+
+func builtinEvents*(libName: string): seq[FFIEventMeta] =
+  ## `not_responding` and `responding`, typed like declared events.
+  func event(wire, procName, payload, doc: string): FFIEventMeta =
+    FFIEventMeta(
+      wireName: wire,
+      nimProcName: procName,
+      libName: libName,
+      payloadTypeName: payload,
+      doc: doc,
+    )
+
+  @[
+    event(
+      NotRespondingEventName,
+      "notResponding",
+      $NotRespondingEvent,
+      "The library stopped responding: its FFI thread stalled or the event queue overflowed.",
+    ),
+    event(
+      RespondingEventName,
+      "responding",
+      $RespondingEvent,
+      "The library responds again after `not_responding`.",
+    ),
+  ]
+
+func withBuiltinTypes*(types: seq[FFITypeMeta]): seq[FFITypeMeta] =
+  ## `types` plus the builtin event types that it does not declare itself.
+  let declared = types.mapIt(it.name)
+  return types & builtinTypes().filterIt(it.name notin declared)
+
+func withBuiltinEvents*(libName: string, events: seq[FFIEventMeta]): seq[FFIEventMeta] =
+  ## `events` plus the builtin events that it does not declare itself.
+  let declared = events.mapIt(it.wireName)
+  return events & builtinEvents(libName).filterIt(it.wireName notin declared)
 
 func isEnum*(t: FFITypeMeta): bool =
   return t.enumValues.len > 0
