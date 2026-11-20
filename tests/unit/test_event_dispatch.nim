@@ -175,13 +175,14 @@ suite "liveness events":
         ctx[].eventRegistry, NotRespondingEventName, testCallback, addr evt
       )
 
-      onNotResponding(ctx)
+      onNotResponding(ctx, NotRespondingReason.queueFull)
 
       waitCallback(evt)
       check evt.retCode == RET_OK
       let decoded = cborDecode(payload(evt), EventEnvelope[NotRespondingEvent])
       check decoded.isOk()
       check decoded.value.eventType == NotRespondingEventName
+      check decoded.value.payload.reason == NotRespondingReason.queueFull
 
   test "onResponding delivers EventEnvelope[RespondingEvent] to subscribers":
     setupCallbackData(evt)
@@ -191,18 +192,19 @@ suite "liveness events":
         ctx[].eventRegistry, RespondingEventName, testCallback, addr evt
       )
 
-      onResponding(ctx)
+      onResponding(ctx, NotRespondingReason.heartbeat)
 
       waitCallback(evt)
       check evt.retCode == RET_OK
       let decoded = cborDecode(payload(evt), EventEnvelope[RespondingEvent])
       check decoded.isOk()
       check decoded.value.eventType == RespondingEventName
+      check decoded.value.payload.reason == NotRespondingReason.heartbeat
 
   test "liveness events with no subscriber are a no-op":
     withPool(ctx):
-      onNotResponding(ctx)
-      onResponding(ctx)
+      onNotResponding(ctx, NotRespondingReason.heartbeat)
+      onResponding(ctx, NotRespondingReason.heartbeat)
 
 suite "event thread drains queued events":
   test "enqueued event is delivered to subscriber within a tick":
