@@ -5,6 +5,9 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- Under `-d:ffiPollMode` the generated `<lib>.h` declares the poll shape (the
+  message, every export as `(ctx, req, len, id_out)`, the fixed exports, the
+  codecs) instead of the callback ABI.
 - **Rust: per-call timeout.** `ctx.with_timeout(Some(d)).echo(..)` and
   `.echo_async(..)` override the ctx default for one call; `with_timeout(None)`
   waits for the terminal `RET_OK`/`RET_ERR` with no Rust-side limit. Instance
