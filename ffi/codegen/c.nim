@@ -9,8 +9,10 @@ import
   ./types_ir,
   ./consts,
   ./build_paths,
-  ../ret_codes,
-  ../ffi_msg
+  ../ret_codes
+
+when defined(ffiPollMode):
+  import ../ffi_msg
 
 ## Fixed 64-bit wire type for any Nim `ptr T`/`pointer` (mirrors CppPtrType).
 const CPtrType* = "uint64_t"
@@ -963,11 +965,9 @@ proc generateCLibHeader*(
     consts: seq[FFIConstMeta] = @[],
     reverse: seq[FFIReverseMeta] = @[],
     reverseEvents: seq[FFIReverseEventMeta] = @[],
-    pollMode = defined(ffiPollMode),
 ): string =
-  ## The `<lib>.h` header: structs, codecs and the C ABI. Callback model: plus
-  ## typed async wrappers. Poll model (`pollMode`): plus the `<lib>_poll` message
-  ## instead, since a host brings its own loop (see `host/`).
+  ## The `<lib>.h` header: structs, codecs and the C ABI, plus the typed async
+  ## wrappers of the callback model.
   let classified = classifyProcs(procs)
   let ctors = classified.ctors
   let libType = libTypeName(ctors, libName)
@@ -1008,7 +1008,10 @@ proc generateCLibHeader*(
     lines.add(codec)
   lines.add("")
 
-  if pollMode:
+  when defined(ffiPollMode):
+    # Poll model: every export answers with a message read from `<lib>_poll`, so
+    # the header declares that message instead of the callback wrappers; a host
+    # brings its own loop (see `host/`).
     lines.add("/* ============================================================ */")
     lines.add("/* The poll model: every export submits a CBOR request (a map    */")
     lines.add("/* keyed by the proc's parameter names) and, when it returns     */")
@@ -1032,7 +1035,7 @@ proc generateCLibHeader*(
   lines.add("extern \"C\" {")
   lines.add("#endif")
   lines.add("")
-  if pollMode:
+  when defined(ffiPollMode):
     for p in procs:
       lines.add(renderBlockDocComment(p.doc))
       case p.kind
@@ -1073,108 +1076,110 @@ proc generateCLibHeader*(
     lines.add("")
     lines.add("#endif /* " & guard & " */")
     return lines.join("\n") & "\n"
-  for p in procs:
-    lines.add(renderBlockDocComment(p.doc))
-    case p.kind
-    of FFIKind.FFI:
-      lines.add(
-        "int " & p.procName & "(void* ctx, FFICallback callback, void* user_data, " &
-          "const uint8_t* req_cbor, size_t req_cbor_len);"
-      )
-    of FFIKind.STATIC:
-      lines.add(
-        "int " & p.procName & "(FFICallback callback, void* user_data, " &
-          "const uint8_t* req_cbor, size_t req_cbor_len);"
-      )
-    of FFIKind.CTOR:
-      lines.add(
-        "void* " & p.procName & "(const uint8_t* req_cbor, size_t req_cbor_len, " &
-          "FFICallback callback, void* user_data);"
-      )
-    of FFIKind.DTOR:
-      lines.add("int " & p.procName & "(void* ctx);")
-  lines.add(
-    "uint64_t " & libName & "_add_event_listener(void* ctx, const char* event_name, " &
-      "FFICallback callback, void* user_data);"
-  )
-  lines.add(renderBlockDocComment(RemoveListenerDoc))
-  lines.add(
-    "int " & libName & "_remove_event_listener(void* ctx, uint64_t listener_id);"
-  )
-  if reverse.len > 0 or reverseEvents.len > 0:
-    lines.add("")
-    lines.add("/* Reverse FFI: host-implemented interfaces + host-emitted events */")
-  if reverse.len > 0:
-    lines.add(ReverseDeclsTpl.strip(leading = false))
-    for r in reverse:
-      lines.add(renderBlockDocComment(r.doc))
-      lines.add(
-        "int " & libName & "_set_" & r.wireName &
-          "_impl(void* ctx, FFIReverseImpl impl, void* user_data, " &
-          "FFIReverseRelease release);"
-      )
-    lines.add(ReverseReplyDeclTpl.fillTpl(("{{LIB}}", libName)))
-  if reverseEvents.len > 0:
-    lines.add(ReverseEmitDocTpl.fillTpl())
-  for rev in reverseEvents:
-    lines.add(renderBlockDocComment(rev.doc))
+  else:
+    for p in procs:
+      lines.add(renderBlockDocComment(p.doc))
+      case p.kind
+      of FFIKind.FFI:
+        lines.add(
+          "int " & p.procName & "(void* ctx, FFICallback callback, void* user_data, " &
+            "const uint8_t* req_cbor, size_t req_cbor_len);"
+        )
+      of FFIKind.STATIC:
+        lines.add(
+          "int " & p.procName & "(FFICallback callback, void* user_data, " &
+            "const uint8_t* req_cbor, size_t req_cbor_len);"
+        )
+      of FFIKind.CTOR:
+        lines.add(
+          "void* " & p.procName & "(const uint8_t* req_cbor, size_t req_cbor_len, " &
+            "FFICallback callback, void* user_data);"
+        )
+      of FFIKind.DTOR:
+        lines.add("int " & p.procName & "(void* ctx);")
     lines.add(
-      "int " & libName & "_emit_" & rev.wireName &
-        "(void* ctx, const uint8_t* payload_cbor, size_t payload_len);"
+      "uint64_t " & libName & "_add_event_listener(void* ctx, const char* event_name, " &
+        "FFICallback callback, void* user_data);"
     )
-  lines.add(renderBlockDocComment(ShutdownDoc))
-  lines.add("int " & libName & "_shutdown(void);")
-  lines.add("")
-  lines.add("#ifdef __cplusplus")
-  lines.add("} /* extern \"C\" */")
-  lines.add("#endif")
-  lines.add("")
-
-  # Per-Req encode / per-response decode void* adapters for the buffer drivers.
-  var adaptersDone = initHashSet[string]()
-  lines.add("/* CBOR buffer adapters (typed codec → void* driver signature) */")
-  for n in reqTypes:
-    let tok = cToken(n)
-    if ("enc" & tok) notin adaptersDone:
-      adaptersDone.incl("enc" & tok)
+    lines.add(renderBlockDocComment(RemoveListenerDoc))
+    lines.add(
+      "int " & libName & "_remove_event_listener(void* ctx, uint64_t listener_id);"
+    )
+    if reverse.len > 0 or reverseEvents.len > 0:
+      lines.add("")
+      lines.add("/* Reverse FFI: host-implemented interfaces + host-emitted events */")
+    if reverse.len > 0:
+      lines.add(ReverseDeclsTpl.strip(leading = false))
+      for r in reverse:
+        lines.add(renderBlockDocComment(r.doc))
+        lines.add(
+          "int " & libName & "_set_" & r.wireName &
+            "_impl(void* ctx, FFIReverseImpl impl, void* user_data, " &
+            "FFIReverseRelease release);"
+        )
+      lines.add(ReverseReplyDeclTpl.fillTpl(("{{LIB}}", libName)))
+    if reverseEvents.len > 0:
+      lines.add(ReverseEmitDocTpl.fillTpl())
+    for rev in reverseEvents:
+      lines.add(renderBlockDocComment(rev.doc))
       lines.add(
-        "static inline CborError " & libName & "_encv_" & tok &
-          "(CborEncoder* e, const void* v) { return " & reg.libName & "_enc_" & n &
-          "(e, (const " & n & "*)v); }"
+        "int " & libName & "_emit_" & rev.wireName &
+          "(void* ctx, const uint8_t* payload_cbor, size_t payload_len);"
       )
-  for n in revEncTypes:
-    let tok = cToken(n)
-    if ("enc" & tok) notin adaptersDone:
-      adaptersDone.incl("enc" & tok)
-      lines.add(
-        "static inline CborError " & libName & "_encv_" & tok &
-          "(CborEncoder* e, const void* v) { return " & encFn(reg, n) & "(e, (const " & n &
-          "*)v); }"
-      )
-  var respSet = respTypes
-  respSet.add(CStrType) # ctor address payload
-  respSet.add(revDecTypes)
-  for n in respSet:
-    let tok = cToken(n)
-    if ("dec" & tok) notin adaptersDone:
-      adaptersDone.incl("dec" & tok)
-      lines.add(
-        "static inline CborError " & libName & "_decv_" & tok &
-          "(CborValue* it, void* v) { return " & decFn(reg, n) & "(it, (" & n & "*)v); }"
-      )
-  lines.add("")
+    lines.add(renderBlockDocComment(ShutdownDoc))
+    lines.add("int " & libName & "_shutdown(void);")
+    lines.add("")
+    lines.add("#ifdef __cplusplus")
+    lines.add("} /* extern \"C\" */")
+    lines.add("#endif")
+    lines.add("")
 
-  emitEventMachinery(lines, reg, libType, libName, events)
-  emitContextStruct(lines, ctxType, events)
-  emitConstructors(lines, reg, ctxType, libType, libName, ctors)
-  emitDestructor(lines, ctxType, libName, classified.dtor, events)
-  emitListenerApi(lines, ctxType, libType, libName, events)
-  emitReverseMachinery(lines, reg, ctxType, libName, reverse, reverseEvents)
-  for m in classified.replyProcs():
-    emitProcWrapper(lines, reg, ctxType, libType, libName, m)
+    # Per-Req encode / per-response decode void* adapters for the buffer drivers.
+    var adaptersDone = initHashSet[string]()
+    lines.add("/* CBOR buffer adapters (typed codec → void* driver signature) */")
+    for n in reqTypes:
+      let tok = cToken(n)
+      if ("enc" & tok) notin adaptersDone:
+        adaptersDone.incl("enc" & tok)
+        lines.add(
+          "static inline CborError " & libName & "_encv_" & tok &
+            "(CborEncoder* e, const void* v) { return " & reg.libName & "_enc_" & n &
+            "(e, (const " & n & "*)v); }"
+        )
+    for n in revEncTypes:
+      let tok = cToken(n)
+      if ("enc" & tok) notin adaptersDone:
+        adaptersDone.incl("enc" & tok)
+        lines.add(
+          "static inline CborError " & libName & "_encv_" & tok &
+            "(CborEncoder* e, const void* v) { return " & encFn(reg, n) & "(e, (const " &
+            n & "*)v); }"
+        )
+    var respSet = respTypes
+    respSet.add(CStrType) # ctor address payload
+    respSet.add(revDecTypes)
+    for n in respSet:
+      let tok = cToken(n)
+      if ("dec" & tok) notin adaptersDone:
+        adaptersDone.incl("dec" & tok)
+        lines.add(
+          "static inline CborError " & libName & "_decv_" & tok &
+            "(CborValue* it, void* v) { return " & decFn(reg, n) & "(it, (" & n &
+            "*)v); }"
+        )
+    lines.add("")
 
-  lines.add("#endif /* " & guard & " */")
-  return lines.join("\n") & "\n"
+    emitEventMachinery(lines, reg, libType, libName, events)
+    emitContextStruct(lines, ctxType, events)
+    emitConstructors(lines, reg, ctxType, libType, libName, ctors)
+    emitDestructor(lines, ctxType, libName, classified.dtor, events)
+    emitListenerApi(lines, ctxType, libType, libName, events)
+    emitReverseMachinery(lines, reg, ctxType, libName, reverse, reverseEvents)
+    for m in classified.replyProcs():
+      emitProcWrapper(lines, reg, ctxType, libType, libName, m)
+
+    lines.add("#endif /* " & guard & " */")
+    return lines.join("\n") & "\n"
 
 proc generateCCMakeLists*(libName, nimSrcRelPath: string): string =
   let src = nimSrcRelPath.replace("\\", "/")
