@@ -7,7 +7,7 @@ public:
     // Events and reverse calls are served by whoever runs the library's queue, on that
     // thread; calls such as the methods below serve it themselves while they wait.
     //   runLoop(): blocks this thread and serves until stop(). For an app with no loop:
-    //               ctx->addOnTickListener(...);  ctx->runLoop();   // or on a thread of yours
+    //               ctx->runLoop();   // or on a thread of yours, with stop() from another
     //   poll():    serves what is waiting and returns at once; call it once per
     //             iteration or tick of a loop of your own, or, in a loop with descriptor
     //             watchers (Qt, libuv, asio, ...), when fd() is readable.

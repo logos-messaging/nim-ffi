@@ -18,7 +18,7 @@ endif()
 # Build the Nim dylib + vendored TinyCBOR (shared with the C backend).
 set(NIM_FFI_LIB {{LIB}})
 set(NIM_FFI_SRC {{SRC}})
-include("${REPO_ROOT}/ffi/codegen/templates/nim_ffi_lib.cmake")
+{{POLL_BUILD}}include("${REPO_ROOT}/ffi/codegen/templates/nim_ffi_lib.cmake")
 
 add_library({{LIB}}_headers INTERFACE)
 target_include_directories({{LIB}}_headers INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")

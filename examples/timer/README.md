@@ -48,3 +48,13 @@ cmake -S . -B build
 cmake --build build
 ./build/example
 ```
+
+### The same example for the poll model
+
+`examples/timer/cpp_poll_bindings/main.cpp` is that program for the poll model, step for step, so the two can be compared. The library is the same source: the bindings are generated with `-d:ffiPollMode`, and the generated `CMakeLists.txt` builds the library the same way.
+
+```sh
+nimble run_examples_poll
+```
+
+The calls and events read the same. What differs: there are no `...Async` variants (a call serves the library's queue while it waits), events arrive on whichever thread serves the queue, the library's reverse calls are answered through a typed `Responder`, and something has to serve the queue between calls (`poll()` or `runLoop()`).

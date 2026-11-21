@@ -1007,11 +1007,27 @@ proc generateCppHeader*(
     )
   return lines.join("\n")
 
+const PollBuildCMake =
+  """# These bindings expect the library built for the poll model, and in this build
+# tree: the callback model's build of the same library has the same file name.
+if(NOT NIM_FFI_EXTRA_ARGS MATCHES "ffiPollMode")
+    set(NIM_FFI_EXTRA_ARGS "${NIM_FFI_EXTRA_ARGS} -d:ffiPollMode" CACHE STRING
+        "Extra nim c args" FORCE)
+endif()
+set(NIM_FFI_LIB_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}")
+"""
+
 proc generateCppCMakeLists*(libName: string, nimSrcRelPath: string): string =
   let src = nimSrcRelPath.replace("\\", "/")
+  let pollBuild =
+    when defined(ffiPollMode):
+      PollBuildCMake
+    else:
+      ""
   return CMakeListsTpl.multiReplace(
     ("{{LIB}}", libName),
     ("{{SRC}}", src),
+    ("{{POLL_BUILD}}", pollBuild),
     ("{{FIND_REPO_ROOT}}", FindRepoRootTpl.strip(leading = false)),
   )
 
