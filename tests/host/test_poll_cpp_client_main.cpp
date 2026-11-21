@@ -69,7 +69,14 @@ int pollfake_poll(void*, int32_t timeoutMs, const PollResult** out) {
   return NIMFFI_RET_OK;
 }
 int64_t pollfake_poll_fd(void*) { return 7; }
-int pollfake_reverse_reply(void*, uint64_t, int, const uint8_t*, size_t) { return NIMFFI_RET_OK; }
+struct ReverseAnswerSeen { uint64_t call; int ret; std::vector<uint8_t> payload; };
+static std::mutex revMu;
+static std::vector<ReverseAnswerSeen> revAnswers;
+int pollfake_reverse_reply(void*, uint64_t call, int ret, const uint8_t* payload, size_t len) {
+  std::lock_guard<std::mutex> guard(revMu);
+  revAnswers.push_back({call, ret, std::vector<uint8_t>(payload, payload + len)});
+  return NIMFFI_RET_OK;
+}
 int pollfake_shutdown(void) { return NIMFFI_RET_OK; }
 }
 
@@ -115,6 +122,74 @@ int main() {
   ctx.stop();
   runner.join();
   CHECK(ctx.removeEventListener(handle2));
+  // Reverse calls: the library asks, the typed handler answers through a Responder.
+  const auto pushReverse = [](uint64_t call, const char* wire, std::vector<uint8_t> args) {
+    std::lock_guard<std::mutex> guard(qmu);
+    queue.push_back({NIMFFI_MSG_REVERSE_CALL, call, nimffi_name_id(wire), NIMFFI_RET_OK, std::move(args)});
+  };
+  const auto lastAnswer = [] {
+    std::lock_guard<std::mutex> guard(revMu);
+    return revAnswers.back();
+  };
+  const auto answerCount = [] {
+    std::lock_guard<std::mutex> guard(revMu);
+    return revAnswers.size();
+  };
+  const auto text = [](const std::vector<uint8_t>& payload) {
+    return std::string(payload.begin(), payload.end());
+  };
+
+  ctx.onFetchHost([](const FetchHostHostCall& a, Responder<std::string> respond) {
+    respond.ok("body of " + a.url);
+  });
+  pushReverse(500, "fetch_host", encodeCborFFI(FetchHostHostCall{"u"}).value());
+  CHECK(ctx.poll() == 1);
+  CHECK(lastAnswer().call == 500 && lastAnswer().ret == NIMFFI_RET_OK);
+  CHECK(decodeCborFFI<std::string>(lastAnswer().payload).value() == "body of u");
+
+  ctx.onHostTick([](Responder<std::string> respond) { respond.ok("tick"); });
+  pushReverse(501, "host_tick", {0xa0});
+  CHECK(ctx.poll() == 1);
+  CHECK(lastAnswer().call == 501 && decodeCborFFI<std::string>(lastAnswer().payload).value() == "tick");
+
+  ctx.onHostNotify([](const FetchHostHostCall&, Responder<void> respond) { respond.ok(); });
+  pushReverse(502, "host_notify", encodeCborFFI(FetchHostHostCall{"x"}).value());
+  CHECK(ctx.poll() == 1);
+  CHECK(lastAnswer().call == 502 && lastAnswer().ret == NIMFFI_RET_OK);
+
+  // answered later, from another thread: the pump is free in between
+  Responder<std::string> held{std::weak_ptr<nim_ffi::Host>{}, 0};
+  std::atomic<bool> haveHeld{false};
+  ctx.onFetchHost([&](const FetchHostHostCall&, Responder<std::string> respond) {
+    held = respond;
+    haveHeld = true;
+  });
+  const auto before = answerCount();
+  pushReverse(503, "fetch_host", encodeCborFFI(FetchHostHostCall{"later"}).value());
+  CHECK(ctx.poll() == 1 && haveHeld.load());
+  CHECK(answerCount() == before);  // nothing answered yet
+  std::thread([held] { held.ok("late"); }).join();
+  CHECK(lastAnswer().call == 503 && decodeCborFFI<std::string>(lastAnswer().payload).value() == "late");
+  held.err("a second answer is ignored");
+  CHECK(lastAnswer().call == 503 && lastAnswer().ret == NIMFFI_RET_OK);
+
+  // a handler that drops its Responder: the library hears at once
+  ctx.onFetchHost([](const FetchHostHostCall&, Responder<std::string>) {});
+  pushReverse(504, "fetch_host", encodeCborFFI(FetchHostHostCall{"y"}).value());
+  CHECK(ctx.poll() == 1);
+  CHECK(lastAnswer().call == 504 && lastAnswer().ret == NIMFFI_RET_ERR);
+  CHECK(text(lastAnswer().payload).find("dropped") != std::string::npos);
+
+  // arguments that do not decode, and a call nobody handles
+  ctx.onFetchHost([](const FetchHostHostCall&, Responder<std::string> respond) { respond.ok("never"); });
+  pushReverse(505, "fetch_host", {0xff});
+  CHECK(ctx.poll() == 1);
+  CHECK(lastAnswer().call == 505 && lastAnswer().ret == NIMFFI_RET_ERR);
+  CHECK(text(lastAnswer().payload).find("could not decode the arguments") != std::string::npos);
+  pushReverse(506, "unknown_call", {0xa0});
+  CHECK(ctx.poll() == 1);
+  CHECK(lastAnswer().call == 506 && lastAnswer().ret == NIMFFI_RET_ERR);
+  CHECK(text(lastAnswer().payload).find("no handler") != std::string::npos);
   std::puts("ok");
   return 0;
 }

@@ -11,8 +11,8 @@ public:
     //   poll():    serves what is waiting and returns at once; call it once per
     //             iteration or tick of a loop of your own, or, in a loop with descriptor
     //             watchers (Qt, libuv, asio, ...), when fd() is readable.
-    // Handlers must return quickly. host() is the underlying nim_ffi::Host, for
-    // reverse-call handlers (onReverseCall / reverseReply) and the slow-handler hook.
+    // Handlers must return quickly. host() is the underlying nim_ffi::Host, for the
+    // slow-handler hook and anything the typed API does not cover.
     // For epoll, kqueue and Windows wiring see nim_ffi_host.hpp.
 #ifndef NIM_FFI_NO_RUNLOOP
     void runLoop() { host_->runLoop(); }
@@ -34,9 +34,12 @@ public:
 
 //@end
 //@reverse
-    // The library asks the host questions: answer them with host().onReverseCall(...)
-    // and host().reverseReply(...); a call with no handler is refused.
+    // Reverse calls: the library asks the host something and waits. Register one handler
+    // per call. It runs on the thread that serves the queue, so it must return quickly:
+    // answer through the Responder, now or later from any thread. A call with no handler
+    // is refused. These handlers set host().onReverseCall(...), so do not set both.
 
+{{REVERSE_METHODS}}
 //@end
 private:
 //@static
@@ -72,10 +75,37 @@ private:
     }
 
 //@end
-    {{CTX}}(std::unique_ptr<nim_ffi::Host> host, std::chrono::milliseconds timeout)
+//@reverse
+    using ReverseFn_ = std::function<void(std::uint64_t, const std::uint8_t*, std::size_t)>;
+
+    void registerReverse_(const char* wireName, ReverseFn_ fn) {
+        std::lock_guard<std::mutex> lock(reverseMu_);
+        reverseHandlers_[nimffi_name_id(wireName)] = std::make_shared<ReverseFn_>(std::move(fn));
+    }
+
+    // Runs on the thread that serves the queue; the handler is copied out so it may register others.
+    void dispatchReverse_(std::uint64_t callId, std::uint64_t nameId, const std::uint8_t* p, std::size_t n) {
+        std::shared_ptr<ReverseFn_> fn;
+        {
+            std::lock_guard<std::mutex> lock(reverseMu_);
+            const auto it = reverseHandlers_.find(nameId);
+            if (it != reverseHandlers_.end()) fn = it->second;
+        }
+        if (fn) {
+            (*fn)(callId, p, n);
+        } else {
+            host_->reverseReply(callId, NIMFFI_RET_ERR, std::string("no handler for this reverse call"));
+        }
+    }
+
+//@end
+    {{CTX}}(std::shared_ptr<nim_ffi::Host> host, std::chrono::milliseconds timeout)
         : timeout_(timeout), host_(std::move(host)) {
 //@events
         host_->onEvent([this](std::uint64_t id, const std::uint8_t* p, std::size_t n) { dispatchEvent_(id, p, n); });
+//@end
+//@reverse
+        host_->onReverseCall([this](std::uint64_t callId, std::uint64_t nameId, const std::uint8_t* p, std::size_t n) { dispatchReverse_(callId, nameId, p, n); });
 //@end
     }
 
@@ -85,6 +115,10 @@ private:
     std::vector<Listener_> listeners_;
     std::uint64_t nextListenerId_ = 0;
 //@end
+//@reverse
+    std::mutex reverseMu_;
+    std::unordered_map<std::uint64_t, std::shared_ptr<ReverseFn_>> reverseHandlers_;
+//@end
     // Last, so the context is destroyed before the state its handlers use.
-    std::unique_ptr<nim_ffi::Host> host_;
+    std::shared_ptr<nim_ffi::Host> host_;
 };

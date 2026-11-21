@@ -8,7 +8,7 @@ import std/[macros, macrocache, strutils]
 import ../codegen/string_helpers
 import ../ffi_msg
 
-proc reverseArgsTypeName(procName: string): string =
+proc reverseArgsTypeName*(procName: string): string =
   return snakeToPascalCase(camelToSnakeCase(procName)) & "HostCall"
 
 const pollReverseWireNames = CacheSeq"ffi.pollReverseWireNames"

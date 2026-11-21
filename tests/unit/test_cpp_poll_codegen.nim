@@ -53,7 +53,36 @@ let
       returnTypeName: "",
     ),
   ]
-  types = @[FFITypeMeta(name: "TickPayload", fields: @[field("n", "int")])]
+  types = @[
+    FFITypeMeta(name: "TickPayload", fields: @[field("n", "int")]),
+    # What a poll-mode `{.ffiReverse.}` registers: the named map its arguments ride in.
+    FFITypeMeta(name: "FetchHostHostCall", fields: @[field("url", "string")]),
+  ]
+  reverseCalls = @[
+    FFIReverseMeta(
+      wireName: "fetch_host",
+      nimProcName: "fetchHost",
+      libName: "pollfake",
+      params: @[param("url", "string")],
+      argsTypeName: "FetchHostHostCall",
+      replyTypeName: "string",
+    ),
+    FFIReverseMeta(
+      wireName: "host_tick",
+      nimProcName: "hostTick",
+      libName: "pollfake",
+      argsTypeName: "",
+      replyTypeName: "string",
+    ),
+    FFIReverseMeta(
+      wireName: "host_notify",
+      nimProcName: "hostNotify",
+      libName: "pollfake",
+      params: @[param("url", "string")],
+      argsTypeName: "FetchHostHostCall",
+      replyTypeName: "",
+    ),
+  ]
   events = @[
     FFIEventMeta(
       wireName: "on_tick",
@@ -64,7 +93,8 @@ let
   ]
 
 suite "generateCppHeader: the poll mode":
-  let header = generateCppHeader(procs, types, "pollfake", events = events)
+  let header =
+    generateCppHeader(procs, types, "pollfake", events = events, reverse = reverseCalls)
 
   test "the exports have the poll shape and no callback machinery":
     check "int pollfake_echo(void* ctx, const uint8_t* req_cbor, size_t req_cbor_len, uint64_t* req_id_out);" in
@@ -79,6 +109,21 @@ suite "generateCppHeader: the poll mode":
     check "nim_ffi::Host" in header
     check "Result<std::string> echo(" in header
     check "addOnTickListener" in header
+
+  test "each reverse call gets a typed handler and the Responder is emitted once":
+    check "void onFetchHost(std::function<void(const FetchHostHostCall&, Responder<std::string>)> handler)" in
+      header
+    check "void onHostTick(std::function<void(Responder<std::string>)> handler)" in
+      header
+    check "void onHostNotify(std::function<void(const FetchHostHostCall&, Responder<void>)> handler)" in
+      header
+    check header.count("class Responder<void>") == 1
+    check header.count("class ReverseAnswer") == 1
+
+  test "a library without reverse calls has no Responder":
+    let plain = generateCppHeader(procs, types, "pollfake", events = events)
+    check "Responder" notin plain
+    check "dispatchReverse_" notin plain
 
   test "a static proc is a static method on the host attached to the static ctx":
     check "static Result<std::string> ping(" in header
