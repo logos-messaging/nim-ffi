@@ -34,6 +34,12 @@ const
   ReverseTrampolineTpl = staticRead("templates/cpp/reverse_trampoline.hpp.tpl")
   ReverseInvokeTpl = staticRead("templates/cpp/reverse_invoke.hpp.tpl")
   ReverseInvokeNoArgsTpl = staticRead("templates/cpp/reverse_invoke_no_args.hpp.tpl")
+  # The poll-mode host runtime, shipped beside a generated header that includes it.
+  PollHostHeaderTpl = staticRead("../../host/nim_ffi_host.hpp")
+  PollHostCHeaderTpl = staticRead("../../host/nim_ffi.h")
+  PollExportsTpl = staticRead("templates/cpp/poll_exports.hpp.tpl")
+  PollContextTpl = staticRead("templates/cpp/poll_context.hpp.tpl")
+  PollItemsTpl = staticRead("templates/cpp/poll_items.hpp.tpl")
 
 func destroyStmt(libName: string, hasListeners: bool): string =
   if not hasListeners:
@@ -388,7 +394,193 @@ proc emitReverseMachinery(
     )
     lines.add("")
 
-proc generateCppHeader*(
+func pickSections(tpl: string, keep: openArray[string]): string =
+  ## A `//@name` line opens a section kept only when `name` is in `keep`; `//@end`
+  ## closes it. The marker lines themselves never reach the output.
+  var kept: seq[string] = @[]
+  var skipping = false
+  for line in tpl.strip(leading = false).splitLines():
+    let marker = line.strip()
+    if marker == "//@end":
+      skipping = false
+    elif marker.startsWith("//@"):
+      skipping = marker[3 ..^ 1] notin keep
+    elif not skipping:
+      kept.add(line)
+  return kept.join("\n")
+
+func templateItem(tpl, name: string): string =
+  ## The text under `//@@name` up to the next `//@@` line, in a template of several items.
+  var item: seq[string] = @[]
+  var inside = false
+  for line in tpl.strip(leading = false).splitLines():
+    if line.startsWith("//@@"):
+      inside = line[4 ..^ 1] == name
+    elif inside:
+      item.add(line)
+  return item.join("\n")
+
+func lineBlock(fragment: seq[string]): string =
+  ## What fills a `{{NAME}}` line of a template: whole lines, or nothing.
+  if fragment.len == 0:
+    return ""
+  return fragment.join("\n") & "\n"
+
+func pollProcDecl(p: FFIProcMeta): string =
+  case p.kind
+  of FFIKind.FFI:
+    "int $1(void* ctx, const uint8_t* req_cbor, size_t req_cbor_len, uint64_t* req_id_out);" %
+      [p.procName]
+  of FFIKind.STATIC:
+    "int $1(const uint8_t* req_cbor, size_t req_cbor_len, uint64_t* req_id_out);" %
+      [p.procName]
+  of FFIKind.CTOR:
+    "int $1(const uint8_t* req_cbor, size_t req_cbor_len, void** ctx_out, uint64_t* req_id_out);" %
+      [p.procName]
+  of FFIKind.DTOR:
+    "int $1(void* ctx);" % [p.procName]
+
+func cppParams(p: FFIProcMeta): seq[string] =
+  ## `const T& name` for each parameter of a proc.
+  var params: seq[string] = @[]
+  for ep in p.extraParams:
+    let cppType =
+      if ep.ridesAsPtr():
+        CppPtrType
+      else:
+        nimTypeToCpp(ep.typeName)
+    params.add("const $1& $2" % [cppType, ep.name])
+  return params
+
+func paramNames(p: FFIProcMeta): seq[string] =
+  var names: seq[string] = @[]
+  for ep in p.extraParams:
+    names.add(ep.name)
+  return names
+
+proc emitPollClient(
+    lines: var seq[string],
+    procs: seq[FFIProcMeta],
+    libName: string,
+    events: seq[FFIEventMeta],
+    reverse: seq[FFIReverseMeta],
+) =
+  ## The `-d:ffiPollMode` client: the poll-shaped C declarations and one typed
+  ## context class over `nim_ffi::Host` (host/nim_ffi_host.hpp), which does the
+  ## pumping. A method encodes its request, calls the export through `Host::call`
+  ## and decodes the reply; an event handler is matched by name id. The C++ lives
+  ## in templates/cpp/poll_*.tpl; this fills in what depends on the library's procs.
+  let classified = classifyProcs(procs)
+  let ctors = classified.ctors
+  let ctxTypeName = libTypeName(ctors, libName) & "Ctx"
+
+  var procDecls: seq[string] = @[]
+  for p in procs:
+    procDecls.add(renderBlockDocComment(p.doc))
+    procDecls.add(pollProcDecl(p))
+  lines.add(
+    PollExportsTpl
+      .multiReplace(
+        ("{{PROC_DECLS}}\n", lineBlock(procDecls)),
+        ("{{SHUTDOWN_DOC}}", renderBlockDocComment(ShutdownDoc).join("\n")),
+        ("{{LIB}}", libName),
+      )
+      .strip(leading = false)
+  )
+  lines.add("")
+
+  var createMethods: seq[string] = @[]
+  for ctor in ctors:
+    let ret = "Result<std::unique_ptr<$1>>" % [ctxTypeName]
+    createMethods.add(renderMemberDocComment(ctor.doc))
+    createMethods.add(
+      templateItem(PollItemsTpl, "create").multiReplace(
+        ("{{RET}}", ret),
+        ("{{NAME}}", "create"),
+        ("{{PARAMS}}", (cppParams(ctor) & CppTimeoutParam).join(", ")),
+        ("{{REQ}}", cppBracedInit(reqStructName(ctor), paramNames(ctor))),
+        ("{{PROC}}", ctor.procName),
+        ("{{CTX}}", ctxTypeName),
+        ("{{LIB}}", libName),
+      )
+    )
+    createMethods.add("")
+
+  var methods: seq[string] = @[]
+  var hasStatic = false
+  for m in classified.replyProcs():
+    let isStatic = m.isStatic()
+    hasStatic = hasStatic or isStatic
+    let value =
+      if m.returnRidesAsPtr():
+        CppPtrType
+      else:
+        nimTypeToCpp(m.returnTypeName)
+    # A static has no ctx to inherit `timeout_` from, so it takes its own `timeout`.
+    let params =
+      if isStatic:
+        (cppParams(m) & CppTimeoutParam).join(", ")
+      else:
+        cppParams(m).join(", ")
+    methods.add(renderMemberDocComment(m.doc))
+    methods.add(
+      templateItem(PollItemsTpl, "method").multiReplace(
+        ("{{STATIC}}", if isStatic: "static " else: ""),
+        ("{{CONST}}", if isStatic: "" else: " const"),
+        ("{{RET}}", "Result<" & value & ">"),
+        ("{{VALUE}}", value),
+        ("{{NAME}}", stripLibPrefix(m.procName, libName)),
+        ("{{PARAMS}}", params),
+        ("{{REQ}}", cppBracedInit(reqStructName(m), paramNames(m))),
+        ("{{HOST}}", if isStatic: "staticHost_()" else: "(*host_)"),
+        ("{{PROC}}", m.procName),
+        ("{{TIMEOUT}}", if isStatic: "timeout" else: "timeout_"),
+      )
+    )
+    methods.add("")
+
+  var eventMethods: seq[string] = @[]
+  for ev in events:
+    eventMethods.add(renderMemberDocComment(ev.doc))
+    eventMethods.add(
+      templateItem(PollItemsTpl, "listener").multiReplace(
+        (
+          "{{NAME}}",
+          "addOn" & capitalizeFirstLetter(ev.nimProcName).substr(2) & "Listener",
+        ),
+        ("{{PAYLOAD}}", ev.payloadTypeName),
+        ("{{WIRE}}", ev.wireName),
+      )
+    )
+    eventMethods.add("")
+
+  var keep: seq[string] = @[]
+  if events.len > 0:
+    keep.add("events")
+  if reverse.len > 0:
+    keep.add("reverse")
+  if hasStatic:
+    keep.add("static")
+
+  lines.add("// ============================================================")
+  lines.add("// High-level C++ context class (poll mode)")
+  lines.add("// ============================================================")
+  lines.add("")
+  lines.add(
+    pickSections(PollContextTpl, keep)
+      .multiReplace(
+        ("{{CREATE_METHODS}}\n", lineBlock(createMethods)),
+        ("{{METHODS}}\n", lineBlock(methods)),
+        ("{{EVENT_METHODS}}\n", lineBlock(eventMethods)),
+        ("{{CTX}}", ctxTypeName),
+        ("{{LIB}}", libName),
+      )
+      .strip(leading = false)
+  )
+  lines.add("")
+
+proc emitCppCommon(
+    lines: var seq[string],
     procs: seq[FFIProcMeta],
     types: seq[FFITypeMeta],
     libName: string,
@@ -396,10 +588,12 @@ proc generateCppHeader*(
     consts: seq[FFIConstMeta] = @[],
     reverse: seq[FFIReverseMeta] = @[],
     reverseEvents: seq[FFIReverseEventMeta] = @[],
-): string =
-  var lines: seq[string] = @[]
-
+) =
+  ## What both models share: the prelude, the codecs, the constants, the types and
+  ## the per-proc request envelopes.
   lines.add(HeaderPreludeTpl.replace("{{RET_CODES}}", cRetCodeDefines()))
+  when defined(ffiPollMode):
+    lines.add("#include \"nim_ffi_host.hpp\"")
   if reverse.len > 0 or reverseEvents.len > 0:
     lines.add(cppRetNameFn())
   if events.len > 0:
@@ -481,6 +675,17 @@ proc generateCppHeader*(
     emitStructCborCodec(lines, reqName, fields)
     lines.add("")
 
+proc emitCallbackClient(
+    lines: var seq[string],
+    procs: seq[FFIProcMeta],
+    types: seq[FFITypeMeta],
+    libName: string,
+    events: seq[FFIEventMeta] = @[],
+    consts: seq[FFIConstMeta] = @[],
+    reverse: seq[FFIReverseMeta] = @[],
+    reverseEvents: seq[FFIReverseEventMeta] = @[],
+) =
+  ## The callback model: the C declarations and the context class over callbacks.
   lines.add("// ============================================================")
   lines.add("// C FFI declarations")
   lines.add("// ============================================================")
@@ -561,16 +766,8 @@ proc generateCppHeader*(
 
   for ctor in ctors:
     let reqName = reqStructName(ctor)
-    var ctorParams: seq[string] = @[]
-    var epNames: seq[string] = @[]
-    for ep in ctor.extraParams:
-      let cppType =
-        if ep.ridesAsPtr():
-          CppPtrType
-        else:
-          nimTypeToCpp(ep.typeName)
-      ctorParams.add("const $1& $2" % [cppType, ep.name])
-      epNames.add(ep.name)
+    let ctorParams = cppParams(ctor)
+    let epNames = paramNames(ctor)
     let ctorParamsWithTimeout =
       if ctorParams.len > 0:
         ctorParams.join(", ") & ", " & CppTimeoutParam
@@ -675,16 +872,8 @@ proc generateCppHeader*(
         nimTypeToCpp(m.returnTypeName)
     let reqName = reqStructName(m)
 
-    var methParams: seq[string] = @[]
-    var methParamNames: seq[string] = @[]
-    for ep in m.extraParams:
-      let cppType =
-        if ep.ridesAsPtr():
-          CppPtrType
-        else:
-          nimTypeToCpp(ep.typeName)
-      methParams.add("const $1& $2" % [cppType, ep.name])
-      methParamNames.add(ep.name)
+    let methParams = cppParams(m)
+    let methParamNames = paramNames(m)
     let methParamNamesStr = methParamNames.join(", ")
     let methParamsStr =
       if not isStatic:
@@ -767,6 +956,23 @@ proc generateCppHeader*(
   lines.add("};")
   lines.add("")
 
+proc generateCppHeader*(
+    procs: seq[FFIProcMeta],
+    types: seq[FFITypeMeta],
+    libName: string,
+    events: seq[FFIEventMeta] = @[],
+    consts: seq[FFIConstMeta] = @[],
+    reverse: seq[FFIReverseMeta] = @[],
+    reverseEvents: seq[FFIReverseEventMeta] = @[],
+): string =
+  var lines: seq[string] = @[]
+  emitCppCommon(lines, procs, types, libName, events, consts, reverse, reverseEvents)
+  when defined(ffiPollMode):
+    emitPollClient(lines, procs, libName, events, reverse)
+  else:
+    emitCallbackClient(
+      lines, procs, types, libName, events, consts, reverse, reverseEvents
+    )
   return lines.join("\n")
 
 proc generateCppCMakeLists*(libName: string, nimSrcRelPath: string): string =
@@ -793,6 +999,9 @@ proc generateCppBindings*(
     buildPath(outputDir, libName & ".hpp"),
     generateCppHeader(procs, types, libName, events, consts, reverse, reverseEvents),
   )
+  when defined(ffiPollMode):
+    writeOutputFile(buildPath(outputDir, "nim_ffi_host.hpp"), PollHostHeaderTpl)
+    writeOutputFile(buildPath(outputDir, "nim_ffi.h"), PollHostCHeaderTpl)
   writeOutputFile(
     buildPath(outputDir, "CMakeLists.txt"),
     generateCppCMakeLists(libName, nimSrcRelPath),

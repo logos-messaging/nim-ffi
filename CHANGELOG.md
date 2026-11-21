@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **A typed C++ client for the poll mode.** Under `-d:ffiPollMode` the C++
+  generator emits the poll-shaped declarations and a `<Lib>Ctx` class over
+  `nim_ffi::Host`: `create(...)`, one typed method per proc (static procs go
+  through a host attached to the library's static context), a typed
+  `addOn<Event>Listener` per event, and `runLoop()`, `poll()`, `stop()`, `fd()`
+  and `host()` forwarded from the host. Methods return errors that name the call,
+  and an event payload that cannot be decoded is reported on stderr. It also
+  writes `nim_ffi_host.hpp` and `nim_ffi.h` beside the header.
 - **The C++ host of the poll mode.** `host/nim_ffi.h` declares what a
   `-d:ffiPollMode` library hands out; `host/nim_ffi_host.hpp` is a header-only
   C++17 host for one context. It owns no thread: a call pumps on the calling
