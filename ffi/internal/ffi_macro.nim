@@ -2409,13 +2409,14 @@ proc bindingsSrcPath(outDir, explicit, projectFull: string): string {.compileTim
     buildRelativePath(projectFull, outDir)
 
 when defined(ffiGenBindings):
-  proc callbackReverseRegistry(): seq[FFIReverseMeta] {.compileTime.} =
+  template callbackReverseRegistry(): seq[FFIReverseMeta] =
     ## The generators that only know the callback model's reverse calls are given none
-    ## under the poll model, where the C++ generator alone reads them.
+    ## under the poll model, where the C++ generator alone reads them. A template, not
+    ## a proc: the registry is read where the generator is called.
     when defined(ffiPollMode):
-      return @[]
+      newSeq[FFIReverseMeta]()
     else:
-      return ffiReverseRegistry()
+      ffiReverseRegistry()
 
   proc emitBindingsFor(
       lang: string, genProcs: seq[FFIProcMeta], libName, outDir, srcRel: string
