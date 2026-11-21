@@ -156,6 +156,28 @@ int main() {
               << "\n";
     expect("onEchoFired calls after remove", echoEvtCalls.load(), 1);
 
+    // ── 8. The library asks the host a question ───────────────────
+    // Each `{.ffiReverse.}` gets `set<Name>Impl(fn)`. The library calls it on a worker
+    // thread of its own, where it may block, and the host answers with `call.reply(...)`,
+    // now or later from any thread. (The poll model's version of this step has a typed
+    // `onFetchHostClock` handler and a Responder, and the handler runs on the thread that
+    // serves the queue.)
+    const auto setClock = ctx->setFetchHostClockImpl(
+        [](MyTimerCtx::FetchHostClockCall call, const std::string& precision) {
+            call.reply(HostClock{1234567, precision == "ms" ? "UTC" : "other"});
+        });
+    if (setClock.isErr()) {
+        std::cerr << "Error: " << setClock.error() << "\n";
+        return 1;
+    }
+    auto clock = ctx->host_clock();
+    if (clock.isErr()) {
+        std::cerr << "Error: " << clock.error() << "\n";
+        return 1;
+    }
+    std::cout << "[8] reverse call fetchHostClock answered by the host: " << clock.value() << "\n";
+    expect("host_clock", clock.value(), "UTC@1234567");
+
     if (failures != 0) {
         std::cerr << "\n" << failures << " check(s) failed.\n";
         return 1;
