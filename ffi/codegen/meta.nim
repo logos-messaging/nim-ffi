@@ -2,6 +2,7 @@
 ## {.ffiCtor.}/{.ffi.} macros and consumed by codegen.
 
 import std/[json, macrocache, macros, options]
+import ../ffi_msg
 
 type
   FFIParamMeta* = object
@@ -88,6 +89,7 @@ const
   reverseEventCache = CacheSeq"ffi.reverseEvents"
   handleTypeCache = CacheSeq"ffi.handleTypes"
   libNameCache = CacheSeq"ffi.libName"
+  nameIdCache = CacheSeq"ffi.nameIds"
   libTypeCache = CacheSeq"ffi.libType"
   genBindingsCache = CacheCounter"ffi.genBindings"
 
@@ -163,6 +165,59 @@ template currentLibName*(): string =
 
 template currentLibType*(): string =
   libTypeCache.cacheLast()
+
+type
+  FFINameKind* = enum
+    ## A polled message names an event or a reverse call by `nameId`; each kind is
+    ## matched within its own namespace.
+    nkEvent = "event"
+    nkReverseCall = "reverse call"
+
+  FFINameIdClaim* = object
+    ## One wire name of a library and the `nameId` a polled message carries for it.
+    id*: uint64
+    wireName*: string
+    kind*: FFINameKind
+    libName*: string
+
+proc addNameIdClaim*(claim: FFINameIdClaim) {.compileTime.} =
+  ## Records a claim without checking it. `claimNameId` is the checked entry; this
+  ## is public so a test can forge a clash, since a real FNV-1a 64 collision
+  ## cannot be written down.
+  nameIdCache.add(
+    newTree(
+      nnkBracket,
+      newLit($claim.kind),
+      newLit(claim.libName),
+      newLit(claim.wireName),
+      newLit(claim.id),
+    )
+  )
+
+proc claimNameId*(wireName: string, kind: FFINameKind) {.compileTime.} =
+  ## A polled message names its event or reverse call by `nameId` alone, so two
+  ## names sharing one id would reach the host as the same thing. Stop the build.
+  let id = nameId(wireName)
+  let libName = currentLibName()
+  for node in nameIdCache:
+    if node[0].strVal == $kind and node[1].strVal == libName and
+        uint64(node[3].intVal) == id and node[2].strVal != wireName:
+      error(
+        "the " & $kind & " names \"" & wireName & "\" and \"" & node[2].strVal &
+          "\" hash to the same name id: " & nameIdLiteral(wireName) &
+          "; rename one of them"
+      )
+  addNameIdClaim(
+    FFINameIdClaim(id: id, wireName: wireName, kind: kind, libName: libName)
+  )
+
+macro claimDispatchedEvent*(eventName: untyped): untyped =
+  ## `dispatchFFIEvent` takes any name, declared or not, and a polled message
+  ## carries its `nameId`: a name written as a literal is claimed like a declared
+  ## one. A name only known at run time cannot be.
+  if eventName.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+    claimNameId(eventName.strVal, nkEvent)
+  return newStmtList()
 
 template libraryDeclared*(): bool =
   libTypeCache.len > 0

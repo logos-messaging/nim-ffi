@@ -8,6 +8,7 @@ import std/[atomics, locks, sequtils, options, tables]
 import chronicles
 import results
 import ./ffi_types, ./cbor_serial, ./ffi_msg
+from ./codegen/meta import claimDispatchedEvent
 
 type EventEnvelope*[T] = object ## CBOR wire shape: { eventType: tstr, payload: <T> }.
   eventType*: string
@@ -621,6 +622,7 @@ proc step*(w: var OverflowWatch, drops: uint64, nowMs: int64): OverflowChange =
 template dispatchFFIEvent*(eventName: string, body: untyped) =
   ## `body` yields string/seq[byte]. FFI thread only; yields a discardable `EnqueueResult`.
   block:
+    claimDispatchedEvent(eventName)
     let evtName: string = eventName
     let bodyVal = body
     let dataLen = bodyVal.len
@@ -635,6 +637,7 @@ template dispatchFFIEventCbor*(eventName: string, eventPayload: typed) =
   ## Typed CBOR variant; param is `eventPayload` to avoid clobbering
   ## `EventEnvelope.payload` substitution.
   block:
+    claimDispatchedEvent(eventName)
     let evtName: string = eventName
     # A polling host is told which event this is by the message header, so the
     # envelope that names it for a listener would only be a wrapper to unwrap.
