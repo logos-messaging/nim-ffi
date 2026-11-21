@@ -4,7 +4,6 @@
 import std/strutils
 import unittest2
 import ffi/codegen/[meta, c]
-import ffi/ret_codes
 
 proc field(n, t: string): FFIFieldMeta =
   FFIFieldMeta(name: n, typeName: t)

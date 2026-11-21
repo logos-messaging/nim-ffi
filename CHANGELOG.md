@@ -5,6 +5,9 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- Under `-d:ffiPollMode` the generated `<lib>.h` declares the poll shape (the
+  message, every export as `(ctx, req, len, id_out)`, the fixed exports, the
+  codecs) instead of the callback ABI.
 - Two event names, or two reverse-call names, of one library that hash to the same
   `nameId` are now a compile error: a polled message carries that id instead of
   the name, so the host could not tell them apart.

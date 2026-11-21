@@ -437,6 +437,22 @@ if missing.len > 0:
 doAssert ffiReverseImplemented("fetch_host_clock").get()
 ```
 
+### The poll mode (`-d:ffiPollMode`)
+
+Built with `-d:ffiPollMode`, the same source exports the poll ABI instead: no
+callbacks, every export answers with a message read from `<lib>_poll()`, and
+the generated `<lib>.h` declares that shape (the message, the exports, the
+codecs) for a host that brings its own loop.
+
+- Events emitted with `dispatchFFIEvent(name): <string>` arrive as the bytes
+  given, `dispatchFFIEventCbor` ones as CBOR. A host matches on the message's
+  `name_id`.
+- `{.ffiReverse.}` is the library asking the host a question and awaiting the
+  answer; it exists only under the poll mode. The host has
+  `-d:ffiReverseCallTimeoutMs` (10 s unless set) to answer.
+- A synchronous export (no parameters, a plain return type) stays a plain C
+  function in both modes.
+
 ## Placement of `genBindings()`
 
 `genBindings()` reads the compile-time registries that the pragmas populate as
