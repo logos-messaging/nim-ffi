@@ -249,9 +249,9 @@ suite "templates: every placeholder is filled":
 
   test "an instance method passes self.ptr; its async twin copies the ptr as usize":
     let api = files[5]
-    check "ffi_call_sync(self.timeout, |cb, ud| unsafe {\n            ffi::timer_echo(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())" in
+    check "ffi_call_sync(self.timeout, self.progress.clone(), |cb, ud| unsafe {\n            ffi::timer_echo(self.ptr, cb, ud, req_bytes.as_ptr(), req_bytes.len())" in
       api
-    check "let ptr = self.ptr as usize;\n        let raw_bytes = ffi_call_async(self.timeout, move |cb, ud| unsafe {\n            ffi::timer_echo(ptr as *mut c_void, cb, ud," in
+    check "let ptr = self.ptr as usize;\n        let raw_bytes = ffi_call_async(self.timeout, self.progress.clone(), move |cb, ud| unsafe {\n            ffi::timer_echo(ptr as *mut c_void, cb, ud," in
       api
     check "let req = TimerEchoReq { req };" in api
 
@@ -294,7 +294,7 @@ suite "templates: every placeholder is filled":
       ", listeners: std::sync::Mutex::new(std::collections::HashMap::new()) })"
     ) == 2
     check "    calls: TimerCalls<'static>,\n}" in without
-    check "_ctx: std::marker::PhantomData } })" in without
+    check "progress: None, _ctx: std::marker::PhantomData } })" in without
     for needle in [
       "listeners", "ListenerHandle", "add_event_listener", "remove_event_listener",
       "_trampoline",
@@ -452,14 +452,15 @@ suite "per-call timeout: the calls view carries the limit":
     check "impl std::ops::Deref for TimerCtx" in api
     check "pub fn with_timeout(&self, timeout: Option<Duration>) -> TimerCalls<'_>" in
       api
-    check "timeout: Option<Duration>,\n    _ctx: std::marker::PhantomData<&'a TimerCtx>," in
+    check "timeout: Option<Duration>,\n    progress: Option<Progress>,\n    _ctx: std::marker::PhantomData<&'a TimerCtx>," in
       api
 
   test "sync and async instance methods read the view's limit":
     check "impl TimerCalls<'_> {" in api
-    check "ffi_call_sync(self.timeout, |cb, ud| unsafe {\n            ffi::timer_echo(" in
+    check "ffi_call_sync(self.timeout, self.progress.clone(), |cb, ud| unsafe {\n            ffi::timer_echo(" in
       api
-    check "ffi_call_async(self.timeout, move |cb, ud| unsafe {" in api
+    check "ffi_call_async(self.timeout, self.progress.clone(), move |cb, ud| unsafe {" in
+      api
 
   test "a static stays an associated fn of the ctx with a plain Duration":
     check "pub fn lib_version(timeout: Duration)" in api
@@ -468,3 +469,47 @@ suite "per-call timeout: the calls view carries the limit":
   test "the view cannot be copied out of the ctx":
     check "pub struct TimerCalls<'a>" in api
     check "derive(Clone, Copy)]\npub struct TimerCalls" notin api
+
+suite "progress: the calls view carries the callback":
+  setup:
+    let procs = @[
+      FFIProcMeta(
+        procName: "timer_create",
+        libName: "timer",
+        kind: FFIKind.CTOR,
+        libTypeName: "Timer",
+        extraParams: @[],
+        returnTypeName: "Timer",
+      ),
+      FFIProcMeta(
+        procName: "timer_echo",
+        libName: "timer",
+        kind: FFIKind.FFI,
+        libTypeName: "Timer",
+        extraParams: @[FFIParamMeta(name: "req", typeName: "string")],
+        returnTypeName: "string",
+      ),
+      FFIProcMeta(
+        procName: "timer_lib_version",
+        libName: "timer",
+        kind: FFIKind.STATIC,
+        libTypeName: "Timer",
+        extraParams: @[],
+        returnTypeName: "string",
+      ),
+    ]
+    let api = generateApiRs(procs, "timer")
+
+  test "an instance call forwards the view's progress":
+    check "ffi_call_sync(self.timeout, self.progress.clone(), |cb, ud| unsafe {" in api
+    check "ffi_call_async(self.timeout, self.progress.clone(), move |cb, ud| unsafe {" in
+      api
+
+  test "a static and a ctor take no progress":
+    check "ffi_call_sync(Some(timeout), None, |cb, ud| unsafe {" in api
+    check "ffi_call_async(Some(timeout), None, move |cb, ud| unsafe {" in api
+
+  test "both the ctx and the view offer with_progress":
+    check "impl TimerCtx {" in api
+    check api.count("pub fn with_progress(") == 2
+    check "pub type Progress = std::sync::Arc<dyn Fn(Duration) + Send + Sync>;" in api

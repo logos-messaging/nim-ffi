@@ -9,10 +9,13 @@ pub struct {{CTX}} {
 /// `ctx.method(..)` uses the ctx default; `ctx.with_timeout(limit).method(..)`
 /// overrides it for that call (`None` waits with no Rust-side limit). A timeout
 /// only stops the wait: the Nim handler keeps running to completion.
+/// `with_progress(f)` calls `f(elapsed)` about every 5 s while a handler still
+/// runs, so a call with no limit is not a silent hang.
 /// Not `Copy`/`Clone`, so it cannot outlive the ctx it borrows from.
 pub struct {{CALLS}}<'a> {
     ptr: *mut c_void,
     timeout: Option<Duration>,
+    progress: Option<Progress>,
     _ctx: std::marker::PhantomData<&'a {{CTX}}>,
 }
 
@@ -26,7 +29,35 @@ impl std::ops::Deref for {{CTX}} {
 impl {{CTX}} {
     /// The same calls with another limit; `None` waits with no Rust-side limit.
     pub fn with_timeout(&self, timeout: Option<Duration>) -> {{CALLS}}<'_> {
-        {{CALLS}} { ptr: self.ptr, timeout, _ctx: std::marker::PhantomData }
+        {{CALLS}} { ptr: self.ptr, timeout, progress: None, _ctx: std::marker::PhantomData }
+    }
+
+    /// The same calls with a progress callback; see [`Progress`].
+    pub fn with_progress(
+        &self,
+        progress: impl Fn(Duration) + Send + Sync + 'static,
+    ) -> {{CALLS}}<'_> {
+        {{CALLS}} {
+            ptr: self.ptr,
+            timeout: Some(self.timeout),
+            progress: Some(std::sync::Arc::new(progress)),
+            _ctx: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<'a> {{CALLS}}<'a> {
+    /// The same calls with another limit; `None` waits with no Rust-side limit.
+    pub fn with_timeout(self, timeout: Option<Duration>) -> {{CALLS}}<'a> {
+        {{CALLS}} { timeout, ..self }
+    }
+
+    /// The same calls with a progress callback; see [`Progress`].
+    pub fn with_progress(
+        self,
+        progress: impl Fn(Duration) + Send + Sync + 'static,
+    ) -> {{CALLS}}<'a> {
+        {{CALLS}} { progress: Some(std::sync::Arc::new(progress)), ..self }
     }
 }
 

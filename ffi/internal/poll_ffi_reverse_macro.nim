@@ -5,7 +5,7 @@
 ## wait, and the answer decoded into the declared return type.
 
 import std/[macros, macrocache, strutils]
-import ../codegen/string_helpers
+import ../codegen/[meta, string_helpers]
 import ../ffi_msg
 
 proc reverseArgsTypeName(procName: string): string =
@@ -54,6 +54,7 @@ proc buildPollFFIReverseProc*(
         "' is already used by another reverse proc; the host tells them apart by it"
     )
   pollReverseWireNames.add(newLit(wireName))
+  claimNameId(wireName, nkReverseCall)
 
   # The arguments ride as one named map, the same shape a request uses, so the
   # host decodes one typed value instead of a positional list.

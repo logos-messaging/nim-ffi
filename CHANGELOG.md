@@ -8,6 +8,9 @@ All notable changes to this project are documented in this file.
 - Under `-d:ffiPollMode` the generated `<lib>.h` declares the poll shape (the
   message, every export as `(ctx, req, len, id_out)`, the fixed exports, the
   codecs) instead of the callback ABI.
+- Two event names, or two reverse-call names, of one library that hash to the same
+  `nameId` are now a compile error: a polled message carries that id instead of
+  the name, so the host could not tell them apart.
 - **Rust: per-call timeout.** `ctx.with_timeout(Some(d)).echo(..)` and
   `.echo_async(..)` override the ctx default for one call; `with_timeout(None)`
   waits for the terminal `RET_OK`/`RET_ERR` with no Rust-side limit. Instance
@@ -15,6 +18,17 @@ All notable changes to this project are documented in this file.
   existing `ctx.echo(..)` calls are unchanged. A Rust-side timeout only stops
   the wait: the Nim handler runs to completion. Statics and `create` /
   `new_async` still take a plain `Duration` (always bounded).
+
+- **C++: per-call timeout, same shape as Rust.** `ctx->withTimeout(limit)`
+  returns a `<Lib>Calls` view whose sync and `*Async` calls use `limit`;
+  `std::nullopt` waits with no limit. The ctx derives from the view, so
+  `ctx->echo(..)` is unchanged. `*Async` no longer runs the sync call on a
+  thread: the callback settles the future, and a shared timer enforces a limit.
+  Statics and `create` still take a plain `milliseconds`.
+- **Progress callback (Rust and C++).** `with_progress(f)` (Rust) and
+  `withProgress(f)` (C++) on a ctx or a calls view call `f(elapsed)` each time a
+  handler still runs (`RET_STALE_WARN`, about every 5 s). The callback runs on a
+  library thread and may still fire after a timeout, until the handler ends.
 
 ### Changed
 - **An event-queue overflow drops and counts; it no longer wedges the context.**

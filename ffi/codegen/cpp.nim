@@ -13,7 +13,7 @@ import
 ## Fixed 64-bit wire type for any Nim `ptr T` / `pointer`.
 const CppPtrType* = "uint64_t"
 
-## Trailing param of every call that can't inherit a ctx's `timeout_`.
+## Trailing param of every call that can't inherit the calls view's `timeout_`.
 const CppTimeoutParam = "std::chrono::milliseconds timeout = std::chrono::seconds{30}"
 
 const
@@ -388,6 +388,136 @@ proc emitReverseMachinery(
     )
     lines.add("")
 
+proc emitReplyMethods(
+    lines: var seq[string], classified: ClassifiedProcs, libName: string, statics: bool
+) =
+  ## Instance methods read `timeout_` / `progress_` of the calls view; a static
+  ## has no ctx to inherit them from, so it takes its own `timeout`.
+  for m in classified.replyProcs():
+    let isStatic = m.isStatic()
+    if isStatic != statics:
+      continue
+    let methodName = stripLibPrefix(m.procName, libName)
+    let retCppType =
+      if m.returnRidesAsPtr():
+        CppPtrType
+      else:
+        nimTypeToCpp(m.returnTypeName)
+    let reqName = reqStructName(m)
+
+    var methParams: seq[string] = @[]
+    var methParamNames: seq[string] = @[]
+    for ep in m.extraParams:
+      let cppType =
+        if ep.ridesAsPtr():
+          CppPtrType
+        else:
+          nimTypeToCpp(ep.typeName)
+      methParams.add("const $1& $2" % [cppType, ep.name])
+      methParamNames.add(ep.name)
+    let methParamsStr =
+      if not isStatic:
+        methParams.join(", ")
+      elif methParams.len > 0:
+        methParams.join(", ") & ", " & CppTimeoutParam
+      else:
+        CppTimeoutParam
+
+    let reqInit = cppBracedInit(reqName, methParamNames)
+    let methRet = "Result<$1>" % [retCppType]
+    let ctxArg = if isStatic: "" else: "ptr_, "
+    let limit = if isStatic: "timeout" else: "timeout_"
+    let progress = if isStatic: "" else: ", progress_"
+    let qualifier = if isStatic: "static " else: ""
+    let constQ = if isStatic: "" else: " const"
+    let submitCall =
+      "            return ::$1($2cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());" %
+      [m.procName, ctxArg]
+
+    lines.add(renderMemberDocComment(m.doc))
+    lines.add(
+      "    $1$2 $3($4)$5 {" % [qualifier, methRet, methodName, methParamsStr, constQ]
+    )
+    lines.add("        const auto ffi_req_ = $1;" % [reqInit])
+    lines.add("        auto ffi_enc_ = encodeCborFFI(ffi_req_);")
+    lines.add(
+      "        if (ffi_enc_.isErr()) return $1::err(ffi_enc_.error());" % [methRet]
+    )
+    lines.add("        const auto& ffi_req_bytes_ = ffi_enc_.value();")
+    lines.add("        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {")
+    lines.add(submitCall)
+    lines.add("        }, $1$2);" % [limit, progress])
+    lines.add(
+      "        if (ffi_raw_.isErr()) return $1::err(ffi_raw_.error());" % [methRet]
+    )
+    lines.add("        return decodeCborFFI<$1>(ffi_raw_.value());" % [retCppType])
+    lines.add("    }")
+    lines.add("")
+
+    lines.add(renderMemberDocComment(m.doc))
+    lines.add(
+      "    $1std::future<$2> $3Async($4)$5 {" %
+        [qualifier, methRet, methodName, methParamsStr, constQ]
+    )
+    lines.add("        const auto ffi_req_ = $1;" % [reqInit])
+    lines.add("        auto ffi_enc_ = encodeCborFFI(ffi_req_);")
+    lines.add("        if (ffi_enc_.isErr()) {")
+    lines.add("            std::promise<$1> ffi_p_;" % [methRet])
+    lines.add("            ffi_p_.set_value($1::err(ffi_enc_.error()));" % [methRet])
+    lines.add("            return ffi_p_.get_future();")
+    lines.add("        }")
+    lines.add("        const auto& ffi_req_bytes_ = ffi_enc_.value();")
+    lines.add(
+      "        return ffi_call_async_<$1>([&](FFICallback cb, void* ud) {" % [
+        retCppType
+      ]
+    )
+    lines.add(submitCall)
+    lines.add(
+      "        }, $1, $2, [](FFIBytes_&& b) { return decodeCborFFI<$3>(b); });" %
+        [limit, (if isStatic: "FFIProgress{}" else: "progress_"), retCppType]
+    )
+    lines.add("    }")
+    lines.add("")
+
+proc emitCallsClass(
+    lines: var seq[string],
+    classified: ClassifiedProcs,
+    ctxTypeName, callsTypeName, libName: string,
+) =
+  lines.add(
+    "// Instance calls of a $1 with their limit (nullopt: none) and progress callback. Borrows the ctx." %
+      [ctxTypeName]
+  )
+  lines.add("class $1 {" % [callsTypeName])
+  lines.add("public:")
+  lines.add(
+    "    $1 withTimeout(std::optional<std::chrono::milliseconds> limit) const {" %
+      [callsTypeName]
+  )
+  lines.add("        $1 c(*this);" % [callsTypeName])
+  lines.add("        c.timeout_ = limit;")
+  lines.add("        return c;")
+  lines.add("    }")
+  lines.add("")
+  lines.add("    $1 withProgress(FFIProgress onProgress) const {" % [callsTypeName])
+  lines.add("        $1 c(*this);" % [callsTypeName])
+  lines.add("        c.progress_ = std::move(onProgress);")
+  lines.add("        return c;")
+  lines.add("    }")
+  lines.add("")
+  emitReplyMethods(lines, classified, libName, statics = false)
+  lines.add("protected:")
+  lines.add("    void* ptr_;")
+  lines.add("    std::optional<std::chrono::milliseconds> timeout_;")
+  lines.add("    FFIProgress progress_;")
+  lines.add(
+    "    $1(void* p, std::optional<std::chrono::milliseconds> t) : ptr_(p), timeout_(t) {}" %
+      [callsTypeName]
+  )
+  lines.add("};")
+  lines.add("")
+
 proc generateCppHeader*(
     procs: seq[FFIProcMeta],
     types: seq[FFITypeMeta],
@@ -556,7 +686,10 @@ proc generateCppHeader*(
   lines.add("// High-level C++ context class")
   lines.add("// ============================================================")
   lines.add("")
-  lines.add("class $1 {" % [ctxTypeName])
+  let callsTypeName = libTypeName(ctors, libName) & "Calls"
+  emitCallsClass(lines, classified, ctxTypeName, callsTypeName, libName)
+
+  lines.add("class $1 : public $2 {" % [ctxTypeName, callsTypeName])
   lines.add("public:")
 
   for ctor in ctors:
@@ -664,105 +797,20 @@ proc generateCppHeader*(
   emitEventDispatcher(lines, ctxTypeName, libName, events)
   emitReverseApi(lines, ctxTypeName, libName, reverse, reverseEvents)
 
-  # A static has no ctx to inherit `timeout_` from, so it takes its own `timeout`.
-  for m in classified.replyProcs():
-    let isStatic = m.isStatic()
-    let methodName = stripLibPrefix(m.procName, libName)
-    let retCppType =
-      if m.returnRidesAsPtr():
-        CppPtrType
-      else:
-        nimTypeToCpp(m.returnTypeName)
-    let reqName = reqStructName(m)
-
-    var methParams: seq[string] = @[]
-    var methParamNames: seq[string] = @[]
-    for ep in m.extraParams:
-      let cppType =
-        if ep.ridesAsPtr():
-          CppPtrType
-        else:
-          nimTypeToCpp(ep.typeName)
-      methParams.add("const $1& $2" % [cppType, ep.name])
-      methParamNames.add(ep.name)
-    let methParamNamesStr = methParamNames.join(", ")
-    let methParamsStr =
-      if not isStatic:
-        methParams.join(", ")
-      elif methParams.len > 0:
-        methParams.join(", ") & ", " & CppTimeoutParam
-      else:
-        CppTimeoutParam
-
-    let reqInit = cppBracedInit(reqName, methParamNames)
-
-    let methRet = "Result<$1>" % [retCppType]
-    lines.add(renderMemberDocComment(m.doc))
-    let decl = if isStatic: "    static $1 $2($3) {" else: "    $1 $2($3) const {"
-    lines.add(decl % [methRet, methodName, methParamsStr])
-    lines.add("        const auto ffi_req_ = $1;" % [reqInit])
-    lines.add("        auto ffi_enc_ = encodeCborFFI(ffi_req_);")
-    lines.add(
-      "        if (ffi_enc_.isErr()) return $1::err(ffi_enc_.error());" % [methRet]
-    )
-    lines.add("        const auto& ffi_req_bytes_ = ffi_enc_.value();")
-    lines.add("        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {")
-    let ctxArg = if isStatic: "" else: "ptr_, "
-    lines.add(
-      "            return ::$1($2cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());" %
-        [m.procName, ctxArg]
-    )
-    lines.add("        }, $1);" % [if isStatic: "timeout" else: "timeout_"])
-    lines.add(
-      "        if (ffi_raw_.isErr()) return $1::err(ffi_raw_.error());" % [methRet]
-    )
-    lines.add("        return decodeCborFFI<$1>(ffi_raw_.value());" % [retCppType])
-    lines.add("    }")
-    lines.add("")
-
-    # A method calls `this->methodName(...)` so a same-named param can't shadow
-    # the call target; a static has no `this` and forwards its own `timeout`.
-    let staticArgs =
-      if methParamNames.len > 0:
-        methParamNamesStr & ", timeout"
-      else:
-        "timeout"
-    let asyncArgs = if isStatic: staticArgs else: methParamNamesStr
-    let asyncCapture =
-      if isStatic:
-        staticArgs
-      elif methParamNamesStr.len > 0:
-        "this, " & methParamNamesStr
-      else:
-        "this"
-    let asyncDecl =
-      if isStatic:
-        "    static std::future<$1> $2Async($3) {"
-      else:
-        "    std::future<$1> $2Async($3) const {"
-    lines.add(renderMemberDocComment(m.doc))
-    lines.add(asyncDecl % [methRet, methodName, methParamsStr])
-    lines.add(
-      "        return std::async(std::launch::async, [$1]() { return $2$3($4); });" %
-        [asyncCapture, (if isStatic: "" else: "this->"), methodName, asyncArgs]
-    )
-    lines.add("    }")
-    lines.add("")
+  emitReplyMethods(lines, classified, libName, statics = true)
 
   lines.add("private:")
   # Listener machinery must precede the `listeners_` member (its value type must be complete at declaration).
   emitEventTrampoline(lines, events)
   emitReverseMachinery(lines, ctxTypeName, reverse)
-  lines.add("    void* ptr_;")
-  lines.add("    std::chrono::milliseconds timeout_;")
   if events.len > 0:
     lines.add("    std::mutex listenersMu_;")
     lines.add(
       "    std::unordered_map<std::uint64_t, std::unique_ptr<ListenerBase>> listeners_;"
     )
   lines.add(
-    "    explicit $1(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}" %
-      [ctxTypeName]
+    "    explicit $1(void* p, std::chrono::milliseconds t) : $2(p, t) {}" %
+      [ctxTypeName, callsTypeName]
   )
   lines.add("};")
   lines.add("")

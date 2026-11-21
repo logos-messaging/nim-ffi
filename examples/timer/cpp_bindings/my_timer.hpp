@@ -21,6 +21,7 @@
 #include <functional>
 #include <future>
 #include <vector>
+#include <map>
 #include <optional>
 #include <type_traits>
 #include <cstring>
@@ -1017,66 +1018,187 @@ int my_timer_shutdown(void);
 } // extern "C"
 
 // ============================================================
-// Synchronous call helper
+// Call helpers
 // ============================================================
 // Guarded so two nim-ffi headers can share a translation unit.
 #ifndef NIM_FFI_SYNC_CALL_HELPER_HPP_INCLUDED
 #define NIM_FFI_SYNC_CALL_HELPER_HPP_INCLUDED
 
+// Gets the elapsed time on each RET_STALE_WARN. Runs on a library thread, also after a timeout.
+using FFIProgress = std::function<void(std::chrono::milliseconds)>;
+
 namespace {
 
+using FFIBytes_ = std::vector<std::uint8_t>;
+
+// The first of the terminal callback, a timeout and a failed submit settles the call.
+template <typename T>
 struct FFICallState_ {
-    std::mutex              mtx;
-    std::condition_variable cv;
-    bool                    done{false};
-    bool                    ok{false};
-    std::vector<std::uint8_t> bytes;
-    std::string             err;
+    std::mutex                    mtx;
+    bool                          settled{false};
+    std::promise<Result<T>>       promise;
+    FFIProgress                   progress;
+    std::function<Result<T>(FFIBytes_&&)> decode;
+    std::function<void()>         onSettled;
+
+    bool live() {
+        std::lock_guard<std::mutex> lock(mtx);
+        return !settled;
+    }
+
+    void settle(Result<T> r) {
+        std::function<void()> done;
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            if (settled) return;
+            settled = true;
+            done = std::move(onSettled);
+        }
+        promise.set_value(std::move(r));
+        if (done) done();
+    }
 };
 
-inline void ffi_cb_(int ret, const char* msg, size_t len, void* ud) {
-    // NIMFFI_RET_STALE_WARN (3) is a non-terminal progress ping: the request is
-    // still running. This blocking wrapper only reports the final result, so
-    // ignore it WITHOUT touching `ud` — a terminal callback still owns the
-    // shared handle and will free it.
-    if (ret == NIMFFI_RET_STALE_WARN) return;
+// Runs deadlines for async calls on one shared thread, so no call owns a thread.
+class FFITimer_ {
+    using Clock = std::chrono::steady_clock;
+    std::mutex mtx_;
+    std::condition_variable cv_;
+    std::map<std::pair<Clock::time_point, std::uint64_t>, std::function<void()>> q_;
+    std::uint64_t next_{0};
 
-    // ffi_call_ heap-allocated a shared_ptr and passed its address as ud;
-    // take ownership here so it's freed on every exit path.
-    std::unique_ptr<std::shared_ptr<FFICallState_>> handle(
-        static_cast<std::shared_ptr<FFICallState_>*>(ud));
-    FFICallState_& s = **handle;
+    FFITimer_() { std::thread([this] { run_(); }).detach(); }
 
-    std::lock_guard<std::mutex> lock(s.mtx);
-    s.ok = (ret == NIMFFI_RET_OK);
-    if (msg && len > 0) {
-        const auto* p = reinterpret_cast<const std::uint8_t*>(msg);
-        if (s.ok) s.bytes.assign(p, p + len);
-        else      s.err.assign(msg, len);
+    // Never returns: the thread runs until the process exits.
+    void run_() {
+        std::unique_lock<std::mutex> lock(mtx_);
+        for (;;) {
+            if (q_.empty()) { cv_.wait(lock); continue; }
+            const auto first = q_.begin();
+            const auto due = first->first.first;
+            if (due > Clock::now()) {
+                cv_.wait_until(lock, due);
+                continue;
+            }
+            auto fn = std::move(first->second);
+            q_.erase(first);
+            lock.unlock();
+            fn();
+            lock.lock();
+        }
     }
-    s.done = true;
-    s.cv.notify_one();
+
+public:
+    // Never destroyed: the thread outlives static destruction.
+    static FFITimer_& get() {
+        static FFITimer_* t = new FFITimer_();
+        return *t;
+    }
+
+    std::uint64_t at(std::chrono::milliseconds after, std::function<void()> fn) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        const auto id = next_++;
+        q_.emplace(std::make_pair(Clock::now() + after, id), std::move(fn));
+        cv_.notify_one();
+        return id;
+    }
+
+    void cancel(std::uint64_t id) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        for (auto it = q_.begin(); it != q_.end(); ++it) {
+            if (it->first.second == id) { q_.erase(it); return; }
+        }
+    }
+};
+
+template <typename T>
+inline void ffi_cb_(int ret, const char* msg, size_t len, void* ud) {
+    using State = FFICallState_<T>;
+    // Non-terminal ping: leave `ud` alone, the terminal callback still owns the handle.
+    if (ret == NIMFFI_RET_STALE_WARN) {
+        State& s = **static_cast<std::shared_ptr<State>*>(ud);
+        if (!s.progress) return;
+        long long ms = 0;
+        if (msg && len > 0) std::from_chars(msg, msg + len, ms);
+        // An exception must not unwind into the library thread.
+        try { s.progress(std::chrono::milliseconds{ms}); } catch (...) {}
+        return;
+    }
+
+    std::unique_ptr<std::shared_ptr<State>> handle(
+        static_cast<std::shared_ptr<State>*>(ud));
+    State& s = **handle;
+    if (!s.live()) return;
+
+    if (ret != NIMFFI_RET_OK) {
+        s.settle(Result<T>::err(msg && len > 0 ? std::string(msg, len) : std::string{}));
+        return;
+    }
+
+    const auto* p = reinterpret_cast<const std::uint8_t*>(msg);
+    FFIBytes_ bytes;
+    if (msg && len > 0) bytes.assign(p, p + len);
+    s.settle([&]() -> Result<T> {
+        try { return s.decode(std::move(bytes)); }
+        catch (...) { return Result<T>::err("reply decode threw"); }
+    }());
 }
 
-inline Result<std::vector<std::uint8_t>> ffi_call_(
-        std::function<int(FFICallback, void*)> f,
-        std::chrono::milliseconds timeout) {
-    using Bytes = std::vector<std::uint8_t>;
-    auto state = std::make_shared<FFICallState_>();
-    auto* cb_ref = new std::shared_ptr<FFICallState_>(state);
-    const int ret = f(ffi_cb_, cb_ref);
+template <typename T>
+inline std::pair<std::shared_ptr<FFICallState_<T>>, std::future<Result<T>>>
+ffi_submit_(const std::function<int(FFICallback, void*)>& f,
+            FFIProgress progress,
+            std::function<Result<T>(FFIBytes_&&)> decode) {
+    auto state = std::make_shared<FFICallState_<T>>();
+    state->progress = std::move(progress);
+    state->decode = std::move(decode);
+    auto fut = state->promise.get_future();
+    auto* cb_ref = new std::shared_ptr<FFICallState_<T>>(state);
+    const int ret = f(&ffi_cb_<T>, cb_ref);
     if (ret == NIMFFI_RET_MISSING_CALLBACK) {
         delete cb_ref;
-        return Result<Bytes>::err("RET_MISSING_CALLBACK (internal error)");
+        state->settle(Result<T>::err("RET_MISSING_CALLBACK (internal error)"));
     }
-    std::unique_lock<std::mutex> lock(state->mtx);
-    const bool fired = state->cv.wait_for(lock, timeout, [&]{ return state->done; });
-    if (!fired)
-        return Result<Bytes>::err("FFI call timed out after " +
-                                  std::to_string(timeout.count()) + "ms");
-    if (!state->ok)
-        return Result<Bytes>::err(state->err);
-    return Result<Bytes>::ok(std::move(state->bytes));
+    return {std::move(state), std::move(fut)};
+}
+
+inline std::string ffi_timeout_msg_(std::chrono::milliseconds limit) {
+    return "FFI call timed out after " + std::to_string(limit.count()) + "ms";
+}
+
+// A nullopt `timeout` waits with no limit. A timeout only stops the wait.
+inline Result<FFIBytes_> ffi_call_(
+        std::function<int(FFICallback, void*)> f,
+        std::optional<std::chrono::milliseconds> timeout,
+        FFIProgress progress = {}) {
+    auto [state, fut] = ffi_submit_<FFIBytes_>(
+        f, std::move(progress),
+        [](FFIBytes_&& b) { return Result<FFIBytes_>::ok(std::move(b)); });
+    if (timeout && fut.wait_for(*timeout) != std::future_status::ready)
+        state->settle(Result<FFIBytes_>::err(ffi_timeout_msg_(*timeout)));
+    return fut.get();
+}
+
+// Like ffi_call_, but returns at once; `f` runs before this returns.
+template <typename T>
+inline std::future<Result<T>> ffi_call_async_(
+        std::function<int(FFICallback, void*)> f,
+        std::optional<std::chrono::milliseconds> timeout,
+        FFIProgress progress,
+        std::function<Result<T>(FFIBytes_&&)> decode) {
+    auto [state, fut] = ffi_submit_<T>(f, std::move(progress), std::move(decode));
+    if (!timeout || !state->live()) return std::move(fut);
+
+    const auto limit = *timeout;
+    const auto id = FFITimer_::get().at(limit, [w = std::weak_ptr<FFICallState_<T>>(state), limit] {
+        if (auto s = w.lock()) s->settle(Result<T>::err(ffi_timeout_msg_(limit)));
+    });
+    {
+        std::lock_guard<std::mutex> lock(state->mtx);
+        if (state->settled) FFITimer_::get().cancel(id);
+        else state->onSettled = [id] { FFITimer_::get().cancel(id); };
+    }
+    return std::move(fut);
 }
 
 } // anonymous namespace
@@ -1087,7 +1209,195 @@ inline Result<std::vector<std::uint8_t>> ffi_call_(
 // High-level C++ context class
 // ============================================================
 
-class MyTimerCtx {
+// Instance calls of a MyTimerCtx with their limit (nullopt: none) and progress callback. Borrows the ctx.
+class MyTimerCalls {
+public:
+    MyTimerCalls withTimeout(std::optional<std::chrono::milliseconds> limit) const {
+        MyTimerCalls c(*this);
+        c.timeout_ = limit;
+        return c;
+    }
+
+    MyTimerCalls withProgress(FFIProgress onProgress) const {
+        MyTimerCalls c(*this);
+        c.progress_ = std::move(onProgress);
+        return c;
+    }
+
+    /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
+    Result<EchoResponse> echo(const EchoRequest& req) const {
+        const auto ffi_req_ = MyTimerEchoReq{req};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) return Result<EchoResponse>::err(ffi_enc_.error());
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
+            return ::my_timer_echo(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        }, timeout_, progress_);
+        if (ffi_raw_.isErr()) return Result<EchoResponse>::err(ffi_raw_.error());
+        return decodeCborFFI<EchoResponse>(ffi_raw_.value());
+    }
+
+    /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
+    std::future<Result<EchoResponse>> echoAsync(const EchoRequest& req) const {
+        const auto ffi_req_ = MyTimerEchoReq{req};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) {
+            std::promise<Result<EchoResponse>> ffi_p_;
+            ffi_p_.set_value(Result<EchoResponse>::err(ffi_enc_.error()));
+            return ffi_p_.get_future();
+        }
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        return ffi_call_async_<EchoResponse>([&](FFICallback cb, void* ud) {
+            return ::my_timer_echo(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        }, timeout_, progress_, [](FFIBytes_&& b) { return decodeCborFFI<EchoResponse>(b); });
+    }
+
+    /// Returns the library's version string.
+    Result<std::string> version() const {
+        const auto ffi_req_ = MyTimerVersionReq{};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) return Result<std::string>::err(ffi_enc_.error());
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
+            return ::my_timer_version(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        }, timeout_, progress_);
+        if (ffi_raw_.isErr()) return Result<std::string>::err(ffi_raw_.error());
+        return decodeCborFFI<std::string>(ffi_raw_.value());
+    }
+
+    /// Returns the library's version string.
+    std::future<Result<std::string>> versionAsync() const {
+        const auto ffi_req_ = MyTimerVersionReq{};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) {
+            std::promise<Result<std::string>> ffi_p_;
+            ffi_p_.set_value(Result<std::string>::err(ffi_enc_.error()));
+            return ffi_p_.get_future();
+        }
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        return ffi_call_async_<std::string>([&](FFICallback cb, void* ud) {
+            return ::my_timer_version(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        }, timeout_, progress_, [](FFIBytes_&& b) { return decodeCborFFI<std::string>(b); });
+    }
+
+    Result<ComplexResponse> complex(const ComplexRequest& req) const {
+        const auto ffi_req_ = MyTimerComplexReq{req};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) return Result<ComplexResponse>::err(ffi_enc_.error());
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
+            return ::my_timer_complex(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        }, timeout_, progress_);
+        if (ffi_raw_.isErr()) return Result<ComplexResponse>::err(ffi_raw_.error());
+        return decodeCborFFI<ComplexResponse>(ffi_raw_.value());
+    }
+
+    std::future<Result<ComplexResponse>> complexAsync(const ComplexRequest& req) const {
+        const auto ffi_req_ = MyTimerComplexReq{req};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) {
+            std::promise<Result<ComplexResponse>> ffi_p_;
+            ffi_p_.set_value(Result<ComplexResponse>::err(ffi_enc_.error()));
+            return ffi_p_.get_future();
+        }
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        return ffi_call_async_<ComplexResponse>([&](FFICallback cb, void* ud) {
+            return ::my_timer_complex(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        }, timeout_, progress_, [](FFIBytes_&& b) { return decodeCborFFI<ComplexResponse>(b); });
+    }
+
+    /// Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
+    Result<ScheduleResult> schedule(const JobSpec& job, const RetryPolicy& retry, const ScheduleConfig& schedule) const {
+        const auto ffi_req_ = MyTimerScheduleReq{job, retry, schedule};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) return Result<ScheduleResult>::err(ffi_enc_.error());
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
+            return ::my_timer_schedule(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        }, timeout_, progress_);
+        if (ffi_raw_.isErr()) return Result<ScheduleResult>::err(ffi_raw_.error());
+        return decodeCborFFI<ScheduleResult>(ffi_raw_.value());
+    }
+
+    /// Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
+    std::future<Result<ScheduleResult>> scheduleAsync(const JobSpec& job, const RetryPolicy& retry, const ScheduleConfig& schedule) const {
+        const auto ffi_req_ = MyTimerScheduleReq{job, retry, schedule};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) {
+            std::promise<Result<ScheduleResult>> ffi_p_;
+            ffi_p_.set_value(Result<ScheduleResult>::err(ffi_enc_.error()));
+            return ffi_p_.get_future();
+        }
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        return ffi_call_async_<ScheduleResult>([&](FFICallback cb, void* ud) {
+            return ::my_timer_schedule(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        }, timeout_, progress_, [](FFIBytes_&& b) { return decodeCborFFI<ScheduleResult>(b); });
+    }
+
+    /// Calls the host-implemented `fetch_host_clock` interface and formats it.
+    Result<std::string> host_clock() const {
+        const auto ffi_req_ = MyTimerHostClockReq{};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) return Result<std::string>::err(ffi_enc_.error());
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
+            return ::my_timer_host_clock(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        }, timeout_, progress_);
+        if (ffi_raw_.isErr()) return Result<std::string>::err(ffi_raw_.error());
+        return decodeCborFFI<std::string>(ffi_raw_.value());
+    }
+
+    /// Calls the host-implemented `fetch_host_clock` interface and formats it.
+    std::future<Result<std::string>> host_clockAsync() const {
+        const auto ffi_req_ = MyTimerHostClockReq{};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) {
+            std::promise<Result<std::string>> ffi_p_;
+            ffi_p_.set_value(Result<std::string>::err(ffi_enc_.error()));
+            return ffi_p_.get_future();
+        }
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        return ffi_call_async_<std::string>([&](FFICallback cb, void* ud) {
+            return ::my_timer_host_clock(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        }, timeout_, progress_, [](FFIBytes_&& b) { return decodeCborFFI<std::string>(b); });
+    }
+
+    /// Reads the last tick number the `on_host_tick` reverse event recorded.
+    Result<int64_t> last_host_tick() const {
+        const auto ffi_req_ = MyTimerLastHostTickReq{};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) return Result<int64_t>::err(ffi_enc_.error());
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
+            return ::my_timer_last_host_tick(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        }, timeout_, progress_);
+        if (ffi_raw_.isErr()) return Result<int64_t>::err(ffi_raw_.error());
+        return decodeCborFFI<int64_t>(ffi_raw_.value());
+    }
+
+    /// Reads the last tick number the `on_host_tick` reverse event recorded.
+    std::future<Result<int64_t>> last_host_tickAsync() const {
+        const auto ffi_req_ = MyTimerLastHostTickReq{};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) {
+            std::promise<Result<int64_t>> ffi_p_;
+            ffi_p_.set_value(Result<int64_t>::err(ffi_enc_.error()));
+            return ffi_p_.get_future();
+        }
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        return ffi_call_async_<int64_t>([&](FFICallback cb, void* ud) {
+            return ::my_timer_last_host_tick(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        }, timeout_, progress_, [](FFIBytes_&& b) { return decodeCborFFI<int64_t>(b); });
+    }
+
+protected:
+    void* ptr_;
+    std::optional<std::chrono::milliseconds> timeout_;
+    FFIProgress progress_;
+    MyTimerCalls(void* p, std::optional<std::chrono::milliseconds> t) : ptr_(p), timeout_(t) {}
+};
+
+class MyTimerCtx : public MyTimerCalls {
 public:
     /// Creates the FFIContext + MyTimer; async via chronos.
     static Result<std::unique_ptr<MyTimerCtx>> create(const TimerConfig& config, std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
@@ -1247,112 +1557,6 @@ public:
         return Result<void>::ok();
     }
 
-    /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
-    Result<EchoResponse> echo(const EchoRequest& req) const {
-        const auto ffi_req_ = MyTimerEchoReq{req};
-        auto ffi_enc_ = encodeCborFFI(ffi_req_);
-        if (ffi_enc_.isErr()) return Result<EchoResponse>::err(ffi_enc_.error());
-        const auto& ffi_req_bytes_ = ffi_enc_.value();
-        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return ::my_timer_echo(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
-        }, timeout_);
-        if (ffi_raw_.isErr()) return Result<EchoResponse>::err(ffi_raw_.error());
-        return decodeCborFFI<EchoResponse>(ffi_raw_.value());
-    }
-
-    /// Sleeps `delayMs` then echoes the message back, firing `on_echo_fired`.
-    std::future<Result<EchoResponse>> echoAsync(const EchoRequest& req) const {
-        return std::async(std::launch::async, [this, req]() { return this->echo(req); });
-    }
-
-    /// Returns the library's version string.
-    Result<std::string> version() const {
-        const auto ffi_req_ = MyTimerVersionReq{};
-        auto ffi_enc_ = encodeCborFFI(ffi_req_);
-        if (ffi_enc_.isErr()) return Result<std::string>::err(ffi_enc_.error());
-        const auto& ffi_req_bytes_ = ffi_enc_.value();
-        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return ::my_timer_version(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
-        }, timeout_);
-        if (ffi_raw_.isErr()) return Result<std::string>::err(ffi_raw_.error());
-        return decodeCborFFI<std::string>(ffi_raw_.value());
-    }
-
-    /// Returns the library's version string.
-    std::future<Result<std::string>> versionAsync() const {
-        return std::async(std::launch::async, [this]() { return this->version(); });
-    }
-
-    Result<ComplexResponse> complex(const ComplexRequest& req) const {
-        const auto ffi_req_ = MyTimerComplexReq{req};
-        auto ffi_enc_ = encodeCborFFI(ffi_req_);
-        if (ffi_enc_.isErr()) return Result<ComplexResponse>::err(ffi_enc_.error());
-        const auto& ffi_req_bytes_ = ffi_enc_.value();
-        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return ::my_timer_complex(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
-        }, timeout_);
-        if (ffi_raw_.isErr()) return Result<ComplexResponse>::err(ffi_raw_.error());
-        return decodeCborFFI<ComplexResponse>(ffi_raw_.value());
-    }
-
-    std::future<Result<ComplexResponse>> complexAsync(const ComplexRequest& req) const {
-        return std::async(std::launch::async, [this, req]() { return this->complex(req); });
-    }
-
-    /// Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
-    Result<ScheduleResult> schedule(const JobSpec& job, const RetryPolicy& retry, const ScheduleConfig& schedule) const {
-        const auto ffi_req_ = MyTimerScheduleReq{job, retry, schedule};
-        auto ffi_enc_ = encodeCborFFI(ffi_req_);
-        if (ffi_enc_.isErr()) return Result<ScheduleResult>::err(ffi_enc_.error());
-        const auto& ffi_req_bytes_ = ffi_enc_.value();
-        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return ::my_timer_schedule(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
-        }, timeout_);
-        if (ffi_raw_.isErr()) return Result<ScheduleResult>::err(ffi_raw_.error());
-        return decodeCborFFI<ScheduleResult>(ffi_raw_.value());
-    }
-
-    /// Three object-typed params (`job`, `retry`, `schedule`) packed into one CBOR envelope.
-    std::future<Result<ScheduleResult>> scheduleAsync(const JobSpec& job, const RetryPolicy& retry, const ScheduleConfig& schedule) const {
-        return std::async(std::launch::async, [this, job, retry, schedule]() { return this->schedule(job, retry, schedule); });
-    }
-
-    /// Calls the host-implemented `fetch_host_clock` interface and formats it.
-    Result<std::string> host_clock() const {
-        const auto ffi_req_ = MyTimerHostClockReq{};
-        auto ffi_enc_ = encodeCborFFI(ffi_req_);
-        if (ffi_enc_.isErr()) return Result<std::string>::err(ffi_enc_.error());
-        const auto& ffi_req_bytes_ = ffi_enc_.value();
-        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return ::my_timer_host_clock(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
-        }, timeout_);
-        if (ffi_raw_.isErr()) return Result<std::string>::err(ffi_raw_.error());
-        return decodeCborFFI<std::string>(ffi_raw_.value());
-    }
-
-    /// Calls the host-implemented `fetch_host_clock` interface and formats it.
-    std::future<Result<std::string>> host_clockAsync() const {
-        return std::async(std::launch::async, [this]() { return this->host_clock(); });
-    }
-
-    /// Reads the last tick number the `on_host_tick` reverse event recorded.
-    Result<int64_t> last_host_tick() const {
-        const auto ffi_req_ = MyTimerLastHostTickReq{};
-        auto ffi_enc_ = encodeCborFFI(ffi_req_);
-        if (ffi_enc_.isErr()) return Result<int64_t>::err(ffi_enc_.error());
-        const auto& ffi_req_bytes_ = ffi_enc_.value();
-        auto ffi_raw_ = ffi_call_([&](FFICallback cb, void* ud) {
-            return ::my_timer_last_host_tick(ptr_, cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
-        }, timeout_);
-        if (ffi_raw_.isErr()) return Result<int64_t>::err(ffi_raw_.error());
-        return decodeCborFFI<int64_t>(ffi_raw_.value());
-    }
-
-    /// Reads the last tick number the `on_host_tick` reverse event recorded.
-    std::future<Result<int64_t>> last_host_tickAsync() const {
-        return std::async(std::launch::async, [this]() { return this->last_host_tick(); });
-    }
-
     static Result<std::string> lib_version(std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
         const auto ffi_req_ = MyTimerLibVersionReq{};
         auto ffi_enc_ = encodeCborFFI(ffi_req_);
@@ -1366,7 +1570,17 @@ public:
     }
 
     static std::future<Result<std::string>> lib_versionAsync(std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
-        return std::async(std::launch::async, [timeout]() { return lib_version(timeout); });
+        const auto ffi_req_ = MyTimerLibVersionReq{};
+        auto ffi_enc_ = encodeCborFFI(ffi_req_);
+        if (ffi_enc_.isErr()) {
+            std::promise<Result<std::string>> ffi_p_;
+            ffi_p_.set_value(Result<std::string>::err(ffi_enc_.error()));
+            return ffi_p_.get_future();
+        }
+        const auto& ffi_req_bytes_ = ffi_enc_.value();
+        return ffi_call_async_<std::string>([&](FFICallback cb, void* ud) {
+            return ::my_timer_lib_version(cb, ud, ffi_req_bytes_.data(), ffi_req_bytes_.size());
+        }, timeout, FFIProgress{}, [](FFIBytes_&& b) { return decodeCborFFI<std::string>(b); });
     }
 
 private:
@@ -1449,9 +1663,7 @@ private:
         }
     }
 
-    void* ptr_;
-    std::chrono::milliseconds timeout_;
     std::mutex listenersMu_;
     std::unordered_map<std::uint64_t, std::unique_ptr<ListenerBase>> listeners_;
-    explicit MyTimerCtx(void* p, std::chrono::milliseconds t) : ptr_(p), timeout_(t) {}
+    explicit MyTimerCtx(void* p, std::chrono::milliseconds t) : MyTimerCalls(p, t) {}
 };
