@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Typed reverse-call handlers in the poll mode's C++ client.** A poll-mode
+  `{.ffiReverse.}` proc is now registered for the generators (`ffiReverseRegistry`,
+  and its named-map arguments as a `<Name>HostCall` type), and the C++ client has an
+  `on<Name>(handler)` per reverse call. The handler gets the decoded arguments and a
+  `Responder<T>`: one-shot, cheap to copy, answerable now or later from any thread,
+  and a handler that drops it without answering makes the library fail the call at
+  once instead of waiting out its deadline. A call with no handler, or whose arguments
+  do not decode, is refused with an error. The Rust and C generators are still given
+  no reverse calls under the poll model.
 - **A typed C++ client for the poll mode.** Under `-d:ffiPollMode` the C++
   generator emits the poll-shaped declarations and a `<Lib>Ctx` class over
   `nim_ffi::Host`: `create(...)`, one typed method per proc (static procs go

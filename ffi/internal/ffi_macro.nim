@@ -2126,6 +2126,42 @@ proc buildFFIReverseProc(prc: NimNode, leading: seq[NimNode]): NimNode {.compile
     echo resultStmts.repr
   return resultStmts
 
+when defined(ffiPollMode):
+  proc registerPollReverse(
+      prc, userProcName: NimNode, wireName: string, timeoutMs: int
+  ) {.compileTime.} =
+    ## What a generator needs to type the host's side of a poll-mode reverse call: the
+    ## call, and the named map its arguments ride in (`<Name>HostCall`, as the macro writes it).
+    var paramMetas: seq[FFIParamMeta] = @[]
+    var fieldMetas: seq[FFIFieldMeta] = @[]
+    for i in 1 ..< prc[3].len:
+      let group = prc[3][i]
+      for j in 0 ..< group.len - 2:
+        let typeName = nimTypeNameRepr(group[^2])
+        paramMetas.add(FFIParamMeta(name: $group[j], typeName: typeName))
+        fieldMetas.add(FFIFieldMeta(name: $group[j], typeName: typeName))
+    var argsTypeName = ""
+    if paramMetas.len > 0:
+      argsTypeName = reverseArgsTypeName($userProcName)
+      addFFIType(FFITypeMeta(name: argsTypeName, fields: fieldMetas))
+    let replyType = prc[3][0][1][1] # Future[Result[T, string]]
+    addFFIReverse(
+      FFIReverseMeta(
+        wireName: wireName,
+        nimProcName: $userProcName,
+        libName: currentLibName(),
+        params: paramMetas,
+        argsTypeName: argsTypeName,
+        replyTypeName:
+          if replyType.kind == nnkIdent and $replyType == "void":
+            ""
+          else:
+            nimTypeNameRepr(replyType),
+        timeoutMs: timeoutMs,
+        doc: extractDocComment(prc),
+      )
+    )
+
 macro ffiReverse*(args: varargs[untyped]): untyped =
   ## Declares a bodyless proc that the host implements at runtime.
   requireBeforeGenBindings("`.ffiReverse.`")
@@ -2150,7 +2186,10 @@ macro ffiReverse*(args: varargs[untyped]): untyped =
           error(
             where & ": an {.ffiHandle.} type cannot cross to the host in a reverse call"
           )
-    return buildPollFFIReverseProc(prc, pragmaArgs.wireName, pragmaArgs.timeoutNode)
+    let pollStmts =
+      buildPollFFIReverseProc(prc, pragmaArgs.wireName, pragmaArgs.timeoutNode)
+    registerPollReverse(prc, userProcName, pragmaArgs.wireName, pragmaArgs.timeoutMs)
+    return pollStmts
   else:
     return buildFFIReverseProc(prc, args[0 ..^ 2])
 
@@ -2370,6 +2409,15 @@ proc bindingsSrcPath(outDir, explicit, projectFull: string): string {.compileTim
     buildRelativePath(projectFull, outDir)
 
 when defined(ffiGenBindings):
+  template callbackReverseRegistry(): seq[FFIReverseMeta] =
+    ## The generators that only know the callback model's reverse calls are given none
+    ## under the poll model, where the C++ generator alone reads them. A template, not
+    ## a proc: the registry is read where the generator is called.
+    when defined(ffiPollMode):
+      newSeq[FFIReverseMeta]()
+    else:
+      ffiReverseRegistry()
+
   proc emitBindingsFor(
       lang: string, genProcs: seq[FFIProcMeta], libName, outDir, srcRel: string
   ) {.compileTime.} =
@@ -2384,7 +2432,7 @@ when defined(ffiGenBindings):
         srcRel,
         ffiEventRegistry(),
         ffiConstRegistry(),
-        ffiReverseRegistry(),
+        callbackReverseRegistry(),
         ffiReverseEventRegistry(),
       )
     of "cpp", "c++":
@@ -2408,7 +2456,7 @@ when defined(ffiGenBindings):
         srcRel,
         ffiEventRegistry(),
         ffiConstRegistry(),
-        ffiReverseRegistry(),
+        callbackReverseRegistry(),
         ffiReverseEventRegistry(),
       )
     of "cddl":

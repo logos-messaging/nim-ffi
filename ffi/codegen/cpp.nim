@@ -40,6 +40,7 @@ const
   PollExportsTpl = staticRead("templates/cpp/poll_exports.hpp.tpl")
   PollContextTpl = staticRead("templates/cpp/poll_context.hpp.tpl")
   PollItemsTpl = staticRead("templates/cpp/poll_items.hpp.tpl")
+  PollResponderTpl = staticRead("templates/cpp/poll_responder.hpp.tpl")
 
 func destroyStmt(libName: string, hasListeners: bool): string =
   if not hasListeners:
@@ -488,6 +489,9 @@ proc emitPollClient(
       .strip(leading = false)
   )
   lines.add("")
+  if reverse.len > 0:
+    lines.add(PollResponderTpl.strip(leading = false))
+    lines.add("")
 
   var createMethods: seq[string] = @[]
   for ctor in ctors:
@@ -554,6 +558,33 @@ proc emitPollClient(
     )
     eventMethods.add("")
 
+  var reverseMethods: seq[string] = @[]
+  for r in reverse:
+    let hasArgs = r.argsTypeName.len > 0
+    reverseMethods.add(renderMemberDocComment(r.doc))
+    reverseMethods.add(
+      templateItem(PollItemsTpl, if hasArgs: "reverse" else: "reverse_noargs")
+        .multiReplace(
+          ("{{PASCAL}}", capitalizeFirstLetter(r.nimProcName)),
+          ("{{WIRE}}", r.wireName),
+          (
+            "{{ARGS}}",
+            if hasArgs:
+              nimTypeToCpp(r.argsTypeName)
+            else:
+              "",
+          ),
+          (
+            "{{REPLY}}",
+            if r.replyTypeName.len > 0:
+              nimTypeToCpp(r.replyTypeName)
+            else:
+              "void",
+          ),
+        )
+    )
+    reverseMethods.add("")
+
   var keep: seq[string] = @[]
   if events.len > 0:
     keep.add("events")
@@ -572,6 +603,7 @@ proc emitPollClient(
         ("{{CREATE_METHODS}}\n", lineBlock(createMethods)),
         ("{{METHODS}}\n", lineBlock(methods)),
         ("{{EVENT_METHODS}}\n", lineBlock(eventMethods)),
+        ("{{REVERSE_METHODS}}\n", lineBlock(reverseMethods)),
         ("{{CTX}}", ctxTypeName),
         ("{{LIB}}", libName),
       )
