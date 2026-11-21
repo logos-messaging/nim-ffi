@@ -5,7 +5,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <atomic>
+#include <mutex>
 #include <thread>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 using namespace nim_ffi;
 
@@ -31,9 +36,12 @@ static int fakeCreate(const uint8_t*, size_t, void** ctx, uint64_t* id) {
   return NIMFFI_RET_OK;
 }
 static int fakeDestroy(void*) { return NIMFFI_RET_OK; }
+static std::mutex qmu;  // the pump thread polls while the test thread pushes
 static int fakePoll(void*, int32_t timeoutMs, const PollResult** out) {
   if (pollRet >= 0) return pollRet;
+  std::unique_lock<std::mutex> guard(qmu);
   if (queue.empty()) {
+    guard.unlock();
     std::this_thread::sleep_for(std::chrono::milliseconds(timeoutMs));
     return NIMFFI_RET_TIMEOUT;
   }
@@ -51,7 +59,11 @@ static int fakePoll(void*, int32_t timeoutMs, const PollResult** out) {
   *out = &cur;
   return NIMFFI_RET_OK;
 }
-static int64_t fakePollFd(void*) { return 7; }
+static std::atomic<int> pollFdCalls{0};
+static int64_t fakePollFd(void*) {
+  ++pollFdCalls;
+  return 7;
+}
 static int fakeReverseReply(void*, uint64_t callId, int ret, const uint8_t*, size_t) {
   lastReverseCall = callId;
   lastReverseRet = ret;
@@ -97,7 +109,7 @@ int main() {
     script = [](uint64_t id) { queue.push_back({NIMFFI_MSG_REPLY, id, 0, NIMFFI_RET_OK, {2}}); };
     Reply next = h.call(fakeMethod, {}, kShort);
     CHECK(next.ret == NIMFFI_RET_OK && next.payload == Bytes({2}));
-    h.drain();
+    h.poll();
     CHECK(queue.empty());
   }
   {  // a reverse call raised while waiting is answered from the handler
@@ -137,7 +149,7 @@ int main() {
     int seen = 0;
     CHECK(h.submit(fakeMethod, {}, [&](const Reply& r) { seen += (r.payload == Bytes({3})); }) ==
           NIMFFI_RET_OK);
-    h.drain();
+    h.poll();
     CHECK(seen == 1);
   }
   {  // a library reply that itself says TIMEOUT is a reply, not the host's deadline
@@ -148,7 +160,7 @@ int main() {
     CHECK(r.ret == NIMFFI_RET_TIMEOUT && r.error == "x");
     script = [](uint64_t id) { queue.push_back({NIMFFI_MSG_REPLY, id, 0, NIMFFI_RET_OK, {}}); };
     CHECK(h.call(fakeMethod, {}, kShort).ret == NIMFFI_RET_OK);
-    h.drain();  // nothing stale left behind
+    h.poll();  // nothing stale left behind
     CHECK(queue.empty());
   }
   {  // a submit still pending when the context closes hears about it
@@ -159,7 +171,7 @@ int main() {
     CHECK(h.submit(fakeMethod, {}, [&](const Reply& r) { closed += (r.ret == NIMFFI_RET_CLOSED); }) ==
           NIMFFI_RET_OK);
     queue.push_back({NIMFFI_MSG_CLOSED, 0, 0, NIMFFI_RET_OK, {}});
-    h.drain();
+    h.poll();
     CHECK(closed == 1 && !h.alive());
   }
   {  // destroy() also fails what is pending
@@ -175,7 +187,7 @@ int main() {
     Host h(lib());
     up(h);
     pollRet = NIMFFI_RET_CLOSED;
-    h.drain();
+    h.poll();
     pollRet = -1;
     CHECK(!h.alive());
   }
@@ -186,16 +198,144 @@ int main() {
     createRet = NIMFFI_RET_OK;
     CHECK(r.ret == NIMFFI_RET_ERR && !h.alive());
   }
-  {  // drain() does not wait for a call another thread is pumping
+  {  // poll() does not wait for a call another thread is pumping
     Host h(lib());
     up(h);
     script = nullptr;
     std::thread t([&] { h.call(fakeMethod, {}, std::chrono::milliseconds(300)); });
     std::this_thread::sleep_for(std::chrono::milliseconds(60));
     const auto start = std::chrono::steady_clock::now();
-    h.drain();
+    h.poll();
     CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(100));
     t.join();
+  }
+  {  // a host attached to a context the library owns serves static calls and never destroys it
+    static int destroyed = 0;
+    Library l = lib();
+    l.destroy = [](void*) { ++destroyed; return NIMFFI_RET_OK; };
+    {
+      Host h(l);
+      CHECK(!h.attach(nullptr));
+      CHECK(h.attach(&fakeCtx) && h.alive());
+      CHECK(!h.attach(&fakeCtx));  // already has a context
+      queue.push_back({NIMFFI_MSG_REPLY, nextId + 1, 0, NIMFFI_RET_OK, {5}});
+      Reply r = h.call(
+          [](const uint8_t*, size_t, uint64_t* id) { *id = ++nextId; return NIMFFI_RET_OK; }, {},
+          kShort);
+      CHECK(r.ret == NIMFFI_RET_OK && r.payload == Bytes({5}));
+    }
+    CHECK(destroyed == 0);
+  }
+  {  // a handler that holds the pump too long is reported, with its name and time
+    Host h(lib());
+    up(h);
+    std::string what;
+    std::chrono::milliseconds took{0};
+    h.onSlowHandler([&](const char* w, std::chrono::milliseconds t) { what = w; took = t; });
+    h.onEvent([](uint64_t, const uint8_t*, size_t) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    });
+    queue.push_back({NIMFFI_MSG_EVENT, 0, 1, NIMFFI_RET_OK, {}});
+    h.poll();
+    CHECK(what.find("event") != std::string::npos && took >= std::chrono::milliseconds(100));
+    what.clear();
+    h.setSlowHandlerLimit(std::chrono::milliseconds(0));  // off
+    queue.push_back({NIMFFI_MSG_EVENT, 0, 1, NIMFFI_RET_OK, {}});
+    h.poll();
+    CHECK(what.empty());
+  }
+  {  // poll() serves what is waiting and says how many
+    Host h(lib());
+    up(h);
+    int events = 0;
+    h.onEvent([&](uint64_t, const uint8_t*, size_t) { ++events; });
+    CHECK(h.poll() == 0);
+    queue.push_back({NIMFFI_MSG_EVENT, 0, 1, NIMFFI_RET_OK, {}});
+    queue.push_back({NIMFFI_MSG_EVENT, 0, 1, NIMFFI_RET_OK, {}});
+    CHECK(h.poll() == 2 && events == 2);
+    CHECK(h.poll() == 0);
+  }
+  {  // runLoop() serves on the calling thread until stop(); a stop() beforehand ends it at once
+    Host h(lib());
+    up(h);
+    std::atomic<int> events{0};
+    h.onEvent([&](uint64_t, const uint8_t*, size_t) { ++events; });
+    h.stop();
+    h.runLoop();  // returns immediately, and the stop is consumed
+    std::thread t([&] { h.runLoop(); });
+    {
+      std::lock_guard<std::mutex> guard(qmu);
+      queue.push_back({NIMFFI_MSG_EVENT, 0, 1, NIMFFI_RET_OK, {}});
+    }
+    for (int i = 0; i < 100 && events.load() == 0; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    CHECK(events.load() == 1);  // served without a wake: the slice bounds the delay
+    h.stop();
+    t.join();
+  }
+  {  // runLoop() also ends when the context closes
+    Host h(lib());
+    up(h);
+    std::thread t([&] { h.runLoop(); });
+    {
+      std::lock_guard<std::mutex> guard(qmu);
+      queue.push_back({NIMFFI_MSG_CLOSED, 0, 0, NIMFFI_RET_OK, {}});
+    }
+    t.join();  // would hang if runLoop() ignored the close
+    CHECK(!h.alive());
+  }
+#ifndef _WIN32
+  {  // runLoop() does not spin while another thread holds the serving lock
+    int fds[2];
+    CHECK(pipe(fds) == 0);
+    static int pipeRead = fds[0];
+    Library l = lib();
+    l.poll_fd = [](void*) -> int64_t {
+      ++pollFdCalls;
+      return pipeRead;
+    };
+    const char byte = 'x';
+    CHECK(write(fds[1], &byte, 1) == 1);  // the line stays raised: messages "wait"
+    Host h(l);
+    up(h);
+    h.onEvent([](uint64_t, const uint8_t*, size_t) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(300));  // a slow handler
+    });
+    h.setSlowHandlerLimit(std::chrono::milliseconds(0));
+    {
+      std::lock_guard<std::mutex> guard(qmu);
+      queue.push_back({NIMFFI_MSG_EVENT, 0, 1, NIMFFI_RET_OK, {}});
+    }
+    pollFdCalls = 0;
+    std::thread serving([&] { h.poll(); });  // holds the lock for 300 ms
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    std::thread loop([&] { h.runLoop(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    CHECK(pollFdCalls.load() < 1000);  // a busy loop would make millions
+    h.stop();
+    loop.join();
+    serving.join();
+    close(fds[0]);
+    close(fds[1]);
+  }
+#endif
+  {  // destroying a Host stops and waits for a runLoop() still running on another thread
+    auto* h = new Host(lib());
+    up(*h);
+    std::thread loop([&] { h->runLoop(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    delete h;  // must not free the Host under the loop thread
+    loop.join();
+  }
+  {  // a stop() that arrives after one was consumed is kept for the next runLoop()
+    Host h(lib());
+    up(h);
+    h.stop();
+    h.runLoop();  // consumes it
+    std::thread t([&] { h.runLoop(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    h.stop();
+    t.join();  // a stale flag would have ended the loop early; a lost stop would hang here
   }
   std::puts("ok");
   return 0;
