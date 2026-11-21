@@ -22,13 +22,19 @@ file(GENERATE OUTPUT "${NIM_BUILD_STAMP}"
 
 find_program(NIM_EXECUTABLE nim REQUIRED)
 
+# Where the dylib is built: the repository root unless the including CMakeLists says
+# otherwise (a build of the same library in another model needs its own file).
+if(NOT DEFINED NIM_FFI_LIB_OUT_DIR)
+    set(NIM_FFI_LIB_OUT_DIR "${REPO_ROOT}")
+endif()
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    set(NIM_LIB_FILE "${REPO_ROOT}/lib${NIM_FFI_LIB}.dylib")
+    set(NIM_LIB_FILE "${NIM_FFI_LIB_OUT_DIR}/lib${NIM_FFI_LIB}.dylib")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    set(NIM_LIB_FILE "${REPO_ROOT}/${NIM_FFI_LIB}.dll")
-    set(NIM_IMPLIB_FILE "${REPO_ROOT}/${NIM_FFI_LIB}.lib")
+    set(NIM_LIB_FILE "${NIM_FFI_LIB_OUT_DIR}/${NIM_FFI_LIB}.dll")
+    set(NIM_IMPLIB_FILE "${NIM_FFI_LIB_OUT_DIR}/${NIM_FFI_LIB}.lib")
 else()
-    set(NIM_LIB_FILE "${REPO_ROOT}/lib${NIM_FFI_LIB}.so")
+    set(NIM_LIB_FILE "${NIM_FFI_LIB_OUT_DIR}/lib${NIM_FFI_LIB}.so")
 endif()
 
 # On Windows the default Nim toolchain (mingw gcc) doesn't emit an import
@@ -71,6 +77,15 @@ else()
     set_target_properties(${NIM_FFI_LIB} PROPERTIES IMPORTED_LOCATION "${NIM_LIB_FILE}")
 endif()
 add_dependencies(${NIM_FFI_LIB} ${NIM_FFI_LIB}_nim_lib)
+
+# An executable that links the dylib finds it where it was built. CMake only adds that
+# rpath for a dylib that already exists at configure time (on macOS), so a first build in
+# a tree where nothing had built the library yet could not load it.
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    get_filename_component(_nim_ffi_lib_dir "${NIM_LIB_FILE}" DIRECTORY)
+    set_property(TARGET ${NIM_FFI_LIB} APPEND PROPERTY
+        INTERFACE_LINK_OPTIONS "-Wl,-rpath,${_nim_ffi_lib_dir}")
+endif()
 
 # Absolute path to the runtime library (DLL/dylib/so). Exposed via the cache so
 # consumers in other directories can stage the DLL next to their executable on

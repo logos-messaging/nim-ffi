@@ -280,20 +280,26 @@ task test_c_e2e, "Build and run the C end-to-end tests (timer + echo)":
   runOrQuit "cmake --build tests/e2e/c/build --config Debug"
   runOrQuit "ctest --test-dir tests/e2e/c/build --output-on-failure -C Debug"
 
-proc runExample(dir: string) =
+proc runExample(dir: string, exe = "my_timer_example") =
   runOrQuit "cmake -S " & dir & " -B " & dir & "/build"
   runOrQuit "cmake --build " & dir & "/build --config Debug"
   # Visual Studio is multi-config: the binary lands under build/Debug/.
   when defined(windows):
-    runOrQuit dir & "/build/Debug/my_timer_example.exe"
+    runOrQuit dir & "/build/Debug/" & exe & ".exe"
   else:
-    runOrQuit dir & "/build/my_timer_example"
+    runOrQuit dir & "/build/" & exe
 
 task run_examples, "Build and run the C and C++ example programs":
   runOrQuit "nimble genbindings_c"
   runOrQuit "nimble genbindings_cpp"
   runExample("examples/timer/c_bindings")
   runExample("examples/timer/cpp_bindings")
+  runOrQuit "nimble genbindings_cpp_poll"
+  runExample("examples/timer/cpp_poll_bindings")
+
+task run_examples_poll, "Build and run the poll-mode C++ example program":
+  runOrQuit "nimble genbindings_cpp_poll"
+  runExample("examples/timer/cpp_poll_bindings")
 
 task run_examples_rust, "Build and run the Rust example programs":
   const manifest = "examples/timer/rust_bindings/Cargo.toml"
@@ -367,6 +373,12 @@ task genbindings_cddl, "Generate CDDL schema for the timer example":
 task genbindings_cpp, "Generate C++ bindings for the timer example":
   runOrQuit genBindingsCmd(nimFlagsOrc, timerSrc, "cpp")
   runOrQuit genBindingsCmd(nimFlagsRefc, timerSrc, "cpp")
+
+task genbindings_cpp_poll, "Generate the timer example's C++ bindings for the poll model":
+  # The same source as the callback bindings; only the model differs.
+  runOrQuit genBindingsCmd(
+    nimFlagsOrc & " -d:ffiPollMode", timerSrc, "cpp", "cpp_poll_bindings"
+  )
 
 task genbindings_cpp_echo, "Generate C++ bindings for the echo example":
   runOrQuit genBindingsCmd(nimFlagsOrc, echoSrc, "cpp")
