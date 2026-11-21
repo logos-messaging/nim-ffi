@@ -51,6 +51,9 @@ proc hostTick*(): Future[Result[string, string]] {.ffiReverse, gcsafe.}
 proc rev_tick*(lib: ReverseLib): Future[Result[string, string]] {.ffi.} =
   return await hostTick()
 
+proc hostDocumented*(): Future[Result[string, string]] {.ffiReverse.} =
+  ## A doc comment is how a bodyless proc keeps its doc, so it is not a body.
+
 proc hostRenamed*(
   url: string
 ): Future[Result[string, string]] {.ffiReverse("asked_by_name", timeout = 300).}
@@ -69,6 +72,8 @@ static:
     of "host_sum":
       doAssert r.argsTypeName == "HostSumHostCall" and r.replyTypeName == "int"
       doAssert r.params.len == 2 and r.params[1].name == "b"
+    of "host_documented":
+      doAssert r.doc.len > 0
     of "host_tick":
       doAssert r.argsTypeName == "" and r.params.len == 0
     of "host_notify":
@@ -78,7 +83,10 @@ static:
     else:
       discard
   doAssert seen ==
-    @["host_fetch", "host_sum", "host_notify", "host_tick", "asked_by_name"]
+    @[
+      "host_fetch", "host_sum", "host_notify", "host_tick", "host_documented",
+      "asked_by_name",
+    ]
   var sumFields: seq[string] = @[]
   for t in ffiTypeRegistry():
     if t.name == "HostSumHostCall":

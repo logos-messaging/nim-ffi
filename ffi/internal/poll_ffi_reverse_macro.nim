@@ -28,8 +28,14 @@ proc buildPollFFIReverseProc*(
   if prc.kind notin {nnkProcDef, nnkFuncDef}:
     error("`.ffiReverse.` must be applied to a proc declaration")
 
+  # A doc comment is how a bodyless proc keeps its doc, so it is not a body.
   let body = prc[^1]
-  if not (body.kind == nnkEmpty or (body.kind == nnkStmtList and body.len == 0)):
+  var hasBody = body.kind notin {nnkEmpty, nnkStmtList}
+  if body.kind == nnkStmtList:
+    for child in body:
+      if child.kind != nnkCommentStmt:
+        hasBody = true
+  if hasBody:
     error(
       "`.ffiReverse.` declares a call the host answers, so it takes no body; " &
         "remove the body of " & $prc[0]
