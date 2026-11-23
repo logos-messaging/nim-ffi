@@ -31,6 +31,14 @@ All notable changes to this project are documented in this file.
   library thread and may still fire after a timeout, until the handler ends.
 
 ### Changed
+- **`not_responding` and `responding` carry a `reason`.** `heartbeat` means the
+  FFI thread stalled and the context needs a recreate. `queueFull` means
+  sustained event-queue overflow, which recovers on its own. Each reason latches
+  and emits its own pair, so a `responding` ends only its own reason. The CBOR
+  payload gains a `reason` field; a decoder that rejects unknown fields must
+  update. Poll mode already had separate `not_responding` kinds
+  (`MsgNotRespondingHeartbeat`, `MsgNotRespondingQueueFull`), but its one
+  `MsgResponding` kind does not say which reason ends.
 - **An event-queue overflow drops and counts; it no longer wedges the context.**
   A full queue used to set a sticky flag that refused every later request until
   the context was recycled. Now the event is dropped and counted per reason

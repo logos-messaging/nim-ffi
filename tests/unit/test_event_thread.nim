@@ -151,6 +151,9 @@ when not defined(gcRefc):
       gBlockingEnabled.store(false)
 
       check waitCallbackTimeout(notif, 1500)
+      let decoded = cborDecode(payload(notif), EventEnvelope[NotRespondingEvent])
+      check decoded.isOk()
+      check decoded.value.payload.reason == NotRespondingReason.heartbeat
 
 type BackpressureState = object
   enteredLock: Lock
@@ -285,8 +288,14 @@ suite "queue overflow":
         .isOk()
 
       check waitCallbackTimeout(notif, 4 * EventOverflowSustainMs)
+      let decoded = cborDecode(payload(notif), EventEnvelope[NotRespondingEvent])
+      check decoded.isOk()
+      check decoded.value.payload.reason == NotRespondingReason.queueFull
       waitCallback(rsp)
       check rsp.retCode == RET_OK
       check ctx.eventDrops().ringFull > 0
 
       check waitCallbackTimeout(back, 6 * EventOverflowSustainMs)
+      let ended = cborDecode(payload(back), EventEnvelope[RespondingEvent])
+      check ended.isOk()
+      check ended.value.payload.reason == NotRespondingReason.queueFull
