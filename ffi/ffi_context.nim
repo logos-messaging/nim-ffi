@@ -306,6 +306,7 @@ proc startContextThreads*[T](ctx: ptr FFIContext[T]): Result[void, string] =
 
 proc initContextResources*[T](ctx: ptr FFIContext[T]): Result[void, string] =
   ## On failure, deferred cleanup closes partial state; caller releases the slot.
+  ctx.myLib = nil
   ctx.myLibOwned = false
   ctx.myLibRefd = false
   ctx.lifecycle.store(CtxLifecycle.Active)

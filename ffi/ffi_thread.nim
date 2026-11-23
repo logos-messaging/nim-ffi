@@ -496,6 +496,9 @@ proc ffiThreadBody[T](ctx: ptr FFIContext[T]) {.thread.} =
   defer:
     onFFIThread = false
     servedCtx = nil
+    # The fallback lib lives in this thread's `ffiRun` closure and dies with it.
+    if not ctx.myLibOwned:
+      ctx.myLib = nil
     unregisterWaitedSignal(ctx.reqSignal)
     # Free handle refs on the thread that allocated them (refc heap is thread-local).
     ctx[].handles.releaseAll()
