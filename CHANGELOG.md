@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **The C header of the poll-mode host.** `host/nim_ffi.h` declares what a
+  `-d:ffiPollMode` library hands out to a host: the `PollResult` message and its
+  `NIMFFI_MSG_*` kinds, the `NIMFFI_RET_*` codes and `nimffi_name_id()`. A test
+  keeps it equal to `ffi/ret_codes.nim` and `ffi/ffi_msg.nim`.
+- **The C++ host of the poll mode.** `host/nim_ffi_host.hpp` is a header-only
+  C++17 host for one context, on top of `host/nim_ffi.h`. It owns no thread: a call pumps on the calling
+  thread until its reply, serving events and reverse calls on the way. Events and
+  reverse calls are served by `runLoop()` (blocks the calling thread until
+  `stop()`, for an app with no loop of its own) or by `poll()` (serves what is
+  waiting and returns, for a loop that calls it each iteration or when `fd()` is
+  readable); the OS-specific wait is inside `Host`, so a developer never touches
+  the fd, and neither call starts a thread. `~Host` stops and waits for a running
+  `runLoop()`, and defining `NIM_FFI_NO_RUNLOOP` leaves `runLoop()` out together
+  with the `<poll.h>` / `<windows.h>` include it needs. `attach(token)` serves a
+  context the library owns (its static context) without destroying it, and `Host`
+  times every handler and callback, calling `onSlowHandler` (stderr by default)
+  past `setSlowHandlerLimit` (50 ms), since a handler that runs long delays every
+  message behind it.
 - Under `-d:ffiPollMode` the generated `<lib>.h` declares the poll shape (the
   message, every export as `(ctx, req, len, id_out)`, the fixed exports, the
   codecs) instead of the callback ABI.
