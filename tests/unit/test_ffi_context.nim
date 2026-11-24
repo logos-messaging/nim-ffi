@@ -134,6 +134,34 @@ suite "FFIContextPool":
     check staticPool.destroyFFIContext(filler.pop()).isOk()
     check staticPool.staticFFIContext().isOk()
 
+  test "a reclaimed static slot does not keep the dead thread's fallback lib":
+    var d: CallbackData
+    initCallbackData(d)
+    defer:
+      deinitCallbackData(d)
+
+    let staticCtx = staticPool.staticFFIContext().valueOr:
+      assert false, "staticFFIContext failed: " & $error
+      return
+    check sendRequestToFFIThread(
+      staticCtx, PingRequest.ffiNewReq(testCallback, addr d, "static".cstring)
+    )
+      .isOk()
+    waitCallback(d)
+    check d.retCode == RET_OK
+    check not staticCtx.myLib.isNil()
+
+    check staticPool.destroyStaticFFIContext().isOk()
+    check staticCtx.myLib.isNil()
+
+    let ctx = staticPool.createFFIContext().valueOr:
+      assert false, "createFFIContext(pool) failed: " & $error
+      return
+    defer:
+      check staticPool.destroyFFIContext(ctx).isOk()
+    check ctx == staticCtx
+    check ctx.myLib.isNil()
+
   test "requests are processed via pool context":
     var pool: FFIContextPool[TestLib]
     var d: CallbackData
