@@ -90,6 +90,15 @@ registerReqFFI(SlowRequest, lib: ptr TestPollLib):
     await sleepAsync(delayMs.milliseconds)
     return ok("slept")
 
+var gBlocking: Atomic[bool]
+
+registerReqFFI(BlockThread, lib: ptr TestPollLib):
+  proc(ms: int): Future[Result[string, string]] {.async.} =
+    gBlocking.store(true)
+    # Blocks the whole FFI thread, so a request sent now waits in the ingress queue.
+    os.sleep(ms)
+    return ok("blocked")
+
 type PolledMsg = object
   ret: cint
   kind: uint32
@@ -531,3 +540,28 @@ suite "destroy":
       withLock outb.pollLock:
         outb.queueLive = true
       check got.ret == RET_TIMEOUT
+
+suite "recycle":
+  test "a reused slot never hands its next owner a reply of the old one":
+    const BlockMs = 200
+    var pool: FFIContextPool[TestPollLib]
+    let first = pool.createFFIContext().valueOr:
+      raiseAssert "create the first context: " & error
+    # Keeps a context live, so the recycle keeps the slot and its queues.
+    let other = pool.createFFIContext().valueOr:
+      raiseAssert "create the second context: " & error
+    defer:
+      discard pool.destroyFFIContext(other)
+
+    submit(first, BlockThread, BlockMs)
+    waitUntil(gBlocking.load())
+    submit(first, Ping)
+    check pool.recycleFFIContext(first).isOk()
+
+    let next = pool.createFFIContext().valueOr:
+      raiseAssert "create the next context: " & error
+    defer:
+      discard pool.destroyFFIContext(next)
+    check next == first
+    let got = pollMsg(next, 100)
+    check got.ret == RET_TIMEOUT

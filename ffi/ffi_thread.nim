@@ -350,13 +350,15 @@ proc drainOngoing(ongoing: ptr seq[Future[void]]): Future[bool] {.async.} =
 
 proc resetForNextOwner[T](ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]) =
   freeLib(ctx)
-  when not defined(ffiPollMode):
-    clearListeners(ctx[].eventRegistry)
   when defined(ffiPollMode):
+    # Before the drop, so the drop frees the replies that this queues.
+    rejectQueuedRequests(ctx, ctx.currentGeneration())
     # The host polling this claim is told it ended, and what it never collected
     # is dropped: the next owner of the slot must not be handed it.
     ctx[].outbound.closeOutbound(ctx.currentGeneration())
     ctx[].outbound.dropQueuedMessages(ctx[].eventQueue)
+  else:
+    clearListeners(ctx[].eventRegistry)
   ctx[].reverse.purgeQueue()
   ctx[].reverse.freeAllReplies()
   ctx[].reverse.closing.store(false)
@@ -365,8 +367,9 @@ proc resetForNextOwner[T](ctx: ptr FFIContext[T], ongoing: ptr seq[Future[void]]
   ctx[].handles.releaseAll()
   # Same reason: the next owner must not inherit the drops of the old one.
   ctx[].eventQueue.resetDropCounts()
-  # Still claimed by the owner being recycled, so its own requests are the ones to fail.
-  rejectQueuedRequests(ctx, ctx.currentGeneration())
+  when not defined(ffiPollMode):
+    # Still claimed by the owner being recycled, so its own requests are the ones to fail.
+    rejectQueuedRequests(ctx, ctx.currentGeneration())
   ongoing[].setLen(0)
 
 proc finishRecycle[T](ctx: ptr FFIContext[T], failure: RecycleFailure) =
