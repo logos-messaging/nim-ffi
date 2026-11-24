@@ -22,6 +22,25 @@ typedef struct {
     const char* shouted;
     const char* prefix;
 } ShoutResponse;
+#ifndef NIM_FFI_BUILTIN_NOT_RESPONDING_REASON_DEFINED
+#define NIM_FFI_BUILTIN_NOT_RESPONDING_REASON_DEFINED
+typedef enum {
+    NOT_RESPONDING_REASON_HEARTBEAT = 0,
+    NOT_RESPONDING_REASON_QUEUE_FULL = 1
+} NotRespondingReason;
+#endif
+#ifndef NIM_FFI_BUILTIN_NOT_RESPONDING_EVENT_DEFINED
+#define NIM_FFI_BUILTIN_NOT_RESPONDING_EVENT_DEFINED
+typedef struct {
+    NotRespondingReason reason;
+} NotRespondingEvent;
+#endif
+#ifndef NIM_FFI_BUILTIN_RESPONDING_EVENT_DEFINED
+#define NIM_FFI_BUILTIN_RESPONDING_EVENT_DEFINED
+typedef struct {
+    NotRespondingReason reason;
+} RespondingEvent;
+#endif
 typedef struct {
     EchoConfig config;
 } EchoCreateCtorReq;
@@ -128,6 +147,76 @@ static inline void echo_free_ShoutResponse(ShoutResponse* v) {
     if (!v) return;
     do { free((void*)v->shouted); v->shouted = NULL; } while (0);
     do { free((void*)v->prefix); v->prefix = NULL; } while (0);
+}
+static inline CborError echo_enc_NotRespondingReason(
+        CborEncoder* e, const NotRespondingReason* v) {
+    switch (*v) {
+    case NOT_RESPONDING_REASON_HEARTBEAT: return cbor_encode_text_stringz(e, "heartbeat");
+    case NOT_RESPONDING_REASON_QUEUE_FULL: return cbor_encode_text_stringz(e, "queueFull");
+    }
+    return CborErrorImproperValue;
+}
+static inline CborError echo_dec_NotRespondingReason(
+        CborValue* it, NotRespondingReason* out) {
+    if (!cbor_value_is_text_string(it)) return CborErrorImproperValue;
+    size_t len = 0;
+    CborError err = cbor_value_get_string_length(it, &len);
+    if (err) return err;
+    char buf[10];
+    if (len >= sizeof(buf)) return CborErrorImproperValue;
+    size_t copied = sizeof(buf);
+    err = cbor_value_copy_text_string(it, buf, &copied, NULL);
+    if (err) return err;
+    buf[len] = '\0';
+    if (strcmp(buf, "heartbeat") == 0) { *out = NOT_RESPONDING_REASON_HEARTBEAT; return cbor_value_advance(it); }
+    if (strcmp(buf, "queueFull") == 0) { *out = NOT_RESPONDING_REASON_QUEUE_FULL; return cbor_value_advance(it); }
+    return CborErrorImproperValue;
+}
+static inline CborError echo_enc_NotRespondingEvent(
+        CborEncoder* e, const NotRespondingEvent* v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(e, &m, 1);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "reason");
+    if (err) return err;
+    err = echo_enc_NotRespondingReason(&m, &v->reason);
+    if (err) return err;
+    return cbor_encoder_close_container(e, &m);
+}
+static inline CborError echo_dec_NotRespondingEvent(
+        CborValue* it, NotRespondingEvent* out) {
+    if (!cbor_value_is_map(it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(it, "reason", &field);
+    if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = echo_dec_NotRespondingReason(&field, &out->reason);
+    if (err) return err;
+    return cbor_value_advance(it);
+}
+static inline CborError echo_enc_RespondingEvent(
+        CborEncoder* e, const RespondingEvent* v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(e, &m, 1);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "reason");
+    if (err) return err;
+    err = echo_enc_NotRespondingReason(&m, &v->reason);
+    if (err) return err;
+    return cbor_encoder_close_container(e, &m);
+}
+static inline CborError echo_dec_RespondingEvent(
+        CborValue* it, RespondingEvent* out) {
+    if (!cbor_value_is_map(it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(it, "reason", &field);
+    if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = echo_dec_NotRespondingReason(&field, &out->reason);
+    if (err) return err;
+    return cbor_value_advance(it);
 }
 static inline CborError echo_enc_EchoCreateCtorReq(
         CborEncoder* e, const EchoCreateCtorReq* v) {
@@ -286,11 +375,56 @@ static inline CborError echo_encv_EchoShoutAnonReq(CborEncoder* e, const void* v
 static inline CborError echo_decv_ShoutResponse(CborValue* it, void* v) { return echo_dec_ShoutResponse(it, (ShoutResponse*)v); }
 static inline CborError echo_decv_Str(CborValue* it, void* v) { return nimffi_dec_str(it, (const char**)v); }
 
+/* Event listener machinery */
+typedef void (*EchoNotRespondingFn)(const NotRespondingEvent* evt, void* user_data);
+typedef struct { EchoNotRespondingFn fn; void* user_data; } EchoNotRespondingBox;
+static void echo_not_responding_trampoline(int ret, const char* msg, size_t len, void* ud) {
+    if (!ud || ret != 0 || !msg || len == 0) return;
+    EchoNotRespondingBox* box = (EchoNotRespondingBox*)ud;
+    if (!box->fn) return;
+    CborParser parser;
+    CborValue it;
+    if (cbor_parser_init((const uint8_t*)msg, len, 0, &parser, &it) != CborNoError) return;
+    if (!cbor_value_is_map(&it)) return;
+    CborValue payloadField;
+    if (cbor_value_map_find_value(&it, "payload", &payloadField) != CborNoError) return;
+    NotRespondingEvent payload;
+    memset(&payload, 0, sizeof(payload));
+    if (echo_dec_NotRespondingEvent(&payloadField, &payload) != CborNoError) return;
+    box->fn(&payload, box->user_data);
+}
+
+typedef void (*EchoRespondingFn)(const RespondingEvent* evt, void* user_data);
+typedef struct { EchoRespondingFn fn; void* user_data; } EchoRespondingBox;
+static void echo_responding_trampoline(int ret, const char* msg, size_t len, void* ud) {
+    if (!ud || ret != 0 || !msg || len == 0) return;
+    EchoRespondingBox* box = (EchoRespondingBox*)ud;
+    if (!box->fn) return;
+    CborParser parser;
+    CborValue it;
+    if (cbor_parser_init((const uint8_t*)msg, len, 0, &parser, &it) != CborNoError) return;
+    if (!cbor_value_is_map(&it)) return;
+    CborValue payloadField;
+    if (cbor_value_map_find_value(&it, "payload", &payloadField) != CborNoError) return;
+    RespondingEvent payload;
+    memset(&payload, 0, sizeof(payload));
+    if (echo_dec_RespondingEvent(&payloadField, &payload) != CborNoError) return;
+    box->fn(&payload, box->user_data);
+}
+
 /* ============================================================ */
 /* High-level context wrapper                                   */
 /* ============================================================ */
 typedef struct {
+    uint64_t id;
+    void* box;
+} EchoCtxListener;
+
+typedef struct {
     void* ptr;
+    EchoCtxListener* listeners;
+    size_t listeners_len;
+    size_t listeners_cap;
 } EchoCtx;
 
 typedef void (*EchoCreateFn)(int err_code, EchoCtx* ctx, const char* err_msg, void* user_data);
@@ -370,8 +504,69 @@ static inline int echo_ctx_destroy(EchoCtx* ctx) {
     if (!ctx) return NIMFFI_RET_OK;
     int rc = NIMFFI_RET_OK;
     if (ctx->ptr) { rc = echo_destroy(ctx->ptr); ctx->ptr = NULL; }
+    if (rc == NIMFFI_RET_OK) {
+        for (size_t i = 0; i < ctx->listeners_len; i++) free(ctx->listeners[i].box);
+    }
+    free(ctx->listeners);
     free(ctx);
     return rc;
+}
+
+/** The library stopped responding: its FFI thread stalled or the event queue overflowed. */
+static inline uint64_t echo_ctx_add_not_responding_listener(EchoCtx* ctx, EchoNotRespondingFn fn, void* user_data) {
+    EchoNotRespondingBox* box = (EchoNotRespondingBox*)malloc(sizeof(EchoNotRespondingBox));
+    if (!box) return 0;
+    box->fn = fn;
+    box->user_data = user_data;
+    uint64_t id = echo_add_event_listener(ctx->ptr, "not_responding", echo_not_responding_trampoline, box);
+    if (id == 0) { free(box); return 0; }
+    if (ctx->listeners_len == ctx->listeners_cap) {
+        size_t ncap = ctx->listeners_cap ? ctx->listeners_cap * 2 : 4;
+        EchoCtxListener* grown = (EchoCtxListener*)realloc(ctx->listeners, ncap * sizeof(EchoCtxListener));
+        if (!grown) { echo_remove_event_listener(ctx->ptr, id); free(box); return 0; }
+        ctx->listeners = grown;
+        ctx->listeners_cap = ncap;
+    }
+    ctx->listeners[ctx->listeners_len].id = id;
+    ctx->listeners[ctx->listeners_len].box = box;
+    ctx->listeners_len++;
+    return id;
+}
+
+/** The library responds again after `not_responding`. */
+static inline uint64_t echo_ctx_add_responding_listener(EchoCtx* ctx, EchoRespondingFn fn, void* user_data) {
+    EchoRespondingBox* box = (EchoRespondingBox*)malloc(sizeof(EchoRespondingBox));
+    if (!box) return 0;
+    box->fn = fn;
+    box->user_data = user_data;
+    uint64_t id = echo_add_event_listener(ctx->ptr, "responding", echo_responding_trampoline, box);
+    if (id == 0) { free(box); return 0; }
+    if (ctx->listeners_len == ctx->listeners_cap) {
+        size_t ncap = ctx->listeners_cap ? ctx->listeners_cap * 2 : 4;
+        EchoCtxListener* grown = (EchoCtxListener*)realloc(ctx->listeners, ncap * sizeof(EchoCtxListener));
+        if (!grown) { echo_remove_event_listener(ctx->ptr, id); free(box); return 0; }
+        ctx->listeners = grown;
+        ctx->listeners_cap = ncap;
+    }
+    ctx->listeners[ctx->listeners_len].id = id;
+    ctx->listeners[ctx->listeners_len].box = box;
+    ctx->listeners_len++;
+    return id;
+}
+
+/** Unregister a listener and release the box that holds the handler. */
+static inline bool echo_ctx_remove_event_listener(EchoCtx* ctx, uint64_t id) {
+    if (id == 0) return false;
+    int rc = echo_remove_event_listener(ctx->ptr, id);
+    for (size_t i = 0; i < ctx->listeners_len; i++) {
+        if (ctx->listeners[i].id == id) {
+            free(ctx->listeners[i].box);
+            ctx->listeners[i] = ctx->listeners[ctx->listeners_len - 1];
+            ctx->listeners_len--;
+            break;
+        }
+    }
+    return rc == 0;
 }
 
 typedef void (*EchoShoutReplyFn)(int err_code, const ShoutResponse* reply, const char* err_msg, void* user_data);

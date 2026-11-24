@@ -2,21 +2,6 @@
 ## `ffi_context.nim`. Drains queued events into listeners and emits
 ## NotResponding/Responding on FFI-heartbeat stall/recovery.
 
-type
-  NotRespondingReason* {.pure.} = enum
-    heartbeat ## FFI thread stalled; recreate the context
-    queueFull ## sustained event-queue overflow; recovers on its own
-
-  NotRespondingEvent* = object
-    reason*: NotRespondingReason
-
-  RespondingEvent* = object
-    reason*: NotRespondingReason
-
-const
-  NotRespondingEventName* = "not_responding"
-  RespondingEventName* = "responding"
-
 proc dispatchToListeners[T](
     ctx: ptr FFIContext[T], eventName: string, data: pointer, dataLen: int
 ) =

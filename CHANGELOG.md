@@ -11,6 +11,16 @@ All notable changes to this project are documented in this file.
 - Two event names, or two reverse-call names, of one library that hash to the same
   `nameId` are now a compile error: a polled message carries that id instead of
   the name, so the host could not tell them apart.
+- **Typed listeners for the liveness events.** The C, C++ and Rust bindings now
+  have a typed registration for `not_responding` and `responding`, with no
+  `{.ffiEvent.}` declared: C `<lib>_ctx_add_not_responding_listener`, C++
+  `addOnNotRespondingListener`, Rust `add_not_responding_listener`. They share the
+  decoder of declared events. Both payloads carry `reason` (`NotRespondingReason`:
+  `heartbeat` or `queueFull`), so a host tells a wedged FFI thread from a sustained
+  queue overflow. The builtin C typedefs are guarded, so two library headers fit in
+  one translation unit. The CDDL schema does not list the builtin types. The raw
+  `add_event_listener` still works, and stays the way to receive
+  `reverse_worker_blocked` and `reverse_worker_recovered`.
 - **Rust: per-call timeout.** `ctx.with_timeout(Some(d)).echo(..)` and
   `.echo_async(..)` override the ctx default for one call; `with_timeout(None)`
   waits for the terminal `RET_OK`/`RET_ERR` with no Rust-side limit. Instance
@@ -39,6 +49,11 @@ All notable changes to this project are documented in this file.
   update. Poll mode already had separate `not_responding` kinds
   (`MsgNotRespondingHeartbeat`, `MsgNotRespondingQueueFull`), but its one
   `MsgResponding` kind does not say which reason ends.
+- **C++: declared event listeners keep the first letter of the event name.**
+  An `{.ffiEvent.}` name with no `On` prefix lost its first two letters:
+  `fooBar` gave `addOnOBarListener`. It now gives `addOnFooBarListener`. A name with
+  the `On` prefix keeps its old method name. Rename the call sites of the
+  affected listeners.
 - **An event-queue overflow drops and counts; it no longer wedges the context.**
   A full queue used to set a sticky flag that refused every later request until
   the context was recycled. Now the event is dropped and counted per reason

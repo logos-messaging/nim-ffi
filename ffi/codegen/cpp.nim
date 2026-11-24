@@ -1,6 +1,6 @@
 ## C++ binding generator: header-only binding + CMakeLists, CBOR over the wire.
 
-import std/strutils
+import std/[sequtils, strutils]
 import
   ./meta,
   ./string_helpers,
@@ -171,8 +171,9 @@ proc emitEventDispatcher(
   lines.add("    struct ListenerHandle { std::uint64_t id = 0; };")
   lines.add("")
   for ev in events:
+    let stem = capitalizeFirstLetter(ev.nimProcName)
     let methodName =
-      "addOn" & capitalizeFirstLetter(ev.nimProcName).substr(2) & "Listener"
+      "addOn" & (if stem.startsWith("On"): stem.substr(2) else: stem) & "Listener"
     lines.add(renderMemberDocComment(ev.doc))
     lines.add(
       "    ListenerHandle $1(std::function<void(const $2&)> handler) {" %
@@ -518,15 +519,37 @@ proc emitCallsClass(
   lines.add("};")
   lines.add("")
 
+proc emitTypes(lines: var seq[string], types: seq[FFITypeMeta]) =
+  ## Enums first: a struct codec that takes one must see its overload already declared.
+  var structTypes: seq[FFITypeMeta] = @[]
+  for t in types:
+    if t.isEnum():
+      emitEnumCborCodec(lines, t)
+    else:
+      structTypes.add(t)
+
+  for t in structTypes:
+    lines.add("struct $1 {" % [t.name])
+    for f in t.fields:
+      lines.add("    $1 $2;" % [nimTypeToCpp(f.typeName), f.name])
+    lines.add("};")
+    var fields: seq[(string, string)] = @[]
+    for f in t.fields:
+      fields.add((f.name, nimTypeToCpp(f.typeName)))
+    emitStructCborCodec(lines, t.name, fields)
+    lines.add("")
+
 proc generateCppHeader*(
     procs: seq[FFIProcMeta],
-    types: seq[FFITypeMeta],
+    declaredTypes: seq[FFITypeMeta],
     libName: string,
-    events: seq[FFIEventMeta] = @[],
+    declaredEvents: seq[FFIEventMeta] = @[],
     consts: seq[FFIConstMeta] = @[],
     reverse: seq[FFIReverseMeta] = @[],
     reverseEvents: seq[FFIReverseEventMeta] = @[],
 ): string =
+  let types = withBuiltinTypes(declaredTypes)
+  let events = withBuiltinEvents(libName, declaredEvents)
   var lines: seq[string] = @[]
 
   lines.add(HeaderPreludeTpl.replace("{{RET_CODES}}", cRetCodeDefines()))
@@ -559,29 +582,27 @@ proc generateCppHeader*(
       )
     lines.add("")
 
-  # Enums first: a struct codec that takes one must see its overload already declared.
-  var structTypes: seq[FFITypeMeta] = @[]
-  for t in types:
-    if t.isEnum():
-      emitEnumCborCodec(lines, t)
-    else:
-      structTypes.add(t)
+  let declaredNames = declaredTypes.mapIt(it.name)
+  let builtinNames = builtinTypes().mapIt(it.name)
+  func isBuiltin(t: FFITypeMeta): bool =
+    t.name in builtinNames and t.name notin declaredNames
 
-  if structTypes.len > 0:
+  let builtin = types.filterIt(it.isBuiltin())
+  let declared = types.filterIt(not it.isBuiltin())
+
+  # Two libraries share one translation unit, so the builtin types are defined once.
+  lines.add("#ifndef NIM_FFI_BUILTIN_EVENT_TYPES_HPP_INCLUDED")
+  lines.add("#define NIM_FFI_BUILTIN_EVENT_TYPES_HPP_INCLUDED")
+  emitTypes(lines, builtin)
+  lines.add("#endif")
+  lines.add("")
+
+  if declared.len > 0:
     lines.add("// ============================================================")
     lines.add("// User-declared FFI types")
     lines.add("// ============================================================")
     lines.add("")
-    for t in structTypes:
-      lines.add("struct $1 {" % [t.name])
-      for f in t.fields:
-        lines.add("    $1 $2;" % [nimTypeToCpp(f.typeName), f.name])
-      lines.add("};")
-      var fields: seq[(string, string)] = @[]
-      for f in t.fields:
-        fields.add((f.name, nimTypeToCpp(f.typeName)))
-      emitStructCborCodec(lines, t.name, fields)
-      lines.add("")
+  emitTypes(lines, declared)
 
   lines.add("// ============================================================")
   lines.add("// Per-proc request envelopes (CBOR encoded on the wire)")

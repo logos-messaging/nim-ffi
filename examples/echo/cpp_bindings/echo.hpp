@@ -53,6 +53,7 @@ extern "C" {
 #define NIMFFI_RET_OUT_OF_MEMORY 13
 #endif
 
+#include <unordered_map>
 // ============================================================
 // Result<T> — exception-free error channel
 // ============================================================
@@ -371,6 +372,72 @@ inline Result<T> decodeCborFFI(const std::vector<std::uint8_t>& bytes) {
 // ============================================================
 
 constexpr int64_t MAX_SHOUT_LEN = 512;
+
+#ifndef NIM_FFI_BUILTIN_EVENT_TYPES_HPP_INCLUDED
+#define NIM_FFI_BUILTIN_EVENT_TYPES_HPP_INCLUDED
+enum class NotRespondingReason {
+    heartbeat = 0,
+    queueFull = 1,
+};
+inline CborError encode_cbor(CborEncoder& e, const NotRespondingReason& v) {
+    switch (v) {
+    case NotRespondingReason::heartbeat: return cbor_encode_text_stringz(&e, "heartbeat");
+    case NotRespondingReason::queueFull: return cbor_encode_text_stringz(&e, "queueFull");
+    }
+    return CborErrorImproperValue;
+}
+inline CborError decode_cbor(CborValue& it, NotRespondingReason& v) {
+    std::string name;
+    CborError err = decode_cbor(it, name);
+    if (err) return err;
+    if (name == "heartbeat") { v = NotRespondingReason::heartbeat; return CborNoError; }
+    if (name == "queueFull") { v = NotRespondingReason::queueFull; return CborNoError; }
+    return CborErrorImproperValue;
+}
+
+struct NotRespondingEvent {
+    NotRespondingReason reason;
+};
+inline CborError encode_cbor(CborEncoder& e, const NotRespondingEvent& v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(&e, &m, 1);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "reason"); if (err) return err;
+    err = encode_cbor(m, v.reason);              if (err) return err;
+    return cbor_encoder_close_container(&e, &m);
+}
+inline CborError decode_cbor(CborValue& it, NotRespondingEvent& v) {
+    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(&it, "reason", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.reason); if (err) return err;
+    return cbor_value_advance(&it);
+}
+
+struct RespondingEvent {
+    NotRespondingReason reason;
+};
+inline CborError encode_cbor(CborEncoder& e, const RespondingEvent& v) {
+    CborEncoder m;
+    CborError err = cbor_encoder_create_map(&e, &m, 1);
+    if (err) return err;
+    err = cbor_encode_text_stringz(&m, "reason"); if (err) return err;
+    err = encode_cbor(m, v.reason);              if (err) return err;
+    return cbor_encoder_close_container(&e, &m);
+}
+inline CborError decode_cbor(CborValue& it, RespondingEvent& v) {
+    if (!cbor_value_is_map(&it)) return CborErrorImproperValue;
+    CborValue field;
+    CborError err;
+    err = cbor_value_map_find_value(&it, "reason", &field); if (err) return err;
+    if (!cbor_value_is_valid(&field)) return CborErrorImproperValue;
+    err = decode_cbor(field, v.reason); if (err) return err;
+    return cbor_value_advance(&it);
+}
+
+#endif
 
 // ============================================================
 // User-declared FFI types
@@ -889,7 +956,7 @@ public:
     // context.
     ~EchoCtx() {
         if (ptr_) {
-            echo_destroy(ptr_);
+            if (echo_destroy(ptr_) != NIMFFI_RET_OK) for (auto& entry : listeners_) (void)entry.second.release();
             ptr_ = nullptr;
         }
     }
@@ -898,6 +965,47 @@ public:
     EchoCtx& operator=(const EchoCtx&) = delete;
     EchoCtx(EchoCtx&&) = delete;
     EchoCtx& operator=(EchoCtx&&) = delete;
+
+    // ── Event listener API ──────────────────────────────────
+    struct ListenerHandle { std::uint64_t id = 0; };
+
+    /// The library stopped responding: its FFI thread stalled or the event queue overflowed.
+    ListenerHandle addOnNotRespondingListener(std::function<void(const NotRespondingEvent&)> handler) {
+        auto owned = std::make_unique<TypedListener<NotRespondingEvent>>(std::move(handler));
+        auto* raw = owned.get();
+        const auto id = echo_add_event_listener(
+            ptr_, "not_responding", &EchoCtx::typedTrampoline<NotRespondingEvent>, raw);
+        if (id == 0) return ListenerHandle{0};
+        std::lock_guard<std::mutex> lock(listenersMu_);
+        listeners_.emplace(id, std::move(owned));
+        return ListenerHandle{id};
+    }
+
+    /// The library responds again after `not_responding`.
+    ListenerHandle addOnRespondingListener(std::function<void(const RespondingEvent&)> handler) {
+        auto owned = std::make_unique<TypedListener<RespondingEvent>>(std::move(handler));
+        auto* raw = owned.get();
+        const auto id = echo_add_event_listener(
+            ptr_, "responding", &EchoCtx::typedTrampoline<RespondingEvent>, raw);
+        if (id == 0) return ListenerHandle{0};
+        std::lock_guard<std::mutex> lock(listenersMu_);
+        listeners_.emplace(id, std::move(owned));
+        return ListenerHandle{id};
+    }
+
+    /// Unregister a listener and release the box that holds the handler.
+    /// From inside a listener callback, the release waits until the outermost callback on that thread returns.
+    bool removeEventListener(ListenerHandle handle) {
+        if (handle.id == 0) return false;
+        const auto rc = echo_remove_event_listener(ptr_, handle.id);
+        auto node = [&] {
+            std::lock_guard<std::mutex> lock(listenersMu_);
+            return listeners_.extract(handle.id);
+        }();
+        if (!node.empty() && dispatchDepth() > 0)
+            deferredListeners().push_back(std::move(node.mapped()));
+        return rc == 0;
+    }
 
     static Result<std::string> lib_version(std::chrono::milliseconds timeout = std::chrono::seconds{30}) {
         const auto ffi_req_ = EchoLibVersionReq{};
@@ -952,5 +1060,53 @@ public:
     }
 
 private:
+    struct ListenerBase {
+        virtual ~ListenerBase() = default;
+    };
+
+    template <class T>
+    struct TypedListener : ListenerBase {
+        std::function<void(const T&)> fn;
+        explicit TypedListener(std::function<void(const T&)> f) : fn(std::move(f)) {}
+    };
+
+    static std::size_t& dispatchDepth() {
+        thread_local std::size_t depth = 0;
+        return depth;
+    }
+
+    // A box removed inside a dispatch waits here until the outermost callback on this thread returns.
+    static std::vector<std::unique_ptr<ListenerBase>>& deferredListeners() {
+        thread_local std::vector<std::unique_ptr<ListenerBase>> boxes;
+        return boxes;
+    }
+
+    struct DispatchScope {
+        DispatchScope() { ++dispatchDepth(); }
+        ~DispatchScope() {
+            if (--dispatchDepth() > 0) return;
+            std::vector<std::unique_ptr<ListenerBase>> doomed;
+            doomed.swap(deferredListeners());
+        }
+    };
+
+    template <class T>
+    static void typedTrampoline(int ret, const char* msg, std::size_t len, void* ud) {
+        DispatchScope scope;
+        if (!ud || ret != 0 || !msg || len == 0) return;
+        auto* listener = static_cast<TypedListener<T>*>(ud);
+        if (!listener->fn) return;
+        CborParser parser; CborValue it;
+        if (cbor_parser_init(reinterpret_cast<const std::uint8_t*>(msg), len, 0, &parser, &it) != CborNoError) return;
+        if (!cbor_value_is_map(&it)) return;
+        CborValue payloadField;
+        if (cbor_value_map_find_value(&it, "payload", &payloadField) != CborNoError) return;
+        T payload{};
+        if (decode_cbor(payloadField, payload) != CborNoError) return;
+        listener->fn(payload);
+    }
+
+    std::mutex listenersMu_;
+    std::unordered_map<std::uint64_t, std::unique_ptr<ListenerBase>> listeners_;
     explicit EchoCtx(void* p, std::chrono::milliseconds t) : EchoCalls(p, t) {}
 };
