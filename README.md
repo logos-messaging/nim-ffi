@@ -520,6 +520,11 @@ foreign host rather than Nim's own `main`. To initialize the Nim runtime,
 name**, on *both* compiles above, or the library fails to link. For
 `declareLibrary("my_timer", …)` that is `--nimMainPrefix:libmy_timer`.
 
+With `--noMain`, `declareLibrary` also defines Nim's `cmdCount` and `cmdLine`
+globals for static linking. They start at zero and do not automatically contain
+the host's arguments. When linking multiple static Nim archives, each archive
+must be sealed separately so these and other Nim symbols do not collide.
+
 **Library-naming collisions.** When several nim-ffi libraries are loaded into
 one process (as the C++ end-to-end test does with `timer` + `echo`), each must
 use a **distinct** library name — and therefore a distinct `--nimMainPrefix` —
