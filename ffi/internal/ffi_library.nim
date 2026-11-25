@@ -68,6 +68,13 @@ macro declareLibraryBase*(libraryName: static[string]): untyped =
   # {.passc: "-fPIC".}
   res.add nnkPragma.newTree(nnkExprColonExpr.newTree(ident"passc", newLit("-fPIC")))
 
+  if compileOption("noMain"):
+    res.add quote do:
+      {.emit: """
+N_LIB_PRIVATE int cmdCount;
+N_LIB_PRIVATE char** cmdLine;
+""".}
+
   # soname / install_name only apply to a shared library and break an executable link (fatally on macOS), so emit them only under `--app:lib`.
   if compileOption("app", "lib"):
     when defined(linux):
