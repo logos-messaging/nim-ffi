@@ -5,6 +5,10 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **The C header of the poll-mode host.** `host/nim_ffi.h` declares what a
+  `-d:ffiPollMode` library hands out to a host: the `PollResult` message and its
+  `NIMFFI_MSG_*` kinds, the `NIMFFI_RET_*` codes and `nimffi_name_id()`. A test
+  keeps it equal to `ffi/ret_codes.nim` and `ffi/ffi_msg.nim`.
 - Under `-d:ffiPollMode` the generated `<lib>.h` declares the poll shape (the
   message, every export as `(ctx, req, len, id_out)`, the fixed exports, the
   codecs) instead of the callback ABI.
